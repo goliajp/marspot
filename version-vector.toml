@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.502"  # PaneAwake from the core is kept for the supervisor and knocks the pump
-core    = "0.12.559"  # passes each session's PaneAwake on to the shell
-session = "0.11.385"  # PaneAwake: output after a quiet spell (at most 1/s) and foreground changes
+core    = "0.12.562"  # a mirrored frame starts with no link ids, so link rows are not rescanned per frame
+session = "0.11.387"  # OSC 8: empty link pool once no cell carries a link; bounded link tables

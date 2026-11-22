@@ -16,12 +16,13 @@ impl GridShmWriter {
     /// # Safety
     /// The caller holds the write side of the seqlock and has checked
     /// the grid's dims against the region's capacity.
-    pub(super) unsafe fn write_packed(&mut self, grid: &Grid) {
+    pub(super) unsafe fn write_packed(&mut self, grid: &Grid, seq: u64) {
         let (cols, rows) = (grid.cols() as usize, grid.rows() as usize);
         let n = cols * rows;
         debug_assert!(n <= MAX_CELLS);
         let wrapped = unsafe { self.wrapped_ptr() };
-        let mut table = self.clusters.as_mut().filter(|t| grid.cluster_pool_len() > 0 || t.last_count > 0);
+        let links = grid.link_pool_len() > 0;
+        let mut table = self.clusters.as_mut().filter(|t| grid.cluster_pool_len() > 0 || links || t.last_count > 0);
         if let Some(t) = table.as_mut() {
             t.begin();
         }
@@ -33,6 +34,19 @@ impl GridShmWriter {
                 // are eight-byte aligned: the area starts 56 bytes into
                 // a page-aligned mapping
                 std::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(row * cols), cols);
+                // only a row whose marks say it may hold a link is looked
+                // at: ids are numbers in this grid's pool, and a reader
+                // from before links refuses a cell carrying one; the
+                // links themselves go into the table
+                if links && grid.row_may_link(row as u16) {
+                    for (col, c) in src.iter().enumerate().filter(|(_, c)| c.link_id() != 0) {
+                        std::ptr::write(dst.add(row * cols + col), c.with_link(0));
+                    }
+                    if let Some(t) = table.as_mut() {
+                        let r = row as u16;
+                        grid.each_link_at_view(0, r, |c0, c1, uri| t.push_link(r, c0, c1, uri));
+                    }
+                }
                 if let Some(t) = table.as_mut() {
                     for (col, c) in src.iter().enumerate().filter(|(_, c)| c.is_cluster()) {
                         if let Some(text) = c.cluster_index().and_then(|i| grid.cluster_text_at(i)) {
@@ -53,7 +67,7 @@ impl GridShmWriter {
             }
         }
         if let Some(t) = table {
-            t.finish();
+            t.finish(seq);
         }
     }
 }

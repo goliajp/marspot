@@ -41,13 +41,7 @@ impl Grid {
             // gates the REGION path, so resetting it is enough — and
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
-            // one row in millions holds a cluster: the test is made
-            // here and the calls only for that row
-            let row_clusters = if self.clusters.is_empty() {
-                Vec::new()
-            } else {
-                self.degrade_clusters_in_row(start, cols)
-            };
+            let (row_clusters, row_links) = self.degrade_row_extras(start, cols);
             let row_mark = self.marks[pr];
             let end = row_mark.end as usize;
             debug_assert!(
@@ -81,9 +75,7 @@ impl Grid {
             if mark != PromptMark::None {
                 self.scrollback.mark_last_line(mark);
             }
-            if !row_clusters.is_empty() || !self.scrollback.keeps_cluster_text() {
-                self.keep_row_clusters(row_clusters);
-            }
+            self.keep_row_extras(row_clusters, row_links);
             self.wrapped[pr] = false;
             if fill.is_default() {
                 // the cells past what the line used are default
@@ -106,9 +98,7 @@ impl Grid {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        while self.sb_clusters.len() > self.scrollback.len() {
-            self.sb_clusters.pop_front();
-        }
+        self.trim_extras_mirrors();
     }
 
     /// Monotonic count of lines pushed into scrollback over this
@@ -184,7 +174,7 @@ impl Grid {
                 if !(blank && self.filed_blank_run >= MAX_FILED_BLANK_RUN) {
                     self.filed_blank_run =
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
-                    let row_clusters = self.degrade_clusters_in_row(start, cols);
+                    let (row_clusters, row_links) = self.degrade_row_extras(start, cols);
                     let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
                     let known =
                         if self.notes_styles() { self.marks[pr].styles.known() } else { None };
@@ -203,7 +193,7 @@ impl Grid {
                     if mark != PromptMark::None {
                         self.scrollback.mark_last_line(mark);
                     }
-                    self.keep_row_clusters(row_clusters);
+                    self.keep_row_extras(row_clusters, row_links);
                     self.scroll_push_count = self.scroll_push_count.saturating_add(1);
                 }
             }
@@ -261,9 +251,7 @@ impl Grid {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        while self.sb_clusters.len() > self.scrollback.len() {
-            self.sb_clusters.pop_front();
-        }
+        self.trim_extras_mirrors();
     }
 
     /// Region-bounded scroll down: shift rows in `top..=bot` downward

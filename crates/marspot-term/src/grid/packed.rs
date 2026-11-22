@@ -9,10 +9,14 @@
 use super::{CLUSTER_INDEX_BASE, Cell, FLAG_CLUSTER, StyleTable};
 
 /// Bits 0–20: the character, or a cluster pool index when bit 21 is
-/// set.  Bits 22–31: zero.  Bits 32–55: the number of the cell's
-/// attributes in its grid's table, 0 for the default.  Bits 56–63:
-/// zero.  So a blank cell is `0x20`, and a row of them is one repeated
-/// word.
+/// set.  Bits 22–29: the high byte of the cell's link id, bits 30–31
+/// zero.  Bits 32–55: the number of the cell's attributes in its grid's
+/// table, 0 for the default.  Bits 56–63: the low byte of the link id.
+/// So a blank cell is `0x20`, and a row of them is one repeated word.
+///
+/// The link id lives only in a grid's own cells: rows filed into
+/// history and frames published to another process have it cleared,
+/// which is why [`PackedCell::checked`] still refuses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct PackedCell(u64);
@@ -20,8 +24,16 @@ pub struct PackedCell(u64);
 const CH_MASK: u64 = 0x1F_FFFF;
 const CLUSTER_BIT: u64 = 1 << 21;
 const STYLE_SHIFT: u32 = 32;
-/// Bits no cell has set: 22–31 and 56–63.
+/// Bits no cell from another process has set: 22–31 and 56–63.
 const RESERVED: u64 = 0x3FF << 22 | 0xFF << 56;
+const LINK_HI_SHIFT: u32 = 22;
+const LINK_LO_SHIFT: u32 = 56;
+const LINK_MASK: u64 = 0xFF << LINK_HI_SHIFT | 0xFF << LINK_LO_SHIFT;
+
+#[inline(always)]
+const fn link_bits(id: u16) -> u64 {
+    ((id & 0xFF) as u64) << LINK_LO_SHIFT | ((id >> 8) as u64) << LINK_HI_SHIFT
+}
 
 impl Default for PackedCell {
     fn default() -> Self {
@@ -50,7 +62,7 @@ impl PackedCell {
     #[inline(always)]
     pub fn from_cell(cell: &Cell, id: u32) -> PackedCell {
         let flag = if cell.attrs._pad[0] & FLAG_CLUSTER != 0 { CLUSTER_BIT } else { 0 };
-        PackedCell(cell.ch as u64 | flag | (id as u64) << STYLE_SHIFT)
+        PackedCell(cell.ch as u64 | flag | (id as u64) << STYLE_SHIFT | link_bits(cell.attrs.link_id()))
     }
 
     /// The cell as readers see it.
@@ -60,7 +72,22 @@ impl PackedCell {
         if self.is_cluster() {
             attrs._pad[0] = FLAG_CLUSTER;
         }
+        if self.0 & LINK_MASK != 0 {
+            attrs.set_link_id(self.link_id());
+        }
         Cell { ch: self.ch(), attrs }
+    }
+
+    /// The OSC 8 link this cell belongs to in its grid's pool, 0 for none.
+    #[inline(always)]
+    pub const fn link_id(self) -> u16 {
+        ((self.0 >> LINK_LO_SHIFT) & 0xFF | ((self.0 >> LINK_HI_SHIFT) & 0xFF) << 8) as u16
+    }
+
+    /// The same cell belonging to link `id` (0: to none).
+    #[inline(always)]
+    pub const fn with_link(self, id: u16) -> PackedCell {
+        PackedCell(self.0 & !LINK_MASK | link_bits(id))
     }
 
     #[inline(always)]
@@ -78,7 +105,8 @@ impl PackedCell {
 
     #[inline(always)]
     pub const fn style_id(self) -> u32 {
-        (self.0 >> STYLE_SHIFT) as u32
+        // the link's low byte sits above the number
+        ((self.0 >> STYLE_SHIFT) & 0xFF_FFFF) as u32
     }
 
     #[inline(always)]
@@ -114,7 +142,7 @@ impl PackedCell {
     /// The same cell under attribute number `id`.
     #[inline(always)]
     pub const fn with_style(self, id: u32) -> PackedCell {
-        PackedCell(self.0 & ((1 << STYLE_SHIFT) - 1) | (id as u64) << STYLE_SHIFT)
+        PackedCell(self.0 & (((1 << STYLE_SHIFT) - 1) | (0xFF << LINK_LO_SHIFT)) | (id as u64) << STYLE_SHIFT)
     }
 
     /// The eight bytes, as they go into a frame.

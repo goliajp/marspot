@@ -25,6 +25,7 @@ pub mod fs_watch;
 pub mod grapheme;
 pub mod grid;
 pub mod grid_links;
+pub mod osc8;
 pub mod idle_pages;
 pub mod logx;
 pub mod loop_watch;

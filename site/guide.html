@@ -216,6 +216,18 @@ rm -rf ~/Library/Logs/Marspot</pre>
       refused on purpose — answering that hands any program which can write to
       the pty whatever you last copied.
     </p>
+    <p>
+      A link a program declares with <span class="mono">OSC 8</span>, as
+      <span class="mono">ls --hyperlink</span> and <span class="mono">gh</span> do,
+      can be clicked like a URL Marspot finds on its own, and opens what the
+      program said it means rather than the text on screen. Marspot adds no
+      underline or colour of its own to a declared link: its text is drawn as
+      the program wrote it, unless that text itself looks like a URL, a path or
+      an address, which is underlined as such text always is. Only http, https,
+      file and mailto targets open, and a file link only when it names this
+      Mac; a link to anything else is shown as plain text, because the target
+      comes from whatever program writes to the pty.
+    </p>
   </div>
 </section>
 

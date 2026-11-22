@@ -16,7 +16,18 @@
 //! ```text
 //! magic u32 | version u32 | count u32 | bytes u32 | overflow u32
 //! count × (col u16 | row u16 | len u16 | len bytes of UTF-8)
+//! links magic u32 | seq u64 | n u32
+//! n × (row u16 | first col u16 | last col u16 | len u16 | len bytes of URI)
 //! ```
+//!
+//! The links of the frame's OSC 8 hyperlinks follow the clusters, at
+//! the offset `bytes` says the clusters end.  A reader from before them
+//! reads `count` clusters and stops, so the section is invisible to it.
+//! The section states the grid region's `seq` of the frame it belongs
+//! to, and a reader takes it only for that frame: an image from before
+//! links writes clusters over the same bytes and never touches the
+//! section, and a section it left behind must not be read as the links
+//! of a frame it did not write.
 //!
 //! The region ends with whose it is -- see [`super::ident`].
 //!
@@ -39,7 +50,7 @@ use super::names::Side;
 
 const MAGIC: u32 = 0x4d_53_43_31; // "MSC1"
 const VERSION: u32 = 1;
-const HEADER: usize = 20;
+pub(super) const HEADER: usize = 20;
 const ENTRY_HEAD: usize = 6;
 
 /// Bytes in the region. A 200 × 80 pane is 16 000 cells; measured over
@@ -47,19 +58,23 @@ const ENTRY_HEAD: usize = 6;
 pub const CAPACITY: usize = 64 * 1024;
 
 /// Where the table ends and the region's identity begins.
-const TABLE_END: usize = CAPACITY - ident::BYTES;
+pub(super) const TABLE_END: usize = CAPACITY - ident::BYTES;
 
 /// Writer side, owned by the session that publishes the grid.
 pub struct ClusterTableWriter {
     _fd: OwnedFd,
-    base: *mut u8,
+    pub(super) base: *mut u8,
     /// Where the next entry goes.
-    at: usize,
+    pub(super) at: usize,
     count: u32,
     overflow: bool,
     /// Entries in the last table written, so a frame with none after a
     /// frame with none writes nothing at all.
     pub(super) last_count: u32,
+    /// The frame's links, as they go into the region, until
+    /// [`Self::finish`] knows where the clusters end.  Keeps its
+    /// capacity from frame to frame.
+    pub(super) links: Vec<u8>,
 }
 
 // The pointer is into a mapping this struct alone owns, written by one
@@ -86,7 +101,7 @@ impl ClusterTableWriter {
             }
         }
         let last_count = unsafe { get_u32(base, 8) };
-        Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count })
+        Ok(Self { _fd: fd, base, at: HEADER, count: 0, overflow: false, last_count, links: Vec::new() })
     }
 
     /// The table in the region now: after [`Self::open`], what the
@@ -105,6 +120,12 @@ impl ClusterTableWriter {
         unsafe {
             std::ptr::copy(old.base, self.base, TABLE_END);
             self.last_count = get_u32(self.base, 8);
+            // the links carried along state a seq of the old grid
+            // region, which this one's may come to show again
+            let links_at = HEADER + get_u32(self.base, 12) as usize;
+            if links_at + 4 <= TABLE_END {
+                put_u32(self.base, links_at, 0);
+            }
         }
     }
 
@@ -112,7 +133,9 @@ impl ClusterTableWriter {
         self.at = HEADER;
         self.count = 0;
         self.overflow = false;
+        self.links.clear();
     }
+
 
     /// Add one cluster. Past the region's end the table is marked as
     /// overflowed and the rest are dropped; a reader treats them as it
@@ -133,13 +156,16 @@ impl ClusterTableWriter {
         self.count += 1;
     }
 
-    pub(super) fn finish(&mut self) {
+    /// Close the table of the frame the grid region will carry `seq`
+    /// for.  The links go after the clusters, as many whole ones as fit.
+    pub(super) fn finish(&mut self, seq: u64) {
         unsafe {
             put_u32(self.base, 8, self.count);
             put_u32(self.base, 12, (self.at - HEADER) as u32);
             put_u32(self.base, 16, self.overflow as u32);
         }
         self.last_count = self.count;
+        self.write_links(seq);
     }
 }
 
@@ -184,6 +210,16 @@ impl ClusterTableReader {
     pub fn read_into(&self, out: &mut ClusterTable) {
         unsafe { read_table(self.base, out) }
     }
+
+    /// [`Self::read_into`], and the frame's links when the section
+    /// beside the clusters was written for the frame whose `seq` the
+    /// grid region shows.
+    pub fn read_frame_into(&self, out: &mut ClusterTable, seq: u64) {
+        unsafe {
+            read_table(self.base, out);
+            super::links::read_links(self.base, out, seq);
+        }
+    }
 }
 
 /// # Safety
@@ -225,8 +261,10 @@ impl Drop for ClusterTableReader {
 /// buffers have grown to fit, a read allocates nothing.
 #[derive(Default, Debug, Clone)]
 pub struct ClusterTable {
-    bytes: Vec<u8>,
+    pub(super) bytes: Vec<u8>,
     entries: Vec<(u16, u16, u32, u16)>,
+    /// (row, first col, last col, offset, len) per link.
+    pub(super) links: Vec<(u16, u16, u16, u32, u16)>,
     /// The writer ran out of room; clusters past the last entry were
     /// not written.
     pub overflow: bool,
@@ -236,12 +274,14 @@ impl ClusterTable {
     pub fn clear(&mut self) {
         self.bytes.clear();
         self.entries.clear();
+        self.links.clear();
         self.overflow = false;
     }
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
 
     /// `(col, row, text)` for each cluster in the frame.
     pub fn iter(&self) -> impl Iterator<Item = (u16, u16, &str)> {
@@ -253,19 +293,19 @@ impl ClusterTable {
     }
 }
 
-unsafe fn put_u32(base: *mut u8, at: usize, v: u32) {
+pub(super) unsafe fn put_u32(base: *mut u8, at: usize, v: u32) {
     unsafe { std::ptr::write_unaligned(base.add(at) as *mut u32, v) }
 }
 
-unsafe fn put_u16(base: *mut u8, at: usize, v: u16) {
+pub(super) unsafe fn put_u16(base: *mut u8, at: usize, v: u16) {
     unsafe { std::ptr::write_unaligned(base.add(at) as *mut u16, v) }
 }
 
-unsafe fn get_u32(base: *const u8, at: usize) -> u32 {
+pub(super) unsafe fn get_u32(base: *const u8, at: usize) -> u32 {
     u32::from_ne_bytes(unsafe { std::ptr::read_volatile(base.add(at) as *const [u8; 4]) })
 }
 
-unsafe fn get_u16(base: *const u8, at: usize) -> u16 {
+pub(super) unsafe fn get_u16(base: *const u8, at: usize) -> u16 {
     u16::from_ne_bytes(unsafe { std::ptr::read_volatile(base.add(at) as *const [u8; 2]) })
 }
 
@@ -375,7 +415,7 @@ mod tests {
         for i in 0..100 {
             w.push(i, 0, &long);
         }
-        w.finish();
+        w.finish(0);
         // opened after the overflow: the table stopped short of the
         // region's identity
         let r = ClusterTableReader::open(&regions);
@@ -415,7 +455,7 @@ mod tests {
     fn one_cluster(w: &mut ClusterTableWriter, text: &str) {
         w.begin();
         w.push(0, 0, text);
-        w.finish();
+        w.finish(0);
     }
 
     fn clusters_of(r: &ClusterTableReader) -> Vec<String> {

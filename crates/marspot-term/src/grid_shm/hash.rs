@@ -29,11 +29,13 @@ pub(super) fn compute_publish_hash(grid: &Grid, view_offset: u16, flags: u32) ->
     h = mix(h, grid.scrollback_len() as u64);
     h = mix(h, cols as u64);
     h = mix(h, rows as u64);
+    // an id's URI only changes when the pool does
+    h = mix(h, grid.link_generation());
     for row in 0..rows {
         for col in 0..cols {
             let cell = grid.cell_at_view(view_offset, col, row);
             h = mix(h, cell.ch as u64);
-            h = mix(h, hash_cell_attrs(&cell.attrs));
+            h = mix(h, hash_cell_attrs(&cell.attrs) ^ (cell.attrs.link_id() as u64) << 48);
             // a cluster is extended in place as codepoints join it: the
             // index stays, the text changes, and the table must go out
             if cell.is_cluster()

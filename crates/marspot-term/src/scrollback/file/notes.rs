@@ -1,5 +1,7 @@
 //! What is filed against a line besides its cells: where a command
-//! began, and the text of clusters too wide for a cell.
+//! began, the text of clusters too wide for a cell, and the targets of
+//! its OSC 8 links.  A reader skips a kind it does not know, so a kind
+//! added later is invisible to a binary from before it.
 //!
 //! A note is a record of its own, written right after the record of the
 //! line it belongs to, through the same buffer and the same writer --
@@ -19,6 +21,7 @@ use super::*;
 
 const MARK: u8 = 1;
 const CLUSTERS: u8 = 2;
+const LINKS: u8 = 3;
 /// Bytes of a note before its payload: length, flags, kind, zero, use.
 const NOTE_HEAD: usize = 4 + 3 + 4;
 
@@ -44,6 +47,58 @@ impl FileScrollback {
                 out.extend_from_slice(s.as_bytes());
             }
         });
+    }
+
+    /// File the links of the line most recently pushed: a count, then
+    /// per link its first and last column, the URI's length and the URI.
+    pub(in crate::scrollback) fn link_last_line(&mut self, links: &[crate::grid::RowLink]) {
+        self.write_note(LINKS, |out| {
+            out.extend_from_slice(&(links.len() as u16).to_le_bytes());
+            for (c0, c1, uri) in links {
+                out.extend_from_slice(&c0.to_le_bytes());
+                out.extend_from_slice(&c1.to_le_bytes());
+                out.extend_from_slice(&(uri.len() as u16).to_le_bytes());
+                out.extend_from_slice(uri.as_bytes());
+            }
+        });
+    }
+
+    /// The links on logical line `line_idx`, appended to `out`.  Lines of
+    /// the format before segments have none.
+    pub(in crate::scrollback) fn links_at(&self, line_idx: usize, out: &mut Vec<crate::grid::RowLink>) -> bool {
+        let before = out.len();
+        self.each_link_at(line_idx, |c0, c1, uri| out.push((c0, c1, uri.to_string())));
+        out.len() > before
+    }
+
+    /// Each link on logical line `line_idx`, read where it is filed.
+    pub(in crate::scrollback) fn each_link_at(&self, line_idx: usize, f: impl FnMut(u16, u16, &str)) {
+        let Some(tiers::Loc::Seg(s, local)) = self.locate(line_idx as u64) else {
+            return;
+        };
+        if let Some(payload) = self.seg_note(s, local, LINKS) {
+            decode_links(payload, f);
+        }
+    }
+
+    /// The payload of the last note of `kind` on local line `local` of
+    /// segment `s`.
+    fn seg_note(&self, s: usize, local: u64, kind: u8) -> Option<&[u8]> {
+        self.ensure_flushed();
+        let t = &self.segs[s];
+        let mut p = t.record_end(t.entry(local)?)?;
+        let end = if local + 1 < self.seg_lines(s) { t.entry(local + 1)? } else { self.seg_end(s) };
+        let mut found = None;
+        while p < end {
+            let Some(body) = t.body(p) else { break };
+            if let Some((k, payload)) = note_of(body, t.seg.hdr.serial)
+                && k == kind
+            {
+                found = Some(payload);
+            }
+            p += 4 + body.len() as u64;
+        }
+        found
     }
 
     /// A note of `kind` after the last line's record, built by `payload`
@@ -126,6 +181,28 @@ impl FileScrollback {
             }
             Some(tiers::Loc::Legacy(k, local)) => self.legacy[k].extras.read_clusters(local, out),
             None => false,
+        }
+    }
+}
+
+/// Parse a links note, keeping what parses: a length that runs past
+/// the end or bytes that are not UTF-8 end the walk.
+fn decode_links(blob: &[u8], mut f: impl FnMut(u16, u16, &str)) {
+    let Some(count) = blob.get(0..2) else { return };
+    let count = u16::from_le_bytes([count[0], count[1]]);
+    let mut p = 2usize;
+    for _ in 0..count {
+        let Some(h) = blob.get(p..p + 6) else { return };
+        let (c0, c1, len) = (
+            u16::from_le_bytes([h[0], h[1]]),
+            u16::from_le_bytes([h[2], h[3]]),
+            u16::from_le_bytes([h[4], h[5]]) as usize,
+        );
+        p += 6;
+        let Some(Ok(uri)) = blob.get(p..p + len).map(std::str::from_utf8) else { return };
+        p += len;
+        if c0 <= c1 {
+            f(c0, c1, uri);
         }
     }
 }

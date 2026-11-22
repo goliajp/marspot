@@ -91,6 +91,13 @@ impl L3Conn {
             }
         }
         self.grid.mirror_clusters(clusters.into_iter());
+        let mut links = Vec::new();
+        let mut row_links = Vec::new();
+        for row in 0..rows {
+            screen.row_links_at_view(0, row, &mut row_links);
+            links.extend(row_links.drain(..).map(|(c0, c1, uri)| (row, c0, c1, uri)));
+        }
+        self.grid.mirror_links(links.iter().map(|(r, c0, c1, u)| (*r, *c0, *c1, u.as_str())));
         let (col, row) = screen.cursor();
         self.grid.set_cursor(col, row);
     }

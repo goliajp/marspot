@@ -89,6 +89,11 @@ impl Terminal {
                 self.predictions_miss += n as u64;
             }
         }
+        // once a chunk: a grid whose links are all gone goes back to
+        // the paths that skip links, which a link still open forbids
+        if self.osc8.uri.is_empty() {
+            self.grid.settle_links();
+        }
         // Nothing is flushed at the end of a feed.  A glyph is
         // committed the moment its width is known, and the open
         // cluster and its anchor survive the boundary: a pty ends its
@@ -103,6 +108,7 @@ impl Terminal {
             grid: &mut self.grid,
             saved_main: &mut self.saved_main,
             attrs: &mut self.attrs,
+            osc8: &mut self.osc8,
             saved_cursor: &mut self.saved_cursor,
             parked_saved_cursor: &mut self.parked_saved_cursor,
             scroll_top: &mut self.scroll_top,

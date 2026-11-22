@@ -19,6 +19,8 @@ use erase::{blank_with, erase_in_display, erase_in_line, fill_range};
 #[cfg(test)]
 mod diff_tests;
 mod lane;
+mod osc;
+pub(crate) use osc::Osc8;
 mod reference;
 mod snapshot_clusters;
 use snapshot_clusters::plausible_cols;
@@ -116,13 +118,6 @@ pub enum MouseTrackingMode {
 /// wanders.  Not a timer: an idle grid does no work at all.
 const CLUSTER_POOL_SWEEP_AT: usize = 4096;
 
-/// The most a program may put on the clipboard in one OSC 52.
-///
-/// 64 KiB is more than any yank and far less than a pty can be made
-/// to carry.  A payload over it is dropped whole rather than
-/// truncated: half of what was copied is worse than none of it,
-/// because nothing tells the user which half.
-const OSC52_MAX: usize = 64 * 1024;
 
 /// What marspot answers DA1 (and DECID) with: VT220-class with
 /// selective attributes — 1 = 132-column mode, 6 = selective erase,
@@ -151,6 +146,10 @@ pub struct Terminal {
     /// Current SGR state — every printed glyph (and every BCE-erased cell)
     /// is stamped with this snapshot.  Persists across `feed` calls.
     attrs: CellAttrs,
+    /// The OSC 8 link printed glyphs belong to.  Apart from `attrs`
+    /// because it is not SGR: `CSI 0 m` does not end a link, and an
+    /// erased cell is not part of one.
+    osc8: Osc8,
     /// Cursor + SGR snapshot saved by ESC 7 (DECSC) or CSI s (SCO save);
     /// restored by ESC 8 (DECRC) or CSI u (SCO restore). Cleared by neither —
     /// TUI apps like claudecode lean on save/restore to redraw progress
@@ -287,7 +286,7 @@ pub struct Terminal {
     cursor_shape: u8,
     /// The last title the program set via OSC 0 / OSC 2.  Stored so it
     /// is available to whatever decides to show it; nothing displays
-    /// it today (see `osc_dispatch`).
+    /// it today (see `osc.rs`).
     osc_title: String,
     /// Sticky: this program has used DEC 2026 at least once.  Callers
     /// that must cut a byte stream at a consistent screen ask this
@@ -594,6 +593,7 @@ impl Terminal {
             kitty_keyboard: KittyKeyboardStack::default(),
             parser: Parser::new(),
             attrs: CellAttrs::default(),
+            osc8: Osc8::default(),
             saved_cursor: None,
             parked_saved_cursor: None,
             scroll_top: 0,
@@ -728,6 +728,7 @@ impl Terminal {
     /// to the one thing that gets stuck.
     pub fn reset_attrs(&mut self) {
         self.attrs = CellAttrs::default();
+        self.osc8 = Osc8::default();
     }
 
     /// Tell this terminal whether its program prints unrendered markup.
@@ -830,8 +831,10 @@ impl Terminal {
         // can run for hours without ever emitting `CSI 0 m`, so the
         // style rides every new cell until something happens to reset
         // it (measured 2026-09-06 on a pane left underlined by a bug
-        // of mine: 300 KB of output, not one reset in it).
+        // of mine: 300 KB of output, not one reset in it).  A link left
+        // open is the same thing.
         self.attrs = CellAttrs::default();
+        self.osc8 = Osc8::default();
     }
 
     /// Take whatever a program asked to put on the clipboard.
@@ -1747,6 +1750,7 @@ impl Terminal {
         // does not rely on it: `serialize_snapshot_live` carries the
         // alt screen verbatim and rebuilds `saved_main` underneath.
         self.attrs = attrs;
+        self.osc8 = Osc8::default();
         self.saved_cursor = saved_cursor;
         self.generation = generation;
         // Reset transient state so a half-feed cluster / prediction
@@ -2126,6 +2130,8 @@ struct Handler<'a> {
     grid: &'a mut Grid,
     saved_main: &'a mut Option<SavedMain>,
     attrs: &'a mut CellAttrs,
+    /// See `Terminal::osc8`.
+    osc8: &'a mut Osc8,
     saved_cursor: &'a mut Option<SavedCursor>,
     /// See `Terminal::parked_saved_cursor`.
     parked_saved_cursor: &'a mut Option<SavedCursor>,
@@ -2357,9 +2363,16 @@ impl<'a> Handler<'a> {
         // skips drawing its glyph (NUL is treated as blank), and the
         // lead glyph extends visually across both cells via its natural
         // advance width.
-        self.grid.set_char(col, row, ch, self.attrs);
+        let linked;
+        let pen: &CellAttrs = if self.osc8.id == 0 {
+            &*self.attrs
+        } else {
+            linked = self.attrs.with_link_id(self.osc8.id);
+            &linked
+        };
+        self.grid.set_char(col, row, ch, pen);
         if w == 2 {
-            self.grid.set_char(col + 1, row, '\0', self.attrs);
+            self.grid.set_char(col + 1, row, '\0', pen);
         }
 
         let next_col = col + w as u16;
@@ -2531,6 +2544,7 @@ impl<'a> Handler<'a> {
             cursor,
             kitty_keyboard,
         });
+        self.relink();
     }
 
     /// `?1049l` — restore the saved main grid + cursor.  No-op if not
@@ -2728,6 +2742,7 @@ impl<'a> Handler<'a> {
         *self.tabs = crate::tabs::TabStops::new(cols);
         *self.g0_graphics = false;
         self.osc_title.clear();
+        *self.osc8 = Osc8::default();
     }
 
     fn exit_alt_screen(&mut self) {
@@ -2737,6 +2752,7 @@ impl<'a> Handler<'a> {
             self.grid.share_if_few();
             self.grid.set_cursor(saved.cursor.0, saved.cursor.1);
             *self.kitty_keyboard = saved.kitty_keyboard;
+            self.relink();
         }
     }
 
@@ -3650,151 +3666,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
-        self.flush_u_buf();
-        self.flush_cluster_for_break();
-        // F3+3.6 — OSC 7 push-based cwd reporting removed; the
-        // LayoutModal now pull-fetches cwd via `proc_pidinfo` only
-        // when the user opens it (one syscall per pane, not on the
-        // hot path).
-        let (num, rest) = match data.iter().position(|&b| b == b';') {
-            Some(i) => (&data[..i], &data[i + 1..]),
-            None => (data, &data[data.len()..]),
-        };
-        let num = std::str::from_utf8(num).ok().and_then(|s| s.parse::<u16>().ok());
-        match num {
-            // 0 = icon name + window title, 2 = window title.  Stored,
-            // not displayed: a pane's label in marspot is DERIVED (its
-            // directory), deliberately, so that there is no second
-            // source of truth about which pane is which.  Wiring this
-            // into the title strip is a product decision, not a
-            // protocol one — but a program that says what it is
-            // shouldn't have that thrown away in the parser.
-            Some(0) | Some(2) => {
-                if let Ok(t) = std::str::from_utf8(rest)
-                    && self.osc_title != t
-                {
-                    self.osc_title.clear();
-                    // Bounded: a title is a label, and a program that
-                    // sends a megabyte of one is not going to get a
-                    // megabyte of storage for it.
-                    self.osc_title.extend(t.chars().take(256));
-                }
-            }
-            // 10 = default foreground, 11 = default background, and
-            // `?` as the value makes it a QUERY.  An unanswered query
-            // is how a TUI ends up guessing whether it is on a dark or
-            // light terminal — the same shape as the DA1 stall that
-            // produced blank rows and misaligned chrome.  Answer in
-            // xterm's own form, and echo the OSC number back so a
-            // batched query is unambiguous.
-            Some(n @ (10 | 11)) if rest.starts_with(b"?") => {
-                let p = crate::palette::current();
-                let c = if n == 10 { p.fg } else { p.bg };
-                let reply = format!("\x1b]{n};{}\x07", crate::palette::xterm_rgb(c));
-                self.pending_response.extend_from_slice(reply.as_bytes());
-                self.record_response("OSC-COLOR");
-            }
-            // OSC 133 — where one command's territory ends and the
-            // next begins, from the shell's own prompt hooks.
-            //
-            // The letters are FinalTerm's and the set is not small (a
-            // full implementation answers L, A, N, P, B, I, C and D).
-            // Four of them carry the boundaries anything would want to
-            // scroll to, and the rest are refinements of those; an
-            // unknown letter is ignored rather than guessed at.
-            //
-            // Options arrive as `;key=value` after the letter and are
-            // skipped, except `D`'s first parameter, which is the exit
-            // status. "No status" is a different thing from zero: a
-            // shell that did not say cannot be reported as success.
-            Some(133) => {
-                let body = std::str::from_utf8(rest).unwrap_or("");
-                let mut parts = body.split(';');
-                let mark = match parts.next() {
-                    Some("A") | Some("P") => crate::grid::PromptMark::PromptStart,
-                    Some("B") => crate::grid::PromptMark::InputStart,
-                    Some("C") => crate::grid::PromptMark::OutputStart,
-                    Some("D") => {
-                        let status = parts
-                            .next()
-                            .filter(|p| !p.is_empty() && !p.contains('='))
-                            .and_then(|p| p.parse::<u8>().ok());
-                        crate::grid::PromptMark::CommandEnd(status)
-                    }
-                    _ => return,
-                };
-                let (_, row) = self.grid.cursor();
-                self.grid.set_row_prompt(row, mark);
-            }
-            // OSC 52 — a program putting something on the clipboard.
-            //
-            // `52 ; <targets> ; <base64>`.  This is how yanking in vim
-            // over ssh reaches the Mac's pasteboard, and it is the one
-            // thing a terminal can do for a remote editor that nothing
-            // else can.
-            //
-            // The read form (`52 ; c ; ?`) is refused, deliberately and
-            // silently.  Answering it hands any program that can write
-            // to this pty whatever the user last copied — a password,
-            // a token — and no program needs that to do its job.  A
-            // terminal that stays quiet is read as one without the
-            // feature, which is the right amount of information.
-            Some(52) => {
-                let payload = match rest.iter().position(|&b| b == b';') {
-                    Some(i) => &rest[i + 1..],
-                    None => &rest[rest.len()..],
-                };
-                if payload != b"?"
-                    && let Some(bytes) = crate::base64::decode(payload, OSC52_MAX)
-                    && let Ok(text) = String::from_utf8(bytes)
-                {
-                    *self.osc_clipboard = Some(text);
-                }
-            }
-            // OSC 4 — one or more palette entries: `4 ; n ; ? ; n ; ?`.
-            // vim and tmux read these to decide what they can draw
-            // with, and a terminal that stays quiet is read as one
-            // with no palette to speak of.  Answered per pair, in the
-            // same order asked, so a batched query is unambiguous.
-            Some(4) => {
-                let mut reply = String::new();
-                let mut fields = rest.split(|&b| b == b';');
-                while let (Some(idx), Some(val)) = (fields.next(), fields.next()) {
-                    if val != b"?" {
-                        // Setting a palette entry, not asking about
-                        // one.  The palette is the theme's, so this
-                        // is declined by not answering it.
-                        continue;
-                    }
-                    let Some(i) = std::str::from_utf8(idx).ok().and_then(|s| s.parse::<u8>().ok())
-                    else {
-                        continue;
-                    };
-                    let c = crate::palette::current().indexed(i);
-                    reply.push_str(&format!("\x1b]4;{i};{}\x07", crate::palette::xterm_rgb(c)));
-                }
-                if !reply.is_empty() {
-                    self.pending_response.extend_from_slice(reply.as_bytes());
-                    self.record_response("OSC-PALETTE");
-                }
-            }
-            // OSC 12 — the cursor's colour.  Same shape as 10 and 11,
-            // and asked by the same programs for the same reason.
-            Some(12) if rest.starts_with(b"?") => {
-                let c = crate::palette::unit(crate::palette::current().cursor);
-                let reply = format!("\x1b]12;{}\x07", crate::palette::xterm_rgb(c));
-                self.pending_response.extend_from_slice(reply.as_bytes());
-                self.record_response("OSC-COLOR");
-            }
-            _ => {
-                lx_debug!(
-                    "term.osc.unsupported",
-                    "OSC payload with no handler",
-                    bytes = data.len(),
-                    num = num.unwrap_or(u16::MAX) as u64
-                );
-            }
-        }
+        self.osc(data);
     }
 }
 
@@ -3972,7 +3844,7 @@ impl<'a> Handler<'a> {
         if self.grid.cluster_pool_len() > CLUSTER_POOL_SWEEP_AT {
             self.grid.sweep_clusters();
         }
-        let attrs = *self.attrs;
+        let attrs = self.attrs.with_link_id(self.osc8.id);
         // The cell being replaced may already point at the newest pool
         // entry — this cluster, one codepoint shorter.  Say so, and it
         // is rewritten in place rather than pushed again.
@@ -4023,7 +3895,7 @@ impl<'a> Handler<'a> {
         if col + 1 >= cols {
             return;
         }
-        self.grid.set_char(col + 1, row, '\0', self.attrs);
+        self.grid.set_char(col + 1, row, '\0', &self.attrs.with_link_id(self.osc8.id));
         if self.grid.cursor() == (col + 1, row) {
             self.grid.set_cursor(col + 2, row);
         }

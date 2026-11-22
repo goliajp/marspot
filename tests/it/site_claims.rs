@@ -573,7 +573,7 @@ mod guide_behaviour {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    const TERMINAL: &str = include_str!("../../crates/marspot-term/src/terminal.rs");
+    const OSC: &str = include_str!("../../crates/marspot-term/src/terminal/osc.rs");
     const PATHS: &str = include_str!("../../crates/marspot-term/src/paths.rs");
 
     /// The guide tells a reader that a program cannot read their clipboard
@@ -588,7 +588,7 @@ mod guide_behaviour {
              because it no longer is, this test is the wrong thing to change"
         );
         assert!(
-            TERMINAL.contains(r#"if payload != b"?""#),
+            OSC.contains(r#"if payload != b"?""#),
             "OSC 52 no longer excludes the read query, so the guide's claim that a \
              program cannot read the clipboard back is false"
         );
@@ -754,32 +754,126 @@ mod known_gaps {
     }
 
     #[test]
-    fn osc_8_and_7_are_not_read_133_is_kept_52_is_write_only() {
-        says("No OSC 8 (hyperlinks) or OSC 7 (working directory");
+    fn osc8_links_in_history_on_disk_survive_a_restart_but_not_a_width_change() {
+        use marspot::grid::{Cell, Grid};
+        says("OSC 8 links in history kept on disk survive scrolling back and a restart.");
+        says("A change of window width turns the links already in history into plain text; links on screen keep working.");
+        the_page_says("links in history kept on disk survive scrolling back and a restart.");
+        the_page_says(
+            "A change of window width turns the links already in history into plain text; links on screen keep working."
+        );
+
+        let uri = "https://example.com/";
+        let d = Dir::new("link");
+        {
+            let mut g = Grid::with_scrollback_kind(20, 3, d.open());
+            let id = g.link_id_for(uri).unwrap();
+            let mut cell = Cell::from('x');
+            cell.attrs.set_link_id(id);
+            g.set_cell(0, 0, cell);
+            for _ in 0..8 {
+                g.scroll_up(1, Cell::default());
+            }
+        }
+        let history_link = |g: &Grid| {
+            (1..=g.scrollback_len() as u16)
+                .flat_map(|off| (0..g.rows()).map(move |r| (off, r)))
+                .find_map(|(off, r)| marspot::osc8::link_at(g, off, 0, r))
+                .map(|l| l.text)
+        };
+        // a new grid over the same files is what a restarted pane is
+        let mut g = Grid::with_scrollback_kind(20, 3, d.open());
+        assert_eq!(history_link(&g).as_deref(), Some(uri), "a restart lost the link");
+        // and one on screen, in a column the history probe does not look at
+        let on_screen = "https://example.org/";
+        let id = g.link_id_for(on_screen).unwrap();
+        let mut cell = Cell::from('y');
+        cell.attrs.set_link_id(id);
+        g.set_cell(5, 0, cell);
+        g.resize(16, 3);
+        assert_eq!(
+            history_link(&g),
+            None,
+            "a width change kept the link; take it off this entry in the README and the page"
+        );
+        let screen_link = (0..g.rows()).find_map(|r| marspot::osc8::link_at(&g, 0, 5, r)).map(|l| l.text);
+        assert_eq!(screen_link.as_deref(), Some(on_screen), "a width change lost the link on screen");
+    }
+
+    #[test]
+    fn osc8_links_on_screen_and_in_memory_history_are_lost_on_an_update() {
+        says(
+            "Links still on screen are lost when the session is updated or restored from a snapshot, \
+             and so are links in history kept in memory."
+        );
+        the_page_says(
+            "Links still on screen are lost when the session is updated or restored from a snapshot, \
+             and so are links in history kept in memory."
+        );
+        let link = |t: &Terminal, off: u16| {
+            (0..t.grid().rows())
+                .flat_map(|r| (0..t.grid().cols()).map(move |c| (c, r)))
+                .find_map(|(c, r)| marspot::osc8::link_at(t.grid(), off, c, r))
+        };
+        let mut t = Terminal::new(40, 4);
+        t.feed(b"\x1b]8;;https://example.com/\x1b\\filed\x1b]8;;\x1b\\\r\n");
+        for i in 0..6 {
+            t.feed(format!("filler {i}\r\n").as_bytes());
+        }
+        t.feed(b"\x1b]8;;https://example.org/\x1b\\shown\x1b]8;;\x1b\\");
+        assert!(link(&t, 0).is_some(), "the probe finds no link on screen");
+        let sb = t.grid().scrollback_len() as u16;
+        assert!((1..=sb).any(|off| link(&t, off).is_some_and(|l| l.text == "https://example.com/")));
+
+        // an update hands the screen and the history kept in memory to
+        // the next image through a snapshot
+        let mut next = Terminal::new(40, 4);
+        next.apply_snapshot(&t.serialize_snapshot_live()).expect("the snapshot applies");
+        let shown: String = (0..5).map(|c| next.grid().cell(c, next.grid().cursor().1).ch).collect();
+        assert_eq!(shown, "shown", "the probe reads the wrong row");
+        assert!(link(&next, 0).is_none(), "a link on screen survived an update; take it off the README and the page");
+        let sb = next.grid().scrollback_len() as u16;
+        assert!(
+            (1..=sb).all(|off| link(&next, off).is_none()),
+            "a link in history kept in memory survived an update; take it off the README and the page"
+        );
+    }
+
+    #[test]
+    fn osc8_is_read_7_is_not_133_is_kept_52_is_write_only() {
+        says("OSC 8 links open only `http`, `https`, `file` and `mailto` targets");
+        says("No OSC 7 (working directory");
         says("OSC 133 prompt marks are read and kept with the history, but nothing uses them yet");
         says("reading it back is refused on purpose");
-        the_page_says("OSC 8 / 7");
+        the_page_says("links open only http, https, file and mailto targets");
+        the_page_says("No working-directory escape sequence");
 
-        // OSC 8: the text shows, and no link comes with it
+        // OSC 8: the text shows, and is a link to what the program
+        // said when the target is in one of the four schemes
         let mut t = Terminal::new(40, 3);
-        t.feed(b"\x1b]8;;https://example.com/\x1b\\here\x1b]8;;\x1b\\");
-        let row: String = (0..4).map(|c| t.grid().cell(c, 0).ch).collect();
-        assert_eq!(row, "here");
-        let links = marspot::grid_links::scan_visible_links(t.grid(), 0, Default::default());
-        assert!(links.is_empty(), "OSC 8 made a link; take it off the README and the page");
+        t.feed(b"\x1b]8;;https://example.com/\x1b\\here\x1b]8;;\x1b\\ ");
+        t.feed(b"\x1b]8;;ssh://host\x1b\\there\x1b]8;;\x1b\\");
+        let row: String = (0..10).map(|c| t.grid().cell(c, 0).ch).collect();
+        assert_eq!(row, "here there");
+        let link = marspot::osc8::link_at(t.grid(), 0, 0, 0).map(|l| l.text);
+        assert_eq!(link.as_deref(), Some("https://example.com/"));
+        assert!(marspot::osc8::link_at(t.grid(), 0, 6, 0).is_none(), "an ssh:// link was made");
 
-        // and the dispatcher has no arm for either number
-        const TERMINAL: &str = include_str!("../../crates/marspot-term/src/terminal.rs");
-        let dispatch = TERMINAL
-            .split("fn osc_dispatch")
+        // and the dispatcher has an arm for 8 and none for 7
+        const OSC: &str = include_str!("../../crates/marspot-term/src/terminal/osc.rs");
+        let dispatch = OSC
+            .split("fn osc(")
             .nth(1)
-            .expect("terminal.rs has osc_dispatch")
+            .expect("terminal/osc.rs has the dispatcher")
             .split("\n    fn ")
             .next()
             .unwrap();
-        assert!(dispatch.contains("Some(133)"), "the probe no longer reads the dispatcher");
-        for n in ["Some(8)", "Some(7)", "Some(8 |", "| 8)", "Some(7 |", "| 7)"] {
-            assert!(!dispatch.contains(n), "osc_dispatch handles {n} now; update the README");
+        assert!(
+            dispatch.contains("Some(133)") && dispatch.contains("Some(8)"),
+            "the probe no longer reads the dispatcher"
+        );
+        for n in ["Some(7)", "Some(7 |", "| 7)"] {
+            assert!(!dispatch.contains(n), "the dispatcher handles {n} now; update the README");
         }
 
         // OSC 7: nothing is kept and nothing answers

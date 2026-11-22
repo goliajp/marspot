@@ -56,6 +56,26 @@ impl Cell {
     }
 }
 
+impl CellAttrs {
+    /// The OSC 8 link this cell belongs to in its grid's pool, 0 for none.
+    #[inline(always)]
+    pub fn link_id(&self) -> u16 {
+        u16::from_le_bytes([self._pad[1], self._pad[2]])
+    }
+
+    #[inline(always)]
+    pub fn set_link_id(&mut self, id: u16) {
+        [self._pad[1], self._pad[2]] = id.to_le_bytes();
+    }
+
+    /// These attributes, belonging to link `id`.
+    #[inline(always)]
+    pub fn with_link_id(mut self, id: u16) -> CellAttrs {
+        self.set_link_id(id);
+        self
+    }
+}
+
 const _: () = {
     assert!(std::mem::size_of::<Cell>() == CELL_MEM_BYTES);
     assert!(std::mem::align_of::<Cell>() == 4);
@@ -149,14 +169,20 @@ pub struct CellAttrs {
     /// (typical: multiply RGB by ~0.55). TUIs (claudecode tips column
     /// divider, dimmed help text) use this for "secondary" content.
     pub dim: bool,
-    /// Flags that are not SGR, then two bytes that are always zero.
+    /// Flags that are not SGR, then the cell's link id.
     ///
-    /// The zeroes are still load-bearing: they are why the struct has
-    /// no implicit padding and a `Cell` can go to disk as its own
-    /// bytes — see `Cell`.  The first byte was one of them until a
-    /// cluster needed somewhere to say it is a cluster; every value
-    /// ever written to disk has it zero, which is exactly what
-    /// `FLAG_CLUSTER` unset means.
+    /// The bytes are why the struct has no implicit padding and a
+    /// `Cell` can go to disk as its own bytes — see `Cell`.  The first
+    /// was zero until a cluster needed somewhere to say it is a
+    /// cluster; every value ever written to disk has it zero, which is
+    /// exactly what `FLAG_CLUSTER` unset means.
+    ///
+    /// The other two are a `u16`, little-endian: the number of the
+    /// OSC 8 hyperlink the cell belongs to in its grid's link pool, 0
+    /// for none.  Only a live screen holds one.  A row is cleared of
+    /// them before it is filed into history or published to another
+    /// process, so on disk and in a frame they are still zero, which
+    /// is what a binary from before links reads.
     ///
     /// Public only because struct-update syntax (`..Default::default()`)
     /// cannot fill a private field from another crate.
