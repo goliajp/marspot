@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.580"  # move ShellWindow and the resize rule out of the shell's main.rs
+shell   = "0.7.581"  # name what the shell's main.rs still holds in its carve-out marker
 core    = "0.12.615"  # drop render_metal.rs's carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
