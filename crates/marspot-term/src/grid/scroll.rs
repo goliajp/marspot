@@ -21,6 +21,24 @@ impl Grid {
         if lines == 0 {
             return;
         }
+        // with no link about, the rows are filed by a loop that has no
+        // link code in it: one test a call, where a test a line in the
+        // loop cost 0.9 instructions a byte of cat-ascii
+        if self.links_idle() {
+            self.scroll_up_rows::<false>(lines, fill);
+        } else {
+            self.scroll_up_linked(lines, fill);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scroll_up_linked(&mut self, lines: u16, fill: Cell) {
+        self.scroll_up_rows::<true>(lines, fill);
+    }
+
+    #[inline(always)]
+    fn scroll_up_rows<const LINKS: bool>(&mut self, lines: u16, fill: Cell) {
         let lines = lines.min(self.rows);
         let cols = self.cols as usize;
         for _ in 0..lines {
@@ -41,7 +59,7 @@ impl Grid {
             // gates the REGION path, so resetting it is enough — and
             // erring toward "do not collapse" is the safe direction.
             self.filed_blank_run = 0;
-            let (row_clusters, row_links) = self.degrade_row_extras(start, cols);
+            let row_clusters = self.degrade_row_extras::<LINKS>(start, cols);
             let row_mark = self.marks[pr];
             let end = row_mark.end as usize;
             debug_assert!(
@@ -75,7 +93,7 @@ impl Grid {
             if mark != PromptMark::None {
                 self.scrollback.mark_last_line(mark);
             }
-            self.keep_row_extras(row_clusters, row_links);
+            self.keep_row_extras::<LINKS>(row_clusters);
             self.wrapped[pr] = false;
             if fill.is_default() {
                 // the cells past what the line used are default
@@ -98,7 +116,7 @@ impl Grid {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        self.trim_extras_mirrors();
+        self.trim_extras_mirrors::<LINKS>();
     }
 
     /// Monotonic count of lines pushed into scrollback over this
@@ -174,7 +192,7 @@ impl Grid {
                 if !(blank && self.filed_blank_run >= MAX_FILED_BLANK_RUN) {
                     self.filed_blank_run =
                         if blank { self.filed_blank_run.saturating_add(1) } else { 0 };
-                    let (row_clusters, row_links) = self.degrade_row_extras(start, cols);
+                    let row_clusters = self.degrade_row_extras::<true>(start, cols);
                     let hint = RowHint { plain_from: self.marks[pr].plain_from, wide: self.marks[pr].wide };
                     let known =
                         if self.notes_styles() { self.marks[pr].styles.known() } else { None };
@@ -193,7 +211,7 @@ impl Grid {
                     if mark != PromptMark::None {
                         self.scrollback.mark_last_line(mark);
                     }
-                    self.keep_row_extras(row_clusters, row_links);
+                    self.keep_row_extras::<true>(row_clusters);
                     self.scroll_push_count = self.scroll_push_count.saturating_add(1);
                 }
             }
@@ -251,7 +269,7 @@ impl Grid {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        self.trim_extras_mirrors();
+        self.trim_extras_mirrors::<true>();
     }
 
     /// Region-bounded scroll down: shift rows in `top..=bot` downward

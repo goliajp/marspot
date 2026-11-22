@@ -110,8 +110,8 @@ pub struct Grid {
     /// The URIs of the OSC 8 links cells point at; see `links`.
     links: links::LinkPool,
     /// The links of rows that left the screen, for history kept in
-    /// RAM; parallel to `sb_clusters` and trimmed with it.
-    sb_links: std::collections::VecDeque<Vec<RowLink>>,
+    /// RAM; see `links::LinkHistory`.
+    sb_links: links::LinkHistory,
     /// Command boundaries for the rows on screen, by physical row.
     /// See [`PromptMark`].
     prompt: Vec<PromptMark>,
@@ -214,7 +214,7 @@ impl Grid {
             sb_wrapped: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             sb_clusters: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             links: Default::default(),
-            sb_links: std::collections::VecDeque::with_capacity(sb_capacity + 1),
+            sb_links: Default::default(),
             sb_prompt: std::collections::VecDeque::with_capacity(sb_capacity + 1),
             filed_blank_run: 0,
             marks: vec![RowMark::default(); rows as usize],
@@ -748,13 +748,13 @@ impl Grid {
             // reflow-derived continuation flag.
             self.scrollback.push_line_with_wrapped(&row, *cont);
             self.sb_wrapped.push_back(*cont);
-            self.keep_row_extras(Vec::new(), Vec::new());
+            self.keep_row_extras::<true>(Vec::new());
         }
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
             self.sb_prompt.pop_front();
         }
-        self.trim_extras_mirrors();
+        self.trim_extras_mirrors::<true>();
         let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
         let new_prompt = vec![PromptMark::None; rows as usize];

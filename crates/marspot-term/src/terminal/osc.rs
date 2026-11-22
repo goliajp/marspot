@@ -187,8 +187,7 @@ impl Handler<'_> {
             Some(i) => &rest[i + 1..],
             None => &rest[rest.len()..],
         };
-        self.osc8.id = 0;
-        self.osc8.uri.clear();
+        self.close_link();
         if uri.is_empty() {
             return;
         }
@@ -209,7 +208,7 @@ impl Handler<'_> {
     /// pen moved to another grid, or before a new link is numbered.
     pub(super) fn relink(&mut self) {
         if self.osc8.uri.is_empty() {
-            self.osc8.id = 0;
+            self.close_link();
             return;
         }
         if self.grid.link_sweep_due() {
@@ -217,5 +216,12 @@ impl Handler<'_> {
         }
         // a full pool gives none: the text is written, unlinked
         self.osc8.id = self.grid.link_id_for(&self.osc8.uri).unwrap_or(0);
+        self.link = self.osc8.id;
+    }
+
+    /// End the open link, if any.
+    pub(super) fn close_link(&mut self) {
+        *self.osc8 = Osc8::default();
+        self.link = 0;
     }
 }

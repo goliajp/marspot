@@ -2132,6 +2132,8 @@ struct Handler<'a> {
     attrs: &'a mut CellAttrs,
     /// See `Terminal::osc8`.
     osc8: &'a mut Osc8,
+    /// `osc8.id` by value, kept equal to it: tested once a run of text.
+    link: u16,
     saved_cursor: &'a mut Option<SavedCursor>,
     /// See `Terminal::parked_saved_cursor`.
     parked_saved_cursor: &'a mut Option<SavedCursor>,
@@ -2363,13 +2365,8 @@ impl<'a> Handler<'a> {
         // skips drawing its glyph (NUL is treated as blank), and the
         // lead glyph extends visually across both cells via its natural
         // advance width.
-        let linked;
-        let pen: &CellAttrs = if self.osc8.id == 0 {
-            &*self.attrs
-        } else {
-            linked = self.attrs.with_link_id(self.osc8.id);
-            &linked
-        };
+        let linked = self.attrs.with_link_id(self.link);
+        let pen = if self.link == 0 { &*self.attrs } else { &linked };
         self.grid.set_char(col, row, ch, pen);
         if w == 2 {
             self.grid.set_char(col + 1, row, '\0', pen);
@@ -2742,7 +2739,7 @@ impl<'a> Handler<'a> {
         *self.tabs = crate::tabs::TabStops::new(cols);
         *self.g0_graphics = false;
         self.osc_title.clear();
-        *self.osc8 = Osc8::default();
+        self.close_link();
     }
 
     fn exit_alt_screen(&mut self) {
@@ -3844,7 +3841,7 @@ impl<'a> Handler<'a> {
         if self.grid.cluster_pool_len() > CLUSTER_POOL_SWEEP_AT {
             self.grid.sweep_clusters();
         }
-        let attrs = self.attrs.with_link_id(self.osc8.id);
+        let attrs = if self.link == 0 { *self.attrs } else { self.attrs.with_link_id(self.link) };
         // The cell being replaced may already point at the newest pool
         // entry — this cluster, one codepoint shorter.  Say so, and it
         // is rewritten in place rather than pushed again.
@@ -3895,7 +3892,8 @@ impl<'a> Handler<'a> {
         if col + 1 >= cols {
             return;
         }
-        self.grid.set_char(col + 1, row, '\0', &self.attrs.with_link_id(self.osc8.id));
+        let linked = self.attrs.with_link_id(self.link);
+        self.grid.set_char(col + 1, row, '\0', if self.link == 0 { self.attrs } else { &linked });
         if self.grid.cursor() == (col + 1, row) {
             self.grid.set_cursor(col + 2, row);
         }
