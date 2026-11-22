@@ -1808,6 +1808,9 @@ enum CoreEvent {
     /// before manifest v2 carried `control_stream_fd`, kernel races
     /// during dual-core swap, plain crashes, etc).
     L3ControlEof(u64),
+    /// This session's pane rang the bell; the flag is the reader's
+    /// "one already queued", cleared when this event is handled.
+    PaneBell(u64, std::sync::Arc<std::sync::atomic::AtomicBool>),
     /// A session said which grid region it publishes into, which frames it reads, or that its pane woke.
     L3Says(u64, Frame),
     /// A background reconnect finished.  `Some(stream)` swaps the
@@ -2167,73 +2170,6 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
     }
 }
 
-/// Background reader on the L2↔L3 control socket: an L3 session pokes
-/// `GridReady` whenever it republishes its grid; we turn each into an
-/// `L3Ready` wake so the main loop re-reads the shm mirror promptly.
-/// EOF / error just ends the thread — the pane's own `try_wait` detects
-/// the child's exit.
-fn l3_reader_loop(
-    mut stream: UnixStream,
-    session_id: u64,
-    tx: Sender<CoreEvent>,
-    selection_tx: Sender<(u32, String)>,
-) {
-    loop {
-        match Frame::read_from(&mut stream) {
-            Ok(Some(f)) => match f.msg_type {
-                MsgType::GridReady => {
-                    trace::mark(Stage::GridReady, session_id as u32);
-                    if tx.send(CoreEvent::L3Ready).is_err() {
-                        return;
-                    }
-                }
-                MsgType::PaneBell => bell::ring(),
-                // OSC 52: L3 has no AppKit, so a clipboard write lands here and
-                // is written from the reader thread (the pasteboard has its own
-                // lock; the event loop would make a yank wait on a redraw)
-                MsgType::PaneClipboardWrite => {
-                    if let Ok(text) = std::str::from_utf8(&f.payload) {
-                        marspot::input::write_clipboard_text(text);
-                    }
-                }
-                MsgType::SessionPublishes | MsgType::SessionReadsFrameCells | MsgType::PaneAwake => {
-                    let _ = tx.send(CoreEvent::L3Says(session_id, f));
-                }
-                // Reply to a Cmd-C `GetSelectionText`, for whoever waits in
-                // `L3Conn::request_selection_text`; its seq lets the waiter
-                // discard a late reply to a request that timed out.
-                MsgType::SelectionText => {
-                    if let Ok(reply) = decode_selection_text(&f.payload) {
-                        let _ = selection_tx.send(reply);
-                    }
-                }
-                // a stale qid is dropped by the pane's `apply_results`
-                MsgType::SearchResults => {
-                    if let Ok((qid, has_more, total_seen, hits)) =
-                        marspot::shell_proto::decode_search_results(&f.payload)
-                    {
-                        let _ = tx.send(CoreEvent::SearchResults(
-                            session_id,
-                            qid,
-                            has_more,
-                            total_seen,
-                            hits,
-                        ));
-                    }
-                }
-                _ => {}
-            },
-            Ok(None) | Err(_) => {
-                // Tell main loop the pane's L2↔L3 stream went away —
-                // it'll wait_and_connect, swap the pane's control,
-                // and respawn this reader on the new stream.
-                let _ = tx.send(CoreEvent::L3ControlEof(session_id));
-                return;
-            }
-        }
-    }
-}
-
 /// Write end of the SIGUSR2 self-pipe.  The signal handler writes one byte
 /// here (the only async-signal-safe way to hand a signal to the event
 /// loop); a reader thread turns each byte into a `SwapIdleL3` event.
@@ -2334,6 +2270,8 @@ struct WindowState {
     /// gate a quiet one's repaint, which is exactly the coupling the
     /// peer model forbids.
     last_render_at: Option<Instant>,
+    /// When this window last beeped (`bell::ring_window`).
+    last_bell_at: Option<Instant>,
     /// The caret of a frame that is committed but not yet settled.
     ///
     /// It travels with the frame: announcing it before the surface is
@@ -2494,6 +2432,7 @@ impl WindowState {
             frame_index: 0,
             surfaces: None,
             last_render_at: None,
+            last_bell_at: None,
             pending_caret: None,
             first_frames: frames::FirstFrames::default(),
             render: marspot::render_metal::WindowRender::new(),
@@ -2627,6 +2566,9 @@ use marspot::ui::components::{layout_view, process_view};
 mod theme_follow;
 #[path = "marspot-core/bell.rs"]
 mod bell;
+#[path = "marspot-core/l3_reader.rs"]
+mod l3_reader;
+use l3_reader::l3_reader_loop;
 #[path = "marspot-core/scrollbar_input.rs"]
 mod scrollbar_input;
 #[path = "marspot-core/boot_assembly.rs"]
@@ -5173,6 +5115,7 @@ fn main() {
                     }
                     win!(app, wi).needs_render = true;
                 }
+                CoreEvent::PaneBell(sid, queued) => app.pane_bell(sid, &queued, Instant::now()),
                 CoreEvent::L3Ready => {
                     // A bare wake — the poke carries no session id, so
                     // which window changed is not knowable here.
