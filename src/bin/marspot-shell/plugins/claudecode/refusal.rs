@@ -107,7 +107,9 @@ pub(super) struct Told {
 /// session's transcript gets is the notice the CLI queues when one
 /// stops: `<status>failed</status>` and, for an API error, the CLI's
 /// text for it with the model the request named. Only that queued
-/// record is read, never the same words quoted in a message.
+/// record is read, never the same words quoted in a message, and in it
+/// only the status and the first summary: a failed notice also carries
+/// the agent's last output, which may quote a refusal it never got.
 ///
 /// A later notice from an agent that did not end this way -- finished,
 /// or waiting on work of its own -- is that work making progress, and
@@ -115,14 +117,18 @@ pub(super) struct Told {
 /// names none.
 pub(super) fn last_agent_refusal(tail: &str) -> Option<Refusal> {
     let (line, notice) = last_agent_notice(tail)?;
-    if !(notice.contains("<status>failed</status>") && says_out_of_quota(notice)) {
+    let (head, summary) = notice_parts(notice)?;
+    if !(head.contains("<status>failed</status>")
+        && summary.contains("Agent terminated early due to an API error:")
+        && says_out_of_quota(summary))
+    {
         return None;
     }
     const SENT: &str = "model sent to the API: ";
-    let model = notice.find(SENT).map(|i| &notice[i + SENT.len()..]).map_or(String::new(), |rest| {
+    let model = summary.find(SENT).map(|i| &summary[i + SENT.len()..]).map_or(String::new(), |rest| {
         short_model(&rest[..rest.find(')').unwrap_or(rest.len())])
     });
-    let five_hour = ACCOUNT_WINDOWS[..2].iter().any(|w| notice.contains(w));
+    let five_hour = ACCOUNT_WINDOWS[..2].iter().any(|w| summary.contains(w));
     Some(Refusal {
         at: record_timestamp(line)?,
         model,
@@ -137,13 +143,21 @@ fn last_agent_notice(tail: &str) -> Option<(&str, &str)> {
     tail.lines().rev().find_map(|l| Some((l, agent_notice(l)?)))
 }
 
+/// A notice's text before its first summary, and that summary.
+fn notice_parts(notice: &str) -> Option<(&str, &str)> {
+    let open = notice.find("<summary>")?;
+    let body = &notice[open + "<summary>".len()..];
+    Some((&notice[..open], &body[..body.find("</summary>")?]))
+}
+
 /// The description of the background agent the newest notice is
 /// about, from its `Agent "<description>" failed`. Read as the record
 /// holds it, so the quotes around it are escaped.
 pub(super) fn refused_agent_name(tail: &str) -> Option<String> {
-    const OPEN: &str = r#"<summary>Agent \""#;
+    const OPEN: &str = r#"Agent \""#;
     let (_, notice) = last_agent_notice(tail)?;
-    let rest = &notice[notice.find(OPEN)? + OPEN.len()..];
+    let (_, summary) = notice_parts(notice)?;
+    let rest = summary.strip_prefix(OPEN)?;
     Some(rest[..rest.find(r#"\" failed"#)?].to_string())
 }
 
