@@ -84,8 +84,9 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
                     // kept where the supervisor reads it, not queued:
                     // a pane that prints reports every second
                     MsgType::PaneAwake => {
-                        if let Ok(a) = marspot::shell_proto::decode_pane_awake(&frame.payload) {
-                            pane_wakes::record(&a);
+                        if let Ok(a) = marspot::shell_proto::decode_pane_awake(&frame.payload)
+                            && pane_wakes::record(&a)
+                        {
                             crate::pump::knock();
                         }
                         None

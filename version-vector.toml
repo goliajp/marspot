@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.504"  # pane machines are swept when due; agent plugins without an agent tick only when something changes
+shell   = "0.7.505"  # the supervisor clock wakes for what is due, not once a second, while panes are awake
 core    = "0.12.563"  # pane machine says whether a quiet candidate is pending
 session = "0.11.387"  # OSC 8: empty link pool once no cell carries a link; bounded link tables

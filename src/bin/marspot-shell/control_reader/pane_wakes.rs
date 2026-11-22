@@ -1,11 +1,13 @@
 //! What the sessions say happened in their panes (`PaneAwake`), kept
 //! for the supervisor: when each pane last printed, when its terminal
 //! last changed hands and to which process group.  The reader of the
-//! core's frames records each report and knocks the pump, so the pass
-//! after it can read it.
-//!
-//! Only kept so far: the pane state machine and the plugins still look
-//! for themselves on the supervisor's clock.
+//! core's frames records each report and knocks the pump only when the
+//! report can change what the pane state machine concludes: the first
+//! report from a pane, the terminal changing hands, and output from a
+//! pane whose terminal the machine last found quiet (`arm`).  Output
+//! from a pane that is already printing only moves the moment its
+//! terminal can next count as quiet, which the supervisor reads from
+//! here when it plans its next pass.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +29,8 @@ pub(crate) struct PaneWake {
     pub(crate) fg_pgid: i32,
     pub(crate) shell_in_front: bool,
     pub(crate) heard_at: Instant,
+    /// The supervisor wants to hear this pane's next output at once.
+    armed: bool,
 }
 
 #[derive(Default)]
@@ -35,19 +39,26 @@ pub(crate) struct Wakes {
 }
 
 impl Wakes {
-    /// Whether the report says the terminal changed hands.
+    /// Whether the report is worth a pass: see the module doc.
     fn record(&mut self, a: &PaneAwake, now: Instant) -> bool {
-        let i = match self.panes.iter().position(|(sid, _)| *sid == a.session_id) {
-            Some(i) => i,
+        let (i, first) = match self.panes.iter().position(|(sid, _)| *sid == a.session_id) {
+            Some(i) => (i, false),
             None => {
                 if self.panes.len() >= PANES_MAX
                     && let Some(oldest) = (0..self.panes.len()).min_by_key(|&i| self.panes[i].1.heard_at)
                 {
                     self.panes.swap_remove(oldest);
                 }
-                let blank = PaneWake { output_at: None, foreground_at: None, fg_pgid: 0, shell_in_front: false, heard_at: now };
+                let blank = PaneWake {
+                    output_at: None,
+                    foreground_at: None,
+                    fg_pgid: 0,
+                    shell_in_front: false,
+                    heard_at: now,
+                    armed: false,
+                };
                 self.panes.push((a.session_id, blank));
-                self.panes.len() - 1
+                (self.panes.len() - 1, true)
             }
         };
         let w = &mut self.panes[i].1;
@@ -60,22 +71,39 @@ impl Wakes {
         }
         w.fg_pgid = a.fg_pgid;
         w.shell_in_front = a.shell_in_front;
-        a.foreground
+        let woke = a.output && w.armed;
+        if woke {
+            w.armed = false;
+        }
+        first || a.foreground || woke
     }
 
     fn latest(&self, sid: u64) -> Option<PaneWake> {
         self.panes.iter().find(|(s, _)| *s == sid).map(|(_, w)| *w)
     }
+
+    fn arm(&mut self, sid: u64, on: bool) {
+        if let Some((_, w)) = self.panes.iter_mut().find(|(s, _)| *s == sid) {
+            w.armed = on;
+        }
+    }
 }
 
 static WAKES: Mutex<Wakes> = Mutex::new(Wakes { panes: Vec::new() });
-static HEARD: AtomicU64 = AtomicU64::new(0);
+static WOKE: AtomicU64 = AtomicU64::new(0);
 
-/// Keep `a`; from the reader thread.
-pub(crate) fn record(a: &PaneAwake) {
-    let handed = WAKES.lock().unwrap_or_else(|p| p.into_inner()).record(a, Instant::now());
-    HEARD.fetch_add(1, Ordering::Release);
-    if handed {
+fn wakes() -> std::sync::MutexGuard<'static, Wakes> {
+    WAKES.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Keep `a`, from the reader thread; true when the supervisor should
+/// make a pass for it.
+pub(crate) fn record(a: &PaneAwake) -> bool {
+    let woke = wakes().record(a, Instant::now());
+    if woke {
+        WOKE.fetch_add(1, Ordering::Release);
+    }
+    if a.foreground {
         marspot::lx_debug!(
             "shell.pane_awake.foreground",
             "a pane's terminal changed hands",
@@ -84,22 +112,28 @@ pub(crate) fn record(a: &PaneAwake) {
             shell_in_front = a.shell_in_front as u32
         );
     }
+    woke
 }
 
 /// What pane `sid` last reported.
-// read by the supervisor once it waits on these reports instead of
-// polling for what they say
-#[allow(dead_code)]
 pub(crate) fn latest(sid: u64) -> Option<PaneWake> {
-    WAKES.lock().unwrap_or_else(|p| p.into_inner()).latest(sid)
+    wakes().latest(sid)
 }
 
-/// How many reports have been kept: a pass compares it with the count
-/// it saw last to tell whether any pane has reported since.
-// as `latest`
-#[allow(dead_code)]
-pub(crate) fn heard() -> u64 {
-    HEARD.load(Ordering::Acquire)
+/// How many reports have asked for a pass: a pass compares it with the
+/// count it saw last to tell whether one has since.
+pub(crate) fn woke() -> u64 {
+    WOKE.load(Ordering::Acquire)
+}
+
+/// Whether pane `sid`'s next output asks for a pass.
+pub(crate) fn arm(sid: u64, on: bool) {
+    wakes().arm(sid, on);
+}
+
+/// Forget the panes `open` says are gone.
+pub(crate) fn retain(open: impl Fn(u64) -> bool) {
+    wakes().panes.retain(|(sid, _)| open(*sid));
 }
 
 #[cfg(test)]
@@ -117,10 +151,29 @@ mod tests {
         let t0 = Instant::now();
         assert!(w.record(&awake(1, false, true, 50), t0));
         let t1 = t0 + Duration::from_secs(1);
-        assert!(!w.record(&awake(1, true, false, 50), t1));
+        assert!(!w.record(&awake(1, true, false, 50), t1), "output from a pane nobody armed");
         let got = w.latest(1).unwrap();
         assert_eq!((got.output_at, got.foreground_at, got.fg_pgid), (Some(t1), Some(t0), 50));
         assert!(w.latest(2).is_none());
+    }
+
+    /// Only the first output after the supervisor armed a pane asks for
+    /// a pass, and so do the first report and a change of hands.
+    #[test]
+    fn output_asks_for_a_pass_only_from_an_armed_pane() {
+        let mut w = Wakes::default();
+        let t0 = Instant::now();
+        assert!(w.record(&awake(1, true, false, 0), t0), "the first report");
+        assert!(!w.record(&awake(1, true, false, 0), t0));
+        w.arm(1, true);
+        assert!(w.record(&awake(1, true, false, 0), t0));
+        assert!(!w.record(&awake(1, true, false, 0), t0), "disarmed by the output it woke for");
+        w.arm(1, true);
+        assert!(!w.record(&awake(1, false, false, 0), t0), "a report without output keeps the arm");
+        assert!(w.record(&awake(1, true, false, 0), t0));
+        assert!(w.record(&awake(1, false, true, 7), t0), "the terminal changed hands");
+        w.arm(2, true);
+        assert!(w.latest(2).is_none(), "arming a pane that never reported adds nothing");
     }
 
     #[test]
