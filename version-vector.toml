@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.575"  # move the wake stagger constant next to the wake queue
+shell   = "0.7.576"  # move ShellApp::new out of the shell's main.rs
 core    = "0.12.615"  # drop render_metal.rs's carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
