@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.514"  # test that no agent plugin claims another agent's child
-core    = "0.12.579"  # move the context menu out of marspot-core.rs
+core    = "0.12.580"  # move pane moves and drag-and-drop out of marspot-core.rs
 session = "0.11.393"  # the session tells the core when its pane rang the bell
