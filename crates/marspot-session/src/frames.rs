@@ -326,6 +326,13 @@ fn publish_and_poke(
     {
         let _ = w.send(Frame::new(MsgType::PaneClipboardWrite, text.into_bytes()));
     }
+    // the bell is not withheld with the frame either, and any number of
+    // BELs since the last publish ring once
+    if session.terminal_mut().take_bell()
+        && let Some(w) = poke.as_deref_mut()
+    {
+        let _ = w.send(Frame::new(MsgType::PaneBell, Vec::new()));
+    }
 
     // Withheld frames are not lost: the bytes are already in the grid,
     // and the publish that follows the closing `l` carries all of them
@@ -358,3 +365,7 @@ fn publish_and_poke(
         let _ = w.send(Frame::new(MsgType::GridReady, Vec::new()));
     }
 }
+
+#[cfg(test)]
+#[path = "bell_tests.rs"]
+mod bell_tests;

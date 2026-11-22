@@ -149,12 +149,7 @@ pub enum MsgType {
     /// requests a redraw only when the hover region changes.
     MouseMove = 17,
     /// shell → core: right-mouse-down at physical-pixel `(x f64, y f64)`
-    /// + modifier byte.  Same encoding as `MouseDown`.  Drives the
-    ///
-    /// F3+9 right-click context menu in L2; missing on pre-F3+9
-    /// images, which is wire-safe per `feedback_frame_forward_compat`
-    /// (older receivers silently skip the unknown msg_type, older
-    /// senders simply never produce it).
+    /// + modifier byte, encoded as `MouseDown`; drives L2's context menu.
     MouseRightDown = 18,
     // ── window state (30..=49) ──
     Focus = 30,
@@ -593,6 +588,9 @@ pub enum MsgType {
     /// pane printed after a quiet spell, or its terminal's foreground
     /// process group changed.  See `pane_events`.
     PaneAwake = 124,
+    /// session → core: the pane's program rang the bell.  Empty
+    /// payload; at most one per published frame.  An older core skips it.
+    PaneBell = 125,
     /// L2 → L1: draw this toolbar icon for me.  `symbol u16,
     /// point_px u16`.  Sent only by a core started with
     /// `MARSPOT_ICONS_FROM_SHELL`: drawing a system symbol registers
@@ -689,6 +687,7 @@ impl MsgType {
             122 => MsgType::SessionFrameCells,
             123 => MsgType::SessionReadsFrameCells,
             124 => MsgType::PaneAwake,
+            125 => MsgType::PaneBell,
             200 => MsgType::Error,
             _ => return None,
         })
