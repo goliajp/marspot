@@ -589,6 +589,10 @@ pub enum MsgType {
     /// for the next frame past its check for an update, and the update
     /// hangs until the core sends something else.
     SessionReadsFrameCells = 123,
+    /// session → core, and core → shell with the same payload: the
+    /// pane printed after a quiet spell, or its terminal's foreground
+    /// process group changed.  See `pane_events`.
+    PaneAwake = 124,
     /// L2 → L1: draw this toolbar icon for me.  `symbol u16,
     /// point_px u16`.  Sent only by a core started with
     /// `MARSPOT_ICONS_FROM_SHELL`: drawing a system symbol registers
@@ -684,6 +688,7 @@ impl MsgType {
             121 => MsgType::SessionPublishes,
             122 => MsgType::SessionFrameCells,
             123 => MsgType::SessionReadsFrameCells,
+            124 => MsgType::PaneAwake,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -697,6 +702,8 @@ pub use handshake::*;
 mod inject;
 pub use inject::{decode_inject_input, encode_inject_input};
 
+mod pane_events;
+pub use pane_events::*;
 mod pointer;
 pub use pointer::{PointerInput, PointerKind, decode_pane_pointer_input, encode_pane_pointer_input};
 
@@ -1772,39 +1779,6 @@ pub fn decode_pane_recede(payload: &[u8]) -> io::Result<(u64, u32)> {
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
     let level = u32::from_le_bytes(payload[8..12].try_into().unwrap());
     Ok((sid, level))
-}
-
-/// PaneResetMouseReporting payload: `session_id u64 LE`.
-pub fn encode_pane_reset_mouse_reporting(session_id: u64) -> Vec<u8> {
-    session_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_pane_reset_mouse_reporting(payload: &[u8]) -> io::Result<u64> {
-    if payload.len() != 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_reset_mouse_reporting payload != 8 bytes",
-        ));
-    }
-    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
-}
-
-/// PaneTerminalFocus payload: `session_id u64 LE, focused u8`.
-pub fn encode_pane_terminal_focus(session_id: u64, focused: bool) -> Vec<u8> {
-    let mut v = Vec::with_capacity(9);
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.push(focused as u8);
-    v
-}
-
-pub fn decode_pane_terminal_focus(payload: &[u8]) -> io::Result<(u64, bool)> {
-    if payload.len() != 9 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_terminal_focus payload != 9 bytes",
-        ));
-    }
-    Ok((u64::from_le_bytes(payload[0..8].try_into().unwrap()), payload[8] != 0))
 }
 
 /// PaneHoldGrid payload: `session_id u64 LE, on u8` (1 = hold).
@@ -3612,29 +3586,6 @@ mod tests {
             MsgType::from_u32(78),
             Some(MsgType::PaneResetMouseReporting)
         );
-    }
-
-    #[test]
-    fn pane_terminal_focus_roundtrip() {
-        for focused in [true, false] {
-            let p = encode_pane_terminal_focus(7, focused);
-            assert_eq!(decode_pane_terminal_focus(&p).unwrap(), (7, focused));
-        }
-        assert!(decode_pane_terminal_focus(&[0u8; 8]).is_err());
-        assert_eq!(MsgType::from_u32(84), Some(MsgType::PaneTerminalFocus));
-    }
-
-    #[test]
-    fn pane_reset_mouse_reporting_roundtrip() {
-        let p = encode_pane_reset_mouse_reporting(0xDEAD_BEEF_1234_5678);
-        assert_eq!(
-            decode_pane_reset_mouse_reporting(&p).unwrap(),
-            0xDEAD_BEEF_1234_5678
-        );
-        // Wrong length is rejected rather than silently read short —
-        // this frame carries nothing but the id, so a mis-sized one is
-        // a bug on the sender, not a version skew.
-        assert!(decode_pane_reset_mouse_reporting(&p[..7]).is_err());
     }
 
     #[test]

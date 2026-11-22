@@ -21,6 +21,7 @@
 //! CPU is ~0. With neither env var set it stays fully standalone
 //! (self-creates the region, no input source) for the dev/test path.
 
+mod awake;
 mod control_reader;
 mod control_writer;
 mod frames;
@@ -69,20 +70,7 @@ use handoff::{
 };
 use local_session::LocalSession;
 
-/// RFC-003 step 1c. Two session backends coexist:
-///
-/// * `Shelld` — the L4-mediated path. PTY + bytelog live in the
-///   `marspot-shelld` daemon; this L3 talks to it over a unix socket
-///   and consumes a snapshot/byte stream.
-/// * `Local`  — the L3-owns-PTY path. PTY + bytelog live right here.
-///   No L4 dependency.
-///
-/// Both expose the same surface to the main loop so the only
-/// difference user-facing is the one env-var-gated dispatch in
-/// `main()`. Phase 6 of RFC-003 deletes the `Shelld` variant once
-/// L2 has fully switched over.
-/// RFC-003 Phase 6: only the L3-owns-PTY path remains; SessionImpl
-/// is a single-variant alias kept for code-shape continuity.
+/// The one session backend: this L3 owns the PTY.
 enum SessionImpl {
     Local(LocalSession),
 }
@@ -188,6 +176,8 @@ impl SessionImpl {
 /// `Key` when L2 forwards a keystroke.
 enum SessionEvent {
     Wake,
+    /// The pane's shell forked, or a child of it exec'd or exited: see `awake`.
+    ProcsChanged,
     /// L1 (through L2) asks this pane to hold its picture where it is,
     /// or to let it go.  See `LocalSession::hold_grid`.
     HoldGrid(bool),
@@ -909,6 +899,9 @@ fn main() {
     frames.follow_scroll_from(&session);
     frames.publish(&mut session, poke.as_mut());
     regions::announce(frames.shm(), poke.as_mut());
+    let SessionImpl::Local(local) = &session;
+    let mut awake = awake::Awake::new(session.id(), local.raw_master(), session.child_pid(), ev_tx.clone());
+    awake.new_core(poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1091,6 +1084,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let mut modes_changed = false;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
+        let mut procs_changed = false;
         let mut selection_reqs: Vec<(u32, (u16, u32), (u16, u32), bool)> = Vec::new();
         input::taken();
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
@@ -1198,6 +1192,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 }
                 SessionEvent::Pointer(ev) => pointer_gate.deliver(&mut session, &mut frames, &ev),
                 SessionEvent::Wake => {}
+                SessionEvent::ProcsChanged => {
+                    awake.procs_seen();
+                    procs_changed = true;
+                }
                 SessionEvent::CoreGone(core_gen) => {
                     // RFC-003 §6 Amendment 11 (debug-2 + debug-3 root
                     // cause): owns-pty L3 MUST NOT exit on control
@@ -1512,6 +1510,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                             // empty (looks black).
                             frames.publish(&mut session, poke.as_mut());
                             regions::announce(frames.shm(), poke.as_mut());
+                            awake.new_core(poke.as_mut());
                             lx_event!(
                                 "L3_UDS_CLIENT_ADOPTED",
                                 "control reader spawned on UDS stream"
@@ -1557,6 +1556,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 break;
             }
         };
+        awake.after_turn(n > 0, procs_changed, poke.as_mut());
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
         // replies L4 sent.  Empty `line_count` means "no more history
@@ -1751,7 +1751,6 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             );
         }
     }
-    // RFC-003 §6 Amendment 16 — post-loop dispatcher.
     if want_shutdown {
         if execv_verdict == Some(true) {
             // Input the readers queued after the loop's last drain would
