@@ -132,3 +132,49 @@ fn a_told_pane_that_stopped_is_told_to_go_on_when_its_account_refuses() {
     let sent = host.sent.lock().unwrap().clone();
     assert_told_to_go_on(&sent[0].1, false);
 }
+
+/// A switch the person asks for keeps the heads-up's promise too: the
+/// told pane is not told "stay idle if idle", and hears that the
+/// background work it had running was ended.
+#[test]
+fn a_told_pane_switched_by_hand_is_told_to_go_on() {
+    marspot::settings::set_for_test(marspot::settings::Settings {
+        cc_rebalance: marspot::settings::Rebalance::Off,
+        ..Default::default()
+    });
+    let home = quota_home("kh");
+    feed(&home, "kh", ("allowed", 0.99));
+    let host = FakeHost::new(home.join("state"));
+    let sid = 99u64;
+    confirmed("u-99");
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-99"), sid);
+    sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::Working));
+    delivered(&plugin, sid);
+    assert!(host.submitted.lock().unwrap().is_empty());
+
+    plugin.last_model.insert(sid, "opus-5-5".into());
+    plugin.last_vetoes.insert(sid, (true, false));
+    let tag = crate::plugins::handoff::profile_tag(crate::plugins::handoff::Agent::Claude, 2);
+    plugin.on_pane_badge_menu_action(&host, sid, tag);
+    assert_eq!(host.submitted.lock().unwrap().len(), 1, "the pick itself");
+    let sent = host.sent.lock().unwrap().clone();
+    assert!(sent[0].1.contains(".claude-profile-2"), "{:?}", sent[0].1);
+    assert_told_to_go_on(&sent[0].1, true);
+}
+
+/// A pick by hand on a pane that was never told is unchanged.
+#[test]
+fn an_untold_pane_switched_by_hand_hears_the_usual_word() {
+    let home = quota_home("ku");
+    feed(&home, "ku", ("allowed", 0.5));
+    let host = FakeHost::new(home.join("state"));
+    let sid = 100u64;
+    confirmed("u-100");
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-100"), sid);
+    plugin.last_model.insert(sid, "opus-5-5".into());
+    let tag = crate::plugins::handoff::profile_tag(crate::plugins::handoff::Agent::Claude, 2);
+    plugin.on_pane_badge_menu_action(&host, sid, tag);
+    let sent = host.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].1.contains(&resume_word()), "{:?}", sent[0].1);
+}

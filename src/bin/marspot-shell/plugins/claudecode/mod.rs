@@ -116,6 +116,9 @@ pub struct ClaudecodePlugin {
     /// pinned to it a profile with a fresh week is not necessarily a
     /// profile with room.
     last_model: HashMap<u64, String>,
+    /// Per pane: `(work running under claude, own timer)`, as the scan
+    /// last read it, for a switch someone asks for between scans.
+    last_vetoes: HashMap<u64, (bool, bool)>,
     /// Panes stranded on an account that is out: how many moves have
     /// been spent on each, and where the last one was aimed.  An entry
     /// disappears when the account answers again.
@@ -230,6 +233,7 @@ impl ClaudecodePlugin {
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
             last_model: HashMap::new(),
+            last_vetoes: HashMap::new(),
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
             rebalanced: HashMap::new(),
