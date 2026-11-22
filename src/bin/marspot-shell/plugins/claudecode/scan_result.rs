@@ -56,6 +56,9 @@ pub(super) struct ScanResult {
     /// Per pane: the quota refusal its newest background-agent report
     /// ended on, when that agent was refused under this claude.
     pub(super) agent_refused: HashMap<u64, quota::Refusal>,
+    /// Per pane: the newest request for Fable that was refused under
+    /// its claude, its own or a background agent's.
+    pub(super) fable_refused: HashMap<u64, super::fable_need::Ask>,
 }
 
 /// The files the quota sweep judges by besides the bindings: the usage

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use super::fable_need::{ask_of, Ask};
 use super::model::short_model;
 use super::quota::{same_model, Room};
 use super::transcript::{record_type, top_level_str};
@@ -65,6 +66,38 @@ impl WorkerCtx {
         }
         self.last_refusal.get(path).cloned()
     }
+
+    /// What the API has told the claude that started at `started`, read
+    /// from the tail window the scan already has.
+    ///
+    /// Only what this process was told counts. The transcript follows a
+    /// session across a profile switch, so a refusal from the account it
+    /// just left is still in there and would read as the new account
+    /// refusing. An account that really is out refuses the new process
+    /// too, and that refusal is newer than its start.
+    pub(super) fn told(&mut self, path: Option<&PathBuf>, window: Option<&str>, started: SystemTime) -> Told {
+        // remembered per transcript: a refusal leaves the window within
+        // minutes on a busy session, and a pane is still shut out after
+        let remembered = match (path, window) {
+            (Some(path), Some(window)) => self.remember_refusal(path, window),
+            (Some(path), None) => self.last_refusal.get(path).cloned(),
+            (None, _) => None,
+        };
+        let own = refused_since(remembered, started);
+        let agent = refused_since(window.and_then(last_agent_refusal), started);
+        let fable = ask_of(own.as_ref(), agent.as_ref(), || window.and_then(refused_agent_name).unwrap_or_default());
+        Told { own, agent, fable }
+    }
+}
+
+/// What one pane's claude has been refused, as one scan read it.
+pub(super) struct Told {
+    /// The session's own request.
+    pub own: Option<Refusal>,
+    /// The newest report of its background agents.
+    pub agent: Option<Refusal>,
+    /// A request for Fable, from either.
+    pub fable: Option<Ask>,
 }
 
 /// The quota refusal a background agent of this session ended on, when
@@ -81,7 +114,7 @@ impl WorkerCtx {
 /// then there is nothing to report. The model is empty when the notice
 /// names none.
 pub(super) fn last_agent_refusal(tail: &str) -> Option<Refusal> {
-    let (line, notice) = tail.lines().rev().find_map(|l| Some((l, agent_notice(l)?)))?;
+    let (line, notice) = last_agent_notice(tail)?;
     if !(notice.contains("<status>failed</status>") && says_out_of_quota(notice)) {
         return None;
     }
@@ -96,6 +129,22 @@ pub(super) fn last_agent_refusal(tail: &str) -> Option<Refusal> {
         logged_out: false,
         window: if five_hour { Window::FiveHour } else { Window::Week },
     })
+}
+
+/// The newest queued notice that a background agent stopped: the
+/// record, and the notice's text.
+fn last_agent_notice(tail: &str) -> Option<(&str, &str)> {
+    tail.lines().rev().find_map(|l| Some((l, agent_notice(l)?)))
+}
+
+/// The description of the background agent the newest notice is
+/// about, from its `Agent "<description>" failed`. Read as the record
+/// holds it, so the quotes around it are escaped.
+pub(super) fn refused_agent_name(tail: &str) -> Option<String> {
+    const OPEN: &str = r#"<summary>Agent \""#;
+    let (_, notice) = last_agent_notice(tail)?;
+    let rest = &notice[notice.find(OPEN)? + OPEN.len()..];
+    Some(rest[..rest.find(r#"\" failed"#)?].to_string())
 }
 
 /// The text of a queued notice that a background agent stopped.
