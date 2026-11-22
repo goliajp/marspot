@@ -220,8 +220,10 @@ impl Prefilter {
                     }
                     if (0x40..=0x7e).contains(&b) {
                         self.mode = Mode::Text;
-                        // colour, erasing, modes and reports leave cells where they are
-                        if !b"mKJXhlnctqp".contains(&b) {
+                        // colour, erasing and reports leave cells where they are;
+                        // mode changes can move the cursor (origin mode, leaving
+                        // the alternate screen), so they count as moves
+                        if !b"mKJXnctqp".contains(&b) {
                             self.moved();
                         }
                     }

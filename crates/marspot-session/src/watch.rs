@@ -197,7 +197,7 @@ impl Watches {
         // asked again once the hold ends and the grid changes
         let check = texts && batch.is_some() && !local(session).is_holding() && {
             let stream = local_mut(session).take_text_check();
-            stream || self.every_batch
+            stream || self.every_batch || above_bottom(session)
         };
         let scan = match batch {
             Some(b) if check => Scan::Batch(b),
@@ -369,3 +369,12 @@ fn invalid(b: &WatchBody) -> Option<Code> {
         _ => None,
     }
 }
+
+/// The cursor ended the batch above the screen's last row: a line break
+/// there lands on a row that may still hold old text, which the byte
+/// stream cannot see, so the grid is read.
+fn above_bottom(session: &SessionImpl) -> bool {
+    let grid = session.terminal().grid();
+    grid.cursor().1 + 1 < grid.rows()
+}
+

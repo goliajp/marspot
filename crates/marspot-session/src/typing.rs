@@ -92,9 +92,21 @@ impl Typing {
         None
     }
 
-    /// Every request held, the one in flight first, taken out unanswered.
-    pub(crate) fn abort(&mut self) -> Vec<u32> {
-        let mut ids: Vec<u32> = self.cur.take().map(|c| c.req_id).into_iter().collect();
+    /// Every request held, taken out for a restart: the one in flight
+    /// whose input already left the PTY queue is answered as written,
+    /// without its return (the caller must not type it again); the rest
+    /// are returned unanswered.
+    pub(crate) fn abort(&mut self, session: &SessionImpl) -> (Option<PaneTyped>, Vec<u32>) {
+        let mut ids = Vec::new();
+        let mut done = None;
+        if let Some(c) = self.cur.take() {
+            if c.written.load(Ordering::Acquire) {
+                let pos = local(session).output_pos();
+                done = Some(typed(c.req_id, TypedResult::Written, pos, c.len, c.echo_off));
+            } else {
+                ids.push(c.req_id);
+            }
+        }
         while self.len > 0 {
             if let Some(t) = self.queue[self.head].take() {
                 ids.push(t.req_id);
@@ -102,7 +114,7 @@ impl Typing {
             self.head = (self.head + 1) % QUEUE;
             self.len -= 1;
         }
-        ids
+        (done, ids)
     }
 
     /// Move the request in flight along, or start the next; what was

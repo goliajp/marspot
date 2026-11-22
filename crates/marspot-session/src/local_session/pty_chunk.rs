@@ -62,7 +62,10 @@ impl marspot_term::frame_writer::Queued for PtyChunk {
                 Err(_) => break,
             }
         }
-        if let Some(written) = &self.written {
+        // a chunk abandoned on a dead fd was not written
+        if off == self.bytes.len()
+            && let Some(written) = &self.written
+        {
             written();
         }
         Ok(())

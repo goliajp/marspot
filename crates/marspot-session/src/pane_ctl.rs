@@ -112,7 +112,11 @@ impl PaneCtl {
     pub(crate) fn restarting(&mut self, session: &mut SessionImpl, mut poke: Option<&mut ControlWriter>) {
         let batch = self.track.after_batch(session);
         self.watches.evaluate(session, &mut self.track, batch, true);
-        for req_id in self.typing.abort() {
+        let (written, unsent) = self.typing.abort(session);
+        if let Some(reply) = written {
+            self.typed(reply, poke.as_deref_mut());
+        }
+        for req_id in unsent {
             self.done(req_id, RESTARTING, poke.as_deref_mut());
         }
         self.watches.release_all();
