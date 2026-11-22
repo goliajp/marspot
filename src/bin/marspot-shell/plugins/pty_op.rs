@@ -1380,11 +1380,9 @@ impl OpRunner {
                         .pane_modes(sid)
                         .map(|(_, f)| f & FLAG_BRACKETED_PASTE != 0)
                         .unwrap_or(false);
-                    let mut bytes = Vec::with_capacity(line.len() + 16);
+                    let mut bytes = Vec::new();
                     if bracketed {
-                        bytes.extend_from_slice(b"\x1b[200~");
-                        bytes.extend_from_slice(line.as_bytes());
-                        bytes.extend_from_slice(b"\x1b[201~");
+                        marspot_term::paste::bracketed_paste(line.as_bytes(), &mut bytes);
                     } else {
                         // Nothing to bracket with.  The text still goes
                         // in and the return still follows it a redraw

@@ -42,17 +42,15 @@ pub(crate) fn handle_key(session: &mut SessionImpl, event: MarspotKeyEvent, mods
 /// Write pasted text (already resolved from the macOS pasteboard by L2) to
 /// the PTY.  Wrap in bracketed-paste markers iff this terminal turned the
 /// mode on (DECSET 2004) so the receiving app treats it as a single paste
-/// rather than typed input.  No local predict — the PTY echo round-trips
-/// back through the normal pump.
+/// rather than typed input; markers inside the text are dropped so it
+/// cannot end the paste early.  No local predict — the PTY echo
+/// round-trips back through the normal pump.
 pub(crate) fn handle_paste(session: &mut SessionImpl, text: &str) {
-    let bracketed = session.terminal().bracketed_paste_mode();
-    let mut bytes: Vec<u8> = Vec::with_capacity(text.len() + 12);
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[200~");
+    if session.terminal().bracketed_paste_mode() {
+        let mut bytes = Vec::new();
+        marspot_term::paste::bracketed_paste(text.as_bytes(), &mut bytes);
+        let _ = session.write(&bytes);
+    } else {
+        let _ = session.write(text.as_bytes());
     }
-    bytes.extend_from_slice(text.as_bytes());
-    if bracketed {
-        bytes.extend_from_slice(b"\x1b[201~");
-    }
-    let _ = session.write(&bytes);
 }

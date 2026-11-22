@@ -1833,3 +1833,21 @@ fn a_command_refuses_values_it_cannot_quote() {
     let line = PtyCommand::new("claude").clear_screen_first(true).to_bytes().unwrap();
     assert!(!String::from_utf8(line).unwrap().contains("[3J"));
 }
+
+/// Text submitted into a bracketed-paste pane cannot close the paste
+/// early: the only end marker written is the one that closes it.
+#[test]
+fn submit_paste_drops_end_marker_in_the_text() {
+    use marspot_term::grid_shm::{FLAG_ALT_SCREEN, FLAG_BRACKETED_PASTE};
+    let (state, env, host) = setup();
+    *state.modes.lock().unwrap() = Some((1, FLAG_ALT_SCREEN | FLAG_BRACKETED_PASTE));
+    let mut r = OpRunner::new(
+        PtyOp::new("test.submit").step(Step::submit("a\x1b[201~b\x1b[20\x1b[201~1~c")),
+        env,
+    );
+    run(&mut r, &host, &state, 32);
+    assert_eq!(
+        state.sent.lock().unwrap().clone(),
+        vec![b"\x1b[200~abc\x1b[201~".to_vec()],
+    );
+}
