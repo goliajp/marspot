@@ -152,11 +152,6 @@ The same commands are in the menu bar, and ⌘/ lists them in the app. Closing a
 
 Honest list, because you will hit these in the first hour:
 
-- Combining marks, ZWJ emoji and flag sequences survive scrolling
-  back and a restart, but not a change of window width: the lines
-  already in history are re-cut to the new width from what is on
-  disk, and a re-cut line shows each such cluster as its base
-  character.
 - OSC 8 links in history kept on disk survive scrolling back and a
   restart. Links still on screen are lost when the session is
   updated or restored from a snapshot, and so are links in history
