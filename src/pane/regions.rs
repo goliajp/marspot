@@ -40,8 +40,13 @@ impl PaneBackend {
     pub fn l3_session_says(&mut self, frame: &Frame) {
         if let PaneBackend::L3(c) = self {
             match frame.msg_type {
-                MsgType::SessionPublishes => c.session_publishes(&frame.payload),
+                MsgType::SessionPublishes => {
+                    // a new image announces itself again right after this
+                    c.reads_pane_control = false;
+                    c.session_publishes(&frame.payload);
+                }
                 MsgType::SessionReadsFrameCells => say_frames_read(&c.control),
+                MsgType::SessionReadsPaneControl => c.reads_pane_control = true,
                 _ => {}
             }
         }
@@ -127,6 +132,8 @@ impl L3Conn {
         // for the dead socket goes with it, which is correct — those
         // frames were addressed to an L3 that no longer exists.
         self.control = new_control_writer(new_control);
+        // whoever is on the new stream has not announced itself yet
+        self.reads_pane_control = false;
         self.selection_rx = selection_rx;
     }
 

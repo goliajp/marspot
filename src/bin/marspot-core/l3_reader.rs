@@ -48,8 +48,22 @@ pub(super) fn l3_reader_loop(
                         marspot::input::write_clipboard_text(text);
                     }
                 }
-                MsgType::SessionPublishes | MsgType::SessionReadsFrameCells | MsgType::PaneAwake => {
+                MsgType::SessionPublishes
+                | MsgType::SessionReadsFrameCells
+                | MsgType::SessionReadsPaneControl
+                | MsgType::PaneAwake => {
                     let _ = tx.send(CoreEvent::L3Says(session_id, f));
+                }
+                MsgType::PaneTyped | MsgType::PaneWatchFired | MsgType::PaneDone => {
+                    let mut f = f;
+                    // a session speaks only for itself, whatever sid it wrote
+                    let at = if f.msg_type == MsgType::PaneTyped { 4 } else { 0 };
+                    if f.msg_type != MsgType::PaneDone
+                        && let Some(b) = f.payload.get_mut(at..at + 8)
+                    {
+                        b.copy_from_slice(&session_id.to_le_bytes());
+                    }
+                    let _ = tx.send(CoreEvent::PaneReport(f));
                 }
                 // Reply to a Cmd-C `GetSelectionText`, for whoever waits in
                 // `L3Conn::request_selection_text`; its seq lets the waiter

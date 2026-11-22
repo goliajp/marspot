@@ -55,6 +55,7 @@ impl L3Conn {
             moving: false,
             selection_rx,
             selection_seq: 0,
+            reads_pane_control: false,
         }
     }
 
@@ -96,6 +97,7 @@ impl L3Conn {
             moving: false,
             selection_rx: spawn.selection_rx,
             selection_seq: 0,
+            reads_pane_control: false,
         }
     }
 }
