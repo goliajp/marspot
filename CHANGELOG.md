@@ -4,6 +4,21 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.9.0
+
+- A session told that its account is about to run out of quota keeps
+  working. The notice says to carry on and expect to be moved to
+  another account at any moment. Before, it asked the session to wrap
+  up, and sessions stopped mid-task. After the move, by quota, by
+  rebalancing or by hand, a session that had the notice is told to
+  pick up where it left off, unless it was waiting for you.
+- A Claude session whose request for the Fable model is refused, its
+  own or a background agent's, is moved in the same scan to an account
+  that still has Fable quota and told which request to send again. The
+  pane is remembered as needing Fable for 12 hours, also across a
+  restart, and is no longer moved away to leave Fable to other panes.
+  When no account has Fable left it stays where it is.
+
 ## 0.8.0
 
 - Links a program marks with OSC 8 can be clicked. A marked link wins
