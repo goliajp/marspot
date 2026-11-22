@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use marspot::pane_state::{Activity, PaneStatus};
 use marspot::{lx_debug, lx_info, lx_warn};
@@ -106,13 +106,11 @@ enum DeclValue {
 }
 
 pub struct ShellPluginHost {
-    /// `shelld_session_id → foreground status`, refreshed once per
-    /// `pane_status::SWEEP_INTERVAL` by the shell's supervisor tick.
-    /// Keyed by session id rather than pane index because that is what
-    /// plugins already hold (badges, PaneSessions, inject-input all
-    /// address sessions), and because pane indices shift when panes
-    /// are added or moved between windows.
-    pane_status: Arc<Mutex<HashMap<u64, (PaneStatus, Duration, bool)>>>,
+    /// `shelld_session_id → (status, since when, quiescent)` as of the
+    /// last sweep, which runs only when a pane's state can have moved:
+    /// how long a state has held is read when it is asked for.  Keyed by
+    /// session id, which is what plugins hold; pane indices shift.
+    pane_status: Arc<Mutex<HashMap<u64, (PaneStatus, Instant, bool)>>>,
     /// Current plugin being invoked — used for the log namespace and
     /// permission lookup.  Set/cleared by the registry around each
     /// hook.  Set by `dispatch::with`, which is the only thing that can.
@@ -366,7 +364,8 @@ impl ShellPluginHost {
             .lock()
             .unwrap()
             .retain(|(sid, _), _| map.contains_key(sid));
-        *self.pane_status.lock().unwrap() = map;
+        let now = Instant::now();
+        *self.pane_status.lock().unwrap() = map.into_iter().map(|(sid, (s, held, q))| (sid, (s, now - held, q))).collect();
     }
 
     /// Queue a badge for the shell, if it differs from the last one
@@ -448,9 +447,9 @@ impl PluginHost for ShellPluginHost {
         shelld_session_id: u64,
     ) -> Result<Option<super::PaneStatusView>, PluginError> {
         Ok(self.pane_status.lock().unwrap().get(&shelld_session_id).map(
-            |(status, held, quiescent)| super::PaneStatusView {
+            |(status, since, quiescent)| super::PaneStatusView {
                 status: status.clone(),
-                held: *held,
+                held: since.elapsed(),
                 quiescent: *quiescent,
             },
         ))

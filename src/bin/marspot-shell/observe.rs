@@ -8,9 +8,9 @@
 //! observer does that once per interval on its own thread and
 //! publishes the result as an `Arc<Observation>`; consumers read the
 //! latest one, or ask for one no older than they can accept.  It keeps
-//! to its interval only while somebody reads: with no reader since the
-//! last walk it waits for one, so an app nobody is polling walks no
-//! process table.
+//! to its interval while somebody reads or the supervisor is awake, and
+//! knocks when what it sees in the panes changes (`walk`); otherwise it
+//! waits for a reader, so an app at rest walks no process table.
 //!
 //! An observation is up to [`INTERVAL`] old.  Anything that acts on a
 //! process (signals it, types at it) must re-check the `ProcId` at the
@@ -316,6 +316,8 @@ struct State {
     wanted: bool,
     /// `latest` has been read since it was built.
     read: bool,
+    /// Keep to the interval whether or not anybody reads (`keep_walking`).
+    awake: bool,
     stop: bool,
     /// The observer thread has ended: no newer observation will come.
     dead: bool,
@@ -392,7 +394,7 @@ impl Observer {
     ) -> Observer {
         let walks = AtomicU64::new(0);
         let first = build(&walks);
-        let state = State { latest: Arc::new(first), wanted: false, read: false, stop: false, dead: false };
+        let state = State { latest: Arc::new(first), wanted: false, read: false, awake: false, stop: false, dead: false };
         let shared = Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new(), walks });
         let theirs = Arc::clone(&shared);
         std::thread::Builder::new()
@@ -474,49 +476,11 @@ impl Drop for Observer {
     }
 }
 
-fn run(shared: &Shared, mut build: impl FnMut(&AtomicU64) -> Observation, interval: Duration) {
-    loop {
-        {
-            let mut g = shared.state();
-            loop {
-                if g.stop {
-                    return;
-                }
-                if g.wanted {
-                    break;
-                }
-                if !g.read {
-                    g = shared.changed.wait(g).unwrap_or_else(std::sync::PoisonError::into_inner);
-                    continue;
-                }
-                let due = g.latest.at + interval;
-                let now = Instant::now();
-                if now >= due {
-                    break;
-                }
-                g = shared
-                    .changed
-                    .wait_timeout(g, due - now)
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .0;
-            }
-            g.wanted = false;
-            g.read = false;
-        }
-        let obs = Arc::new(build(&shared.walks));
-        let mut g = shared.state();
-        if g.stop {
-            return;
-        }
-        let old = std::mem::replace(&mut g.latest, obs);
-        drop(g);
-        shared.changed.notify_all();
-        drop(old);
-    }
-}
-
 mod env_cache;
+mod walk;
 pub use env_cache::EnvCache;
+pub use walk::{changes, keep_walking};
+use walk::run;
 
 #[cfg(test)]
 pub(crate) mod tests;

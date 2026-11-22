@@ -221,6 +221,22 @@ impl Plugin for CodexPlugin {
         }
     }
 
+    /// With no codex in a pane and no badge left to clear, a tick does
+    /// only what the CLI follower has due; a codex starting in a pane
+    /// changes what the observer sees, and its knock brings the tick.
+    fn tick_due(&self) -> super::TickDue {
+        if !self.initialised {
+            return super::TickDue::Event;
+        }
+        if !self.last_badge.is_empty()
+            || !self.panes.is_empty()
+            || crate::observe::shared().latest().live().any(|s| pane_codex(s).is_some())
+        {
+            return super::TickDue::Cadence;
+        }
+        self.follower.due_at().map_or(super::TickDue::Cadence, super::TickDue::At)
+    }
+
     fn tick(&mut self, host: &dyn PluginHost) {
         if !self.initialised {
             return;

@@ -164,6 +164,25 @@ impl Plugin for PeerbusPlugin {
         Ok(())
     }
 
+    /// With no codex in a pane, nothing new from the gemini and kimi
+    /// plugins and no noted change to look at, a tick only asks for the
+    /// names pass when it is due; a codex starting in a pane changes what
+    /// the observer sees, and its knock brings the tick.
+    fn tick_due(&self) -> super::TickDue {
+        if self.tx.is_none() {
+            return super::TickDue::Event;
+        }
+        let settled = self.sent.is_empty()
+            && self.config_seen == super::agents::changes::count()
+            && crate::plugins::gemini::peers() == self.sent_gemini
+            && crate::plugins::kimi::peers() == self.sent_kimi
+            && !crate::observe::shared().latest().live().any(|s| crate::plugins::codex::pane_codex(s).is_some());
+        match self.names_at {
+            Some(t) if settled => super::TickDue::At(t),
+            _ => super::TickDue::Cadence,
+        }
+    }
+
     fn tick(&mut self, host: &dyn PluginHost) {
         let Some(tx) = &self.tx else { return };
         let obs = crate::observe::shared().latest();

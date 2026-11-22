@@ -178,9 +178,9 @@ const PONG_DEADLINE: Duration = Duration::from_secs(15);
 /// accuses anyone else of being asleep.  Deadlines are handed the gap
 /// back rather than charged for it.
 ///
-/// Nominal cadence is the 1 s redraw pump (`REDRAW_INTERVAL_MS`), so
-/// one ping interval is 5× nominal: far outside ordinary jitter, far
-/// inside a real hang.
+/// Measured past the moment the clock was told to tick, which while
+/// awake is never more than a ping interval away: far outside ordinary
+/// jitter, far inside a real hang.
 const SUPERVISOR_STALL_GAP: Duration = PING_INTERVAL;
 /// Crash-budget window.  More than `MAX_CRASHES_IN_WINDOW` in this
 /// span and we stop auto-restarting (binary is broken; user needs
@@ -1191,6 +1191,7 @@ impl ShellApp {
                 // pick up the clocks the previous image left so a
                 // silent update doesn't tell every pane it just woke.
                 let mut t = pane_status::PaneStateTracker::new();
+                t.read_reports(|sid| control_reader::pane_wakes::latest(sid).map(|w| w.output_at));
                 let n = t.load_clocks();
                 if n > 0 {
                     lx_info!(
@@ -2108,6 +2109,10 @@ impl ShellApp {
                 );
             }
         }
+        // a quiet pane's next output is a change of state
+        for sid in snapshot.keys() {
+            control_reader::pane_wakes::arm(*sid, self.pane_status.pty_quiet_now(*sid, now));
+        }
         // Closed panes leave every per-pane table here, against the
         // same map the plugin host drops its memo by: a repeat the host
         // swallows must be one these tables still hold.
@@ -2128,6 +2133,7 @@ impl ShellApp {
         self.pane_look.retain(&open);
         self.pane_tables.retain(&open);
         self.wake_queue.retain(|sid| open(*sid));
+        control_reader::pane_wakes::retain(&open);
     }
 
     /// Send the current core every badge, title and recede level it
@@ -2369,6 +2375,7 @@ impl ShellApp {
         // control socket as InjectInput frames; L2 routes by
         // session_id to the L3 owning that pane.
         while let Ok(req) = self.inject_input_rx.try_recv() {
+            self.pane_status.poke();
             if let Some(conn) = self.active.as_ref() {
                 match req.what {
                     plugins::host::InjectWhat::Input(bytes) => conn.send(
@@ -2402,31 +2409,8 @@ impl ShellApp {
             }
         }
 
-        // 0a. Were *we* running?  Everything below judges the core by
-        // how long it has been quiet, which is only evidence if
-        // somebody was listening the whole time.  When the gap between
-        // two ticks blows past `SUPERVISOR_STALL_GAP` the shell itself
-        // was descheduled — the machine slept, or a build storm took
-        // the cores — and the core's deadlines get that time handed
-        // back instead of charged.  `next_ping_at` is deliberately
-        // left alone: the next tick pings immediately, which is how we
-        // find out what actually happened.
-        let tick_now = Instant::now();
-        let since_last = self.last_tick_at.map(|t| tick_now.duration_since(t));
-        self.last_tick_at = Some(tick_now);
-        if let Some(tick_gap) = since_last.filter(|g| *g > SUPERVISOR_STALL_GAP) {
-            if let Some(c) = self.active.as_mut() {
-                c.spawned_at = forgive_stall(c.spawned_at, tick_gap, tick_now);
-                c.last_pong_at = forgive_stall(c.last_pong_at, tick_gap, tick_now);
-            }
-            if !self.pump_rested() {
-                lx_event!(
-                    "SUPERVISOR_STALL",
-                    "supervisor tick was late — deadlines forgiven, not charged",
-                    gap_ms = tick_gap.as_millis() as u64
-                );
-            }
-        }
+        // 0a. Were *we* running?  See `witness_stall`.
+        self.witness_stall(Instant::now());
 
         // 0b. Cool-down after a blown crash budget.  Not "until manual
         // intervention" any more: the four restarts that trip the
@@ -3900,12 +3884,13 @@ impl MarspotApp for ShellApp {
             Some(conn) => conn.control_rx.try_iter().collect(),
             None => Vec::new(),
         };
+        let owed = self.frame_owed();
         let knocked = self.knocked(&active_inbox);
         for msg in active_inbox {
             self.handle_active_msg(msg, ctx);
         }
         self.poll_supervisor(ctx);
-        self.settle_pump(knocked);
+        self.settle_pump(knocked, owed);
         self.dev_pass();
         ctx.request_redraw();
     }

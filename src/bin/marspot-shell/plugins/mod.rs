@@ -57,6 +57,8 @@ pub mod dispatch;
 pub mod pty_op;
 pub mod pty_command;
 pub mod skills;
+mod ticks;
+pub use ticks::TickDue;
 // F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2 (marspot-core)
 // can use the same libproc walker for the process-tree panel.  Re-export under
 // the old path keeps L1 plugin code unchanged (`crate::plugins::pidtree::…`).
@@ -373,6 +375,11 @@ pub trait Plugin: Send + Sync {
         let _ = host;
     }
 
+    /// When the next tick is wanted; see [`TickDue`].
+    fn tick_due(&self) -> TickDue {
+        TickDue::Cadence
+    }
+
     /// Called before plugin is dropped (marspot quit / explicit
     /// disable).  Plugin should release resources here.
     fn stop(&mut self, host: &dyn PluginHost) {
@@ -612,28 +619,6 @@ impl PluginRegistry {
             });
         }
         self.started = true;
-    }
-
-    pub fn tick_all(&mut self, host: &dyn PluginHost) {
-        if !self.started {
-            return;
-        }
-        let now = Instant::now();
-        for slot in self.slots.iter_mut() {
-            if !slot.enabled || slot.metadata.tick_interval_ms == 0 {
-                continue;
-            }
-            let interval = Duration::from_millis(
-                (slot.metadata.tick_interval_ms as u64).max(100),
-            );
-            if now.duration_since(slot.last_tick) < interval {
-                continue;
-            }
-            slot.last_tick = now;
-            dispatch::with(host, slot.metadata.name, || {
-            run_hook_void(slot, "tick", |p| p.tick(host));
-            });
-        }
     }
 
     /// Fan a PaneBadgeClicked event to every enabled plugin.  The L1

@@ -120,6 +120,9 @@ pub struct GeminiPlugin {
     env: crate::observe::EnvCache,
     /// The model each gemini process started with.
     starts: model::Starts,
+    /// A tick has run since the last gemini left the panes: what it
+    /// publishes is what a tick with no gemini publishes.
+    looked: bool,
 }
 
 impl GeminiPlugin {
@@ -131,6 +134,7 @@ impl GeminiPlugin {
             panes: std::collections::HashMap::new(),
             env: crate::observe::EnvCache::default(),
             starts: model::Starts::default(),
+            looked: false,
         }
     }
 
@@ -262,6 +266,20 @@ impl Plugin for GeminiPlugin {
         }
     }
 
+    /// With gemini in no pane and the last tick having found none, a
+    /// tick repeats what that one published; a gemini starting in a pane
+    /// changes what the observer sees, and its knock brings the tick.
+    fn tick_due(&self) -> super::TickDue {
+        if !self.initialised {
+            return super::TickDue::Event;
+        }
+        let none = self.looked
+            && self.last_badge.is_empty()
+            && self.panes.is_empty()
+            && !crate::observe::shared().latest().sessions.iter().any(|s| agent_in(s).is_some());
+        if none { super::TickDue::Event } else { super::TickDue::Cadence }
+    }
+
     fn tick(&mut self, host: &dyn PluginHost) {
         if !self.initialised {
             return;
@@ -272,6 +290,7 @@ impl Plugin for GeminiPlugin {
         self.env.prune(&obs);
         let Some(user_home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
         let seen: Vec<Seen> = obs.sessions.iter().filter_map(|s| self.see(s, &user_home)).collect();
+        self.looked = seen.is_empty();
         let live: Vec<pidtree::ProcId> = seen.iter().map(|s| s.gemini).collect();
         others::panes_started(live.iter().map(|g| g.start_us / 1000).min());
         self.sessions.retain(&live);

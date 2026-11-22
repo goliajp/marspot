@@ -164,6 +164,9 @@ pub struct KimiPlugin {
     /// Every kimi there has been, in a pane or not, by home and
     /// directory.
     beside: Beside,
+    /// A tick has run since the last kimi went: what it published is
+    /// what a tick with no kimi publishes.
+    looked: bool,
 }
 
 /// What kimi keeps sessions apart by.
@@ -183,6 +186,7 @@ impl KimiPlugin {
             woken: HashSet::new(),
             balance: balance::Balance::default(),
             beside: Beside::default(),
+            looked: false,
         }
     }
 
@@ -339,6 +343,21 @@ impl Plugin for KimiPlugin {
         self.hand_off(host, shelld_session_id, &pane, to, n);
     }
 
+    /// With no kimi on the machine and the last tick having found none,
+    /// a tick repeats what that one published; a kimi starting anywhere
+    /// changes what the observer sees, and its knock brings the tick.
+    fn tick_due(&self) -> super::TickDue {
+        if !self.initialised {
+            return super::TickDue::Event;
+        }
+        let none = self.looked
+            && self.last_badge.is_empty()
+            && self.panes.is_empty()
+            && self.woken.is_empty()
+            && !crate::observe::shared().latest().table.rows().iter().any(looks_like_kimi);
+        if none { super::TickDue::Event } else { super::TickDue::Cadence }
+    }
+
     fn tick(&mut self, host: &dyn PluginHost) {
         if !self.initialised {
             return;
@@ -356,6 +375,7 @@ impl Plugin for KimiPlugin {
             let cwd = pidtree::proc_cwd(row.pid).map(|c| c.to_string_lossy().into_owned());
             alive.push((row.id(), cwd.map(|c| place(&home, &c))));
         }
+        self.looked = alive.is_empty();
         let oldest = obs.sessions.iter().filter_map(agent_in).map(|k| k.row.start_us / 1000).min();
         self.beside.note(alive, beside::now_ms(), oldest);
         let seen: Vec<u64> = obs.sessions.iter().filter_map(|s| self.see(host, s, &user_home)).collect();
