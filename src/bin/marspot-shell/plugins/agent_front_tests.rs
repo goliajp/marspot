@@ -109,18 +109,27 @@ fn kimi_started_by_gemini_in_front_is_not_claimed_by_kimi() {
     // of its executable, so the child runs a copy of sleep named kimi;
     // a copy keeps the system's signature and is killed on exec unless
     // it is signed again
-    let dir = std::env::temp_dir().join(format!("marspot-agent-front-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let bin = dir.join("kimi");
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = Scratch(std::env::temp_dir().join(format!("marspot-agent-front-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let bin = dir.0.join("kimi");
     std::fs::copy("/bin/sleep", &bin).unwrap();
     let signed = std::process::Command::new("/usr/bin/codesign").arg("--force").args(["-s", "-"]).arg(&bin).output().unwrap();
     assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
+    // the first exec of a freshly signed file waits on the system's
+    // assessment of it, which on a ci runner outlasts the wait below
+    let first = std::process::Command::new(&bin).arg("0").status().unwrap();
+    assert!(first.success(), "the copy named kimi did not run: {first:?}");
     let claimed = claim_with_a_child_in_front(
         &format!("(exec -a gemini /bin/bash -c '{} 30 & wait')", bin.display()),
         gemini,
         |p| p.row.comm == "kimi",
         kimi,
     );
-    std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(claimed, None);
 }
