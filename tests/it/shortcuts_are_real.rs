@@ -15,7 +15,7 @@
 use marspot::commands::{Command, Runs, TABLE};
 
 const CORE: &str = "src/bin/marspot-core/keys.rs";
-const SHELL: &str = "src/bin/marspot-shell/main.rs";
+const SHELL: &str = "src/bin/marspot-shell/app_events.rs";
 
 /// `Command::Copy`, `Command::FocusPane` — the variant as source
 /// spells it, without what it carries.
