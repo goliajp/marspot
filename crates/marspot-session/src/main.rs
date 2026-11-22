@@ -29,6 +29,7 @@ mod snapshot_writer;
 use control_reader::ControlReaders;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
+mod execv_swap;
 mod handoff;
 mod input;
 mod keys;
@@ -36,16 +37,21 @@ use keys::{handle_key, handle_paste};
 mod line_discipline;
 mod owner_watch;
 mod local_session;
+mod pane_ctl;
 mod pane_env;
 mod pointer;
 mod publish_gate;
 mod pty_reader;
 mod shell_end;
+mod track;
+mod typing;
 mod signal_events;
 mod regions;
 mod reply_guard;
 mod uds_server;
 mod upkeep;
+mod watch;
+mod watch_text;
 
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -64,10 +70,8 @@ use marspot_term::shell_proto::{
 };
 use marspot_term::session_state::{PendingPage, SessionState};
 
-use handoff::{
-    ENV_HANDOFF_MANIFEST, L3Handoff, handoff_manifest_path, staged_is_another_build,
-    try_resume_handoff, write_handoff_manifest,
-};
+use execv_swap::{do_l3_execv_swap, set_cloexec};
+use handoff::{staged_is_another_build, try_resume_handoff};
 use local_session::LocalSession;
 
 /// The one session backend: this L3 owns the PTY.
@@ -219,6 +223,8 @@ enum SessionEvent {
     /// L2's pointer event, written only if the program asked for it —
     /// see `pointer`.
     Pointer(marspot_term::shell_proto::PointerInput),
+    /// `PaneType` or `PaneWatch`, see `pane_ctl`.
+    PaneControl(pane_ctl::Request),
     /// The control socket to L2/core hit EOF — our core is gone (crash,
     /// hang-kill, or clean exit). A freshly-booted core re-attaches the
     /// shelld session (PTY + bytelog survive *in shelld*, kept alive with
@@ -379,116 +385,6 @@ impl Drop for MappedFile {
     }
 }
 
-fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 { return Err(std::io::Error::last_os_error()); }
-        if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-}
-
-fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 { return Err(std::io::Error::last_os_error()); }
-        if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-}
-
-/// Stage the execv handoff and replace this process's image with
-/// `current/marspot-session`.  Returns Err only if we couldn't even
-/// reach execv — on success the function does not return.
-fn do_l3_execv_swap(
-    id: u64,
-    mut local: local_session::LocalSession,
-    mut listener: uds_server::SessionListener,
-    poke: Option<ControlWriter>,
-    snapshots: &SnapshotWriter,
-) -> std::io::Result<()> {
-    let started = Instant::now();
-    local.quiesce_for_handoff();
-    let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
-
-    // v5 LIVE snapshot (RFC-004 C.1 amendment): the TUI on this PTY
-    // survives the execv, so an alt screen must come back verbatim —
-    // the fold form here swapped the visible base out from under the
-    // TUI's incremental repaints (claudecode's input box vanished
-    // until its next full repaint).
-    let body = terminal.serialize_snapshot_live();
-    snapshots.write_last(session_state_bin_path(id), body);
-    // F3+10 — flush the FileScrollback BufWriter tail to the kernel
-    // page cache before execv.  Drop won't run on `libc::execv` so
-    // anything sitting in the writer's 64 KB user-space buffer would
-    // otherwise be lost to the next L3.  Snapshot v3 self-describing
-    // index dedup is the safety net (it'll refill any remaining gap
-    // from its RAM-ring section), but flushing keeps disk + RAM in
-    // sync so the next L3's cold reads hit complete data immediately.
-    terminal.grid().scrollback_flush_for_handoff();
-
-    clear_cloexec(master_fd)?;
-    let listen_fd = listener.prepare_for_execv()?;
-
-    // Carry the adopted control stream across execv too, so L2's
-    // reader doesn't see EOF.  `into_raw_fd` so the OwnedFd doesn't
-    // close on drop after we've cleared CLOEXEC on it.
-    let control_stream_fd: RawFd = match poke {
-        Some(writer) => {
-            let fd = writer.into_raw_fd();
-            clear_cloexec(fd)?;
-            fd
-        }
-        None => -1,
-    };
-
-    let manifest_path = handoff_manifest_path();
-    let handoff = L3Handoff {
-        master_fd, child_pid, listen_fd, cols, rows, control_stream_fd,
-    };
-    write_handoff_manifest(&handoff, &manifest_path)?;
-
-    let target = marspot_term::binary_tree::BinaryTree::default_for("marspot-session")?.current();
-    let target_c = std::ffi::CString::new(target.to_string_lossy().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target"))?;
-    let argv: [*const libc::c_char; 2] = [target_c.as_ptr(), std::ptr::null()];
-
-    unsafe { std::env::set_var(ENV_HANDOFF_MANIFEST, &manifest_path); }
-
-    lx_event!(
-        "L3_EXECV_INVOKE",
-        "execv into new marspot-session image",
-        session_id = id,
-        target = target.display(),
-        manifest = manifest_path.display(),
-        master_fd = master_fd,
-        listen_fd = listen_fd,
-        control_stream_fd = control_stream_fd,
-        child_pid = child_pid,
-        elapsed_us = started.elapsed().as_micros()
-    );
-
-    // Drop listener so suppress_drop runs (mem::forget keeps the
-    // listener fd open for the new image).
-    std::mem::drop(listener);
-
-    // Held across the exec and released by the new image once its own
-    // handler is armed — see `set_sigterm_blocked`.
-    marspot_term::signals::set_sigterm_blocked(true);
-    unsafe { libc::execv(target_c.as_ptr(), argv.as_ptr()); }
-    // Only reached when execv failed; this process keeps running, so
-    // it must be able to receive SIGTERM again.
-    marspot_term::signals::set_sigterm_blocked(false);
-    let err = std::io::Error::last_os_error();
-    lx_error!("l3.execv.failed", &format!("{err}"), target = target.display());
-    unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
-    let _ = std::fs::remove_file(&manifest_path);
-    Err(err)
-}
 
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -614,6 +510,7 @@ fn main() {
     let mut resumed_poke: Option<ControlWriter> = None;
     let mut resumed_client_generation: u64 = 0;
     let mut resumed = false;
+    let mut resumed_command_end = None;
     let mut session: SessionImpl = {
         let wake_tx = ev_tx.clone();
         let wake = move || {
@@ -642,6 +539,7 @@ fn main() {
         //   * Cold:   plain fresh forkpty + shell + bind UDS listener.
         let local = if let Some(h) = try_resume_handoff() {
             resumed = true;
+            resumed_command_end = h.marks.command_end;
             // Adopt inherited PTY + listener — see do_l3_execv_swap.
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
             let state_path = session_state_bin_path(id);
@@ -701,7 +599,7 @@ fn main() {
                 }
             }
             let local = LocalSession::from_handoff(
-                id, h.master_fd, h.child_pid, h.cols, h.rows, terminal, wake,
+                id, h.master_fd, h.child_pid, h.cols, h.rows, terminal, h.marks.pos, wake,
             )
             .unwrap_or_else(|e| {
                 lx_error!("l3.execv.from_handoff_failed", &format!("{e}"));
@@ -902,6 +800,7 @@ fn main() {
     let SessionImpl::Local(local) = &session;
     let mut awake = awake::Awake::new(session.id(), local.raw_master(), session.child_pid(), ev_tx.clone());
     awake.new_core(poke.as_mut());
+    let mut pane_ctl = pane_ctl::PaneCtl::new(&session, resumed_command_end, ev_tx.clone());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1040,7 +939,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let tally_due = ((t.predictions_hit, t.predictions_miss) != predict_seen)
             .then(|| PREDICT_REPORT_EVERY.saturating_sub(last_predict_report.elapsed()));
         // see `reply_guard` and `line_discipline`: both look often for a while
-        let wait = [wait, frames.due_in(), upkeep.wait(), snapshot_due, tally_due, session.reply_poll_every()]
+        let wait = [wait, frames.due_in(), upkeep.wait(), snapshot_due, tally_due, session.reply_poll_every(), pane_ctl.due_in()]
             .into_iter()
             .flatten()
             .min();
@@ -1191,6 +1090,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     pointer::write_input(&mut session, &bytes);
                 }
                 SessionEvent::Pointer(ev) => pointer_gate.deliver(&mut session, &mut frames, &ev),
+                SessionEvent::PaneControl(r) => pane_ctl.request(r, &mut session, poke.as_mut()),
                 SessionEvent::Wake => {}
                 SessionEvent::ProcsChanged => {
                     awake.procs_seen();
@@ -1552,11 +1452,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         ) {
             frames::Turn::Parsed(n) => n,
             frames::Turn::Exited => {
+                pane_ctl.session_ended(&mut session, poke.as_mut());
                 shell_ended = true;
                 break;
             }
         };
         awake.after_turn(n > 0, procs_changed, poke.as_mut());
+        pane_ctl.after_turn(&mut session, procs_changed, poke.as_mut());
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
         // replies L4 sent.  Empty `line_count` means "no more history
@@ -1752,32 +1654,16 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         }
     }
     if want_shutdown {
-        if execv_verdict == Some(true) {
-            // Input the readers queued after the loop's last drain would
-            // die with this image.  Stopped first, they queue no more;
-            // what they have not read stays in the socket, and the next
-            // image reads it.
-            readers.stop();
-            while let Ok(ev) = ev_rx.try_recv() {
-                match ev {
-                    SessionEvent::Key(e, m) => {
-                        handle_key(&mut session, e, m);
-                    }
-                    SessionEvent::Paste(text) => handle_paste(&mut session, &text),
-                    SessionEvent::InjectInput(bytes) => {
-                        let _ = session.write(&bytes);
-                    }
-                    _ => {}
-                }
-            }
-        }
         let id = session.id();
         let do_execv = execv_verdict == Some(true);
         if do_execv {
+            readers.stop();
+            execv_swap::settle(&mut session, &ev_rx, &mut pane_ctl, poke.as_mut());
             // the image that takes over may be one from before eight-byte
             // frames: it attaches to the region as it finds it
             frames.reader_gone(&session);
         }
+        let marks = pane_ctl.marks(&session);
         let SessionImpl::Local(local) = session;
         if do_execv {
             match _listener.take() { Some(listener_owned) => {
@@ -1786,7 +1672,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     "fingerprint differs from current/marspot-session — execv",
                     session_id = id
                 );
-                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer) {
+                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer, marks) {
                     Ok(()) => unreachable!(),
                     Err(e) => {
                         lx_error!(

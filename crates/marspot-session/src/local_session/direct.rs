@@ -252,6 +252,7 @@ mod tests {
             child_pid: 0,
             terminal: Terminal::new(COLS, 24),
             bytelog: None,
+            out: Default::default(),
             rx,
             reader: Some(reader),
             writer: super::super::PtyWriter::new("l3-pty-writer-1", std::io::sink(), marspot_term::frame_writer::cap::PTY),

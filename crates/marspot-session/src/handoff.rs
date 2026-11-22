@@ -51,6 +51,8 @@ pub(crate) struct L3Handoff {
     /// happens when L2 is mid-swap and the previous client EOF'd
     /// before NewClient adopted a new one).
     pub(crate) control_stream_fd: RawFd,
+    /// Not in a manifest from an image before them: zero and none.
+    pub(crate) marks: crate::pane_ctl::Marks,
 }
 
 pub(crate) fn handoff_manifest_path() -> std::path::PathBuf {
@@ -61,8 +63,8 @@ pub(crate) fn handoff_manifest_path() -> std::path::PathBuf {
 }
 
 pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> std::io::Result<()> {
-    let body = format!(
-        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\ncontrol_stream_fd={}\n",
+    let mut body = format!(
+        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\ncontrol_stream_fd={}\npos={}\n",
         HANDOFF_MANIFEST_VERSION,
         h.master_fd,
         h.child_pid,
@@ -70,7 +72,12 @@ pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> s
         h.cols,
         h.rows,
         h.control_stream_fd,
+        h.marks.pos,
     );
+    if let Some((pos, status)) = h.marks.command_end {
+        let status = status.map_or("-".to_string(), |s| s.to_string());
+        body.push_str(&format!("command_end={pos}:{status}\n"));
+    }
     let tmp = path.with_extension("tsv.tmp");
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)?;
@@ -113,6 +120,13 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
         .get("control_stream_fd")
         .and_then(|s| s.parse().ok())
         .unwrap_or(-1);
+    let marks = crate::pane_ctl::Marks {
+        pos: fields.get("pos").and_then(|s| s.parse().ok()).unwrap_or(0),
+        command_end: fields.get("command_end").and_then(|s| {
+            let (pos, status) = s.split_once(':')?;
+            Some((pos.parse().ok()?, status.parse().ok()))
+        }),
+    };
     Ok(L3Handoff {
         master_fd: fields
             .get("master_fd")
@@ -140,6 +154,7 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
             .parse()
             .map_err(|_| inv("rows"))?,
         control_stream_fd,
+        marks,
     })
 }
 
@@ -204,6 +219,7 @@ mod tests {
             cols: 132,
             rows: 43,
             control_stream_fd: 11,
+            marks: crate::pane_ctl::Marks { pos: 123_456, command_end: Some((120_000, Some(1))) },
         }
     }
 
@@ -213,7 +229,7 @@ mod tests {
         read_handoff_manifest(&path)
     }
 
-    const V2: &str = "version=2\nmaster_fd=7\nchild_pid=4242\nlisten_fd=9\ncols=132\nrows=43\ncontrol_stream_fd=11\n";
+    const V2: &str = "version=2\nmaster_fd=7\nchild_pid=4242\nlisten_fd=9\ncols=132\nrows=43\ncontrol_stream_fd=11\npos=123456\ncommand_end=120000:1\n";
 
     /// What one image writes, the next reads back field for field, and
     /// the write leaves no temp file for a later boot to trip over.
@@ -235,6 +251,7 @@ mod tests {
         );
         let no_stream = L3Handoff {
             control_stream_fd: -1,
+            marks: crate::pane_ctl::Marks { pos: 9, command_end: Some((5, None)) },
             ..sample()
         };
         write_handoff_manifest(&no_stream, &path).unwrap();
@@ -270,9 +287,19 @@ mod tests {
             h,
             L3Handoff {
                 control_stream_fd: -1,
+                marks: Default::default(),
                 ..sample()
             }
         );
+    }
+
+    /// An image from before the output position left none: the new one
+    /// starts it at zero rather than refusing the handoff.
+    #[test]
+    fn a_manifest_without_marks_reads_as_zero_and_none() {
+        let dir = TempDir::new("handoff");
+        let old: String = V2.lines().filter(|l| !l.starts_with("pos=") && !l.starts_with("command_end=")).map(|l| format!("{l}\n")).collect();
+        assert_eq!(read_body(&dir, &old).unwrap(), L3Handoff { marks: Default::default(), ..sample() });
     }
 
     /// A required field that is missing or does not parse is an error,
