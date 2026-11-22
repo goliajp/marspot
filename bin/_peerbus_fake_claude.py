@@ -18,11 +18,22 @@ import sys
 import time
 import uuid
 
+def ps(field):
+    return subprocess.run(["ps", "-o", field + "=", "-p", str(os.getpid())], env={"LC_ALL": "C", "TZ": "UTC"},
+                          capture_output=True, text=True).stdout.strip()
+
+
+# marspot names a pane's Claude session only when the program in front
+# of the pane is `claude` by argv[0], so take that name: exec the
+# interpreter image itself (`comm`), as a launcher such as macOS's
+# python3 would re-exec under its own name, keeping this pid
+if os.path.basename(ps("args").split(" ")[0]) != "claude":
+    os.execv(ps("comm"), ["claude"] + sys.argv)
+
 registry, seconds = sys.argv[1], float(sys.argv[2])
 log = sys.argv[3] if len(sys.argv) > 3 else os.devnull
 pid = os.getpid()
-lstart = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], env={"LC_ALL": "C", "TZ": "UTC"},
-                        capture_output=True, text=True).stdout.strip()
+lstart = ps("lstart")
 now = int(time.time() * 1000)
 path = os.path.join(registry, "%d.json" % pid)
 inbox = "/tmp/cc-socks/e2e-fake-%d.sock" % pid
