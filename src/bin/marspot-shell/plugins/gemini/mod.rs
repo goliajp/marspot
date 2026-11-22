@@ -84,7 +84,7 @@ pub(crate) fn is_gemini(p: &Proc) -> bool {
 /// program, an agent or not, is that program's tool and is left alone.
 /// gemini relaunches itself as a child of the same name, so the one in
 /// front normally has a second under it; they are one agent, bound once.
-fn agent_in(s: &crate::observe::Session) -> Option<(&Proc, pidtree::ProcId)> {
+pub(super) fn agent_in(s: &crate::observe::Session) -> Option<(&Proc, pidtree::ProcId)> {
     let outer = s.agent(is_gemini)?;
     let descendants = &s.descendants;
     let mut worker = outer;
