@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.586"  # drop bracketed paste markers inside pasted text
-core    = "0.12.616"  # drop bracketed paste markers inside pasted text
-session = "0.11.407"  # drop bracketed paste markers inside pasted text
+shell   = "0.7.587"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
+core    = "0.12.617"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
+session = "0.11.408"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
