@@ -363,7 +363,7 @@ impl ClaudecodePlugin {
             idle_for: SystemTime::now().duration_since(meta.transcript_at).unwrap_or_default(),
             since_last: self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()),
             move_in_flight,
-            host_load: marspot::host_load::load1(),
+            host_load: (self.host_load)(),
         };
         let dry = mode == marspot::settings::Rebalance::DryRun;
         let held = rebalance::not_now(&pane)

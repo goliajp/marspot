@@ -119,6 +119,9 @@ pub struct ClaudecodePlugin {
     /// Per pane: `(work running under claude, own timer)`, as the scan
     /// last read it, for a switch someone asks for between scans.
     last_vetoes: HashMap<u64, (bool, bool)>,
+    /// The machine's one-minute load, which holds a resting pane's move
+    /// on an overloaded machine. A test gives its own.
+    host_load: fn() -> Option<f64>,
     /// Panes stranded on an account that is out: how many moves have
     /// been spent on each, and where the last one was aimed.  An entry
     /// disappears when the account answers again.
@@ -234,6 +237,7 @@ impl ClaudecodePlugin {
             last_meta: HashMap::new(),
             last_model: HashMap::new(),
             last_vetoes: HashMap::new(),
+            host_load: marspot::host_load::load1,
             stranded: HashMap::new(),
             moved_at: HashMap::new(),
             rebalanced: HashMap::new(),

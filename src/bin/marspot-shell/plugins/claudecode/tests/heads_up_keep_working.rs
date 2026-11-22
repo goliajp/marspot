@@ -79,11 +79,6 @@ fn a_told_pane_stays_until_its_account_refuses_and_is_then_moved_and_told_to_go_
 /// told "stay idle if idle" and stayed idle on the new account.
 #[test]
 fn a_told_pane_that_stopped_is_told_to_go_on_after_any_move() {
-    // the resting move waits out an overloaded machine, and this one
-    // reads the real load
-    if !marspot::host_load::quiet_enough_to_time("a resting pane's move") {
-        return;
-    }
     rebalance_on();
     let home = quota_home("ks");
     feed(&home, "ks", ("allowed", 0.99));
@@ -91,6 +86,8 @@ fn a_told_pane_that_stopped_is_told_to_go_on_after_any_move() {
     let sid = 96u64;
     confirmed("u-96");
     let mut plugin = stranded_plugin(pane_on_p1(&home, "u-96"), sid);
+    // the resting move waits out an overloaded machine; this one is idle
+    plugin.host_load = || Some(0.0);
     sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::Working));
     delivered(&plugin, sid);
     assert!(host.submitted.lock().unwrap().is_empty());
