@@ -153,7 +153,7 @@ fn a_pane_told_in_time_leaves_at_once_and_hears_its_background_work_ended() {
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "moved without the wait");
     let sent = host.sent.lock().unwrap().clone();
     assert!(sent[0].1.contains(".claude-profile-2"), "{:?}", sent[0].1);
-    assert!(sent[0].1.contains(&resume_word()), "{:?}", sent[0].1);
+    assert!(sent[0].1.contains(&super::heads_up::after_warned_move(true)), "{:?}", sent[0].1);
     assert!(sent[0].1.contains("后台任务"), "told its background work was ended: {:?}", sent[0].1);
 }
 

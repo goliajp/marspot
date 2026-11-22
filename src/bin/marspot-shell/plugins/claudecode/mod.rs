@@ -348,6 +348,7 @@ mod tests {
     mod refused;
     mod settings_file;
     mod telling;
+    mod heads_up_keep_working;
     mod api_errors;
     mod refusal_text;
     mod activity;

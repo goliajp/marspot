@@ -258,7 +258,11 @@ impl ClaudecodePlugin {
                 );
                 // the move ends what runs under claude; the session is
                 // told, or it waits on background shells that are gone
-                let word = if work_running { heads_up::after_ended_work(&resume_word()) } else { resume_word() };
+                let word = match (warned, work_running) {
+                    (true, _) => heads_up::after_warned_move(work_running),
+                    (false, true) => heads_up::after_ended_work(&resume_word()),
+                    (false, false) => resume_word(),
+                };
                 if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
                     self.moved_at.insert(sid, Instant::now());
                     let tally = self.stranded.entry(sid).or_default();
@@ -389,9 +393,11 @@ impl ClaudecodePlugin {
             return false;
         }
         // A resting pane had nothing interrupted, unless it was told
-        // its account was nearly out: it may have stopped for that.
+        // its account was nearly out: it may have stopped for that, and
+        // is told to go on, not to stay idle, whatever the move is for.
+        // Nothing runs under it, or it would not be moved.
         let warned = self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num));
-        let word = (why == rebalance::Why::RunningOut && warned).then(resume_word);
+        let word = warned.then(|| heads_up::after_warned_move(false));
         if self.start_profile_cycle_to(host, sid, meta.clone(), target, word, choice.clone()) {
             self.rebalanced.insert(sid, (Instant::now(), target));
             return true;

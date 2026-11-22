@@ -146,7 +146,9 @@ impl KimiPlugin {
                 host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid}: account {current} is nearly out; telling it"));
                 let delivered = Arc::new(AtomicBool::new(false));
                 let kimi_pid = pane.proc.pid;
-                heads_up::send_to(sid, current, Arc::clone(&delivered), "kimi.quota.heads_up", move || inbox_of(kimi_pid));
+                // a kimi move sends no word to go on, so the message promises none
+                let body = heads_up::body(current, false);
+                heads_up::send_to(sid, current, body, Arc::clone(&delivered), "kimi.quota.heads_up", move || inbox_of(kimi_pid));
                 b.told.insert(sid, heads_up::Sent { profile: current, week, delivered });
             }
             return;

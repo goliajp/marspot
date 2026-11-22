@@ -4,10 +4,11 @@
 //! Once an account refuses, the claude on it cannot send a request,
 //! so anything it is told then goes unanswered and the wait before a
 //! move buys nothing but a pane standing still. The last of the week
-//! is the only time a session can still act on the news: finish the
-//! step it is on, start nothing long, write down what runs in the
-//! background. The message goes to the session's own inbox, never
-//! into the composer, so what the person is typing is not touched.
+//! is the only time a session can still act on the news, and what it
+//! is asked to do is keep working until the switch comes and be ready
+//! for it: write down what runs in the background. The message goes to
+//! the session's own inbox, never into the composer, so what the
+//! person is typing is not touched.
 
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -140,21 +141,45 @@ impl Ledger {
 
 /// Said to a session whose account is nearly out. It arrives while
 /// the session is working, so it asks for no stop and no reply.
-pub(super) fn body(profile: u8) -> String {
+///
+/// It must not read as a reason to wrap up. On 2026-11-22 the earlier
+/// wording asked for the step in hand to be brought to a point where it
+/// could be interrupted, and for no long background work to be started.
+/// All five panes told at 15:00:38 ended their turn within half a
+/// minute, saying they could now be interrupted; one had its subagent
+/// stop as well. Four sat still until the person typed "carry on", on
+/// an account that went on answering for nine more minutes.
+///
+/// `told_after`: whether the move is followed by a word asking the
+/// session to go on, which the session is then promised.
+pub(in crate::plugins) fn body(profile: u8, told_after: bool) -> String {
+    let after = if told_after { "切换完成后 marspot 会发消息让你接着做。" } else { "" };
     format!(
-        "marspot 提醒：这个会话所用的账号（P{profile}）额度只剩不到 1%。用完后 marspot 会把会话换到另一个账号上重启，\
-         重启会结束所有还在运行的后台任务。请照常继续工作，同时：把手头这一步做到可以中断的状态；不要再启动耗时长的后台任务；\
-         正在运行的后台任务，把命令和输出位置记下来，重启后好接着做。这条消息不用回复。"
+        "marspot 提醒：这个会话所用的账号（P{profile}）额度只剩不到 1%，随时可能被换到另一个账号上重启。\
+         请照常继续手头的任务，不要因为这条提醒停下、收尾或者等待切换，也不要让子代理停下；在切换之前，这个账号还能正常使用。\
+         切换会结束还在运行的后台任务和后台子代理，所以请做好随时被打断的准备：正在运行的和以后启动的后台任务，把命令和输出位置记下来，被打断后好接着做。\
+         {after}这条消息不用回复。"
     )
 }
 
 /// Said after a move to a session that had work running in the
 /// background when its claude was taken down.
 pub(super) fn after_ended_work(resume_word: &str) -> String {
-    format!(
-        "{resume_word}。换账号时还在运行的后台任务和后台子代理已经被结束了，此前因额度用尽而失败的子代理也没有做完，\
-         请检查它们的状态，需要的话重新启动"
-    )
+    format!("{resume_word}。{ENDED_WORK}")
+}
+
+const ENDED_WORK: &str = "换账号时还在运行的后台任务和后台子代理已经被结束了，此前因额度用尽而失败的子代理也没有做完，\
+                          请检查它们的状态，需要的话重新启动";
+
+/// Said after a move to a session that was told its account was
+/// nearly out.
+///
+/// Such a session was working when it was told, so the usual word's
+/// "stay idle if idle" is wrong for it: one that stopped after the
+/// warning reads itself as idle and keeps still on the new account.
+pub(super) fn after_warned_move(work_ended: bool) -> String {
+    let word = "额度提醒里说的账号切换已经完成。请接着做切换前在做的任务；如果你在提醒之后停下了，或者在等这次切换，现在就继续，不用等人确认";
+    if work_ended { format!("{word}。{ENDED_WORK}") } else { word.to_string() }
 }
 
 /// The frame for `inbox`, from marspot.
@@ -177,13 +202,14 @@ fn inbox_of(claude_pid: i32) -> Option<String> {
 
 /// Off the drawing thread: it reads the registry and writes a socket.
 pub(super) fn send(sid: u64, claude_pid: i32, profile: u8, delivered: Arc<AtomicBool>) {
-    send_to(sid, profile, delivered, "claudecode.quota.heads_up", move || inbox_of(claude_pid));
+    send_to(sid, profile, body(profile, true), delivered, "claudecode.quota.heads_up", move || inbox_of(claude_pid));
 }
 
-/// The same message for a session whose inbox is found by `inbox`.
+/// `body` for a session whose inbox is found by `inbox`.
 pub(in crate::plugins) fn send_to(
     sid: u64,
     profile: u8,
+    body: String,
     delivered: Arc<AtomicBool>,
     tag: &'static str,
     inbox: impl FnOnce() -> Option<String> + Send + 'static,
@@ -191,7 +217,7 @@ pub(in crate::plugins) fn send_to(
     std::thread::spawn(move || {
         let outcome = match inbox() {
             None => "the session has no inbox".to_string(),
-            Some(inbox) => match marspot_peer::inbox::write(&inbox, &frame_line(&inbox, &body(profile))) {
+            Some(inbox) => match marspot_peer::inbox::write(&inbox, &frame_line(&inbox, &body)) {
                 Ok(()) => {
                     delivered.store(true, Ordering::Relaxed);
                     "delivered".to_string()
@@ -249,7 +275,7 @@ mod tests {
             marspot_peer::proc::lstart(me).unwrap()
         );
         std::fs::write(dir.join(format!("{me}.json")), rec).unwrap();
-        marspot_peer::inbox::write_in(std::slice::from_ref(&dir), &inbox, &frame_line(&inbox, &body(8))).unwrap();
+        marspot_peer::inbox::write_in(std::slice::from_ref(&dir), &inbox, &frame_line(&inbox, &body(8, true))).unwrap();
         let (conn, _) = listener.accept().unwrap();
         let mut line = String::new();
         BufReader::new(conn).read_line(&mut line).unwrap();
@@ -288,5 +314,34 @@ mod tests {
         let said = after_ended_work("carry on");
         assert!(said.starts_with("carry on"));
         assert!(said.contains("后台任务"));
+        assert!(after_warned_move(true).contains("后台任务"));
+        assert!(!after_warned_move(false).contains("后台任务"));
+    }
+
+    #[test]
+    fn the_heads_up_asks_to_keep_working_and_never_to_wrap_up() {
+        let said = body(1, true);
+        assert!(said.contains("P1"));
+        assert!(said.contains("切换完成后"), "a claude pane is told after the move: {said}");
+        assert!(!body(1, false).contains("切换完成后"), "a kimi pane is not promised what it is not sent");
+        assert!(body(1, false).contains("照常继续"));
+        assert!(said.contains("照常继续"));
+        assert!(said.contains("随时"), "a switch may come at any moment: {said}");
+        assert!(said.contains("被打断"), "be ready to be interrupted: {said}");
+        assert!(said.contains("不要因为这条提醒停下"), "{said}");
+        // the words that made five sessions stop on 2026-11-22
+        for wrap_up in ["做到可以中断的状态", "不要再启动", "停在"] {
+            assert!(!said.contains(wrap_up), "{wrap_up:?} in {said}");
+        }
+    }
+
+    #[test]
+    fn a_warned_session_is_never_told_to_stay_idle_after_the_move() {
+        for ended in [false, true] {
+            let said = after_warned_move(ended);
+            assert!(said.contains("接着做"), "{said}");
+            assert!(!said.contains("idle"), "{said}");
+            assert!(!said.contains("保持"), "{said}");
+        }
     }
 }
