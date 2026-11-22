@@ -2779,6 +2779,7 @@ mod tests {
                 bot_fixed_h_cells: 0,
                 highlight_spans: &[],
                 search_overlay: None,
+                history: Default::default(),
                 seq,
             }
         }
@@ -2893,6 +2894,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 1,
         };
 
@@ -3235,7 +3237,7 @@ mod tests {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "",
             right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
-            highlight_spans: &[], search_overlay: None, seq: 0,
+            highlight_spans: &[], search_overlay: None, history: Default::default(), seq: 0,
             dormant: false, recede: 0, scrim: 0.0,
         };
         let mut overlay_rects = Vec::new();
@@ -3455,7 +3457,7 @@ mod tests {
             grid: &grid, view_offset: 0, cursor_visible: false, focused,
             title: "", selection: None, ime_preedit: "",
             right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
-            highlight_spans: &[], search_overlay: None, seq: 0,
+            highlight_spans: &[], search_overlay: None, history: Default::default(), seq: 0,
             dormant, recede, scrim: attention_scrim(focused, recede),
         };
         let mut scrim_alphas = |view: SessionView| -> Vec<u8> {
@@ -3654,6 +3656,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         let mut run = |v: &SessionView| -> Vec<GlyphInstance> {
@@ -3737,6 +3740,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         // Pane 0 focused; its right / bottom / bottom-right neighbours
@@ -3836,6 +3840,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
 
@@ -3949,6 +3954,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
 
@@ -4032,6 +4038,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -4139,6 +4146,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         // Baseline cell count (no highlight) for the same layout/grid.
@@ -4159,6 +4167,7 @@ mod tests {
             bot_fixed_h_cells: view.bot_fixed_h_cells,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         let mut run = |v: &SessionView| -> Vec<CellInstance> {
@@ -4270,6 +4279,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -4344,6 +4354,7 @@ mod tests {
             right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         let view_bot = SessionView {
@@ -4354,6 +4365,7 @@ mod tests {
             right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         };
         let mut run = |view: &SessionView| -> Vec<GlyphInstance> {

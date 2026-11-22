@@ -74,13 +74,8 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
 /// `--snapshot <path>` draws a demo terminal frame; `--panel settings`
 /// opens a panel over it first.
 ///
-/// This existed as a stub for months with a note saying a Metal path
-/// "needs Managed-storage MTLTexture + getBytes readback + BGRA → RGBA
-/// conversion".  It was finished the day it became the shortest way to
-/// answer a question that kept coming back: *how does this panel
-/// actually look?*  There is no test for that — the only check is to
-/// look — and every previous look cost either a user screenshot or
-/// raising a window over whatever they were doing.  Now it is a file.
+/// It answers *how does this panel actually look?* without a user
+/// screenshot or a window raised over whatever they are doing.
 fn run_snapshot(path: &str, panel: Option<&str>) {
     use marspot::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
     use marspot_term::layout::Layout;
@@ -169,6 +164,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: search,
+        history: Default::default(),
         seq: 0,
     };
 
@@ -1024,6 +1020,7 @@ fn bench_first_frame(arg: &str) {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         })
         .collect();
@@ -1138,6 +1135,7 @@ fn bench_metal_render(arg: &str) {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
+        history: Default::default(),
         seq: 0,
     };
     let views = std::slice::from_ref(&view);

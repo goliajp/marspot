@@ -112,3 +112,15 @@ pub const MENU_PAD_Y: f64 = space::S6 * 0.5;
 /// Narrowest and widest a menu is, whatever its labels.
 pub const MENU_MIN_W: f64 = 90.0;
 pub const MENU_MAX_W: f64 = 180.0;
+
+/// Width of the thumb of a pane's scrollbar, shown while the pane is
+/// scrolled back into its history.
+pub const SCROLLBAR_W: f64 = 3.0;
+/// The thumb's distance from the pane's right edge and from the ends
+/// of its track.
+pub const SCROLLBAR_INSET: f64 = space::S2;
+/// Shortest the thumb gets, however deep the history.
+pub const SCROLLBAR_MIN_THUMB: f64 = space::S16;
+/// How far in from the pane's right edge a press lands on the
+/// scrollbar: wider than the thumb, which is too thin to aim at.
+pub const SCROLLBAR_HIT_W: f64 = space::S8;

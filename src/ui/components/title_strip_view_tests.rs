@@ -45,6 +45,7 @@ fn views<'a>(term: &'a Terminal, strips: &'a [(&'a str, &'a str)], focused: usiz
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            history: Default::default(),
             seq: 0,
         })
         .collect()

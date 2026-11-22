@@ -21,6 +21,7 @@ pub mod settings_rows;
 pub mod shortcuts_panel;
 pub mod shortcuts_view;
 pub mod scroll_view;
+pub mod scrollbar;
 pub mod process_panel;
 pub mod process_view;
 pub mod search_overlay;

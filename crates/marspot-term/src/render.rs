@@ -197,6 +197,11 @@ pub struct SessionView<'a> {
     /// keystroke that mutates the live state reflects on the next
     /// render.
     pub search_overlay: Option<SearchOverlayView>,
+    /// How far into its history the pane is showing, for the
+    /// scrollbar.  Separate from `view_offset`: an L3 pane draws its
+    /// mirror at offset 0 while showing the rows L3 published at the
+    /// requested offset, and this is that requested offset.
+    pub history: HistoryView,
     /// F1+13 — content-freshness tag the renderer uses to short-
     /// circuit per-pane instance rebuilds.  Caller (`Pane::as_view`)
     /// supplies a monotonic-ish counter that bumps whenever the
@@ -206,33 +211,8 @@ pub struct SessionView<'a> {
     pub seq: u64,
 }
 
-/// F1+ — immutable per-frame snapshot of the search overlay, fed to
-/// the renderer in `SessionView`.  Owned (not `'a`-borrowed) so the
-/// renderer doesn't need to keep `pane.search` borrowed across
-/// `build_instances`; the clone cost is paid only when search is
-/// open (a String per query + per visible snippet, < 1 µs).  Subset
-/// of §6.6.5's `SearchOverlay` fields — minimum needed to paint the
-/// bar + a minimal result list.
-#[derive(Clone, Debug)]
-pub struct SearchOverlayView {
-    pub query: String,
-    /// Char-column of the edit cursor inside `query`.
-    pub query_cursor: u16,
-    pub case_sensitive: bool,
-    /// `(focused_1based, total)` — drawn as `N/M`.  `None` skips the
-    /// counter (e.g. before the first SearchResults arrives).
-    pub counter: Option<(u32, u32)>,
-    /// Up to `VIEWPORT` hit snippets (newest-first).  Each row's
-    /// `is_focused` flag drives the focused-row BG highlight.
-    pub hits: Vec<SearchHitView>,
-}
-
-/// Per-row view of one hit in the result list.
-#[derive(Clone, Debug)]
-pub struct SearchHitView {
-    pub snippet: String,
-    pub is_focused: bool,
-}
+mod view_parts;
+pub use view_parts::{HistoryView, SearchHitView, SearchOverlayView};
 
 #[derive(Copy, Clone, Debug)]
 pub struct SelectionView {
