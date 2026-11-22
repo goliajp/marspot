@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.512"  # the text lane takes its open cluster byte without string push
+shell   = "0.7.513"  # peer names bind a claude to a pane only when it is in front
 core    = "0.12.567"  # the text lane takes its open cluster byte without string push
 session = "0.11.391"  # the text lane takes its open cluster byte without string push
