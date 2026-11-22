@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.505"  # the supervisor clock wakes for what is due, not once a second, while panes are awake
+shell   = "0.7.506"  # the clock is woken for any change of plan, so a later deadline right after a tick is kept
 core    = "0.12.563"  # pane machine says whether a quiet candidate is pending
 session = "0.11.387"  # OSC 8: empty link pool once no cell carries a link; bounded link tables

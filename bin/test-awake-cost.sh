@@ -41,7 +41,7 @@ LAYOUTS="${AWAKE_LAYOUTS:-1x1 2x2 4x3}"
 # while panes are awake (2026-11-22): one pane 15.6, 16.1, 15.6; four
 # 38.2, 36.6, 38.0; twelve 106.9, 104.0, 106.9, and 110.0 measured alone.
 # The ceilings are the highest of those and a little of the spread on top.
-BUDGETS="${AWAKE_BUDGETS-1:18,4:41,12:112}"
+BUDGETS="${AWAKE_BUDGETS-1:18,4:41,12:115}"
 SETTLE="${AWAKE_SETTLE:-15}"
 WINDOW="${AWAKE_WINDOW:-25}"
 work="$(mktemp -d /tmp/marspot-awake.XXXXXX)"

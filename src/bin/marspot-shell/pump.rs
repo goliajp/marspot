@@ -177,12 +177,11 @@ impl Pump {
         }
     }
 
-    /// Tell the clock what to do next.  It is woken only for a plan
-    /// that asks for a tick sooner, or that ends or starts a rest; one
-    /// that asks for a later tick is read when the clock wakes.
+    /// Tell the clock what to do next.  It is woken for any change of
+    /// plan; an unchanged plan costs nothing.
     fn plan(&mut self, plan: Plan) {
         let resting = plan == Plan::Rest;
-        self.rested |= resting;
+        self.rested = resting;
         self.planned = match plan {
             Plan::Rest => None,
             Plan::At(t) => Some(t),
@@ -191,18 +190,14 @@ impl Pump {
         if g.0 == plan {
             return;
         }
-        let sooner = match (g.0, plan) {
-            (Plan::At(was), Plan::At(now)) => now < was,
-            _ => true,
-        };
         if (g.0 == Plan::Rest) != resting {
             self.shared.at_rest.store(resting, Ordering::Release);
             marspot::lx_debug!("shell.pump", if resting { "resting" } else { "awake" });
         }
         *g = (plan, g.1 + 1);
-        if sooner {
-            self.shared.changed.notify_all();
-        }
+        // a later plan wakes the clock too: having just fired, it sleeps
+        // a beat past the old plan and would wake late for the new one
+        self.shared.changed.notify_all();
     }
 
     #[cfg(test)]
@@ -458,6 +453,19 @@ mod tests {
         p.plan(Plan::At(Instant::now() + Duration::from_millis(100)));
         assert!(ticks(&p, Duration::from_secs(2)), "a sooner plan wakes the clock");
         assert!(!ticks(&p, Duration::from_millis(300)), "after firing it beats, and the beat is an hour");
+    }
+
+    /// Right after firing, a plan later than the one that fired is kept
+    /// to, not left to the beat.
+    #[test]
+    fn a_later_plan_after_a_tick_is_kept() {
+        let mut p = Pump::start_with(EventProxy::new(), Duration::from_secs(1));
+        p.plan(Plan::At(Instant::now() + Duration::from_millis(50)));
+        assert!(ticks(&p, Duration::from_secs(2)), "no tick when it was due");
+        let asked = Instant::now();
+        p.plan(Plan::At(asked + Duration::from_millis(300)));
+        assert!(ticks(&p, Duration::from_millis(700)), "the later plan was not kept");
+        assert!(asked.elapsed() < Duration::from_millis(700));
     }
 
     /// At rest a touch asks for a pass; awake it only leaves its mark.
