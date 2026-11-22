@@ -42,7 +42,7 @@ impl Asker {
 /// the message is an answer this module relayed.
 pub(super) fn asker(content: &str, reply_to: String) -> Option<Asker> {
     let env = marspot_peer::envelope::parse(content);
-    if env.as_ref().is_some_and(|e| e.body.trim_start().starts_with(RELAYED)) {
+    if env.as_ref().is_some_and(|e| e.from_plugin.as_deref() == Some(RELAY_PLUGIN) || e.body.trim_start().starts_with(RELAYED_UNMARKED)) {
         return None;
     }
     Some(Asker { reply_to, name: env.and_then(|e| e.from_name) })
@@ -129,11 +129,28 @@ impl Replies {
     }
 }
 
+/// The `from-plugin` of a relayed answer: what tells the receiver not
+/// to relay its own answer to it back.
+pub(super) const RELAY_PLUGIN: &str = "marspot-relay";
+
+/// Kept equal to `RELAYED_UNMARKED` while v0.6.2 is still in use: that
+/// build recognises nothing else.
 const RELAYED: &str = "(Relayed by marspot: this Codex session's answer to your message, from its turn.)";
 
+/// How builds up to v0.6.2 and the next few began a relayed answer,
+/// which they did not mark otherwise.  Frozen, whatever `RELAYED` says
+/// later: a build from before the mark still relays everything, and a
+/// relayed answer from it is known only by this.
+const RELAYED_UNMARKED: &str = "(Relayed by marspot: this Codex session's answer to your message, from its turn.)";
+
 /// What the asker is sent: the answer, said to be relayed.
-pub(super) fn body(answer: &str) -> String {
+fn body(answer: &str) -> String {
     format!("{RELAYED}\n\n{answer}")
+}
+
+/// The whole relayed answer, as this session.
+pub(super) fn envelope(from: &marspot_peer::envelope::Header, answer: &str) -> String {
+    marspot_peer::envelope::encode_from_plugin(from, Some(RELAY_PLUGIN), &body(answer))
 }
 
 #[cfg(test)]
@@ -207,7 +224,7 @@ mod tests {
         let back = at_b.completed("tb");
         assert_eq!(back.len(), 1, "A's question is answered");
 
-        let relayed = encode(&Header { from: b.into(), from_name: Some("proj#1002".into()), from_mode: None }, &body(&back[0].1));
+        let relayed = envelope(&Header { from: b.into(), from_name: Some("proj#1002".into()), from_mode: None }, &back[0].1);
         assert_eq!(super::asker(&relayed, b.into()), None, "the relayed answer names no asker");
         let mut at_a = Replies::default();
         if let Some(who) = super::asker(&relayed, b.into()) {
@@ -215,6 +232,34 @@ mod tests {
         }
         at_a.item("ta", &says("final_answer", "ok"));
         assert!(at_a.completed("ta").is_empty(), "A's answer to the relay does not go back to B");
+    }
+
+    /// The mark is in the header: a relayed answer is known whatever
+    /// its body says, and a body that merely starts like one in a
+    /// header without the mark is known only by the frozen old wording.
+    #[test]
+    fn a_relayed_answer_is_known_by_its_mark_not_its_wording() {
+        use marspot_peer::envelope::{encode, encode_from_plugin, Header};
+        let b = "uds:/tmp/cc-socks/b.sock";
+        let h = Header { from: b.into(), from_name: Some("proj#1002".into()), from_mode: None };
+        for reworded in ["(Answer forwarded by marspot.)\n\nok", "ok", "マーズポットが転送した回答\n\nok"] {
+            let relayed = encode_from_plugin(&h, Some(RELAY_PLUGIN), reworded);
+            assert_eq!(super::asker(&relayed, b.into()), None, "{reworded}");
+        }
+        let plain = encode(&h, "(Answer forwarded by marspot.)\n\nok");
+        assert!(super::asker(&plain, b.into()).is_some(), "the wording alone is not the mark");
+        let other = encode_from_plugin(&h, Some("someone-else"), "hi");
+        assert!(super::asker(&other, b.into()).is_some(), "another plugin's message is a question");
+    }
+
+    /// A build from before the mark relays every answer, its relays
+    /// unmarked; answering one of those back would never stop.
+    #[test]
+    fn an_unmarked_relay_from_an_older_build_is_still_known() {
+        use marspot_peer::envelope::{encode, Header};
+        let h = Header { from: "uds:/tmp/cc-socks/b.sock".into(), from_name: None, from_mode: None };
+        let v062 = encode(&h, "(Relayed by marspot: this Codex session's answer to your message, from its turn.)\n\nok");
+        assert_eq!(super::asker(&v062, "uds:/tmp/cc-socks/b.sock".into()), None);
     }
 
     fn asker_of(content: &str, reply_to: &str) -> Asker {
