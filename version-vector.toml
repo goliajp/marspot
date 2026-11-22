@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.528"  # cc: move the input proxy client out of the claudecode plugin's mod.rs
+shell   = "0.7.529"  # cc: move the api error matcher and monitor state out of the claudecode plugin's mod.rs
 core    = "0.12.598"  # basic: name what terminal.rs still holds in its carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker

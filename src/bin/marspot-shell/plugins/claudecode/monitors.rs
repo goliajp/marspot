@@ -1,6 +1,6 @@
 //! The auto-retry monitors' upkeep, from the tick.
 
-use super::{ClaudecodePlugin, MonitorState, retryable_error_kind};
+use super::{ClaudecodePlugin, retryable_error_kind};
 use crate::plugins::{LogLevel, PluginHost};
 
 impl ClaudecodePlugin {
@@ -136,4 +136,25 @@ impl ClaudecodePlugin {
             );
         }
     }
+}
+
+/// Long-running watcher for one claudecode pane.  Receives raw PTY
+/// bytes via OBSERVE_PTY, looks for retryable error patterns, sends a
+/// carriage return back to claude on match (with throttling so a
+/// stuck error doesn't loop forever).
+pub(super) struct MonitorState {
+    /// Channel set up by `attach_raw_only`.  Drained on every plugin
+    /// tick.  Wrapped in a Mutex purely so MonitorState satisfies
+    /// `Sync` for the Plugin trait bound — only the tick thread ever
+    /// touches it, so the lock is uncontended.
+    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
+    /// Unfinished tail bytes from the last drain — patterns are
+    /// line-anchored, so a line split across two Data frames needs
+    /// the carry-over.  Capped to keep a runaway pattern from
+    /// growing this without bound.
+    line_buf: Vec<u8>,
+    /// Wall-clock of every retry we triggered for this session.
+    /// Bounded by `RETRY_WINDOW`; older entries get evicted.  Used to
+    /// throttle so a hard-blocking error doesn't hot-loop.
+    retry_history: Vec<std::time::Instant>,
 }

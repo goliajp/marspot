@@ -43,6 +43,7 @@ mod wake;
 mod monitors;
 mod due;
 mod client;
+mod api_error;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
 #[cfg(test)]
@@ -67,6 +68,10 @@ use refusal::{last_agent_refusal, refused_since};
 use super::handoff::resume_word;
 use client::ShelldClient;
 pub use client::InjectInputProxy;
+use monitors::MonitorState;
+pub(crate) use api_error::retryable_error_kind;
+#[cfg(test)]
+use api_error::strip_ansi;
 
 use std::collections::HashMap;
 use std::fs;
@@ -209,114 +214,6 @@ pub struct ClaudecodePlugin {
     scan_inflight: bool,
     /// What the ticks need while no pane runs claude; see `due`.
     quiet: due::Quiet,
-}
-
-/// Long-running watcher for one claudecode pane.  Receives raw PTY
-/// bytes via OBSERVE_PTY, looks for retryable error patterns, sends a
-/// carriage return back to claude on match (with throttling so a
-/// stuck error doesn't loop forever).
-struct MonitorState {
-    /// Channel set up by `attach_raw_only`.  Drained on every plugin
-    /// tick.  Wrapped in a Mutex purely so MonitorState satisfies
-    /// `Sync` for the Plugin trait bound — only the tick thread ever
-    /// touches it, so the lock is uncontended.
-    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
-    /// Unfinished tail bytes from the last drain — patterns are
-    /// line-anchored, so a line split across two Data frames needs
-    /// the carry-over.  Capped to keep a runaway pattern from
-    /// growing this without bound.
-    line_buf: Vec<u8>,
-    /// Wall-clock of every retry we triggered for this session.
-    /// Bounded by `RETRY_WINDOW`; older entries get evicted.  Used to
-    /// throttle so a hard-blocking error doesn't hot-loop.
-    retry_history: Vec<std::time::Instant>,
-}
-
-/// Strip ANSI CSI / OSC escape sequences from a line so the pattern
-/// match doesn't have to know about colour bytes claude prints around
-/// the error glyph.  Keeps printable bytes; drops control runs.
-fn strip_ansi(line: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(line.len());
-    let mut i = 0;
-    while i < line.len() {
-        let b = line[i];
-        if b == 0x1b && i + 1 < line.len() {
-            let nxt = line[i + 1];
-            if nxt == b'[' {
-                // CSI — skip until a terminator in 0x40..=0x7e
-                let mut j = i + 2;
-                while j < line.len() && !(0x40..=0x7e).contains(&line[j]) {
-                    j += 1;
-                }
-                i = j + 1;
-                continue;
-            }
-            if nxt == b']' {
-                // OSC — skip until BEL or ESC\
-                let mut j = i + 2;
-                while j < line.len() {
-                    if line[j] == 0x07 {
-                        j += 1;
-                        break;
-                    }
-                    if line[j] == 0x1b && j + 1 < line.len() && line[j + 1] == b'\\' {
-                        j += 2;
-                        break;
-                    }
-                    j += 1;
-                }
-                i = j;
-                continue;
-            }
-            // Unknown ESC; skip the ESC byte alone.
-            i += 1;
-            continue;
-        }
-        if b == b'\r' {
-            i += 1;
-            continue;
-        }
-        out.push(b);
-        i += 1;
-    }
-    out
-}
-
-/// Does this buffer (one or more lines) contain a claudecode error
-/// we should retry on?  Conservative — only matches the
-/// "API Error: ... · <kind>" shape.  Returns the kind tag for
-/// logging.  Buffer-level (not per-line) because claude wraps long
-/// errors across two grid rows — the "Rate limited" marker often
-/// straddles a newline.
-pub(crate) fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
-    let stripped = strip_ansi(buf);
-    let s = match std::str::from_utf8(&stripped) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-    if !s.contains("API Error") {
-        return None;
-    }
-    // Whitespace-normalise: collapse \n + indent so a wrapped marker
-    // like "...Rate\n  limited" reads as "...Rate limited".  Cheap
-    // — runs once per fire, not per byte.
-    let flat: String = s
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if flat.contains("Rate limited") || flat.contains("rate_limit") {
-        return Some("rate_limited");
-    }
-    if flat.contains("Network error") || flat.contains("network_error") {
-        return Some("network");
-    }
-    if flat.contains("overloaded") {
-        return Some("overloaded");
-    }
-    if flat.contains("Server error") || flat.contains("Internal server error") {
-        return Some("server_error");
-    }
-    None
 }
 
 
