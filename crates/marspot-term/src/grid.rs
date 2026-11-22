@@ -165,7 +165,7 @@ mod cluster_mirror;
 mod clusters;
 mod history;
 mod links;
-pub use links::{LINK_POOL_MAX, RowExtras, RowLink, strip_links};
+pub use links::{LINK_POOL_MAX, ROW_LINK_BYTES, RowExtras, RowLink, strip_links};
 mod row_mark;
 mod row_styles;
 pub use row_styles::{ROW_STYLES, RowStyles};

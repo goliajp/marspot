@@ -30,6 +30,12 @@ pub const LINK_POOL_MAX: usize = u16::MAX as usize;
 /// pool stays a small multiple of what the screen shows.
 const SWEEP_AT: usize = 1024;
 
+/// The most URI bytes a row filed into history keeps; links past it on
+/// the row are filed as plain text.  A program printing a row of
+/// distinct maximal URIs must not make each line of history hold
+/// hundreds of kilobytes.
+pub const ROW_LINK_BYTES: usize = 4096;
+
 /// The URIs a grid's cells point at, id `i + 1` at index `i`.
 #[derive(Default)]
 pub(super) struct LinkPool {
@@ -94,6 +100,40 @@ impl Grid {
         self.links.uris.len() >= self.links.kept + SWEEP_AT
     }
 
+    /// Whether live row `row` may hold a cell carrying a link.  False is
+    /// certain; true is a bound kept by the row's marks.
+    #[inline(always)]
+    pub fn row_may_link(&self, row: u16) -> bool {
+        !self.links.uris.is_empty() && self.marks[self.phys_row(row)].links
+    }
+
+    /// Clear the mark of each row no cell of which carries a link any
+    /// more, and empty the pool when no row does, so a grid whose links
+    /// have all been overwritten or scrolled off is back on the paths
+    /// that know it has none.  The caller must hold no id: with a link
+    /// open, an id handed out may not be on any cell yet.
+    ///
+    /// Looks only at the rows whose marks say they may hold a link.
+    pub(crate) fn settle_links(&mut self) {
+        if self.links.uris.is_empty() {
+            return;
+        }
+        let cols = self.cols as usize;
+        let mut any = false;
+        for (pr, mark) in self.marks.iter_mut().enumerate() {
+            if mark.links {
+                mark.links = self.cells[pr * cols..(pr + 1) * cols].iter().any(|c| c.link_id() != 0);
+                any |= mark.links;
+            }
+        }
+        if !any {
+            self.links.uris.clear();
+            self.links.index.clear();
+            self.links.kept = 0;
+            self.links.generation += 1;
+        }
+    }
+
     /// Drop pool entries no cell points at, and renumber the rest.
     ///
     /// A cell whose id the pool does not hold afterwards is cleared, so
@@ -135,15 +175,20 @@ impl Grid {
     /// Clear the link ids of storage row `start..start + cols` and hand
     /// back its links by column range.  Called just before the row is
     /// filed into history, where an id would point into a pool that
-    /// sweeps without it.
+    /// sweeps without it.  Links past [`ROW_LINK_BYTES`] of URI on the
+    /// row are dropped.
     fn degrade_links_in_row(&mut self, start: usize, cols: usize) -> Vec<RowLink> {
         let mut out = Vec::new();
+        let mut bytes = 0usize;
         let mut run: Option<(u16, usize)> = None;
         for i in start..=start + cols {
             let id = if i < start + cols { self.cells[i].link_id() } else { 0 };
             if run.is_some_and(|(r, _)| r != id) {
                 let (r, from) = run.take().expect("checked");
-                if let Some(uri) = self.link_uri(r) {
+                if let Some(uri) = self.link_uri(r)
+                    && bytes + uri.len() <= ROW_LINK_BYTES
+                {
+                    bytes += uri.len();
                     out.push(((from - start) as u16, (i - 1 - start) as u16, uri.to_string()));
                 }
             }
@@ -163,7 +208,11 @@ impl Grid {
     #[inline(always)]
     pub(super) fn degrade_row_extras(&mut self, start: usize, cols: usize) -> (Vec<(u16, String)>, Vec<RowLink>) {
         let clusters = if self.clusters.is_empty() { Vec::new() } else { self.degrade_clusters_in_row(start, cols) };
-        let links = if self.links.uris.is_empty() { Vec::new() } else { self.degrade_links_in_row(start, cols) };
+        let links = if self.links.uris.is_empty() || !self.marks[start / cols].links {
+            Vec::new()
+        } else {
+            self.degrade_links_in_row(start, cols)
+        };
         (clusters, links)
     }
 
@@ -204,16 +253,28 @@ impl Grid {
     }
 
     /// The links on the row a viewport row is showing, into `out`,
-    /// which is cleared first.  A live row's come from its cells and the
-    /// pool, a history row's from where history keeps them; asked once
-    /// per row, like [`Self::row_clusters_at_view`] and with the same
-    /// index arithmetic.
+    /// which is cleared first.  See [`Self::each_link_at_view`].
     pub fn row_links_at_view(&self, view_offset: u16, viewport_row: u16, out: &mut Vec<RowLink>) -> bool {
         out.clear();
-        if let Some(cells) = self.live_row_at_view(view_offset, viewport_row) {
-            if self.links.uris.is_empty() {
-                return false;
+        self.each_link_at_view(view_offset, viewport_row, |c0, c1, uri| out.push((c0, c1, uri.to_string())));
+        !out.is_empty()
+    }
+
+    /// Each link on the row a viewport row is showing, as (first
+    /// column, last column, URI), allocating nothing.  A live row's come
+    /// from its cells and the pool, a history row's from where history
+    /// keeps them; asked once per row, like
+    /// [`Self::row_clusters_at_view`] and with the same index arithmetic.
+    pub fn each_link_at_view(&self, view_offset: u16, viewport_row: u16, mut f: impl FnMut(u16, u16, &str)) {
+        let rows = self.rows() as usize;
+        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
+        if abs < rows {
+            let row = (rows - 1 - abs) as u16;
+            if !self.row_may_link(row) {
+                return;
             }
+            let start = self.phys_row(row) * self.cols as usize;
+            let cells = &self.cells[start..start + self.cols as usize];
             let mut c = 0usize;
             while c < cells.len() {
                 let id = cells[c].link_id();
@@ -224,19 +285,24 @@ impl Grid {
                 if id != 0
                     && let Some(uri) = self.link_uri(id)
                 {
-                    out.push((from as u16, (c - 1) as u16, uri.to_string()));
+                    f(from as u16, (c - 1) as u16, uri);
                 }
             }
-            return !out.is_empty();
+            return;
         }
-        let rows = self.rows() as usize;
-        let from_end = view_offset as usize + (rows - 1 - viewport_row as usize) - rows;
+        let from_end = abs - rows;
         let sb_len = self.scrollback_len();
         if from_end >= sb_len {
-            return false;
+            return;
         }
-        self.scrollback_links(sb_len - 1 - from_end, out);
-        !out.is_empty()
+        let line = sb_len - 1 - from_end;
+        if self.scrollback.keeps_link_text() {
+            self.scrollback.each_link_at(line, f);
+        } else if let Some(row) = self.sb_links.get(line) {
+            for (c0, c1, uri) in row {
+                f(*c0, *c1, uri);
+            }
+        }
     }
 
     /// The links of scrollback line `line`, 0 = oldest, into `out`,
@@ -267,15 +333,19 @@ impl Grid {
     /// Every id in the grid is cleared first, so a cell the entries do
     /// not name is not a link.
     pub fn mirror_links<'a>(&mut self, entries: impl Iterator<Item = (u16, u16, u16, &'a str)>) {
-        if !self.links.uris.is_empty() {
-            for c in &mut self.cells {
-                *c = c.with_link(0);
+        let cols = self.cols as usize;
+        // only a row whose marks say so can hold an id
+        for (pr, mark) in self.marks.iter_mut().enumerate() {
+            if mark.links {
+                for c in &mut self.cells[pr * cols..(pr + 1) * cols] {
+                    *c = c.with_link(0);
+                }
+                mark.links = false;
             }
         }
         self.links.index.clear();
         self.links.kept = 0;
         self.links.generation += 1;
-        let cols = self.cols as usize;
         // slot by slot, keeping each `String`'s capacity: a frame with
         // the links of the last one allocates nothing
         let mut n = 0usize;
@@ -291,7 +361,9 @@ impl Grid {
                 None => self.links.uris.push(uri.to_string()),
             }
             n += 1;
-            let start = self.phys_row(row) * cols;
+            let pr = self.phys_row(row);
+            self.marks[pr].links = true;
+            let start = pr * cols;
             for c in &mut self.cells[start + c0 as usize..=start + c1 as usize] {
                 *c = c.with_link(n as u16);
             }

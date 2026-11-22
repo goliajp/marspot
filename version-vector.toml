@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.502"  # PaneAwake from the core is kept for the supervisor and knocks the pump
-core    = "0.12.560"  # OSC 8 links: a click on one opens what the program declared
-session = "0.11.386"  # OSC 8 links: kept per cell, filed with history, published beside the frame
+core    = "0.12.561"  # OSC 8: link rows tracked by row marks; file links on another host do not open
+session = "0.11.387"  # OSC 8: empty link pool once no cell carries a link; bounded link tables

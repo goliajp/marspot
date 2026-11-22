@@ -23,6 +23,9 @@ pub struct RowMark {
     /// A character past 0x7F may be in the row.  A guess for whoever
     /// encodes the row, which is right either way.
     pub wide: bool,
+    /// A cell of the row may carry an OSC 8 link id.  Kept only by the
+    /// writes that put one there, cleared by `Grid::settle_links`.
+    pub links: bool,
     /// The attribute numbers in the row, kept only by a grid whose
     /// history is in RAM (see `row_styles`).
     pub styles: RowStyles,
@@ -31,7 +34,7 @@ pub struct RowMark {
 impl RowMark {
     /// A row about which nothing is known.
     pub(super) fn unknown(cols: u16) -> Self {
-        RowMark { end: cols, plain_from: cols, wide: false, styles: RowStyles::UNKNOWN }
+        RowMark { end: cols, plain_from: cols, wide: false, links: true, styles: RowStyles::UNKNOWN }
     }
 
     /// A row every cell of which is `fill`.
@@ -98,6 +101,7 @@ impl Grid {
             mark.plain_from = col + 1;
         }
         mark.wide |= cell.ch as u32 >= 0x80;
+        mark.links |= cell.attrs.link_id() != 0;
     }
 
     /// [`Self::set_cell`] for a character in the pen `attrs`, as the
@@ -191,6 +195,7 @@ impl Grid {
                     && row[end..].iter().all(|c| *c == StoredCell::BLANK)
                     && row[plain..].iter().all(|c| c.run_key() == 0)
                     && (mark.wide || row.iter().all(|c| c.ch_bits() < 0x80))
+                    && (mark.links || row.iter().all(|c| c.link_id() == 0))
                     && (!self.notes_styles()
                         || mark.styles.known().is_none_or(|ids| {
                             row.iter().all(|c| c.style_id() == 0 || ids[c.style_id() as usize % ids.len()] == c.style_id())

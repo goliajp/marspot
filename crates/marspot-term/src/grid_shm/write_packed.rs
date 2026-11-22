@@ -34,19 +34,17 @@ impl GridShmWriter {
                 // are eight-byte aligned: the area starts 56 bytes into
                 // a page-aligned mapping
                 std::ptr::copy_nonoverlapping(src.as_ptr(), dst.add(row * cols), cols);
-                if links {
-                    // ids are numbers in this grid's pool, and a reader
-                    // from before links refuses a cell carrying one; the
-                    // links themselves go into the table
+                // only a row whose marks say it may hold a link is looked
+                // at: ids are numbers in this grid's pool, and a reader
+                // from before links refuses a cell carrying one; the
+                // links themselves go into the table
+                if links && grid.row_may_link(row as u16) {
                     for (col, c) in src.iter().enumerate().filter(|(_, c)| c.link_id() != 0) {
                         std::ptr::write(dst.add(row * cols + col), c.with_link(0));
                     }
-                    if let Some(t) = table.as_mut()
-                        && grid.row_links_at_view(0, row as u16, &mut self.row_links)
-                    {
-                        for (c0, c1, uri) in &self.row_links {
-                            t.push_link(row as u16, *c0, *c1, uri);
-                        }
+                    if let Some(t) = table.as_mut() {
+                        let r = row as u16;
+                        grid.each_link_at_view(0, r, |c0, c1, uri| t.push_link(r, c0, c1, uri));
                     }
                 }
                 if let Some(t) = table.as_mut() {

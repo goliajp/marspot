@@ -50,6 +50,14 @@ impl Scrollback {
         }
     }
 
+    /// Each link on scrollback line `idx` as (first column, last column,
+    /// URI), read in place.
+    pub fn each_link_at(&self, idx: usize, f: impl FnMut(u16, u16, &str)) {
+        if let Self::File(file) = self {
+            file.each_link_at(idx, f);
+        }
+    }
+
     /// File the links of the line most recently pushed.  A no-op for
     /// the in-RAM variant.
     pub fn link_last_line(&mut self, links: &[crate::grid::RowLink]) {

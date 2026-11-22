@@ -24,14 +24,27 @@ fn osc8_a_click_on_the_text_opens_the_uri_the_program_declared() {
 }
 
 /// `ls --hyperlink` names files as `file://<host>/<path>`; `open(1)` is
-/// handed the path, unescaped.  `mailto:` goes to the mail client.
+/// handed the path, unescaped, when the host is this machine.
+/// `mailto:` goes to the mail client.
 #[test]
 fn osc8_file_and_mailto_links_open_what_they_name() {
     let mut t = Terminal::new(40, 3);
-    t.feed(b"\x1b]8;;file://studio.local/tmp/a%20b.txt\x1b\\a b.txt\x1b]8;;\x1b\\ ");
+    t.feed(b"\x1b]8;;file://localhost/tmp/a%20b.txt\x1b\\a b.txt\x1b]8;;\x1b\\ ");
     t.feed(b"\x1b]8;;file:///tmp/x\x1b\\x\x1b]8;;\x1b\\ ");
     t.feed(b"\x1b]8;;mailto:someone@example.com\x1b\\mail\x1b]8;;\x1b\\");
     assert_eq!(opened(&t, 0, 0).as_deref(), Some("/tmp/a b.txt"));
     assert_eq!(opened(&t, 8, 0).as_deref(), Some("/tmp/x"));
     assert_eq!(opened(&t, 10, 0).as_deref(), Some("mailto:someone@example.com"));
+}
+
+/// The same listing run on another machine over ssh names that
+/// machine; the path would mean another file here, so the text is
+/// shown and is not a link.
+#[test]
+fn osc8_a_file_link_on_another_host_does_not_open() {
+    let mut t = Terminal::new(40, 3);
+    t.feed(b"\x1b]8;;file://build-server/etc/hosts\x1b\\hosts\x1b]8;;\x1b\\");
+    let text: String = (0..5).map(|c| t.grid().cell(c, 0).ch).collect();
+    assert_eq!(text, "hosts");
+    assert!(marspot::osc8::link_at(t.grid(), 0, 0, 0).is_none());
 }

@@ -262,8 +262,6 @@ pub struct GridShmWriter {
     /// One scrollback row's clusters, refilled per row while a
     /// scrolled view is published.
     row_clusters: Vec<(u16, String)>,
-    /// The same for links, reused from row to row.
-    row_links: Vec<crate::grid::RowLink>,
     /// Where the window title goes, once attached.
     title: Option<TitleWriter>,
 }
@@ -307,7 +305,6 @@ impl GridShmWriter {
             reader_frames: 0,
             clusters: None,
             row_clusters: Vec::new(),
-            row_links: Vec::new(),
             title: None,
         })
     }
@@ -517,11 +514,8 @@ impl GridShmWriter {
                 }
                 if let Some(t) = table.as_mut()
                     && links
-                    && grid.row_links_at_view(view_offset, row, &mut self.row_links)
                 {
-                    for (c0, c1, uri) in &self.row_links {
-                        t.push_link(row, *c0, *c1, uri);
-                    }
+                    grid.each_link_at_view(view_offset, row, |c0, c1, uri| t.push_link(row, c0, c1, uri));
                 }
                 let row_base = row as usize * cols as usize;
                 for col in 0..cols {

@@ -1,7 +1,7 @@
 //! OSC 8 hyperlinks, bytes in: what the screen shows, what a click
 //! reaches, what the clipboard gets, and what history keeps.
 
-use marspot_term::grid::{Cell, Grid, LINK_POOL_MAX};
+use marspot_term::grid::{Cell, Grid, LINK_POOL_MAX, ROW_LINK_BYTES};
 use marspot_term::grid_links::LinkKind;
 use marspot_term::osc8::{URI_MAX, link_at};
 use marspot_term::render::grid_selection_text;
@@ -213,12 +213,13 @@ fn osc8_a_link_fed_as_bytes_comes_back_after_the_session_restarts() {
 /// and never as the link of another row.
 #[test]
 fn osc8_a_cell_without_an_id_never_reads_another_rows_link() {
-    // on screen: the pool keeps the URI, the cells no longer point at it
+    // on screen: the pool keeps the URI, held there by a link on
+    // another row, and the cells no longer point at it
     let mut t = Terminal::new(20, 4);
-    t.feed(b"\x1b]8;;https://example.com\x1b\\Click me\x1b]8;;\x1b\\\r\nplain row");
+    t.feed(b"\x1b]8;;https://example.com\x1b\\Click me\x1b]8;;\x1b\\\r\n\x1b]8;;https://example.org\x1b\\other\x1b]8;;\x1b\\");
     t.feed(b"\x1b[1;1HClick me");
-    assert_eq!(t.grid().link_pool_len(), 1, "the pool still holds the URI");
-    assert!(links_in_view(t.grid(), 0).is_empty(), "{:?}", links_in_view(t.grid(), 0));
+    assert_eq!(t.grid().link_pool_len(), 2, "the pool still holds the URI");
+    assert_eq!(links_in_view(t.grid(), 0), vec![(1, "https://example.org".to_string())]);
 
     // in history: only the line the link was on has it, before and
     // after the files are reopened, and a reflow that renumbers every
@@ -313,4 +314,91 @@ fn osc8_an_open_link_follows_the_pen_across_the_alternate_screen() {
     let g = t.grid();
     assert_eq!(row_text(g, 0, 0), "ac");
     assert!(link_at(g, 0, 0, 0).is_some() && link_at(g, 0, 1, 0).is_some());
+}
+
+/// Once no cell carries a link the pool is emptied, so every path that
+/// asks whether there are links -- each frame published, each row
+/// scrolled into history -- is back to the answer that costs nothing.
+#[test]
+fn osc8_a_screen_whose_links_are_all_gone_empties_the_pool() {
+    // overwritten in place
+    let mut t = Terminal::new(20, 4);
+    t.feed(LINE);
+    assert_eq!(t.grid().link_pool_len(), 1);
+    t.feed(b"\x1b[1;1Hplain   ");
+    assert_eq!(t.grid().link_pool_len(), 0);
+    assert!(t.grid().row_marks_hold());
+
+    // scrolled into history: the history keeps the link, the pool lets go
+    let mut t = Terminal::new(20, 3);
+    t.feed(LINE);
+    for i in 0..5 {
+        t.feed(format!("\rfiller {i}\n").as_bytes());
+    }
+    assert_eq!(t.grid().link_pool_len(), 0);
+    assert_eq!(history_links(t.grid()).iter().map(|l| l.3.as_str()).collect::<Vec<_>>(), [URI]);
+
+    // cleared
+    let mut t = Terminal::new(20, 4);
+    t.feed(LINE);
+    t.feed(b"\x1b[2J");
+    assert_eq!(t.grid().link_pool_len(), 0);
+}
+
+/// A region scroll moves a row's link along with its cells.
+#[test]
+fn osc8_a_link_moved_by_a_region_scroll_is_still_found() {
+    let mut t = Terminal::new(20, 4);
+    t.feed(b"\x1b]8;;https://example.com\x1b\\a\x1b]8;;\x1b\\");
+    t.feed(b"\x1b[2;4r\x1b[3;1H\x1b]8;;https://example.org\x1b\\b\x1b]8;;\x1b\\\x1b[4;1H\n\x1b[r");
+    let g = t.grid();
+    assert!(g.row_marks_hold());
+    assert_eq!(row_text(g, 0, 1), "b");
+    assert_eq!(links_in_view(g, 0), vec![(0, URI.to_string()), (1, "https://example.org".to_string())]);
+}
+
+/// A link opened at the end of one read and written in the next: the
+/// pool must not be emptied in between, or its id would come to mean
+/// another link.
+#[test]
+fn osc8_a_link_still_open_at_the_end_of_a_feed_keeps_its_id() {
+    let mut t = Terminal::new(20, 3);
+    t.feed(b"\x1b]8;;https://example.com\x1b\\");
+    t.feed(b"Cl");
+    t.feed(b"ick me\x1b]8;;\x1b\\ \x1b]8;;https://example.org\x1b\\x\x1b]8;;\x1b\\");
+    let g = t.grid();
+    for col in 0..8 {
+        assert_eq!(link_at(g, 0, col, 0).map(|l| l.text).as_deref(), Some(URI), "col {col}");
+    }
+    assert_eq!(link_at(g, 0, 9, 0).map(|l| l.text).as_deref(), Some("https://example.org"));
+}
+
+/// A row filed into history keeps at most `ROW_LINK_BYTES` of URI; the
+/// links past it are plain text there.
+#[test]
+fn osc8_a_row_in_history_keeps_a_bounded_amount_of_link_text() {
+    let mut t = Terminal::new(20, 3);
+    let uri = |i: usize| format!("https://e.com/{i}/{}", "a".repeat(1990));
+    for i in 0..6 {
+        t.feed(format!("\x1b]8;;{}\x1b\\{i}\x1b]8;;\x1b\\", uri(i)).as_bytes());
+    }
+    t.feed(b"\r\n\r\n\r\n\r\n");
+    let kept = history_links(t.grid());
+    let bytes: usize = kept.iter().map(|l| l.3.len()).sum();
+    assert!(bytes <= ROW_LINK_BYTES, "{bytes} bytes kept for one row");
+    assert_eq!(kept.iter().map(|l| (l.1, l.3.clone())).collect::<Vec<_>>(), [(0, uri(0)), (1, uri(1))]);
+}
+
+/// A mirror takes each frame's links in place of the last one's: a row
+/// that had a link and has none in the new frame is not a link.
+#[test]
+fn osc8_a_mirrored_frame_replaces_the_links_of_the_last_one() {
+    let mut g = Grid::new(20, 3);
+    g.mirror_links([(0u16, 0u16, 3u16, URI)].into_iter());
+    assert_eq!(links_in_view(&g, 0), vec![(0, URI.to_string())]);
+    g.mirror_links([(2u16, 1u16, 2u16, "https://example.org")].into_iter());
+    assert_eq!(links_in_view(&g, 0), vec![(2, "https://example.org".to_string())]);
+    g.mirror_links(std::iter::empty());
+    assert!(links_in_view(&g, 0).is_empty());
+    assert!(g.row_marks_hold());
 }

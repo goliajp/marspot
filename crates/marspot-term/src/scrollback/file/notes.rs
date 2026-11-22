@@ -66,17 +66,39 @@ impl FileScrollback {
     /// The links on logical line `line_idx`, appended to `out`.  Lines of
     /// the format before segments have none.
     pub(in crate::scrollback) fn links_at(&self, line_idx: usize, out: &mut Vec<crate::grid::RowLink>) -> bool {
-        let Some(tiers::Loc::Seg(s, local)) = self.locate(line_idx as u64) else {
-            return false;
-        };
         let before = out.len();
-        self.seg_notes(s, local, |kind, payload| {
-            if kind == LINKS {
-                out.truncate(before);
-                decode_links(payload, out);
-            }
-        });
+        self.each_link_at(line_idx, |c0, c1, uri| out.push((c0, c1, uri.to_string())));
         out.len() > before
+    }
+
+    /// Each link on logical line `line_idx`, read where it is filed.
+    pub(in crate::scrollback) fn each_link_at(&self, line_idx: usize, f: impl FnMut(u16, u16, &str)) {
+        let Some(tiers::Loc::Seg(s, local)) = self.locate(line_idx as u64) else {
+            return;
+        };
+        if let Some(payload) = self.seg_note(s, local, LINKS) {
+            decode_links(payload, f);
+        }
+    }
+
+    /// The payload of the last note of `kind` on local line `local` of
+    /// segment `s`.
+    fn seg_note(&self, s: usize, local: u64, kind: u8) -> Option<&[u8]> {
+        self.ensure_flushed();
+        let t = &self.segs[s];
+        let mut p = t.record_end(t.entry(local)?)?;
+        let end = if local + 1 < self.seg_lines(s) { t.entry(local + 1)? } else { self.seg_end(s) };
+        let mut found = None;
+        while p < end {
+            let Some(body) = t.body(p) else { break };
+            if let Some((k, payload)) = note_of(body, t.seg.hdr.serial)
+                && k == kind
+            {
+                found = Some(payload);
+            }
+            p += 4 + body.len() as u64;
+        }
+        found
     }
 
     /// A note of `kind` after the last line's record, built by `payload`
@@ -165,7 +187,7 @@ impl FileScrollback {
 
 /// Parse a links note, keeping what parses: a length that runs past
 /// the end or bytes that are not UTF-8 end the walk.
-fn decode_links(blob: &[u8], out: &mut Vec<crate::grid::RowLink>) {
+fn decode_links(blob: &[u8], mut f: impl FnMut(u16, u16, &str)) {
     let Some(count) = blob.get(0..2) else { return };
     let count = u16::from_le_bytes([count[0], count[1]]);
     let mut p = 2usize;
@@ -180,7 +202,7 @@ fn decode_links(blob: &[u8], out: &mut Vec<crate::grid::RowLink>) {
         let Some(Ok(uri)) = blob.get(p..p + len).map(std::str::from_utf8) else { return };
         p += len;
         if c0 <= c1 {
-            out.push((c0, c1, uri.to_string()));
+            f(c0, c1, uri);
         }
     }
 }

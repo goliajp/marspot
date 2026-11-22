@@ -120,6 +120,12 @@ impl ClusterTableWriter {
         unsafe {
             std::ptr::copy(old.base, self.base, TABLE_END);
             self.last_count = get_u32(self.base, 8);
+            // the links carried along state a seq of the old grid
+            // region, which this one's may come to show again
+            let links_at = HEADER + get_u32(self.base, 12) as usize;
+            if links_at + 4 <= TABLE_END {
+                put_u32(self.base, links_at, 0);
+            }
         }
     }
 
