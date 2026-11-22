@@ -34,6 +34,10 @@
 #             skips the frame it does not know, and an old session,
 #             which sends none, to the new core; each keeps the
 #             session's stream and goes on showing frames
+#   pane control  in the first phase the new core tells the old shell
+#             what it does with pane control, and answers typing into
+#             and watching the old session itself, sending it nothing
+#             (see _mixed-versions-checks.sh)
 #   repeat    old app → new core and new session build at once, a few
 #             times over: every session moves within a bound.  A core
 #             that sent an old session a message it does not know,
@@ -71,6 +75,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 source "$ROOT/bin/_sandbox-panes.sh"
+source "$ROOT/bin/_mixed-versions-checks.sh"
 NEW="$ROOT/target/release"
 OLD="${MARSPOT_OLD_BINS:-}"
 PROBE="$NEW/examples/shm_probe"
@@ -126,7 +131,7 @@ start_app() { # directory of the build to start
   # session left under those names is not this pane's
   if [[ -n $SID ]]; then dev_forget_regions "/msp-s-$SID" "/msp-c-$SID" "/msp-t-$SID"; fi
   CLI="$1/marspot-shell"
-  launch "$SD" "$1/marspot-shell"
+  launch "$SD" "$1/marspot-shell" MARSPOT_DEV_PANE_CONTROL=1
   mkdir -p "$SD/work"
   printf '\033]2;TITLE-M\007MARK-M \360\237\207\257\360\237\207\265\n' > "$SD/work/m.txt"
   SID=$(first_pane "$SD") || die "no pane"
@@ -221,23 +226,6 @@ region_shows() { # text
   return 1
 }
 
-# Ring the bell in the pane, three times in one line, and go on typing.
-# A new session tells its core in a frame of a type an old core does not
-# know; the core's reader of the session's stream skips it or rings, and
-# either way must not drop the stream.  Keeping the stream shows as no
-# new handshake with the session and no reconnect.
-bells_keep_the_stream() { # who reads the session's stream
-  local hellos reconnects n=$((300 + panes_checks))
-  hellos=$(count "$SD" L3_UDS_HELLO)
-  reconnects=$(count "$SD" L3_CONTROL_RECONNECTED)
-  type_in_pane "$SD" "$SID" "printf '\\a\\a\\a'; echo BELL-\$((1+$n))"
-  check "$1: the line after the bells shows" wait_shows "$SD" "$SID" "BELL-$((1 + n))" 10
-  type_in_pane "$SD" "$SID" "echo BELL-\$((2+$n))"
-  check "$1: the next frame comes after the bells" region_shows "BELL-$((2 + n))"
-  check "$1: the session's stream was kept through the bells" \
-    test "$(count "$SD" L3_UDS_HELLO) $(count "$SD" L3_CONTROL_RECONNECTED)" = "$hellos $reconnects"
-}
-
 new_readers_read_everything() {
   check "this build reads the frame" frame_shows MARK-M
   check "this build reads the cluster text" frame_shows "$FLAG"
@@ -295,6 +283,7 @@ check "no session was started again" lacks_log core.reattach.l3_failed
 check "the old session's word on identities is its build's" \
   test "$(entry "$SD" "$SID" stamps_regions)" = "$OLD_STAMPS"
 new_readers_read_everything
+pane_control_new_core_old_session
 
 echo "════ update: the sessions move to the new build ════"
 execs=$(count "$SD" L3_EXECV_INVOKE)
