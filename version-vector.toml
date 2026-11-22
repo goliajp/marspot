@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.515"  # basic: move the kitty keyboard stack out of terminal.rs
-core    = "0.12.586"  # basic: move the kitty keyboard stack out of terminal.rs
-session = "0.11.394"  # basic: move the kitty keyboard stack out of terminal.rs
+shell   = "0.7.516"  # basic: move the terminal's host-facing accessors out of terminal.rs
+core    = "0.12.587"  # basic: move the terminal's host-facing accessors out of terminal.rs
+session = "0.11.395"  # basic: move the terminal's host-facing accessors out of terminal.rs
