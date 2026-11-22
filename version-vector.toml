@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.514"  # test that no agent plugin claims another agent's child
-core    = "0.12.570"  # drag or click a pane's scrollbar to move through history
+core    = "0.12.584"  # move boot assembly out of marspot-core.rs
 session = "0.11.393"  # the session tells the core when its pane rang the bell
