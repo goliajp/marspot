@@ -24,12 +24,13 @@ use std::time::Duration;
 
 use crate::frame;
 use crate::json::{self, Value, obj};
+use crate::{inbox, registry};
 
 /// Connections served at once, per socket.
 const MAX_CONNS: usize = 8;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a peer gets to take a frame.
-const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const SEND_TIMEOUT: Duration = inbox::WRITE_TIMEOUT;
 
 /// Serve until standard input closes.  `public` is the inbox peers
 /// write to, `upstream` where marspot reads what arrives, `send` where
@@ -39,7 +40,7 @@ pub fn run(public: &Path, upstream: &Path, send: &Path) -> io::Result<()> {
     let outbox = bind(send)?;
     let up = upstream.to_path_buf();
     spawn("relay-inbox", move || serve(inbox, move |c| pass_through(c, &up)))?;
-    spawn("relay-send", move || serve(outbox, send_for))?;
+    spawn("relay-send", move || serve(outbox, |c| send_for(c, &registry::default_dirs())))?;
     // blocks until marspot closes the pipe, or exits
     let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
     let _ = std::fs::remove_file(public);
@@ -87,8 +88,9 @@ fn pass_through(mut conn: UnixStream, upstream: &Path) {
 
 /// A request to send, one JSON object per line:
 /// `{"to":"/tmp/cc-socks/1.sock","line":"{…}"}`, answered `ok` or
-/// `error: …` on a line of its own.
-fn send_for(conn: UnixStream) {
+/// `error: …` on a line of its own.  `dirs` is the session registry
+/// the recipient is checked against.
+fn send_for(conn: UnixStream, dirs: &[PathBuf]) {
     let _ = conn.set_read_timeout(Some(IO_TIMEOUT));
     let Ok(mut out) = conn.try_clone() else { return };
     let mut reader = BufReader::new((&conn).take(u64::MAX));
@@ -100,7 +102,7 @@ fn send_for(conn: UnixStream) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
-        let answer = match deliver(line.trim_end()) {
+        let answer = match deliver(line.trim_end(), dirs) {
             Ok(()) => "ok\n".to_string(),
             Err(e) => format!("error: {e}\n"),
         };
@@ -110,16 +112,14 @@ fn send_for(conn: UnixStream) {
     }
 }
 
-fn deliver(request: &str) -> Result<(), String> {
+fn deliver(request: &str, dirs: &[PathBuf]) -> Result<(), String> {
     let v = json::parse(request)?;
     let to = v.str_at("to").ok_or("no `to`")?;
     let line = v.str_at("line").ok_or("no `line`")?;
-    if line.contains('\n') || line.len() > frame::MAX_LINE {
+    if line.contains('\n') {
         return Err("not one frame".into());
     }
-    let mut s = UnixStream::connect(to).map_err(|e| e.to_string())?;
-    let _ = s.set_write_timeout(Some(SEND_TIMEOUT));
-    s.write_all(line.as_bytes()).and_then(|()| s.write_all(b"\n")).map_err(|e| e.to_string())
+    inbox::write_in(dirs, to, line)
 }
 
 /// Hand `line` (one frame, with or without its newline) to the relay at
@@ -165,7 +165,15 @@ mod tests {
         let (inbox, outbox) = (bind(&public).unwrap(), bind(&send).unwrap());
         let u = upstream.clone();
         spawn("t-in", move || serve(inbox, move |c| pass_through(c, &u))).unwrap();
-        spawn("t-out", move || serve(outbox, send_for)).unwrap();
+        let reg = vec![d.clone()];
+        spawn("t-out", move || serve(outbox, move |c| send_for(c, &reg))).unwrap();
+        let me = std::process::id() as i32;
+        let rec = format!(
+            "{{\"pid\":{me},\"procStart\":\"{}\",\"messagingSocketPath\":\"{}\"}}",
+            crate::proc::lstart(me).unwrap(),
+            target.display()
+        );
+        std::fs::write(d.join(format!("{me}.json")), rec).unwrap();
 
         let mut c = UnixStream::connect(&public).unwrap();
         c.write_all(b"{\"type\":\"user\"}\n").unwrap();
