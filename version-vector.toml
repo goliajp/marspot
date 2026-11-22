@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.535"  # cc: move the plugin trait impl out of the claudecode plugin's mod.rs
+shell   = "0.7.536"  # cc: move the claudecode test fixtures into their own file
 core    = "0.12.598"  # basic: name what terminal.rs still holds in its carve-out marker
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
