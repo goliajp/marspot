@@ -35,6 +35,17 @@ impl CoreApp {
                 self.close_session(wi, idx);
             }
         }
+        // a shadow has no window to empty or layout to save
+        for idx in (0..self.shadows.len()).rev() {
+            if !self.shadows[idx].shell_ended() {
+                continue;
+            }
+            let pane = self.shadows.remove(idx);
+            if let Some(sid) = pane.shelld_session_id() {
+                lx_event!("SHADOW_SHELL_ENDED", "a shadow pane's shell ended; retiring it", session_id = sid);
+                self.retire_pane_session(sid, pane.is_l3());
+            }
+        }
     }
 
     /// Every pane's session is gone and none of them ended: the core

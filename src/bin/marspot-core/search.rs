@@ -52,7 +52,7 @@ impl CoreApp {
         has_more: bool,
         hits: Vec<marspot::shell_proto::WireSearchHit>,
     ) {
-        let Some((wi, pi)) = self.find_pane_by_sid(shelld_session_id) else { return };
+        let Some((wi, pi)) = self.find_window_pane_by_sid(shelld_session_id) else { return };
         let Some(s) = win!(self, wi).panes[pi].search.as_mut() else { return };
         let changed = s.list.apply_results(query_id, hits, has_more);
         if changed {

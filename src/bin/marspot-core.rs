@@ -529,6 +529,7 @@ mod window_state_tests {
             dev_panels: None,
             layout_discarded: false,
             windows,
+            shadows: Vec::new(),
             key_window: 0,
         }
     }
@@ -2583,6 +2584,8 @@ use spawn::{
 mod sessions;
 #[path = "marspot-core/windows.rs"]
 mod windows;
+#[path = "marspot-core/panes.rs"]
+mod panes;
 #[path = "marspot-core/pane_move.rs"]
 mod pane_move;
 #[path = "marspot-core/context_menu.rs"]
@@ -2715,6 +2718,8 @@ struct CoreApp {
     /// Every open window, in creation order.  Never empty: the last
     /// window closing exits the app.
     windows: Vec<WindowState>,
+    /// Sessions that run without a window: never laid out or drawn.
+    shadows: Vec<Pane>,
     /// The window that took the current mouse press, if any.  Set on
     /// press, cleared on release; `drag_target` reads it.
     drag_window: Option<u32>,
@@ -4540,6 +4545,7 @@ fn main() {
             .map(|d| (d, Instant::now() + Duration::from_secs(3))),
         dev_panels: PanelScript::from_env(),
         layout_discarded: false,
+        shadows: Vec::new(),
         windows: vec![{
             let mut w = WindowState::new(
                 FIRST_WINDOW_ID,
@@ -5013,8 +5019,8 @@ fn main() {
                     }
                 }
                 CoreEvent::L3Says(sid, frame) => {
-                    if let Some((wi, idx)) = app.find_pane_by_sid(sid) {
-                        win!(app, wi).panes[idx].session_mut().l3_session_says(&frame);
+                    if let Some(pane) = app.pane_by_sid_mut(sid) {
+                        pane.session_mut().l3_session_says(&frame);
                     }
                 }
                 CoreEvent::L3ControlReconnected(sid, stream) => {
@@ -5027,13 +5033,8 @@ fn main() {
                         );
                         return;
                     };
-                    let found = app.windows.iter().enumerate().find_map(|(wi, w)| {
-                        w.panes
-                            .iter()
-                            .position(|p| p.session().l3_session_id() == Some(sid))
-                            .map(|pi| (wi, pi))
-                    });
-                    let Some((wi, idx)) = found else { return };
+                    let tx = app.event_tx.clone();
+                    let Some(pane) = app.pane_by_sid_mut(sid) else { return };
                     match new_control.try_clone() {
                         Ok(rh) => {
                             // Both halves of the new connection move
@@ -5044,18 +5045,14 @@ fn main() {
                             // `L3Conn::swap_control`).
                             let (selection_tx, selection_rx) =
                                 std::sync::mpsc::channel::<(u32, String)>();
-                            win!(app, wi).panes[idx]
-                                .session_mut()
-                                .swap_l3_control(new_control, selection_rx);
-                            let tx = app.event_tx.clone();
+                            pane.session_mut().swap_l3_control(new_control, selection_rx);
                             std::thread::spawn(move || {
                                 l3_reader_loop(rh, sid, tx, selection_tx);
                             });
                             lx_event!(
                                 "L3_CONTROL_RECONNECTED",
                                 "L2 reader reconnected after EOF",
-                                session = sid,
-                                pane = idx
+                                session = sid
                             );
                         }
                         Err(e) => lx_warn!(
@@ -5065,56 +5062,7 @@ fn main() {
                         ),
                     }
                 }
-                CoreEvent::L3SpawnFinished(sid, outcome) => {
-                    let Some((wi, idx)) = app.find_pane_by_sid(sid) else {
-                        // The slot was closed while the spawn ran.  The
-                        // child is dropped with the L3Spawn, which kills
-                        // it — nothing to reap here.
-                        return;
-                    };
-                    match outcome.0 {
-                        Ok(spawn) => {
-                            win!(app, wi).panes[idx].adopt_backend(
-                                marspot::pane::PaneBackend::L3(
-                                    marspot::pane::L3Conn::new(spawn, sid),
-                                ),
-                            );
-                            lx_event!(
-                                "L3_SPAWN_ADOPTED",
-                                "off-loop spawn landed; pending slot is now live",
-                                session_id = sid,
-                                pane = idx
-                            );
-                        }
-                        Err(e) => {
-                            // Fall back to a plain vacant slot: its
-                            // revive-on-keystroke path is exactly the
-                            // retry affordance this needs.  Swap the
-                            // backend rather than replacing the whole
-                            // `Pane`, so both outcomes go through the
-                            // same door — replacing wholesale would
-                            // quietly drop any pane-level state the day
-                            // someone adds a field that outlives a
-                            // failed spawn.
-                            let (c, r) = {
-                                let g = win!(app, wi).panes[idx].session().grid();
-                                (g.cols(), g.rows())
-                            };
-                            win!(app, wi).panes[idx].adopt_backend(
-                                marspot::pane::PaneBackend::Vacant(
-                                    marspot::pane::VacantPane::new(sid, c, r),
-                                ),
-                            );
-                            lx_error!(
-                                "core.spawn.failed",
-                                &e.to_string(),
-                                session_id = sid,
-                                pane = idx
-                            );
-                        }
-                    }
-                    win!(app, wi).needs_render = true;
-                }
+                CoreEvent::L3SpawnFinished(sid, outcome) => app.adopt_spawn_outcome(sid, outcome),
                 CoreEvent::PaneBell(sid, queued) => app.pane_bell(sid, &queued, Instant::now()),
                 CoreEvent::L3Ready => {
                     // A bare wake — the poke carries no session id, so
@@ -5163,7 +5111,7 @@ fn main() {
                 CoreEvent::PaneBadgeMenu(sid, x, y, items) => {
                     // The menu belongs over the badge that was clicked,
                     // which is in whichever window holds that session.
-                    if let Some((wi, _)) = app.find_pane_by_sid(sid) {
+                    if let Some((wi, _)) = app.find_window_pane_by_sid(sid) {
                         app.open_pane_badge_menu(wi, sid, x, y, items);
                     }
                 }

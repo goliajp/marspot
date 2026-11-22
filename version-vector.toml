@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.587"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
-core    = "0.12.617"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet
+core    = "0.12.618"  # panes_mut reaches session-keyed lookups into an empty shadows list
 session = "0.11.408"  # pane-control frame payloads (types 130-143) in marspot-term; nothing sends them yet

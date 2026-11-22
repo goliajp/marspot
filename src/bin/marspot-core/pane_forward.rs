@@ -112,21 +112,15 @@ impl CoreApp {
 
     /// the pane may well be in one that is not focused.
     pub(super) fn inject_input(&mut self, shelld_session_id: u64, bytes: &[u8]) {
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-            if pane.session().l3_session_id() == Some(shelld_session_id) {
-                pane.session_mut().forward_inject_input(bytes);
-                return;
-            }
+        if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
+            pane.session_mut().forward_inject_input(bytes);
         }
     }
 
     /// Pass pasted text down to the pane's own L3.
     pub(super) fn forward_pane_paste(&mut self, shelld_session_id: u64, text: &str) {
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-            if pane.session().l3_session_id() == Some(shelld_session_id) {
-                pane.session_mut().forward_paste(text);
-                return;
-            }
+        if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
+            pane.session_mut().forward_paste(text);
         }
     }
 
@@ -135,11 +129,8 @@ impl CoreApp {
     /// L2 does not act on it: the point of the hold is that it belongs
     /// to the session, not to whichever core is currently drawing it.
     pub(super) fn forward_pane_hold_grid(&mut self, shelld_session_id: u64, on: bool) {
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-            if pane.session().l3_session_id() == Some(shelld_session_id) {
-                pane.session_mut().forward_pane_hold_grid(on);
-                return;
-            }
+        if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
+            pane.session_mut().forward_pane_hold_grid(on);
         }
     }
 
@@ -148,11 +139,9 @@ impl CoreApp {
     /// L2 does not act on it: the terminal that would draw the markup
     /// lives in L3, and L2's grid is a mirror of what L3 publishes.
     pub(super) fn forward_pane_render_markup(&mut self, shelld_session_id: u64, on: bool) {
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-            if pane.session().l3_session_id() == Some(shelld_session_id) {
-                pane.session_mut().forward_pane_render_markup(on);
-                return;
-            }
+        if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
+            pane.session_mut().forward_pane_render_markup(on);
+            return;
         }
         // Named a pane this core does not have.  Worth a line: the
         // declaration is re-sent every tick, so a steady stream of
@@ -171,11 +160,8 @@ impl CoreApp {
     /// terminal that holds the mode lives in L3 and L2's copy is a
     /// mirror of L3's next publish.
     pub(super) fn forward_pane_reset_mouse_reporting(&mut self, shelld_session_id: u64) {
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
-            if pane.session().l3_session_id() == Some(shelld_session_id) {
-                pane.session_mut().forward_pane_reset_mouse_reporting();
-                return;
-            }
+        if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
+            pane.session_mut().forward_pane_reset_mouse_reporting();
         }
     }
 
@@ -183,7 +169,7 @@ impl CoreApp {
     /// when the value actually moves — L1 sends on change, but a
     /// repeated value after a core swap must not cost a frame.
     pub(super) fn set_pane_recede(&mut self, sid: u64, level: u32) {
-        let Some((wi, idx)) = self.find_pane_by_sid(sid) else {
+        let Some((wi, idx)) = self.find_window_pane_by_sid(sid) else {
             return;
         };
         let pane = &mut win!(self, wi).panes[idx];
