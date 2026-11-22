@@ -84,6 +84,48 @@ pub fn open_arg_for(kind: crate::grid_links::LinkKind, text: &str) -> Option<Str
     }
 }
 
+/// What Open does with a file link's path.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FileOpen {
+    /// Hand it to `open(1)`, which shows it in its default app.
+    Open,
+    /// Show it selected in Finder instead: `open(1)` would launch it.
+    Reveal,
+}
+
+/// Kinds of file `open(1)` runs, installs, mounts or follows to
+/// another URL instead of showing them: bundles, Terminal settings and
+/// command files, internet locations, Java archives, installer
+/// packages, configuration profiles, disk images, scripts.
+const LAUNCHED: &[&str] = &[
+    "app", "action", "command", "dmg", "fileloc", "inetloc", "jar", "kext", "mobileconfig", "mpkg", "osax",
+    "pkg", "prefpane", "qlgenerator", "saver", "scpt", "scptd", "shortcut", "terminal", "tool", "webloc",
+    "workflow",
+];
+
+/// Whether a file link may be opened, or only shown in Finder.
+///
+/// `open(1)` launches an application bundle, runs an executable in a
+/// new Terminal window, and installs or follows the kinds in
+/// [`LAUNCHED`]. A link's target is whatever the program that printed
+/// it chose, so a click shows these in Finder and lets the person
+/// decide. `declared` is an OSC 8 link, whose visible text need not
+/// resemble its target: any directory it names is only revealed too.
+/// Blocks on the filesystem: call it off the main thread.
+pub fn file_open_for(path: &str, declared: bool) -> FileOpen {
+    use std::os::unix::fs::PermissionsExt;
+    let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if ext.is_some_and(|e| LAUNCHED.contains(&e.as_str())) {
+        return FileOpen::Reveal;
+    }
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => if declared { FileOpen::Reveal } else { FileOpen::Open },
+        Ok(m) if m.permissions().mode() & 0o111 != 0 => FileOpen::Reveal,
+        _ => FileOpen::Open,
+    }
+}
+
 /// Undo percent-escapes in a `file://` URL's path.
 ///
 /// Only `%XX` is handled, and an invalid escape is left as written —
@@ -106,6 +148,50 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+#[cfg(test)]
+mod file_open_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("marspot-file-open-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn opened(url: &str) -> FileOpen {
+        let path = open_arg_for(crate::grid_links::LinkKind::File, url).unwrap();
+        file_open_for(&path, true)
+    }
+
+    #[test]
+    fn osc8_a_file_link_to_an_app_an_executable_or_a_directory_is_only_revealed() {
+        let d = scratch("reveal");
+        let app = d.join("Some Tool.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        let exe = d.join("run");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = d.join("folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = d.join("notes.txt");
+        std::fs::write(&text, "x").unwrap();
+        let url = |p: &std::path::Path| format!("file://{}", p.display().to_string().replace(' ', "%20"));
+
+        assert_eq!(opened(&url(&app)), FileOpen::Reveal, "an application bundle");
+        assert_eq!(opened(&format!("{}/", url(&app))), FileOpen::Reveal, "with a trailing slash");
+        assert_eq!(opened(&url(&exe)), FileOpen::Reveal, "a file with an execute bit");
+        assert_eq!(opened(&url(&dir)), FileOpen::Reveal, "a directory");
+        assert_eq!(opened(&url(&text)), FileOpen::Open, "a plain file still opens");
+        for launched in ["/nonexistent/Gone.APP", "/tmp/x.terminal", "/tmp/a.webloc", "/tmp/i.pkg", "/tmp/p.mobileconfig"] {
+            assert_eq!(file_open_for(launched, false), FileOpen::Reveal, "{launched}");
+        }
+        assert_eq!(file_open_for(&dir.display().to_string(), false), FileOpen::Open, "a directory found by its shape opens");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
 
 #[cfg(test)]

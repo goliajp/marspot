@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.506"  # the clock is woken for any change of plan, so a later deadline right after a tick is kept
-core    = "0.12.564"  # the parse path pays for OSC 8 links only while one is open or a row holds one
+core    = "0.12.565"  # file links to apps, executables and directories are only revealed; declared links show their target
 session = "0.11.388"  # the parse path pays for OSC 8 links only while one is open or a row holds one
