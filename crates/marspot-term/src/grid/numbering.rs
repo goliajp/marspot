@@ -119,9 +119,14 @@ impl Grid {
                 remap[theirs] = id;
                 id
             };
-            self.cells[idx] = c.with_style(ours);
+            // a frame's cells never carry link ids (the writer drops
+            // them), so the mirror's rows start with none
+            self.cells[idx] = c.with_style(ours).with_link(0);
         }
         self.forget_row_marks();
+        for mark in &mut self.marks {
+            mark.links = false;
+        }
     }
 
     /// Write `cell` over `range`.
