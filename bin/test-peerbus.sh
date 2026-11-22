@@ -423,10 +423,21 @@ TH1="$(cut -f3 <<<"$R1C")"; TH2="$(cut -f3 <<<"$R2C")"
 [[ "$N1" != "$N2" ]] || fail "both panes carry one code: $N1"
 ok "two panes in one directory show their full names: $N1 and $N2"
 
+relayed() { # answers relayed from one of the two Codex panes to the other
+  grep answer_relayed "$APPLOG" | grep -cF -e "to=uds:$S1" -e "to=uds:$S2" || true
+}
+RELAYED0="$(relayed)"
 python3 "$ROOT/bin/_peerbus_claude_side.py" "$S2" 30 "" "Send $N1 the text PEERBUS-C2C-ONE" >/dev/null \
   || fail "the forwarding request did not reach pane $P2"
 shows "$P1" PEERBUS-C2C-ONE "Codex in pane $P2 sent to $N1"
 ok "Codex in pane $P2 messaged the Codex in pane $P1 by its full name"
+# pane 1's answer goes back to pane 2 once; pane 2's answer to that relay stays in pane 2
+# (pane 2's own answer goes to the stand-in that asked it, which is not counted)
+for (( i = 0; i < 40; i++ )); do (( $(relayed) > RELAYED0 )) && break; sleep 0.25; done
+sleep 4
+RELAYED=$(( $(relayed) - RELAYED0 ))
+(( RELAYED == 1 )) || fail "one exchange between two Codex panes relayed $RELAYED answers, expected 1"
+ok "the answer was relayed once and the answer to the relay was not relayed back"
 
 # the shared plain name, and an agent both run, are refused with the candidates
 for to in proj codex:proj; do
