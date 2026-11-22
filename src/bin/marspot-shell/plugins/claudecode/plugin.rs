@@ -207,6 +207,7 @@ impl Plugin for ClaudecodePlugin {
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;
             self.last_model = result.new_models;
+            self.last_vetoes = result.new_vetoes;
         }
 
         // (2) Kick off the next scan if the worker is idle.  At most

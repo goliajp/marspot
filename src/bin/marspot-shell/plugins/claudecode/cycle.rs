@@ -114,8 +114,16 @@ impl ClaudecodePlugin {
         }
         // The person may switch away from a turn that was cut off by the
         // quota and walk off; the new claude is told the same as after
-        // an automatic move, and an idle one stays idle.
-        if self.start_profile_cycle_to(host, sid, meta, target, Some(resume_word()), choice) {
+        // an automatic move, and an idle one stays idle -- unless it was
+        // told its account was nearly out, and may have stopped for that.
+        let warned = self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num));
+        let word = if warned {
+            // unknown counts as running, as for an automatic move
+            heads_up::after_warned_move(self.last_vetoes.get(&sid).is_none_or(|v| v.0))
+        } else {
+            resume_word()
+        };
+        if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
             self.stranded.entry(sid).or_default().last_target = Some(target);
         }
     }
@@ -291,6 +299,7 @@ impl ClaudecodePlugin {
             home: config_dir_or_default(meta.config_dir.as_deref()),
             session_id: Some(meta.uuid.clone()),
             cwd: None,
+            go_on: self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num)),
         };
         host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} claude → {} P{n}: {leaving:?}", to.key()));
         let Some(op) = handoff::switch_op(sid, leaving, to, n, dir) else {

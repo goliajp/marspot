@@ -28,6 +28,8 @@ impl GeminiPlugin {
             home: pane.root.clone(),
             session_id: Some(session.clone()),
             cwd: pane.cwd.clone(),
+            // gemini panes are not sent the heads-up
+            go_on: false,
         };
         // read back if the pane is handed to gemini again and resumes this session
         if let Err(e) = handoff::remember_gemini_model(sid, &session, pane.model.as_deref()) {

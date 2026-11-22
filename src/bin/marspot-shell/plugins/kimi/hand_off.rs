@@ -33,6 +33,9 @@ impl KimiPlugin {
             home: pane.home.clone(),
             session_id: Some(session),
             cwd: pane.cwd.clone(),
+            // told it was nearly out, it kept working and may have
+            // stopped only for the switch, by hand or not
+            go_on: self.balance.told(sid, pane.profile.unwrap_or(0)),
         };
         host.log(LogLevel::Info, "handoff.start", &format!("pane {sid} kimi → {} P{n}: {leaving:?}", to.key()));
         // a model named by environment variables exists in this process only

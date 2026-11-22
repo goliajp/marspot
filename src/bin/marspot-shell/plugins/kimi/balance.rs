@@ -58,6 +58,11 @@ pub(super) struct Balance {
 }
 
 impl Balance {
+    /// The pane's session took the heads-up about the account it is on.
+    pub(super) fn told(&self, sid: u64, profile: u8) -> bool {
+        self.told.get(&sid).is_some_and(|h| h.landed_on(profile))
+    }
+
     pub(super) fn load(&mut self, host: &dyn PluginHost) {
         let Ok(dir) = host.state_dir() else { return };
         if let Ok(text) = std::fs::read_to_string(dir.join(REFUSED_FILE)) {
@@ -135,6 +140,9 @@ impl KimiPlugin {
         let Some((_, here)) = rooms.iter().find(|(n, _)| *n == current) else { return };
         let status = pane.facts.as_ref().map(|f| f.status);
         let on_its_way = |t: &Tally| t.moved.filter(|(at, to)| *to != current && at.elapsed() < LANDING).map(|(_, to)| to);
+        if b.told.get(&sid).is_some_and(|h| h.renewed_on(current, here, None)) {
+            b.told.remove(&sid);
+        }
         if !here.refused_for(None) {
             if b.tallies.get(&sid).is_some_and(|t| on_its_way(t).is_none()) {
                 b.tallies.remove(&sid);
@@ -146,7 +154,9 @@ impl KimiPlugin {
                 host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid}: account {current} is nearly out; telling it"));
                 let delivered = Arc::new(AtomicBool::new(false));
                 let kimi_pid = pane.proc.pid;
-                heads_up::send_to(sid, current, Arc::clone(&delivered), "kimi.quota.heads_up", move || inbox_of(kimi_pid));
+                // the handoff after the move asks a told pane to go on
+                let body = heads_up::body(current, true);
+                heads_up::send_to(sid, current, body, Arc::clone(&delivered), "kimi.quota.heads_up", move || inbox_of(kimi_pid));
                 b.told.insert(sid, heads_up::Sent { profile: current, week, delivered });
             }
             return;
