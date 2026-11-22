@@ -65,7 +65,7 @@ impl Sent {
     pub(in crate::plugins) fn is_for(&self, profile: u8, week: i64) -> bool {
         self.profile == profile && self.week.abs_diff(week) < SAME_WEEK
     }
-    pub(super) fn landed_on(&self, profile: u8) -> bool {
+    pub(in crate::plugins) fn landed_on(&self, profile: u8) -> bool {
         self.profile == profile && self.delivered.load(Ordering::Relaxed)
     }
 }
@@ -177,8 +177,12 @@ const ENDED_WORK: &str = "换账号时还在运行的后台任务和后台子代
 /// Such a session was working when it was told, so the usual word's
 /// "stay idle if idle" is wrong for it: one that stopped after the
 /// warning reads itself as idle and keeps still on the new account.
+/// It is no order to go on either: by the time of the move the session
+/// may have finished its task or be waiting for the person's answer,
+/// and then it keeps waiting.
 pub(super) fn after_warned_move(work_ended: bool) -> String {
-    let word = "额度提醒里说的账号切换已经完成。请接着做切换前在做的任务；如果你在提醒之后停下了，或者在等这次切换，现在就继续，不用等人确认";
+    let word = "额度提醒里说的账号切换已经完成。如果你是因为额度提醒停下的，或者在等这次切换，现在就接着做切换前在做的任务；\
+                如果你在等用户回答，或者任务已经做完，就继续等用户";
     if work_ended { format!("{word}。{ENDED_WORK}") } else { word.to_string() }
 }
 
@@ -339,9 +343,23 @@ mod tests {
     fn a_warned_session_is_never_told_to_stay_idle_after_the_move() {
         for ended in [false, true] {
             let said = after_warned_move(ended);
+            assert!(said.contains("因为额度提醒停下"), "{said}");
             assert!(said.contains("接着做"), "{said}");
             assert!(!said.contains("idle"), "{said}");
             assert!(!said.contains("保持"), "{said}");
+        }
+    }
+
+    /// A session that finished its task, or asked the person something,
+    /// is not pushed on by the move.
+    #[test]
+    fn a_warned_session_waiting_for_the_user_keeps_waiting_after_the_move() {
+        for ended in [false, true] {
+            let said = after_warned_move(ended);
+            assert!(said.contains("在等用户回答"), "{said}");
+            assert!(said.contains("任务已经做完"), "{said}");
+            assert!(said.contains("继续等用户"), "{said}");
+            assert!(!said.contains("不用等"), "no unconditional go-ahead: {said}");
         }
     }
 }
