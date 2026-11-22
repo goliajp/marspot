@@ -27,15 +27,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use marspot::pane_state::{Activity, Change, Generic, Observation, PaneMachine, PaneStatus};
 use marspot::pidtree;
 
-/// How often the machines are stepped.  Rides `poll_supervisor`, which
-/// runs on the 1 s redraw pump plus every knock, and gates itself to
-/// this, so the syscall cost is
-/// ~2-4 per pane per second — the same order as L2's cwd sweep.
+/// The shortest time between two sweeps.  Rides `poll_supervisor`,
+/// and a sweep runs only when one is due (`due`): at this interval while
+/// a pane cannot tell the supervisor what changed in it, and otherwise
+/// at the moments its state can move on its own.
 ///
 /// This is also the machine's clock: `CONFIRM_TICKS` agreeing
 /// observations at this interval is how long a pane must look quiet
 /// before anything may act on it.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The longest a pane that keeps printing goes between two reports of
+/// output (`PaneAwake`, the session's `OUTPUT_EVERY`): its last output is
+/// at most this long after its last report.
+pub const OUTPUT_REPORTED_EVERY: Duration = Duration::from_secs(1);
+
+mod due;
 
 /// How long a bound program must sit finished before its pane starts
 /// to recede.
@@ -129,6 +136,14 @@ pub struct PaneStateTracker {
     /// warming up would be a lie with the same shape as the truth.
     any_report_seen: bool,
     last_sweep: Option<Instant>,
+    /// Something happened since the last sweep that the next one has to
+    /// look at: a plugin's report changed, input was sent to a pane, or
+    /// a pane's session asked for a pass.
+    dirty: bool,
+    /// What each pane's session reports: None when it has never
+    /// reported, otherwise when it last reported output.  A pane that
+    /// does not report is swept every `SWEEP_INTERVAL`.
+    reports: fn(u64) -> Option<Option<Instant>>,
 }
 
 impl PaneStateTracker {
@@ -142,7 +157,19 @@ impl PaneStateTracker {
             reported: HashMap::new(),
             any_report_seen: false,
             last_sweep: None,
+            dirty: false,
+            reports: |_| None,
         }
+    }
+
+    /// Where the sessions' reports are read from.
+    pub fn read_reports(&mut self, reports: fn(u64) -> Option<Option<Instant>>) {
+        self.reports = reports;
+    }
+
+    /// Have the next sweep run as soon as `SWEEP_INTERVAL` allows.
+    pub fn poke(&mut self) {
+        self.dirty = true;
     }
 
     /// Has this pane's PTY been silent long enough to call it quiet?
@@ -167,6 +194,12 @@ impl PaneStateTracker {
 
     /// [`pty_quiet`](Self::pty_quiet) with the bytelog's size, or why
     /// it could not be read, already in hand.
+    ///
+    /// A change is dated by the sweep that sees it, or, when the pane's
+    /// session reported output since the date already held, by the
+    /// latest moment that output can have ended: sweeps are not a second
+    /// apart while a pane prints, and the date has to stay within a
+    /// second of the last output as it did when they were.
     fn pty_quiet_with(&mut self, sid: u64, now: Instant, size: std::io::Result<u64>) -> bool {
         let size = match size {
             Ok(n) => {
@@ -206,9 +239,14 @@ impl PaneStateTracker {
             Some(prev) if prev == size => now.checked_sub(PTY_QUIET_AFTER).unwrap_or(now),
             _ => now,
         };
+        let reported = (self.reports)(sid).flatten();
         let entry = self.pty_bytes.entry(sid).or_insert((size, seed));
         if entry.0 != size {
-            *entry = (size, now);
+            let since = match reported.map(|r| r + OUTPUT_REPORTED_EVERY) {
+                Some(ended_by) if ended_by >= entry.1 => ended_by.min(now),
+                _ => now,
+            };
+            *entry = (size, since);
         }
         now.duration_since(entry.1) >= PTY_QUIET_AFTER
     }
@@ -276,7 +314,9 @@ impl PaneStateTracker {
     /// channel drain; the value is consumed by the next sweep.
     pub fn report_activity(&mut self, sid: u64, activity: Activity) {
         self.any_report_seen = true;
-        self.reported.insert(sid, activity);
+        if self.reported.insert(sid, activity) != Some(activity) {
+            self.dirty = true;
+        }
     }
 
     /// Current composed status + how long it has held, for every live
@@ -299,25 +339,24 @@ impl PaneStateTracker {
         self.last_sweep = None;
     }
 
-    /// Step every live session's machine, at most once per
-    /// [`SWEEP_INTERVAL`].
+    /// Step every live session's machine when a sweep is due
+    /// ([`due`](Self::due)), at most once per [`SWEEP_INTERVAL`].
     ///
-    /// `None` = the interval gate skipped this call; `Some(vec)` = the
+    /// `None` = the gate skipped this call; `Some(vec)` = the
     /// machines were stepped and these are the committed transitions
     /// (possibly empty).  The caller needs the distinction: a pane
     /// *closing* removes a machine without producing a transition, so
     /// treating an empty vec as "nothing to do" would leave the closed
     /// pane's last status readable forever.
     pub fn sweep(&mut self, now: Instant) -> Option<Vec<SessionChange>> {
-        if self.last_sweep.is_some_and(|t| now.duration_since(t) < SWEEP_INTERVAL) {
-            return None;
-        }
-        self.last_sweep = Some(now);
         // The registry as the observer last read it, at most
         // `observe::INTERVAL` old: a pane that just opened joins a sweep
         // or two late, which no threshold here can notice.  The probe
         // stays live per sweep — it is what reads who owns the tty now.
         let obs = crate::observe::shared().latest();
+        if self.last_sweep.is_some() && self.due(obs.sessions.iter().map(|s| s.entry.id)).is_none_or(|t| now < t) {
+            return None;
+        }
         let panes: Vec<(u64, i32)> =
             obs.sessions.iter().map(|s| (s.entry.id, s.entry.shell_child_pid)).collect();
         // a shell pid of 0 or 1 is an entry without one, not launchd
@@ -345,6 +384,8 @@ impl PaneStateTracker {
     where
         F: FnMut(i32) -> Generic,
     {
+        self.last_sweep = Some(now);
+        self.dirty = false;
         let mut changes = Vec::new();
         let live: Vec<u64> = panes.iter().map(|(sid, _)| *sid).collect();
         for (sid, shell_pid) in panes {
@@ -645,11 +686,14 @@ mod tests {
         let mut t = PaneStateTracker::new();
         let base = Instant::now();
         assert!(t.sweep(base).is_some(), "first sweep runs");
+        // something to look at, so a sweep is due once the window allows
+        t.poke();
         assert!(
             t.sweep(base + Duration::from_millis(250)).is_none(),
             "a second sweep inside the window must be a no-op"
         );
         assert!(t.sweep(base + SWEEP_INTERVAL).is_some());
+        t.poke();
 
         // …and the one caller that cannot wait out the window: a pane
         // whose picture has just been unfrozen needs its brightness
@@ -659,6 +703,7 @@ mod tests {
         assert!(t.sweep(just_after).is_none(), "still inside the window");
         t.force_next_sweep();
         assert!(t.sweep(just_after).is_some(), "forced through the gate");
+        t.poke();
         assert!(
             t.sweep(just_after).is_none(),
             "and the gate closes again behind it"

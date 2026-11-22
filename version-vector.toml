@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.503"  # plugins say when their next tick is due; the host reads how long a pane state held when asked
-core    = "0.12.562"  # a mirrored frame starts with no link ids, so link rows are not rescanned per frame
+shell   = "0.7.504"  # pane machines are swept when due; agent plugins without an agent tick only when something changes
+core    = "0.12.563"  # pane machine says whether a quiet candidate is pending
 session = "0.11.387"  # OSC 8: empty link pool once no cell carries a link; bounded link tables

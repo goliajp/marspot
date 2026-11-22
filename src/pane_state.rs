@@ -351,6 +351,11 @@ impl PaneMachine {
         &self.state
     }
 
+    /// A quiet status has been seen and waits for more agreeing looks.
+    pub fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Move this state's start time back to when it actually began.
     ///
     /// Idleness is a property of the pane, not of the process watching

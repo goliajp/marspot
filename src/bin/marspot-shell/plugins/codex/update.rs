@@ -117,6 +117,15 @@ impl Follower {
         moved || self.next_check.is_none_or(|t| now >= t)
     }
 
+    /// When the next comparison is due: now when a link was replaced,
+    /// None before the first.
+    pub(crate) fn due_at(&self) -> Option<Instant> {
+        if self.links.as_ref().is_some_and(|l| l.moved.load(Ordering::Acquire)) {
+            return Some(Instant::now());
+        }
+        self.next_check
+    }
+
     pub(crate) fn tick(&mut self, home: &Path) {
         let now = Instant::now();
         if !self.due(now) {
