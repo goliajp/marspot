@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.519"  # basic: move scrollback paging out of terminal.rs
-core    = "0.12.590"  # basic: move scrollback paging out of terminal.rs
-session = "0.11.398"  # basic: move scrollback paging out of terminal.rs
+shell   = "0.7.520"  # basic: move snapshot apply out of terminal.rs
+core    = "0.12.591"  # basic: move snapshot apply out of terminal.rs
+session = "0.11.399"  # basic: move snapshot apply out of terminal.rs
