@@ -96,9 +96,9 @@ mod tests {
         let listener = UnixListener::bind(&sock).unwrap();
         let me = std::process::id() as i32;
         record(&d, me, &crate::proc::lstart(me).unwrap(), &sock);
-        write_in(&[d.clone()], sock.to_str().unwrap(), "{\"a\":1}").unwrap();
+        write_in(std::slice::from_ref(&d), sock.to_str().unwrap(), "{\"a\":1}").unwrap();
         assert_eq!(read_one(&listener), "{\"a\":1}\n");
-        write_in(&[d.clone()], sock.to_str().unwrap(), "{\"b\":2}\n").unwrap();
+        write_in(std::slice::from_ref(&d), sock.to_str().unwrap(), "{\"b\":2}\n").unwrap();
         assert_eq!(read_one(&listener), "{\"b\":2}\n", "a newline already there is not doubled");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -115,7 +115,7 @@ mod tests {
         // this process, but started at another time: a reused pid
         let me = std::process::id() as i32;
         record(&d, me, "Thu Jan  1 00:00:00 1970", &sock);
-        let err = write_in(&[d.clone()], sock.to_str().unwrap(), "{}").unwrap_err();
+        let err = write_in(std::slice::from_ref(&d), sock.to_str().unwrap(), "{}").unwrap_err();
         assert!(err.contains("is gone or its pid was reused"), "{err}");
         assert!(listener.accept().is_err(), "nothing connected");
         std::fs::remove_dir_all(&d).unwrap();
@@ -128,7 +128,7 @@ mod tests {
         let d = dir();
         let sock = d.join("1.sock");
         let listener = UnixListener::bind(&sock).unwrap();
-        write_in(&[d.clone()], sock.to_str().unwrap(), "{}").unwrap();
+        write_in(std::slice::from_ref(&d), sock.to_str().unwrap(), "{}").unwrap();
         assert_eq!(read_one(&listener), "{}\n");
         std::fs::remove_dir_all(&d).unwrap();
     }
