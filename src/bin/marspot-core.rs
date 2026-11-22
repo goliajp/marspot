@@ -515,6 +515,7 @@ mod window_state_tests {
             event_tx,
             drag_window: None,
             pane_drag: None,
+            scrollbar_drag: None,
             mouse_report_press: None,
             mouse_report_last_cell: None,
             drop_target: None,
@@ -2910,6 +2911,8 @@ use marspot::ui::components::{layout_view, process_view};
 mod theme_follow;
 #[path = "marspot-core/bell.rs"]
 mod bell;
+#[path = "marspot-core/scrollbar_input.rs"]
+mod scrollbar_input;
 
 struct CoreApp {
     renderer: MetalRenderer,
@@ -3033,6 +3036,8 @@ struct CoreApp {
     /// meaning, entering title edit).  One at a time, app-wide — a
     /// drag spans windows by nature.
     pane_drag: Option<PaneDrag>,
+    /// A press holding a pane's scrollbar, until the button comes up.
+    scrollbar_drag: Option<scrollbar_input::ScrollbarDrag>,
     /// The pane a forwarded mouse press went to, and the cell it
     /// landed in.  A program that was told a button went down has to
     /// be told it came up, even if the pointer left the pane first —
@@ -5142,6 +5147,7 @@ impl CoreApp {
         let Some(i) = self.window_index(window_id) else { return };
         // Window indices shift below; any in-flight drag is stale.
         self.pane_drag = None;
+        self.scrollbar_drag = None;
         if self.windows.len() <= 1 {
             lx_event!(
                 "WINDOW_CLOSE_LAST",
@@ -5176,6 +5182,7 @@ impl CoreApp {
     fn close_session(&mut self, wi: usize, idx: usize) {
         // A pane closing invalidates any armed drag's index math.
         self.pane_drag = None;
+        self.scrollbar_drag = None;
         if idx >= win!(self, wi).panes.len() {
             return;
         }
@@ -6470,6 +6477,9 @@ impl CoreApp {
         if on.is_some_and(ChromeTarget::acts_on_release) {
             return;
         }
+        if on.is_none() && self.scrollbar_press(wi, x_phys, y_phys) {
+            return;
+        }
         let title_hit = match on {
             Some(ChromeTarget::Title(i)) => Some(i),
             _ => None,
@@ -6713,6 +6723,9 @@ impl CoreApp {
         hover_x: f64,
         hover_y: f64,
     ) {
+        if self.scrollbar_drag_to(y_phys) {
+            return;
+        }
         // RFC-005 step 5 — an armed title press becomes a pane drag
         // once the pointer clears the slop radius.  The activation
         // repaints the title (a ⇢ marker) so the mode is visible.
@@ -6827,6 +6840,9 @@ impl CoreApp {
     }
 
     fn mouse_up(&mut self, wi: usize, drop_window_id: u32, drop_x: f64, drop_y: f64) {
+        if self.scrollbar_release() {
+            return;
+        }
         // a button of the chrome pressed and let go on
         if self.release_chrome(wi, drop_window_id, drop_x, drop_y) {
             return;
@@ -8341,6 +8357,7 @@ fn main() {
         event_tx: event_tx.clone(),
         drag_window: None,
         pane_drag: None,
+        scrollbar_drag: None,
         drop_target: None,
         pending_move_sid: None,
         saved_windows,
