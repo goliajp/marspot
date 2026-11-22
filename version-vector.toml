@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.506"  # the clock is woken for any change of plan, so a later deadline right after a tick is kept
+shell   = "0.7.507"  # a turn started by a relayed codex answer owes no answer back
 core    = "0.12.564"  # the parse path pays for OSC 8 links only while one is open or a row holds one
 session = "0.11.388"  # the parse path pays for OSC 8 links only while one is open or a row holds one

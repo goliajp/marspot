@@ -8,6 +8,11 @@
 //! asker never heard. So once the turn that took the message ends, its
 //! final answer goes back to the sender, unless Codex already sent one
 //! there itself.
+//!
+//! A relayed answer is itself a message, and the session it reaches
+//! answers it in a turn of its own. Relaying that answer too would
+//! send two Codex sessions back and forth until the rate limit stops
+//! them, so a turn a relayed answer started owes nobody an answer.
 
 use std::collections::HashMap;
 
@@ -31,6 +36,16 @@ impl Asker {
     fn is(&self, to: &str) -> bool {
         to == self.reply_to || self.name.as_deref().is_some_and(|n| to == n || to.starts_with(&format!("{n} ")))
     }
+}
+
+/// Who asked, for a message whose content is `content`: nobody when
+/// the message is an answer this module relayed.
+pub(super) fn asker(content: &str, reply_to: String) -> Option<Asker> {
+    let env = marspot_peer::envelope::parse(content);
+    if env.as_ref().is_some_and(|e| e.body.trim_start().starts_with(RELAYED)) {
+        return None;
+    }
+    Some(Asker { reply_to, name: env.and_then(|e| e.from_name) })
 }
 
 #[derive(Default)]
@@ -114,9 +129,11 @@ impl Replies {
     }
 }
 
+const RELAYED: &str = "(Relayed by marspot: this Codex session's answer to your message, from its turn.)";
+
 /// What the asker is sent: the answer, said to be relayed.
 pub(super) fn body(answer: &str) -> String {
-    format!("(Relayed by marspot: this Codex session's answer to your message, from its turn.)\n\n{answer}")
+    format!("{RELAYED}\n\n{answer}")
 }
 
 #[cfg(test)]
@@ -174,6 +191,36 @@ mod tests {
         r.item("t4", &item(r#"{"type":"mcpToolCall","id":"x","server":"marspot","tool":"SendMessage","arguments":{"to":"someone-else"}}"#));
         r.item("t4", &says("final_answer", "a"));
         assert_eq!(r.completed("t4").len(), 1, "a message to someone else is not the answer");
+    }
+
+    /// 2026-11-22: two Codex panes relayed "ok" to each other until the
+    /// rate limit refused them.
+    #[test]
+    fn the_answer_to_a_relayed_answer_is_not_relayed_back() {
+        use marspot_peer::envelope::{encode, Header};
+        let a = "uds:/tmp/cc-socks/a.sock";
+        let b = "uds:/tmp/cc-socks/b.sock";
+        let question = encode(&Header { from: a.into(), from_name: Some("proj#1001".into()), from_mode: None }, "what is 2+2");
+        let mut at_b = Replies::default();
+        at_b.steered("tb", asker_of(&question, a));
+        at_b.item("tb", &says("final_answer", "4"));
+        let back = at_b.completed("tb");
+        assert_eq!(back.len(), 1, "A's question is answered");
+
+        let relayed = encode(&Header { from: b.into(), from_name: Some("proj#1002".into()), from_mode: None }, &body(&back[0].1));
+        assert_eq!(super::asker(&relayed, b.into()), None, "the relayed answer names no asker");
+        let mut at_a = Replies::default();
+        if let Some(who) = super::asker(&relayed, b.into()) {
+            at_a.steered("ta", who);
+        }
+        at_a.item("ta", &says("final_answer", "ok"));
+        assert!(at_a.completed("ta").is_empty(), "A's answer to the relay does not go back to B");
+    }
+
+    fn asker_of(content: &str, reply_to: &str) -> Asker {
+        let who = super::asker(content, reply_to.into()).expect("a plain message has an asker");
+        assert_eq!(who.name.as_deref(), Some("proj#1001"));
+        who
     }
 
     #[test]

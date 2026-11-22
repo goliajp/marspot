@@ -427,10 +427,7 @@ impl Worker {
         let (home, thread) = (b.home.clone(), b.thread.clone());
         let steer_turn = b.active_turn.clone().filter(|_| frame.priority == Priority::Now && b.subscribed);
         let id = frame.msg_id.clone().unwrap_or_else(marspot_peer::rand::uuid_v4);
-        let asker = reply_to.clone().map(|reply_to| super::reply::Asker {
-            reply_to,
-            name: marspot_peer::envelope::parse(&frame.content).and_then(|e| e.from_name),
-        });
+        let asker = reply_to.clone().and_then(|reply_to| super::reply::asker(&frame.content, reply_to));
         let (result, via) = self.hand_over(&home, &thread, a.text, steer_turn.clone(), id.clone());
         match &result {
             Ok(_) => {
