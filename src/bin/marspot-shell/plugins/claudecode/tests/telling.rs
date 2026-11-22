@@ -74,9 +74,11 @@ fn a_pane_is_told_once_per_running_low_not_once_per_read() {
     let home = quota_home("h1");
     feed(&home, "h1", ("allowed", 0.99), ("allowed", 0.2));
     let host = FakeHost::new(home.join("state"));
-    let sid = 94u64;
-    confirmed("u-94");
-    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-94"), sid);
+    // a record of its own: the model directory is shared by tests running at once,
+    // and a rewrite of another test's record can be read half written
+    let sid = 97u64;
+    confirmed("u-97");
+    let mut plugin = stranded_plugin(pane_on_p1(&home, "u-97"), sid);
     let mut result = scan_of(sid, CcActivity::Working);
     sweep(&mut plugin, &host, &mut result);
     let first = Arc::as_ptr(&plugin.heads_up.get(&sid).expect("told").delivered);
