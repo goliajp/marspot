@@ -170,6 +170,7 @@ fn empty_scan() -> ScanResult {
         new_cpu: HashMap::new(),
         new_vetoes: HashMap::new(),
         agent_refused: HashMap::new(),
+        fable_refused: HashMap::new(),
         scanned_at: SystemTime::now(),
         sessions_seen: Vec::new(),
         log_lines: Vec::new(),

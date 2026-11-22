@@ -3,6 +3,7 @@
 //! lapses first.
 
 use super::*;
+use super::fable_need::Judged;
 
 const HEADS_UP_FILE: &str = "heads_up.tsv";
 const REFUSED_FILE: &str = "refused.tsv";
@@ -36,7 +37,8 @@ impl ClaudecodePlugin {
         let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
         let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
         let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email, rooms::unix_now());
-        for meta in result.new_meta.values() {
+        for (sid, meta) in &result.new_meta {
+            self.note_fable_refusal(host, *sid, meta, result);
             let Some(r) = meta.refused_at.as_ref() else { continue };
             if self.refused.note(meta.profile_num, r) {
                 let what = if r.logged_out {
@@ -69,9 +71,21 @@ impl ClaudecodePlugin {
         // However the pane got where it is -- by hand, by a move, or
         // started there -- one rule: what it is running against what its
         // profile has left for that model.
-        let out_for = |sid: &u64, meta: &BindMeta| -> bool {
-            let model = result.new_models.get(sid).map(String::as_str);
+        // A pane refused Fable is judged as a Fable pane.
+        let judged = |sid: u64, marked: bool| {
+            let model = result.new_models.get(&sid).map(String::as_str);
+            if marked && !quota::needs_fable(model) { Some(fable_need::FABLE) } else { model }
+        };
+        // Judged as Fable, its background agents' refusal of Fable
+        // under this claude is its own: the account may read Unknown,
+        // and then only a refusal says it is out.
+        let out_for = |sid: u64, meta: &BindMeta, model: Option<&str>| -> bool {
+            let agent = result
+                .agent_refused
+                .get(&sid)
+                .filter(|r| quota::needs_fable(model) && quota::needs_fable(Some(&r.model)));
             is_out(meta.profile_num, model, meta.refused_at.as_ref())
+                || agent.is_some_and(|r| is_out(meta.profile_num, model, Some(r)))
         };
         // Forget what was tried for a pane that is out of trouble —
         // but not for one that is merely between bindings.  A cycle
@@ -81,12 +95,14 @@ impl ClaudecodePlugin {
         // fact that a move is already on its way, and the next pass
         // starts a second one on top of the first (seen on pane 442,
         // 2026-09-29: three cycles in 40 seconds).
+        self.fable_need.retain(&result.sessions_seen, rooms::unix_now());
+        let marks = &self.fable_need;
         self.stranded.retain(|sid, _| {
             if !result.sessions_seen.contains(sid) {
                 return false;
             }
             match result.new_meta.get(sid) {
-                Some(m) => out_for(sid, m),
+                Some(m) => out_for(*sid, m, judged(*sid, marks.marked(*sid))),
                 None => true,
             }
         });
@@ -127,10 +143,15 @@ impl ClaudecodePlugin {
             }
             self.unjudged.remove(&sid);
             let in_flight = self.rebalance_in_flight(sid, meta.profile_num);
-            if !out_for(&sid, &meta) {
-                self.heads_up_if_due(host, sid, &rooms, &meta, result);
+            let marked = self.fable_need.marked(sid);
+            let as_judged = judged(sid, marked);
+            // out only for want of the Fable it was refused: the move
+            // answers that refusal, and the session hears about it
+            let for_fable = as_judged != model.as_deref() && !out_for(sid, &meta, model.as_deref());
+            if !out_for(sid, &meta, as_judged) {
+                self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged);
                 if mode != marspot::settings::Rebalance::Off
-                    && self.rebalance(host, sid, &rooms, &meta, result, &choice, in_flight, mode, rebalanced_this_pass)
+                    && self.rebalance(host, sid, &rooms, &meta, result, as_judged, &choice, in_flight, mode, rebalanced_this_pass)
                 {
                     rebalanced_this_pass = true;
                 }
@@ -143,16 +164,19 @@ impl ClaudecodePlugin {
             }
             let first_time = !self.stranded.contains_key(&sid);
             self.stranded.entry(sid).or_default();
-            if first_time {
+            // a pane out only of Fable gets its one line from the move
+            if first_time && !for_fable {
                 host.log(
                     LogLevel::Info,
                     "quota.stranded",
                     &format!("sid={sid} is on P{}, which is out", meta.profile_num),
                 );
             }
-            self.move_off_refused(host, sid, &rooms, meta, result, choice);
+            let model = as_judged.map(str::to_string);
+            self.move_off_refused(host, sid, &rooms, meta, result, choice, Judged { model, for_fable });
         }
         self.persist_heads_up(host);
+        self.persist_fable_need(host);
     }
 
     pub(super) fn load_heads_up(&mut self, host: &dyn PluginHost) {
@@ -195,6 +219,7 @@ impl ClaudecodePlugin {
         result: &ScanResult,
         // the model and effort the sweep confirmed for this pane
         choice: CliChoice,
+        judged: Judged,
     ) {
         // One question, answered from structure: is a command of the
         // user's running on this machine right now — then leave the
@@ -217,10 +242,7 @@ impl ClaudecodePlugin {
         // session to continue *if* something was interrupted.
         let activity = result.new_activity.get(&sid);
         let tool_executing = matches!(activity, Some(CcActivity::ToolPending { executing: true }));
-        // Read before the Situation so the borrow ends here: the
-        // model is a fact about this pane, and the decision is about
-        // where it can go next.
-        let needs_model = result.new_models.get(&sid).cloned();
+        let needs_model = judged.room_model(rooms, meta.profile_num, result.new_models.get(&sid));
         // The idle policy's rule too: a process of its own under claude
         // (unknown counts as one) is work a move would kill.
         let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
@@ -243,27 +265,40 @@ impl ClaudecodePlugin {
                 let tally = self.stranded.entry(sid).or_default();
                 if tally.hold_said != Some(why) {
                     tally.hold_said = Some(why);
-                    host.log(
-                        LogLevel::Info,
-                        "quota.hold",
-                        &format!("sid={sid} stays on P{}: {why}", meta.profile_num),
-                    );
+                    let (event, line) = judged.hold_line(sid, meta.profile_num, why);
+                    host.log(LogLevel::Info, event, &line);
                 }
             }
             quota::Move::To(target) => {
+                let fable_word = judged.for_fable.then(|| self.fable_need.word(sid, meta.profile_num, target)).flatten();
+                let told_fable = fable_word.is_some();
+                // told once per refusal: moved again with nothing new
+                // refused, it goes for what the feed reads
+                let because = match (judged.for_fable, told_fable) {
+                    (true, true) => ": it was refused Fable",
+                    (true, false) => ": the usage feed shows its Fable spent",
+                    (false, _) => "",
+                };
                 host.log(
                     LogLevel::Info,
                     "quota.moving",
-                    &format!("sid={sid} P{} → P{target}", meta.profile_num),
+                    &format!("sid={sid} P{} → P{target}{because}", meta.profile_num),
                 );
                 // the move ends what runs under claude; the session is
-                // told, or it waits on background shells that are gone
-                let word = match (warned, work_running) {
-                    (true, _) => heads_up::after_warned_move(work_running),
-                    (false, true) => heads_up::after_ended_work(&resume_word()),
-                    (false, false) => resume_word(),
+                // told, or it waits on background shells that are gone.
+                // A pane moved for the Fable it was refused hears which
+                // request to start again, whatever else it was told
+                let word = match (fable_word, warned, work_running) {
+                    (Some(said), _, true) => heads_up::after_ended_work(&said),
+                    (Some(said), _, false) => said,
+                    (None, true, _) => heads_up::after_warned_move(work_running),
+                    (None, false, true) => heads_up::after_ended_work(&resume_word()),
+                    (None, false, false) => resume_word(),
                 };
                 if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
+                    if told_fable {
+                        self.fable_need.told(sid);
+                    }
                     self.moved_at.insert(sid, Instant::now());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
@@ -286,8 +321,9 @@ impl ClaudecodePlugin {
         rooms: &[(u8, quota::Room)],
         meta: &BindMeta,
         result: &ScanResult,
+        // what the pane is judged as: a pane refused Fable as Fable
+        model: Option<&str>,
     ) {
-        let model = result.new_models.get(&sid).map(String::as_str);
         let Some((_, room)) = rooms.iter().find(|(p, _)| *p == meta.profile_num) else { return };
         let week = room.reset_7d();
         // the account came back, at a new five hours or a new week: the
@@ -337,12 +373,13 @@ impl ClaudecodePlugin {
         rooms: &[(u8, quota::Room)],
         meta: &BindMeta,
         result: &ScanResult,
+        // what the pane is judged as: a pane refused Fable as Fable
+        model: Option<&str>,
         choice: &CliChoice,
         move_in_flight: bool,
         mode: marspot::settings::Rebalance,
         already_moved_one: bool,
     ) -> bool {
-        let model = result.new_models.get(&sid).map(String::as_str);
         let Some((target, why)) = rebalance::better_home(rooms, meta.profile_num, model) else {
             self.rebalance_said.remove(&sid);
             return false;

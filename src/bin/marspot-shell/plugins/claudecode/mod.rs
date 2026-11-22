@@ -25,6 +25,7 @@ mod rebalance;
 mod switching;
 pub(in crate::plugins) mod heads_up;
 mod refusal;
+mod fable_need;
 pub(in crate::plugins) mod seen;
 mod profile_tag;
 mod model;
@@ -70,6 +71,7 @@ use worker::*;
 use scan_result::*;
 use profile_tag::*;
 use records::*;
+#[cfg(test)]
 use refusal::{last_agent_refusal, refused_since};
 use super::handoff::resume_word;
 use client::ShelldClient;
@@ -140,6 +142,8 @@ pub struct ClaudecodePlugin {
     unjudged: std::collections::HashSet<u64>,
     /// What panes have been told about their accounts.
     refused: seen::Seen,
+    /// Panes refused Fable, judged as Fable panes for a while.
+    fable_need: fable_need::Marks,
 
     /// Panes whose claude has been reclaimed and that are waiting for a
     /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
@@ -245,6 +249,7 @@ impl ClaudecodePlugin {
             heads_up: heads_up::Ledger::default(),
             unjudged: std::collections::HashSet::new(),
             refused: seen::Seen::default(),
+            fable_need: fable_need::Marks::default(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
@@ -371,6 +376,7 @@ mod tests {
     mod cycle_script;
     mod moves;
     mod cycle_clicks;
+    mod fable_refused;
     mod support;
     use support::*;
 

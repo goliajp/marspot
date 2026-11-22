@@ -451,6 +451,7 @@ impl WorkerCtx {
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
         let mut new_vetoes: HashMap<u64, (bool, bool)> = HashMap::new();
         let mut agent_refused: HashMap<u64, super::quota::Refusal> = HashMap::new();
+        let mut fable_refused: HashMap<u64, super::fable_need::Ask> = HashMap::new();
         self.caches.env.prune(obs);
         // Pass 1 — the per-pane facts, gathered before anything is
         // bound.  Binding needs to be a decision over the whole set:
@@ -744,17 +745,12 @@ impl WorkerCtx {
             // a read failure is an empty window, which every check below
             // takes as "no evidence"
             let tail = jsonl_path.as_ref().map(|_| tail.unwrap_or_default());
-            // Remembered per transcript: a refusal leaves the window
-            // within minutes on a busy session, and a pane is still
-            // shut out after that.
-            let refused_at_for = match (&jsonl_path, tail.as_deref()) {
-                (Some(path), Some(window)) => self.remember_refusal(path, window),
-                (Some(path), None) => self.last_refusal.get(path).cloned(),
-                (None, _) => None,
-            };
-            // only what an agent of this process was told, as for the pane itself
-            if let Some(r) = super::refused_since(tail.as_deref().and_then(super::last_agent_refusal), f.claude_start) {
+            let told = self.told(jsonl_path.as_ref(), tail.as_deref(), f.claude_start);
+            if let Some(r) = told.agent {
                 agent_refused.insert(f.shelld_sid, r);
+            }
+            if let Some(a) = told.fable {
+                fable_refused.insert(f.shelld_sid, a);
             }
             let mut work = work_in_flight(f.claude.pid, &obs.table);
             work.sort();
@@ -791,18 +787,9 @@ impl WorkerCtx {
                     claude: f.claude,
                     project_basename,
                     project_dir,
-                    // The same tail, third question: has the account
-                    // refused this session, and when. Kept once seen,
-                    // because the window it is read from moves.
-                    //
-                    // Only what this process was told counts. The
-                    // transcript follows a session across a profile
-                    // switch, so a refusal from the account it just
-                    // left is still in there and would read as the new
-                    // account refusing. An account that really is out
-                    // refuses the new process too, and that refusal is
-                    // newer than its start.
-                    refused_at: super::refused_since(refused_at_for, f.claude_start),
+                    // the same tail, third question: has the account
+                    // refused this session, and when
+                    refused_at: told.own,
                     transcript_at: jsonl_path
                         .as_ref()
                         .and_then(|p| p.metadata().ok())
@@ -838,7 +825,7 @@ impl WorkerCtx {
         let (usage, choices) = quota_inputs(&new_meta);
         ScanResult {
             new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes,
-            scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused,
+            scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused, fable_refused,
         }
     }
 }

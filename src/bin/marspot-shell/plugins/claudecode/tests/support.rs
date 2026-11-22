@@ -144,6 +144,8 @@ pub(super) struct FakeHost {
     /// Every badge / title push, in order.
     pub(super) pane_badges: std::sync::Mutex<Vec<(u64, String)>>,
     pub(super) pane_titles: std::sync::Mutex<Vec<(u64, String)>>,
+    /// Every log line, as (event, text).
+    pub(super) logged: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl FakeHost {
@@ -162,6 +164,7 @@ impl FakeHost {
             sent: std::sync::Mutex::new(Vec::new()),
             pane_badges: std::sync::Mutex::new(Vec::new()),
             pane_titles: std::sync::Mutex::new(Vec::new()),
+            logged: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -207,7 +210,9 @@ impl PluginHost for FakeHost {
     fn state_dir(&self) -> Result<PathBuf, PluginError> {
         Ok(self.state_dir.clone())
     }
-    fn log(&self, _: LogLevel, _: &str, _: &str) {}
+    fn log(&self, _: LogLevel, event: &str, line: &str) {
+        self.logged.lock().unwrap().push((event.to_string(), line.to_string()));
+    }
     fn submit_pty_op_at(
         &self,
         sid: u64,
@@ -329,6 +334,7 @@ pub(super) fn scan_with(sid: u64, claude_pid: i32, uuid: &str) -> ScanResult {
         new_cpu,
         new_vetoes: HashMap::from([(sid, (false, false))]),
         agent_refused: HashMap::new(),
+        fable_refused: HashMap::new(),
         scanned_at: SystemTime::now(),
         sessions_seen: vec![sid],
         log_lines: Vec::new(),
@@ -403,6 +409,7 @@ pub(super) fn scan_of(sid: u64, activity: CcActivity) -> ScanResult {
         new_cpu: HashMap::new(),
         new_vetoes: HashMap::new(),
         agent_refused: HashMap::new(),
+        fable_refused: HashMap::new(),
         scanned_at: SystemTime::now(),
         sessions_seen: vec![sid],
         log_lines: Vec::new(),

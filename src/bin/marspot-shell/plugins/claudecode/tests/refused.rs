@@ -167,6 +167,16 @@ fn an_agent_the_api_refused_is_read_from_the_notice_of_its_failure() {
     );
     assert_eq!(last_agent_refusal(&overloaded), None);
 
+    // nor when the agent's last output, carried after the summary,
+    // quotes a refusal it never got
+    let quoting = overloaded.replace(
+        r"</summary>\n",
+        r"</summary>\n<result>it said: You've hit your Fable limit · resets Nov 27 at 2pm (model sent to the API: claude-fable-5-2)</result>\n",
+    );
+    assert!(quoting.contains("<result>"), "{quoting}");
+    assert_eq!(last_agent_refusal(&quoting), None);
+    assert_eq!(super::super::refusal::refused_agent_name(&quoting).as_deref(), Some("x"));
+
     // nor are the same words quoted in a message
     let quoted = format!(
         r#"{{"parentUuid":"p","isSidechain":false,"type":"user","message":{{"role":"user","content":{}}},"timestamp":"2026-11-11T11:20:00.000Z"}}"#,
