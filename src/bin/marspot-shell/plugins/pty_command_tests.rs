@@ -116,8 +116,8 @@ impl OpEnv for Env {
     fn signal(&self, _id: ProcId, _sig: i32) -> Result<(), SignalError> {
         Err(SignalError::Gone)
     }
-    fn pid_alive(&self, _id: ProcId) -> bool {
-        false
+    fn pid_alive(&self, id: ProcId) -> bool {
+        !matches!(pidtree::signal(id, 0), Err(SignalError::Gone))
     }
     fn find_descendant(&self, _under: i32, _pred: fn(&pidtree::ProcRow) -> bool) -> Option<ProcId> {
         None
@@ -305,4 +305,54 @@ fn nothing_is_typed_while_another_program_holds_the_terminal() {
     shell.type_in(b"\x04");
     shell.wait_for(mark, "P> ");
     assert_eq!(std::fs::read_to_string(&got).unwrap(), "", "cat was given input");
+}
+
+/// The program a script waited for exits before the script types at
+/// it.  The paste must not reach the shell left holding the terminal,
+/// which would read it as commands; the run ends saying why.
+#[test]
+fn nothing_is_pasted_once_the_awaited_program_has_exited() {
+    use crate::plugins::pty_op::front::{self, Front};
+    let tmp = marspot_term::test_env::sandbox_state_dir();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let shell = Shell::spawn("/bin/zsh", &["-f", "-i"], &root);
+    let pid = shell.pty.child_pid();
+    shell.type_in(b"PS1='P> '; echo SETUP-DONE\r");
+    shell.wait_for(0, "SETUP-DONE");
+    shell.type_in(b"/bin/sleep 30\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !matches!(front::of(pid), Front::Program { ref comm, .. } if comm == "sleep") {
+        assert!(Instant::now() < deadline, "sleep never took the terminal: {:?}", front::of(pid));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let Front::Program { pid: sleeper, .. } = front::of(pid) else { unreachable!() };
+    let mark = shell.len();
+    // between finding the program and typing at it, the program goes:
+    // an interrupt from the terminal, as a person's ^C would
+    let pty = Arc::clone(&shell.pty);
+    let gone: crate::plugins::pty_op::CallFn = Arc::new(move || {
+        pty.write_shared(b"\x03").map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while front::of(pid) != Front::Shell {
+            if Instant::now() > deadline {
+                return Err("the shell never took its terminal back".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    });
+    let op = PtyOp::new("test.paste")
+        .step(Step::await_process(pid, |r| r.comm == "sleep"))
+        .step(Step::call(gone))
+        .step(Step::paste("echo PASTED-INTO-SHELL\r"));
+    let log = run(op, &shell);
+
+    assert!(!log.iter().any(|l| l.contains("Done")), "the op must not finish as done: {log:?}");
+    assert!(
+        log.iter().any(|l| l.starts_with("test.paste.not_typed") && l.contains(&format!("pid {sleeper}"))),
+        "the run says the program it found is gone: {log:?}"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let after = shell.text()[mark..].to_string();
+    assert!(!after.contains("PASTED-INTO-SHELL"), "the paste reached the shell: {after:?}");
 }
