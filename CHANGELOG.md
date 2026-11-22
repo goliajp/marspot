@@ -18,6 +18,11 @@ Per-layer version numbers live in `version-vector.toml`.
   pane is remembered as needing Fable for 12 hours, also across a
   restart, and is no longer moved away to leave Fable to other panes.
   When no account has Fable left it stays where it is.
+- Text pasted into a program that asked for bracketed paste can no
+  longer end the paste early. Paste markers inside the text are
+  removed before it is wrapped, so the rest of the text reaches the
+  program as pasted text, not as typed keys. Before, a pasted
+  `ESC[201~` made everything after it run as if typed.
 
 ## 0.8.0
 
