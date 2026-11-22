@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.552"  # cc: move session and binding meta out of the claudecode plugin's mod.rs
-core    = "0.12.599"  # move the per-window render state out of render_metal.rs
+core    = "0.12.600"  # move the window frame path out of render_metal.rs
 session = "0.11.406"  # basic: name what terminal.rs still holds in its carve-out marker
