@@ -462,84 +462,6 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
 
-    /// A temp `HOME` with two profiles: P1 on an account that is out,
-    /// P2 on one with room.  One right answer, so a test never has to
-    /// argue about which way the pick went.
-    fn quota_home(tag: &str) -> TestHome {
-        let home = TestHome::new(&format!("quota-{tag}"));
-        for n in [1u8, 2] {
-            fs::create_dir_all(home.join(format!(".claude-profile-{n}/sessions"))).unwrap();
-            fs::write(
-                home.join(format!(".claude-profile-{n}/.claude.json")),
-                format!("{{\n  \"oauthAccount\": {{\n    \"emailAddress\": \"{tag}{n}@example\"\n  }}\n}}"),
-            )
-            .unwrap();
-        }
-        fs::create_dir_all(home.join(".local/state/devops")).unwrap();
-        fs::write(
-            home.join(".local/state/devops/claude-usage.json"),
-            format!(
-                r#"{{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
-                   {{"name":"A","email":"{tag}1@example","status":"rejected","utilization_5h":0.0,
-                    "utilization_7d":1.0,"reset_5h":1,"reset_7d":4102444800}},
-                   {{"name":"B","email":"{tag}2@example","status":"allowed","utilization_5h":0.0,
-                    "utilization_7d":0.2,"reset_5h":1,"reset_7d":4102444900}}]}}"#
-            ),
-        )
-        .unwrap();
-        // The status-line hook's records, which a switch starts the new
-        // claude from: every pane in these tests is on Opus 5.5.
-        let push = model_push_dir();
-        fs::create_dir_all(&push).unwrap();
-        for n in 77..=81 {
-            fs::write(
-                push.join(format!("u-{n}")),
-                "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n",
-            )
-            .unwrap();
-        }
-        home
-    }
-
-    /// A pane bound to P1 of that `HOME`, with the session name it
-    /// would have to resume.
-    fn pane_on_p1(home: &std::path::Path, uuid: &str) -> BindMeta {
-        BindMeta {
-            bound_by: "test",
-            profile_num: 1,
-            config_dir: Some(home.join(".claude-profile-1").to_string_lossy().into_owned()),
-            uuid: uuid.into(),
-            claude: live_claude(),
-            has_transcript: true,
-            transcript_at: SystemTime::UNIX_EPOCH,
-            project_basename: String::new(),
-            project_dir: None,
-            refused_at: None,
-        }
-    }
-
-    fn scan_of(sid: u64, activity: CcActivity) -> ScanResult {
-        let mut result = ScanResult {
-            new_mapping: HashMap::new(),
-            new_models: HashMap::new(),
-            new_meta: HashMap::new(),
-            new_activity: HashMap::new(),
-            new_cpu: HashMap::new(),
-            new_vetoes: HashMap::new(),
-            agent_refused: HashMap::new(),
-            scanned_at: SystemTime::now(),
-            sessions_seen: vec![sid],
-            log_lines: Vec::new(),
-            profiles: profiles::ProfileCache::default().read(),
-            usage: None,
-            choices: HashMap::new(),
-        };
-        result.new_activity.insert(sid, activity);
-        result.new_vetoes.insert(sid, (false, false));
-        result.new_models.insert(sid, "opus-5-5".into());
-        result
-    }
-
     /// An automatic switch does not go ahead on a guess about the pane:
     /// its model has to be known, and the hook's record of what to
     /// start the new claude on has to name the same one.
@@ -581,24 +503,6 @@ mod tests {
         assert_eq!(handed.len(), 1, "both reads agree: it moves");
         let sent = host.sent.lock().unwrap().clone();
         assert!(sent[0].1.contains("--model 'claude-opus-5-5'"), "{:?}", sent[0].1);
-    }
-
-    /// The sweep on a scan that bound what `plugin.last_meta` holds:
-    /// the sweep reads the scan's bindings, these tests set the plugin's.
-    fn sweep(plugin: &mut ClaudecodePlugin, host: &FakeHost, scan: &mut ScanResult) {
-        for (sid, m) in &plugin.last_meta {
-            scan.new_meta.insert(*sid, m.clone());
-        }
-        // what the worker reads alongside the bindings
-        (scan.usage, scan.choices) = quota_inputs(&scan.new_meta);
-        plugin.sweep_unusable_profiles(host, scan);
-    }
-
-    fn stranded_plugin(meta: BindMeta, sid: u64) -> ClaudecodePlugin {
-        let mut plugin = ClaudecodePlugin::new();
-        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
-        plugin.last_meta.insert(sid, meta);
-        plugin
     }
 
     /// P2 has room by the feed, which cannot tell an account nobody has
