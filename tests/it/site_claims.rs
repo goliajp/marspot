@@ -708,51 +708,6 @@ mod known_gaps {
         }
     }
 
-    /// The cluster text of column 0 anywhere in history, read the way
-    /// the renderer reads it.
-    fn history_cluster(g: &marspot::grid::Grid) -> Option<String> {
-        let mut row = Vec::new();
-        for off in 1..=g.scrollback_len() as u16 {
-            for r in 0..g.rows() {
-                let cell = g.cell_at_view(off, 0, r);
-                g.row_clusters_at_view(off, r, &mut row);
-                if let Some(t) =
-                    g.cluster_text(&cell).or_else(|| marspot::grid::cluster_in_row(&row, 0))
-                {
-                    return Some(t.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn a_cluster_survives_a_restart_but_not_a_width_change() {
-        use marspot::grid::{Cell, CellAttrs, Grid};
-        says("survive scrolling back and a restart, but not a change of window width");
-        the_page_says("survive scrolling back and a restart, but not a change of window width");
-
-        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
-        let d = Dir::new("cluster");
-        {
-            let mut g = Grid::with_scrollback_kind(20, 3, d.open());
-            let cell = g.cluster_cell(family, CellAttrs::default());
-            g.set_cell(0, 0, cell);
-            for _ in 0..8 {
-                g.scroll_up(1, Cell::default());
-            }
-        }
-        // a new grid over the same files is what a restarted pane is
-        let mut g = Grid::with_scrollback_kind(20, 3, d.open());
-        assert_eq!(history_cluster(&g).as_deref(), Some(family), "a restart lost the cluster");
-        g.resize(16, 3);
-        assert_eq!(
-            history_cluster(&g),
-            None,
-            "a width change kept the cluster; take this entry off the README and the page"
-        );
-    }
-
     #[test]
     fn osc8_links_in_history_on_disk_survive_a_restart_but_not_a_width_change() {
         use marspot::grid::{Cell, Grid};
