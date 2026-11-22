@@ -218,52 +218,7 @@ fn restart_cooldown(trips: u32) -> Duration {
 }
 
 #[cfg(test)]
-mod supervisor_deadline_tests {
-    use super::*;
-
-    /// 2026-08-11 的原形:核心启动慢,握手完成时 spawn 锚点已经过
-    /// 期,于是它刚说完 hello 就被判"卡死"。
-    #[test]
-    fn a_slow_boot_still_gets_a_full_window_to_answer() {
-        let hello = Instant::now();
-        // 旧行为:锚点在 spawn。握手花了 20 秒 → 握手当场就超期。
-        let spawned = hello - Duration::from_secs(20);
-        assert!(
-            pong_overdue(true, spawned, hello),
-            "spawn 锚点会让慢启动的核心在握手瞬间被判死 —— 这正是要修的",
-        );
-        // 新行为:锚点在 HelloAck。整整一个 PONG_DEADLINE 都归它。
-        assert!(!pong_overdue(true, hello, hello + PONG_DEADLINE));
-        assert!(pong_overdue(true, hello, hello + PONG_DEADLINE + Duration::from_secs(1)));
-        // 还没握上手的核心归 HELLO_TIMEOUT 管,不归这里。
-        assert!(!pong_overdue(false, spawned, hello));
-    }
-
-    /// 我们自己没在跑的那段时间,不能记在对方账上。
-    #[test]
-    fn time_we_did_not_witness_is_handed_back() {
-        let now = Instant::now();
-        let anchor = now - Duration::from_secs(60);
-        // 整整 60 秒的停摆:锚点回到 now,立刻重新计时,不判超期。
-        let forgiven = forgive_stall(anchor, Duration::from_secs(60), now);
-        assert!(!pong_overdue(true, forgiven, now));
-        // 但不许推到未来 —— 那等于白送一个 deadline。
-        assert_eq!(forgive_stall(anchor, Duration::from_secs(600), now), now);
-        // 停摆只有 1 秒,就只还 1 秒:真卡死仍然抓得到。
-        let barely = forgive_stall(anchor, Duration::from_secs(1), now);
-        assert!(pong_overdue(true, barely, now));
-    }
-
-    /// 冷却时间翻倍、封顶,且永远不为零 —— 为零就等于没有预算。
-    #[test]
-    fn the_cool_down_doubles_then_stops_doubling() {
-        assert_eq!(restart_cooldown(0), CRASH_WINDOW);
-        assert_eq!(restart_cooldown(1), CRASH_WINDOW);
-        assert_eq!(restart_cooldown(2), CRASH_WINDOW * 2);
-        assert_eq!(restart_cooldown(4), CRASH_WINDOW * 8);
-        assert_eq!(restart_cooldown(99), CRASH_WINDOW * 8, "封顶后不再增长");
-    }
-}
+mod supervisor_deadline_tests;
 
 /// Everything tied to one live core process: its child handle, the
 /// control socket (both directions), and the liveness-handshake
@@ -480,54 +435,7 @@ fn resize_work(prev: Option<AttachedGeometry>, now: &AttachedGeometry) -> Resize
 }
 
 #[cfg(test)]
-mod resize_work_tests {
-    use super::{resize_work, AttachedGeometry, ResizeWork};
-
-    fn geom(w: usize, h: usize, scale: f64, lights: f64) -> AttachedGeometry {
-        AttachedGeometry { w_px: w, h_px: h, scale, lights_right_phys: lights }
-    }
-
-    /// The 2026-09-27 report: a window nobody was resizing flickered,
-    /// and the log had 144 resize notifications a second behind it,
-    /// each one allocating an IOSurface pair and swapping the
-    /// presenter onto a surface the core had only started painting.
-    #[test]
-    fn a_notification_with_nothing_new_costs_nothing() {
-        let g = geom(2000, 1400, 2.0, 69.0);
-        assert_eq!(resize_work(Some(g), &g), ResizeWork::Nothing);
-    }
-
-    #[test]
-    fn the_first_notification_always_attaches() {
-        assert_eq!(resize_work(None, &geom(2000, 1400, 2.0, 69.0)), ResizeWork::Attach);
-    }
-
-    #[test]
-    fn moved_pixels_attach() {
-        let prev = geom(2000, 1400, 2.0, 69.0);
-        assert_eq!(resize_work(Some(prev), &geom(2000, 1401, 2.0, 69.0)), ResizeWork::Attach);
-        assert_eq!(resize_work(Some(prev), &geom(1999, 1400, 2.0, 69.0)), ResizeWork::Attach);
-    }
-
-    /// A window dragged to a display of another density keeps its
-    /// pixel size and needs everything rebuilt anyway.
-    #[test]
-    fn a_new_density_attaches_at_the_same_size() {
-        let prev = geom(2000, 1400, 2.0, 69.0);
-        assert_eq!(resize_work(Some(prev), &geom(2000, 1400, 1.0, 69.0)), ResizeWork::Attach);
-    }
-
-    /// Full-screen moves the buttons without moving a pixel of the
-    /// drawable; routing that through the surface path is what left
-    /// the toolbar sitting on the buttons for a whole animation.
-    #[test]
-    fn a_moved_button_cluster_travels_on_its_own() {
-        let prev = geom(2000, 1400, 2.0, 69.0);
-        assert_eq!(resize_work(Some(prev), &geom(2000, 1400, 2.0, 0.0)), ResizeWork::ChromeOnly);
-        // Measurement noise is not a move.
-        assert_eq!(resize_work(Some(prev), &geom(2000, 1400, 2.0, 69.3)), ResizeWork::Nothing);
-    }
-}
+mod resize_work_tests;
 
 impl ShellWindow {
     fn new(window_id: u32, frame_index: usize) -> Self {
@@ -3637,96 +3545,7 @@ fn live_frames_by_slot(
 }
 
 #[cfg(test)]
-mod window_frame_merge_tests {
-    use super::{live_frames_by_slot, merge_window_frames};
-    use marspot::state::SavedWindow;
-
-    fn win(x: f64) -> SavedWindow {
-        SavedWindow { display_id: 1, x, y: 10.0, w: 1200.0, h: 800.0 }
-    }
-
-    /// The 2026-08-03 half of the same bug: close the FIRST of two
-    /// windows and the survivor used to write itself into slot 0,
-    /// overwriting the closed window's geometry — so when the closed
-    /// window came back (it is parked, not discarded) the two had
-    /// swapped places.
-    #[test]
-    fn a_closed_window_keeps_its_slot_for_the_window_still_open() {
-        let prev = vec![win(0.0), win(872.0)];
-        // Window 0 closed; window 1 is still open and still slot 1.
-        let live = live_frames_by_slot(
-            [(1usize, Some(win(880.0)))].into_iter(),
-            prev.len(),
-        );
-        let out = merge_window_frames(&prev, &live);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].x, 0.0, "the closed window's geometry is untouched");
-        assert_eq!(out[1].x, 880.0, "the open one wrote its own slot");
-    }
-
-    /// A window opened past everything on disk grows the list.
-    #[test]
-    fn a_window_in_a_new_slot_extends_the_list() {
-        let live = live_frames_by_slot(
-            [(0usize, Some(win(1.0))), (2usize, Some(win(2.0)))].into_iter(),
-            1,
-        );
-        assert_eq!(live.len(), 3);
-        assert!(live[1].is_none(), "the gap stays a gap");
-        assert_eq!(live[2].as_ref().unwrap().x, 2.0);
-    }
-
-    /// The silent-update regression: one live window, two on disk.
-    /// The second entry is the geometry the boot restore is about to
-    /// ask for, so it has to survive window 0's save.
-    #[test]
-    fn a_single_live_window_does_not_delete_the_other_saved_frames() {
-        let prev = vec![win(0.0), win(872.0)];
-        let live = vec![Some(win(5.0))];
-        let out = merge_window_frames(&prev, &live);
-        assert_eq!(out.len(), 2, "saved tail must survive");
-        assert_eq!(out[0].x, 5.0, "live window wins its own slot");
-        assert_eq!(out[1].x, 872.0, "window 1 keeps its saved geometry");
-    }
-
-    /// A live window with no frame yet keeps its slot pointing at the
-    /// saved value — the old `filter_map` dropped it and shifted the
-    /// windows after it up by one.
-    #[test]
-    fn a_frameless_live_window_keeps_its_slot_instead_of_shifting() {
-        let prev = vec![win(0.0), win(100.0), win(200.0)];
-        let live = vec![Some(win(1.0)), None, Some(win(201.0))];
-        let out = merge_window_frames(&prev, &live);
-        assert_eq!(
-            out.iter().map(|w| w.x).collect::<Vec<_>>(),
-            vec![1.0, 100.0, 201.0],
-        );
-    }
-
-    /// Nothing live and nothing saved for a slot: a hole, not a shift.
-    #[test]
-    fn a_slot_with_no_history_becomes_a_hole_not_a_shift() {
-        let live = vec![None, Some(win(9.0))];
-        let out = merge_window_frames(&[], &live);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].w, 0.0, "hole is zero-sized (restore rejects it)");
-        assert_eq!(out[1].x, 9.0, "later window keeps index 1");
-    }
-
-    #[test]
-    fn a_new_window_past_the_saved_list_is_appended() {
-        let prev = vec![win(0.0)];
-        let live = vec![Some(win(0.0)), Some(win(500.0))];
-        let out = merge_window_frames(&prev, &live);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[1].x, 500.0);
-    }
-
-    #[test]
-    fn no_windows_and_no_history_writes_nothing() {
-        assert!(merge_window_frames(&[], &[]).is_empty());
-    }
-}
+mod window_frame_merge_tests;
 
 impl ShellApp {
     /// F3+6.1 — read the NSWindow's current frame + screen, atomic-
