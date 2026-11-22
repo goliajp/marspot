@@ -160,7 +160,7 @@ fn bytes_reach_a_pane_only_through_the_io_the_op_runner_drives() {
 /// interface -- rather than from a plugin directly.
 #[test]
 fn the_forwarder_is_called_from_the_op_runners_interface() {
-    let text = std::fs::read_to_string(format!("{PLUGINS}/claudecode/mod.rs"))
+    let text = std::fs::read_to_string(format!("{PLUGINS}/claudecode/client.rs"))
         .expect("the client is where it was");
     let lines = production_lines(&text);
     let callers: Vec<usize> = lines
