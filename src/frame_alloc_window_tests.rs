@@ -114,6 +114,7 @@ fn a_whole_window_frame_allocates_nothing_once_warm() {
                 bot_fixed_h_cells: 0,
                 highlight_spans: &[],
                 search_overlay: None,
+                history: Default::default(),
                 seq: if i == 4 { seq } else { 1 },
             });
             build_instances(

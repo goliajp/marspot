@@ -37,6 +37,10 @@ pub fn danger() -> [f32; 4] { rgba::danger() }
 /// track has to separate from the card it sits on (`SURFACE_1`),
 /// otherwise "0 %" and "no data" look identical.
 pub fn track() -> [f32; 4] { rgba::surface_4() }
+/// The thumb of a pane's scrollbar.  Opaque, and the quiet line
+/// colour: it says where the view is without competing with the text
+/// it lies over.
+pub fn scroll_thumb() -> [f32; 4] { rgba::border_strong() }
 /// A card sits **on** its panel, so it takes the surface level
 /// above the panel's own — the same step in every panel.
 pub fn card_bg() -> [f32; 4] { rgba::surface_3() }

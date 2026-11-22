@@ -88,6 +88,7 @@ scenes_hold_at_both_scales! {
     density_chrome_menu = chrome::chrome_snapshot_menu, 2;
     density_chrome_close = chrome::chrome_snapshot_close, 0;
     density_chrome_terminal = chrome::chrome_snapshot_terminal, 0;
+    density_chrome_scrollback = chrome::chrome_snapshot_scrollback, 0;
 }
 
 /// A sheet with one thing wrong in it: a card placed in points and
@@ -297,6 +298,7 @@ pictures_at_scale_2! {
     chrome_snapshot_window_2x = chrome::chrome_snapshot_window;
     chrome_snapshot_search_2x = chrome::chrome_snapshot_search;
     chrome_snapshot_menu_2x = chrome::chrome_snapshot_menu;
+    chrome_snapshot_scrollback_2x = chrome::chrome_snapshot_scrollback;
     panel_snapshot_settings_2x = panel::panel_snapshot_settings;
     panel_snapshot_shortcuts_2x = panel::panel_snapshot_shortcuts;
     panel_snapshot_layout_2x = panel::panel_snapshot_layout;

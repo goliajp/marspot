@@ -11,6 +11,7 @@ use crate::frame_build::color::rgba8_of_f32;
 use golia_ui_core::scene::{RectInstance as CellInstance, GlyphInstance, UiRectInstance};
 use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::panel_palette as palette;
+use crate::ui::components::scrollbar::Scrollbar;
 use crate::ui::theme::spec::chrome as chrome_spec;
 use crate::ui::components::context_menu_view::MenuRender;
 use crate::ui::components::layout_view::LayoutModalRender;
@@ -137,6 +138,7 @@ pub(crate) fn build_frame(
 
     push_drop_preview(drop_preview, overlay_ui_rects);
     push_scrims(layout, views, drag_source, overlay_ui_rects);
+    push_scrollbars(layout, views, overlay_ui_rects);
 
     // Sidebar BG = cell BG (already covered by the clear pass).  No
     // explicit fill needed unless the sidebar palette ever diverges.
@@ -285,6 +287,17 @@ fn push_scrims(
             shadow_color: golia_ui_core::Rgba8::TRANSPARENT,
             shadow_blur: 0.0,
         });
+    }
+}
+
+/// The thumb of each pane scrolled back into its history, over the
+/// pane's scrim so a pane not in use still says where it is.
+fn push_scrollbars(layout: &Layout, views: &[SessionView], overlay_ui_rects: &mut Vec<UiRectInstance>) {
+    for (view, cell) in views.iter().zip(&layout.cells) {
+        let bar = Scrollbar::of(cell, layout.cell_title_h, view.grid.rows(), view.history);
+        if let Some(bar) = bar {
+            overlay_ui_rects.push(bar.instance());
+        }
     }
 }
 

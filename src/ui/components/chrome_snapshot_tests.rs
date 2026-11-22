@@ -4,8 +4,8 @@
 //!
 //! Same machinery and the same way of recording and fetching as the
 //! panel pictures (see `panel_snapshot_tests`); the tests are
-//! `chrome_snapshot_{window,search,menu,close,terminal}` and the
-//! baselines `bench/ui/snapshots/chrome_{window,search,menu,close,terminal}.png`.
+//! `chrome_snapshot_{window,search,menu,close,terminal,scrollback}` and the
+//! baselines `bench/ui/snapshots/chrome_{window,search,menu,close,terminal,scrollback}.png`.
 //! `before/` beside them holds the first three scenes as they were
 //! drawn before the chrome took its colours and sizes from the theme.
 //! All but `close` are drawn again under the light and the
@@ -14,7 +14,7 @@
 use super::density_kit;
 use super::panel_snapshot_tests::terminal_text;
 use crate::grid::{Cell, CellAttrs, Color, Grid};
-use crate::render::{HighlightSpan, SelectionView};
+use crate::render::{HighlightSpan, HistoryView, SelectionView};
 use crate::layout::Layout;
 use crate::render::{SearchHitView, SearchOverlayView, SessionView, SidebarEntry};
 use crate::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
@@ -36,10 +36,20 @@ struct PaneSpec {
     content: fn(u16, u16) -> Grid,
     selection: Option<SelectionView>,
     hits: &'static [HighlightSpan],
+    history: HistoryView,
 }
 
 fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
-    PaneSpec { title, badge, state, search: None, content: terminal_text, selection: None, hits: &[] }
+    PaneSpec {
+        title,
+        badge,
+        state,
+        search: None,
+        content: terminal_text,
+        selection: None,
+        hits: &[],
+        history: HistoryView::default(),
+    }
 }
 
 /// A screen that uses every terminal colour: the sixteen as text and
@@ -173,6 +183,7 @@ fn snapshot_on(
             bot_fixed_h_cells: 0,
             highlight_spans: p.hits,
             search_overlay: p.search.clone(),
+            history: p.history,
             seq: 1 + i as u64,
         })
         .collect();
@@ -356,6 +367,18 @@ pub(super) fn chrome_snapshot_close() {
 pub(super) fn chrome_snapshot_terminal() {
     let panes = [ansi_pane("colours"), ansi_pane("colours, not in use")];
     snapshot("chrome_terminal", (1600, 900), (1, 2), &panes, 0, |_, _, _| {});
+}
+
+/// Two panes scrolled back into their history: the one in use a third
+/// of the way up a short history, the other near the top of a deep one,
+/// where the thumb is as short as it gets.
+#[test]
+pub(super) fn chrome_snapshot_scrollback() {
+    let panes = [
+        PaneSpec { history: HistoryView { offset: 40, len: 120 }, ..pane("smix", "", SessionState::Active) },
+        PaneSpec { history: HistoryView { offset: 9000, len: 9500 }, ..pane("devops", "", SessionState::Idle) },
+    ];
+    snapshot("chrome_scrollback", (1200, 640), (2, 1), &panes, 0, |_, _, _| {});
 }
 
 crate::snapshot_kit::snapshots_in_other_themes! {
