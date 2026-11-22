@@ -322,6 +322,8 @@ pub struct Terminal {
     /// Text a program asked to put on the clipboard with OSC 52,
     /// waiting for whoever owns the pasteboard to collect it.
     osc_clipboard: Option<String>,
+    /// A bare BEL arrived since the last `take_bell`.
+    bell: bool,
     /// G0 is the DEC Special Graphics set, selected by `ESC ( 0`.
     g0_graphics: bool,
     /// DECOM (`?6`).  While set, row addressing counts from the top
@@ -624,6 +626,7 @@ impl Terminal {
             pending_wrap: false,
             tabs: crate::tabs::TabStops::new(cols),
             osc_clipboard: None,
+            bell: false,
             g0_graphics: false,
             origin_mode: false,
             insert_mode: false,
@@ -849,14 +852,17 @@ impl Terminal {
         (m.keypad_app, m.autowrap, m.reverse_screen) = (false, true, false);
     }
 
-    /// Take whatever a program asked to put on the clipboard.
-    ///
-    /// The terminal cannot reach a pasteboard — it does not know
-    /// there is one — so it holds the text until the layer that can
-    /// comes to collect it.  Taking it clears it: a clipboard write
-    /// happens once.
+    /// Take whatever a program asked to put on the clipboard.  The
+    /// terminal cannot reach a pasteboard, so it holds the text until
+    /// the layer that can collects it, once.
     pub fn take_osc_clipboard(&mut self) -> Option<String> {
         self.osc_clipboard.take()
+    }
+
+    /// Whether a bare BEL arrived since the last call; any number of
+    /// them is one ring.  A BEL that ends an OSC string is not one.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.bell)
     }
 
     /// Forget that anything asked for mouse reports.
@@ -2166,6 +2172,7 @@ struct Handler<'a> {
     pending_wrap: &'a mut bool,
     tabs: &'a mut crate::tabs::TabStops,
     osc_clipboard: &'a mut Option<String>,
+    bell: &'a mut bool,
     g0_graphics: &'a mut bool,
     /// See `Terminal::origin_mode`.
     origin_mode: &'a mut bool,
@@ -2781,26 +2788,17 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn execute(&mut self, byte: u8) {
-        // A control code ends the text run, so a `<` still waiting to
-        // become a tag never will.  Without this, a line ending in one
-        // swallows it until the next printable character.
+        // a control ends the text run: a `<` waiting to become a tag
+        // never will, else a line ending in one swallows it
         self.flush_u_buf();
-        // Any pending grapheme cluster ends here: a C0 control byte
-        // can never extend a cluster, so commit it now.
         self.flush_cluster_for_break();
-        // Trace C0 row-advancers (LF/CR/BS/Tab) so we can see how the
-        // app actually moves between rows — `CSI 1 B` shows up in the
-        // CSI trace but plain `\n` / `\r` only show here.
+        // row-advancers (LF/CR/BS/Tab): plain `\n` / `\r` show only here
         if matches!(byte, 0x08..=0x0D) {
             trace_seq("C0", &[], &[], byte);
         }
         // The deferred wrap is cancelled per control, not by all of
-        // them.  Blanket-clearing here is the same defect the CSI
-        // dispatch had (see `csi_dispatch`): a control that does not
-        // move the cursor has no business dropping a wrap the last
-        // printed glyph armed.  ghostty clears in `carriageReturn`,
-        // `index` and (via `cursorLeft`) `backspace`, and nowhere else
-        // — `horizontalTab` notably keeps it.
+        // them (see `csi_dispatch`): ghostty clears it in
+        // `carriageReturn`, `index` and `backspace` only; HT keeps it.
         match byte {
             0x08 => {
                 *self.pending_wrap = false;
@@ -2830,7 +2828,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let to = self.tabs.next(col, 1);
                 self.grid.set_cursor(to, row);
             }
-            // BEL makes no sound and shows nothing
+            0x07 => *self.bell = true,
             _ => {} // unknown C0 control: ignore for now
         }
     }

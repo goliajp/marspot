@@ -29,6 +29,11 @@
 #             updates, moves to a new region and lives → and with no
 #             session build staged, the one case in which the session
 #             is started again
+#   bells     in three of the phases above the pane rings the bell: a
+#             new session to the new core and to the old one, which
+#             skips the frame it does not know, and an old session,
+#             which sends none, to the new core; each keeps the
+#             session's stream and goes on showing frames
 #   repeat    old app → new core and new session build at once, a few
 #             times over: every session moves within a bound.  A core
 #             that sent an old session a message it does not know,
@@ -206,6 +211,33 @@ frames_keep_coming() { # how many frames
   done
 }
 
+# Wait for `text` in the region as this build reads it.
+region_shows() { # text
+  local tries
+  for (( tries = 0; tries < 50; tries++ )); do
+    [[ $("$NEW/examples/dump_row" "$SD/sessions/$SID" 40 2>/dev/null) == *"$1"* ]] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Ring the bell in the pane, three times in one line, and go on typing.
+# A new session tells its core in a frame of a type an old core does not
+# know; the core's reader of the session's stream skips it or rings, and
+# either way must not drop the stream.  Keeping the stream shows as no
+# new handshake with the session and no reconnect.
+bells_keep_the_stream() { # who reads the session's stream
+  local hellos reconnects n=$((300 + panes_checks))
+  hellos=$(count "$SD" L3_UDS_HELLO)
+  reconnects=$(count "$SD" L3_CONTROL_RECONNECTED)
+  type_in_pane "$SD" "$SID" "printf '\\a\\a\\a'; echo BELL-\$((1+$n))"
+  check "$1: the line after the bells shows" wait_shows "$SD" "$SID" "BELL-$((1 + n))" 10
+  type_in_pane "$SD" "$SID" "echo BELL-\$((2+$n))"
+  check "$1: the next frame comes after the bells" region_shows "BELL-$((2 + n))"
+  check "$1: the session's stream was kept through the bells" \
+    test "$(count "$SD" L3_UDS_HELLO) $(count "$SD" L3_CONTROL_RECONNECTED)" = "$hellos $reconnects"
+}
+
 new_readers_read_everything() {
   check "this build reads the frame" frame_shows MARK-M
   check "this build reads the cluster text" frame_shows "$FLAG"
@@ -280,6 +312,7 @@ check "the title from before the update is still published" \
 new_readers_read_everything
 check "the new session writes the new core eight-byte frames" layout_is "$PACKED"
 check "the frames keep coming" frames_keep_coming 3
+bells_keep_the_stream "a new session to the new core"
 old_reader_on_packed "a region the new session wrote eight-byte frames into"
 
 echo "════ update: the new core restarts over new sessions ════"
@@ -297,6 +330,7 @@ same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
 check "the session writes the old core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
 check "the old reader takes every frame as this build does" frames_match_old_reader 5
+bells_keep_the_stream "a new session to the old core"
 check "the old readers find the cluster text and title where they look" \
   test -n "$("$OLD/examples/shm_probe" title "$SD/sessions/$SID" 2>/dev/null)"
 
@@ -343,6 +377,7 @@ same_pane
 check "no session was started again" lacks_log core.reattach.l3_failed
 check "an old session writes the new core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
 check "this build reads the frame" frame_shows MARK-M
+bells_keep_the_stream "an old session to the new core"
 
 echo "════ lost: an old session without its region, a new session build staged ════"
 start_app "$OLD"

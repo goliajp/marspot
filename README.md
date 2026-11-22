@@ -173,7 +173,7 @@ Honest list, because you will hit these in the first hour:
   tested against marspot (the extended ones, such as the cursor
   shape or the modified-key strings, are not), with these
   exceptions: Backspace sends DEL (0x7f) rather than the entry's ^H,
-  as every macOS terminal does; BEL makes no sound; no key sends the
+  as every macOS terminal does; no key sends the
   keypad's Begin (`kb2`), since a Mac keypad has no NumLock; the
   keypad's Enter sends Return, not `ESC O M`, because zsh binds
   nothing to that at the prompt; and the printer sequences are

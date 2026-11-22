@@ -22,8 +22,6 @@ mod screen_more;
 pub const EXCEPTIONS: &[(&str, &str)] = &[
     // every macOS terminal sends DEL for Backspace and shells expect it
     ("kbs", "Backspace sends DEL (0x7f), not ^H"),
-    // there is no bell yet: BEL is consumed and nothing happens
-    ("bel", "BEL makes no sound"),
     // a Mac keypad has no NumLock, so no key is KP_Begin
     ("kb2", "no key on a Mac keyboard is the keypad's Begin"),
     // oh-my-zsh sends smkx at every prompt and zsh binds nothing to
@@ -249,7 +247,7 @@ fn terminfo_exceptions_are_capabilities_of_the_entry() {
     for name in ELSEWHERE {
         assert!(entry.iter().any(|(k, _)| k == name), "{name} is not in the entry");
     }
-    assert_eq!(EXCEPTIONS.len(), 8, "the exception list only shrinks");
+    assert_eq!(EXCEPTIONS.len(), 7, "the exception list only shrinks");
 }
 
 #[test]

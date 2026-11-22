@@ -170,10 +170,11 @@ pub fn string(name: &str, s: &[u8]) -> bool {
             let want = if name == "smacs" { '─' } else { 'q' };
             assert_eq!((t.grid().cell(0, 0).ch, t.grid().cell(1, 0).ch), ('─', want));
         }
+        // the session rings it, at most once per published frame
         "bel" => {
-            assert!(EXCEPTIONS.iter().any(|(n, _)| *n == name));
             let mut t = fed(b"ab");
             t.feed(s);
+            assert!(t.take_bell(), "the bell is recorded");
             assert_eq!((row(&t, 0).as_str(), at(&t)), ("ab", (2, 0)));
             assert!(t.take_response().is_empty());
         }
