@@ -16,6 +16,7 @@ use super::caller::CallerKey;
 use super::conn::{ANSWER_WITHIN, Asked, Conn, done_reject};
 use super::dispatch::{Ctx, audit, target};
 use super::limits::{SpawnCounts, check_spawn, session_cap};
+use super::recent::Opened;
 use super::shadow_gate::{GATE_WITHIN, Tree};
 use super::{Reply, names, panes, shadow_tree};
 
@@ -135,6 +136,10 @@ pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Dura
     };
     gate.record(sid, shadow_parent);
     drop(gate);
+    // the name a list shows next: the observation may not have the pane yet
+    let cwd = names::cwd_of_entry(sid).unwrap_or_else(|| spawn.cwd.clone());
+    let name = marspot::pane_name::PaneRef::new(sid, cwd.clone()).full_name();
+    conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).opened(Opened { sid, cwd, parent: shadow_parent }, Instant::now());
     conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened(ctx.caller, sid, a.shadow);
     audit(conn, ctx, "pane.open", sid, a.command.clone().map(String::into_bytes), false, if a.shadow { "shadow" } else { "window" });
     if let Some(cmd) = &a.command {
@@ -143,7 +148,7 @@ pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Dura
     let pos = conn.probe_pos(sid, Duration::from_millis(250));
     Ok(obj([
         ("id", (sid as i64).into()),
-        ("name", names::full_name(sid, &ctx.obs).into()),
+        ("name", name.into()),
         ("pos", pos.map_or(Value::Null, |p| (p as i64).into())),
     ]))
 }
@@ -163,6 +168,9 @@ pub(super) fn close(conn: &mut Conn, ctx: &Ctx, t: &str) -> Result<Value, Reject
     let mine = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened_by(sid) == Some(ctx.caller);
     let mode = if shadow && mine { RetireMode::Delete } else { RetireMode::Recycle };
     let out = ask_done(conn, sid, MsgType::PaneRetire, |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode })), Again::Gone);
+    if out.is_ok() {
+        conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).closed(sid, Instant::now());
+    }
     audit(conn, ctx, "pane.close", sid, None, false, out.as_ref().map_or_else(|r| r.code.as_str(), |_| "closed"));
     out.map(|_| obj([("id", (sid as i64).into()), ("recycled", (mode == RetireMode::Recycle).into())]))
 }
@@ -170,12 +178,21 @@ pub(super) fn close(conn: &mut Conn, ctx: &Ctx, t: &str) -> Result<Value, Reject
 pub(super) fn resize(conn: &mut Conn, ctx: &Ctx, t: &str, cols: u16, rows: u16) -> Result<Value, Reject> {
     let sid = target(ctx, t)?;
     conn.need_caps(CAP_SHADOWS)?;
-    if !ctx.obs.session(sid).is_some_and(|s| panes::shadow_of(&s.entry) != 0) {
+    if !is_shadow(conn, ctx, sid) {
         return Err(Reject::new(ErrorCode::NotResizable, "a pane in a window takes its size from the window's layout"));
     }
     let out = ask_done(conn, sid, MsgType::PaneSize, |req_id| Ok(encode_pane_size(&PaneSize { req_id, sid, cols, rows })), Again::Yes);
     audit(conn, ctx, "pane.resize", sid, None, false, out.as_ref().map_or_else(|r| r.code.as_str(), |_| "resized"));
     out.map(|_| obj([("id", (sid as i64).into())]))
+}
+
+/// Pane `sid` is a shadow in the view, or, when the view is older than
+/// the pane, it was opened as one.  The core checks again.
+fn is_shadow(conn: &Conn, ctx: &Ctx, sid: u64) -> bool {
+    match ctx.obs.session(sid) {
+        Some(s) => panes::shadow_of(&s.entry) != 0,
+        None => conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).opened_after(ctx.obs.at, Instant::now()).any(|o| o.sid == sid && o.parent != 0),
+    }
 }
 
 pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Value, Reject> {

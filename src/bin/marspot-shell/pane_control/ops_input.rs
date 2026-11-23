@@ -5,7 +5,9 @@
 
 use std::time::{Duration, Instant};
 
-use marspot::shell_proto::{CAP_TYPE_AND_WATCH, MsgType, PaneType, PaneTyped, TypedResult, WatchBody, WatchKind, WatchReason, encode_pane_type};
+use marspot::shell_proto::{
+    CAP_TYPE_AND_WATCH, MsgType, PaneType, PaneTyped, TypedResult, WatchBody, WatchKind, WatchReason, encode_pane_type, run_trailer,
+};
 use marspot_peer::control::{ErrorCode, Input, Reject, RunArgs, SendArgs, keys};
 use marspot_peer::json::{Value, obj};
 
@@ -111,10 +113,10 @@ pub(super) fn send(conn: &mut Conn, ctx: &Ctx, a: &SendArgs) -> Result<Value, Re
 }
 
 /// The two lines `pane.run` pastes: the command, then a line printing
-/// the status it left as a command-end mark.
+/// the status it left as a command-end mark.  Reads leave the echoed
+/// second line out of the text they answer.
 pub(super) fn run_text(command: &str, fish: bool) -> String {
-    let status = if fish { "$status" } else { "$?" };
-    format!("{}\nprintf '\\033]133;D;%s\\007' {status}", command.trim_end_matches('\n'))
+    format!("{}\n{}", command.trim_end_matches('\n'), run_trailer(fish))
 }
 
 fn runs_fish(ctx: &Ctx, sid: u64) -> bool {

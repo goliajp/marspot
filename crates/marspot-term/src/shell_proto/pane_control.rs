@@ -13,9 +13,11 @@
 use std::io;
 
 mod input;
+mod run_trailer;
 mod wire;
 
 pub use input::*;
+pub use run_trailer::run_trailer;
 use wire::{Rd, finish, put_text};
 
 /// `PaneControlCaps` bits: what the core does with these messages.

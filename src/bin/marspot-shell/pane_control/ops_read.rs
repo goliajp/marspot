@@ -16,7 +16,7 @@ use marspot_term::terminal::Terminal;
 use super::super::observe::Observation;
 use super::conn::Conn;
 use super::dispatch::{Ctx, target};
-use super::{names, panes};
+use super::{names, panes, run_trailer};
 
 /// The most text one read hands back.
 pub(super) const MAX_TEXT: usize = 1024 * 1024;
@@ -31,17 +31,13 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
     let agent_of = |code: Option<u16>| {
         table.iter().find(|p| p.code.is_some() && p.code == code).and_then(|p| p.agent.clone()).map_or(Value::Null, Value::from)
     };
-    let live: std::collections::HashSet<u64> = ctx.obs.live().map(|s| s.entry.id).collect();
-    let mut out = Vec::new();
-    for (sid, cwd, _) in names::live_panes(&ctx.obs) {
-        let Some(s) = ctx.obs.session(sid).filter(|_| live.contains(&sid)) else { continue };
+    let row = |sid: u64, cwd: String, parent: u64| {
         let r = marspot::pane_name::PaneRef::new(sid, cwd.clone());
-        let parent = panes::shadow_of(&s.entry);
         let view = views.get(&sid);
         // a closed window keeps its place in the saved layout, to be reopened
         let shown = cells.get(&sid).filter(|(w, _, _)| open.contains(&(w - 1)));
         let cell = shown.map_or(Value::Null, |(w, x, y)| format!("w({w},{x},{y})").into());
-        out.push(obj([
+        obj([
             ("id", (sid as i64).into()),
             ("name", r.full_name().into()),
             ("cwd", cwd.into()),
@@ -53,7 +49,18 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
             ("state", view.map_or("unknown", |v| v.state.as_str()).into()),
             ("dormant", view.is_some_and(|v| v.dormant).into()),
             ("busy", view.and_then(|v| v.busy).map_or(Value::Null, Value::from)),
-        ]));
+        ])
+    };
+    let live: std::collections::HashSet<u64> = ctx.obs.live().map(|s| s.entry.id).collect();
+    let recent = conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    let mut out = Vec::new();
+    for (sid, cwd, _) in names::live_panes(&ctx.obs) {
+        let Some(s) = ctx.obs.session(sid).filter(|_| live.contains(&sid) && !recent.closed_lately(sid, now)) else { continue };
+        out.push(row(sid, cwd, panes::shadow_of(&s.entry)));
+    }
+    for o in recent.opened_after(ctx.obs.at, now).filter(|o| !live.contains(&o.sid)) {
+        out.push(row(o.sid, o.cwd.clone(), o.parent));
     }
     obj([("panes", Value::Arr(out))])
 }
@@ -113,7 +120,8 @@ fn matched_line(v: &mut Value, replay: Option<&super::matched::Replay>, line: u6
     let squeezed: String = needle.split_whitespace().collect();
     let by_row = replay
         .and_then(|r| r.line_at(line))
-        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed));
+        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed))
+        .filter(|l| !run_trailer::is_status_line(l));
     let (text, from) = match by_row {
         Some(l) => (Some(l), "row"),
         None => (v.str_at("text").unwrap_or("").lines().rev().find(|l| l.contains(needle)).map(String::from), "screen"),
@@ -132,8 +140,9 @@ pub(super) fn screen_of(sid: u64, history_lines: u32, pos: Option<u64>, obs: &Ob
 /// [`screen_of`], with the history from `replay` when one is at hand.
 fn screen_from(sid: u64, history_lines: u32, pos: Option<u64>, obs: &Observation, replay: Option<&Terminal>) -> Value {
     let raw = marspot::pane_read::screen_with(sid, history_lines.min(u16::MAX as u32) as u16, replay).unwrap_or_default();
-    let (text, truncated) = cap_text(screen::filter(&raw));
+    let (text, truncated) = cap_text(screen::filter(&run_trailer::drop_status_lines(&raw)));
     let (cols, rows, cursor) = shape(sid);
+    // cursor and rows are screen coordinates; text may have fewer lines once status lines are dropped
     let mut v = obj([
         ("pane", names::full_name(sid, obs).into()),
         ("id", (sid as i64).into()),

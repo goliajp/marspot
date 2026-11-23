@@ -74,6 +74,14 @@ pub fn cwd_of(sid: u64, obs: &Observation) -> Option<String> {
     Some(cwd.map_or_else(|| s.entry.cwd.clone(), |p| p.to_string_lossy().into_owned()))
 }
 
+/// The working directory of pane `sid` read off its registry entry: its
+/// shell's, else the entry's.  For a pane too new for the observation.
+pub fn cwd_of_entry(sid: u64) -> Option<String> {
+    let e = marspot_term::session_registry::read_session_entry(sid).ok()?;
+    let shell = (e.shell_child_pid > 1).then_some(e.shell_child_pid).and_then(marspot::pidtree::pane_cwd);
+    Some(shell.map_or(e.cwd, |p| p.to_string_lossy().into_owned()))
+}
+
 /// Every pane with what naming needs, its shadow mark read from its
 /// registry entry.  May read the code file, so not for the main
 /// thread's hot paths.

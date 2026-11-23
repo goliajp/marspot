@@ -14,6 +14,7 @@ use super::*;
 
 mod audit_tests;
 mod conn_tests;
+mod list_tests;
 mod server_tests;
 mod shadow_race_tests;
 
@@ -36,6 +37,7 @@ fn hub_at(dir: &std::path::Path) -> (Hub, std::sync::mpsc::Receiver<MainCmd>) {
         links: links::Links::new(),
         limits: Mutex::new(Limits::default()),
         shadow_gate: shadow_gate::Gate::default(),
+        recent: Mutex::new(recent::Recent::default()),
         config: RwLock::new(Arc::new(Config::default())),
         deny: Mutex::new(DenyList::at(dir.join("control-deny.tsv"))),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),
@@ -273,7 +275,7 @@ fn watch_table_shares_and_reply_routing() {
 
 #[test]
 fn run_puts_the_status_line_on_its_own_line() {
-    assert_eq!(ops_input::run_text("make # done\n", false), "make # done\nprintf '\\033]133;D;%s\\007' $?");
+    assert_eq!(ops_input::run_text("make # done\n", false), "make # done\nprintf '\\033]133;D;%s;marspot=run\\007' $?");
     assert!(ops_input::run_text("true", true).ends_with(" $status"));
 }
 

@@ -42,6 +42,11 @@ Add `--json` to any of them for the app's answer as JSON.
   2000 lines of history. `--since POS` counts the wait from an earlier answer's
   `pos`. A wait that did not succeed prints its reason on stderr (`timeout`,
   `session_ended`, `restarting`).
+- The screen text leaves out the status line `pane run` typed after the
+  command, so it can have fewer lines than `rows`, and `cursor` is a screen
+  position, not a line of the text. `--wait-text` sees the raw screen,
+  including that status line: right after a run, a wait for `marspot` or
+  `run` can be met by it.
 - `send`/`run` refuse with `user_typing` when the person is typing in that pane;
   `--force` sends anyway. Prefer waiting and trying again.
 

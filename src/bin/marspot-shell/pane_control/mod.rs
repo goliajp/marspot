@@ -38,6 +38,8 @@ mod ops_input;
 mod ops_pane;
 mod ops_read;
 mod panes;
+mod recent;
+pub(crate) mod run_trailer;
 mod server;
 mod shadow_gate;
 mod shadow_tree;
@@ -91,6 +93,8 @@ pub(crate) struct Hub {
     limits: Mutex<limits::Limits>,
     /// One new pane or move into the shadows at a time.
     shadow_gate: shadow_gate::Gate,
+    /// Panes opened a moment ago, for lists from older observations.
+    recent: Mutex<recent::Recent>,
     config: RwLock<Arc<config::Config>>,
     deny: Mutex<config::DenyList>,
     panes: RwLock<Arc<panes::PaneViews>>,
@@ -134,6 +138,7 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         links: links::Links::new(),
         limits: Mutex::new(limits::Limits::default()),
         shadow_gate: shadow_gate::Gate::default(),
+        recent: Mutex::new(recent::Recent::default()),
         config: RwLock::new(Arc::new(config::Config::load())),
         deny: Mutex::new(config::DenyList::at(config::deny_path())),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),

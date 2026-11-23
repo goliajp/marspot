@@ -6,7 +6,9 @@
 #   1. `pane list` names the three panes, in words and as JSON.
 #   2. `pane run` hands back the command's own exit status in a zsh, a
 #      bash and a fish pane (fish only where it is installed; said and
-#      counted as not applicable otherwise).
+#      counted as not applicable otherwise); in a zsh with prompt hooks
+#      that print command ends too, and what a run or a read answers
+#      leaves out the status line the run typed.
 #   3. `pane read --wait-text` returns once the text is printed, and on
 #      its timeout says so without failing.
 #   4. The command socket's `marspot-shell --panes / --send / --read`
@@ -137,6 +139,27 @@ check "zsh: false → 1" runs "$P1" 1 false
 check "zsh: (exit 7) → 7" runs "$P1" 7 '(exit 7)'
 check "zsh: the answer shows what it printed" bash -c "$(printf '%q' "$PEER") pane run $P1 'echo RUN-\$((6*7))Z' | grep -q RUN-42Z"
 check "zsh: a command ending in a comment still reports" runs "$P1" 0 'true # trailing comment'
+
+# prompt hooks that print their own command ends, as shell integrations do
+cat > "$SD/zdot/hooks.zsh" <<'ZSH'
+precmd() { local s=$?; printf '\033]133;D;%s\007\033]133;A\007' $s; }
+preexec() { printf '\033]133;C\007'; }
+ZSH
+pc send "$P1" "source $SD/zdot/hooks.zsh" >/dev/null || die "could not load the prompt hooks in pane $P1"
+at_shell "$P1" || die "pane $P1's zsh with prompt hooks never ran a command"
+check "zsh with hooks: false → 1" runs "$P1" 1 false
+check "zsh with hooks: (exit 6) → 6" runs "$P1" 6 '(exit 6)'
+no_status_line() { # pane: what a run and a read of it answer
+  local out
+  out=$("$PEER" pane run "$1" --timeout 20 'echo HOOKED-$((2*3))Z' 2>&1) || { echo "    the run failed: $out"; return 1; }
+  grep -q HOOKED-6Z <<<"$out" || { echo "    the run did not show the output: $out"; return 1; }
+  out+=$'\n'$("$PEER" pane read "$1" -n 200 2>&1)
+  if grep -q '133;D' <<<"$out"; then
+    grep -n '133;D' <<<"$out" | sed 's/^/    shown: /'
+    return 1
+  fi
+}
+check "zsh with hooks: neither the run nor a read shows the status line" no_status_line "$P1"
 
 pc send "$P2" 'exec /bin/bash --norc --noprofile' >/dev/null || die "could not start bash in pane $P2"
 at_shell "$P2" || die "pane $P2's bash never ran a command"

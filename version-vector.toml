@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.617"  # the terminal counts input start marks (OSC 133 ; B)
-core    = "0.12.632"  # the terminal counts input start marks (OSC 133 ; B)
-session = "0.11.417"  # a prompt watch in a shell that marks input starts waits for one after its position, a second at most
+shell   = "0.7.619"  # a run tags its status line, and reads leave that line out
+core    = "0.12.633"  # the shared run status line carries a marspot=run option
+session = "0.11.418"  # the shared run status line carries a marspot=run option
