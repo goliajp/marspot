@@ -40,3 +40,9 @@ leak-timeout = { period = "5s", result = "fail" }
 [[profile.default.overrides]]
 filter = 'test(b1_perf_1mb_first_64_hits_under_20ms) + test(b3_perf_1mb_first_64_hits_under_50ms) + test(the_blank_test_is_cheap_on_a_screen_with_content) + test(watch_pending_text_keeps_the_parse_within_five_percent)'
 threads-required = "num-cpus"
+
+# 262144 cells through the parser in a debug build: 21 s on mini, 49 s
+# on an idle lx64, past a minute when that host is loaded.
+[[profile.default.overrides]]
+filter = 'test(the_largest_grid_of_distinct_colours_stays_in_bounds)'
+slow-timeout = { period = "60s", terminate-after = 4 }
