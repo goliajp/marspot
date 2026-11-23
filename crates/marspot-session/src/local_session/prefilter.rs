@@ -15,6 +15,10 @@
 //! short.  Otherwise what state it left is unknown, and the next chunk
 //! that is read says "check" if one of the last bytes comes before its
 //! first line break.
+//!
+//! Which texts the stream held whole is said apart from that, for a
+//! check on rows the batch went to and left again: a cursor that moved
+//! is no sign that the text is new there.
 
 /// Texts looked for at once: one per text watch.
 const TEXTS: usize = 8;
@@ -42,13 +46,15 @@ enum Mode {
 }
 
 struct Text {
+    /// Whose it is, as it was set: a bit of `seen`.
+    id: usize,
     bytes: Vec<u8>,
     back: Vec<u16>,
     state: usize,
 }
 
 impl Text {
-    fn new(bytes: &[u8]) -> Self {
+    fn new(id: usize, bytes: &[u8]) -> Self {
         let mut back = vec![0u16; bytes.len()];
         let mut k = 0;
         for i in 1..bytes.len() {
@@ -60,7 +66,7 @@ impl Text {
             }
             back[i] = k as u16;
         }
-        Self { bytes: bytes.to_vec(), back, state: 0 }
+        Self { id, bytes: bytes.to_vec(), back, state: 0 }
     }
 
     #[inline]
@@ -99,6 +105,12 @@ pub(crate) struct Prefilter {
     /// The state the last chunk left is not known.
     unknown: bool,
     check: bool,
+    /// The texts the bytes held whole, by id.
+    seen: u8,
+    /// Bytes were left unread and no line break came since, so a text
+    /// may have begun in them; and the text bytes read since.
+    skipped: bool,
+    after_skip: Vec<u8>,
 }
 
 impl Default for Prefilter {
@@ -112,14 +124,22 @@ impl Default for Prefilter {
             cr: false,
             unknown: true,
             check: false,
+            seen: 0,
+            skipped: false,
+            after_skip: Vec::new(),
         }
     }
 }
 
 impl Prefilter {
     /// Look for `texts` from now on; none stops looking.
-    pub(crate) fn set(&mut self, texts: &[&[u8]]) {
-        self.texts = texts.iter().take(TEXTS).map(|t| Text::new(t)).collect();
+    pub(crate) fn set(&mut self, texts: &[(usize, &[u8])]) {
+        let same = |t: &&Text| texts.iter().any(|&(id, bytes)| t.id == id && t.bytes == bytes);
+        let kept = self.texts.iter().filter(same).fold(0, |k, t| k | 1 << t.id);
+        self.seen &= kept;
+        self.texts = texts.iter().take(TEXTS).map(|&(id, t)| Text::new(id, t)).collect();
+        self.after_skip.clear();
+        self.after_skip.reserve(self.longest());
         let mut stops = [false; 256];
         stops[..0x20].fill(true);
         for (i, t) in self.texts.iter().enumerate() {
@@ -129,7 +149,7 @@ impl Prefilter {
         *self.stops = stops;
         self.firsts = self.texts.iter().map(|t| ONES * u64::from(t.bytes[0])).collect();
         self.firsts.dedup();
-        // a check still owed, for output a held grid has not parsed, stays owed
+        // what is owed for output a held grid has not parsed stays owed
         self.forget();
     }
 
@@ -137,9 +157,14 @@ impl Prefilter {
         !self.texts.is_empty()
     }
 
-    /// Whether a batch since the last ask has to be checked on the grid.
-    pub(crate) fn take(&mut self) -> bool {
-        std::mem::take(&mut self.check)
+    fn longest(&self) -> usize {
+        self.texts.iter().map(|t| t.bytes.len()).max().unwrap_or(0)
+    }
+
+    /// Whether a batch since the last ask has to be checked on the
+    /// grid, and a bit for the id of each text it held whole.
+    pub(crate) fn take(&mut self) -> (bool, u8) {
+        (std::mem::take(&mut self.check), std::mem::take(&mut self.seen))
     }
 
     pub(crate) fn took(&mut self, bytes: &[u8]) {
@@ -170,6 +195,8 @@ impl Prefilter {
         self.unknown = true;
         self.mode = Mode::Text;
         self.cr = false;
+        self.skipped = true;
+        self.after_skip.clear();
         for t in &mut self.texts {
             t.state = 0;
         }
@@ -180,10 +207,12 @@ impl Prefilter {
         self.check = true;
         // what the bytes say next no longer follows the grid, up to a line break
         self.unknown = true;
+        self.skipped = false;
     }
 
     fn line_break(&mut self) {
         self.unknown = false;
+        self.skipped = false;
         for t in &mut self.texts {
             t.state = 0;
         }
@@ -269,12 +298,15 @@ impl Prefilter {
             b'\n' | 0x08 | 0x09 | 0x0b | 0x0c | 0x0e | 0x0f => self.moved(),
             0..=0x1f | 0x7f => {}
             _ => {
-                let unknown = self.unknown;
+                if self.skipped {
+                    self.after_skip.push(b);
+                    self.skipped = self.after_skip.len() < self.longest();
+                }
                 for t in &mut self.texts {
                     let last = t.last() == b;
-                    if t.step(b) || (unknown && last) {
-                        self.check = true;
-                    }
+                    let whole = t.step(b) || (self.skipped && last && t.bytes.ends_with(&self.after_skip));
+                    self.seen |= u8::from(whole) << t.id;
+                    self.check |= whole || (self.unknown && last);
                 }
             }
         }
@@ -305,12 +337,12 @@ mod tests {
     /// before the last byte.
     fn settle(p: &mut Prefilter) {
         p.took(b"\r\nE\r\n");
-        assert!(!p.take());
+        assert!(!p.take().0);
     }
 
     fn set(text: &str) -> Prefilter {
         let mut p = Prefilter::default();
-        p.set(&[text.as_bytes()]);
+        p.set(&[(0, text.as_bytes())]);
         settle(&mut p);
         p
     }
@@ -319,7 +351,7 @@ mod tests {
         for c in chunks {
             p.took(c.as_bytes());
         }
-        p.take()
+        p.take().0
     }
 
     #[test]
@@ -362,6 +394,27 @@ mod tests {
         assert!(!after(&mut none, &["DONE"]));
     }
 
+    #[test]
+    fn watch_prefilter_tells_a_whole_text_from_a_moved_cursor() {
+        let held = |p: &mut Prefilter, chunks: &[&str]| {
+            chunks.iter().for_each(|c| p.took(c.as_bytes()));
+            p.take().1
+        };
+        let mut p = Prefilter::default();
+        p.set(&[(2, b"DONE"), (5, b"FIVE")]);
+        settle(&mut p);
+        assert_eq!(held(&mut p, &["\x1b[AxE"]), 0, "only the last byte");
+        assert_eq!(held(&mut p, &["\x1b[H\x1b[2JFIVE\r\n"]), 1 << 5);
+        assert_eq!(held(&mut p, &["DON", "E\r\n"]), 1 << 2);
+        let long = format!("x\r\n{}DO", "y".repeat(TAIL_READ));
+        assert_eq!(held(&mut p, &[&long, "NE"]), 1 << 2, "begun in bytes not read");
+        assert_eq!(held(&mut p, &["\r\n", &long, "xE"]), 0, "not what the text ends with");
+        assert_eq!(held(&mut p, &["\r\n", &long, "\x1b[5;1HE"]), 0, "nor beside it");
+        p.took(b"\r\nDONE FIVE");
+        p.set(&[(2, b"DONE"), (5, b"GONE")]);
+        assert_eq!(p.take(), (true, 1 << 2), "kept for the text that stays");
+    }
+
     /// How fast build-like output is read when every line has the
     /// text's last byte; printed, for the parse's cost in the perf test.
     #[test]
@@ -375,7 +428,7 @@ mod tests {
         let mut checks = 0;
         for chunk in out.chunks(64 * 1024) {
             p.took(chunk);
-            checks += usize::from(p.take());
+            checks += usize::from(p.take().0);
         }
         let took = started.elapsed();
         eprintln!("prefilter: {:.0} MiB/s, {checks} checks", out.len() as f64 / took.as_secs_f64() / (1 << 20) as f64);

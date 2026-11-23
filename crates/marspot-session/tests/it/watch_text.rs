@@ -131,3 +131,28 @@ fn watch_text_printed_while_the_grid_is_held_matches_once_it_is_let_go() {
     s.send_frame(MsgType::PaneHoldGrid, encode_pane_hold_grid(0, false));
     assert!(l.fired(1, 5.0).line.is_some(), "the line, once the grid has it");
 }
+
+/// The clear, the text and the next prompt reach the grid as one batch,
+/// as they do for a session that did not get to run meanwhile.
+#[test]
+fn watch_text_printed_after_a_clear_matches_in_one_batch_with_the_prompt() {
+    use marspot_term::shell_proto::{MsgType, encode_pane_hold_grid};
+    let mut sandbox = sandbox_state_dir();
+    let s = with_zsh(&mut sandbox);
+    let mut l = Link::new(&s);
+    l.inject("printf 'needle-%s\\n' xyz\r");
+    screen_shows(&s, "needle-xyz");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let p = l.pos();
+    l.armed(text(1, p, "needle-xyz"));
+    s.send_frame(MsgType::PaneHoldGrid, encode_pane_hold_grid(0, true));
+    l.inject("printf '\\033[H\\033[2Jneedle-%s\\n' xyz\r");
+    wait(5.0, "the output, counted while held", || l.pos() > p + 60);
+    let mut quiet = body(2, WatchKind::Quiet, p);
+    quiet.quiet_ms = 300;
+    l.armed(quiet);
+    l.fired(2, 10.0);
+    assert!(l.try_fired(1, 0.0).is_none(), "the held grid does not have the line yet");
+    s.send_frame(MsgType::PaneHoldGrid, encode_pane_hold_grid(0, false));
+    assert!(l.fired(1, 5.0).line.is_some());
+}
