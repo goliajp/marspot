@@ -237,7 +237,8 @@ if (( (CAPS & 2) == 0 )) || [[ $OPENED == *old_session* ]]; then
   not_applicable "shadow pane open → run → read → close" "the core or the shell does not do shadow panes yet"
 else
   S=$(field id <<<"$OPENED")
-  check "pane open made a shadow pane" bash -c "[[ -n '$S' ]] && $(printf '%q' "$PEER") pane list --json | python3 -c 'import json,sys; ps=json.load(sys.stdin)[\"result\"][\"panes\"]; sys.exit(0 if any(str(p[\"id\"])==\"$S\" and p[\"shadow\"] and p[\"parent\"]==$P1 for p in ps) else 1)'"
+  # the list comes from the shell's view of the registry, which takes a moment to see a new session
+  check "pane open made a shadow pane" bash -c "[[ -n '$S' ]] && for i in \$(seq 25); do $(printf '%q' "$PEER") pane list --json | python3 -c 'import json,sys; ps=json.load(sys.stdin)[\"result\"][\"panes\"]; sys.exit(0 if any(str(p[\"id\"])==\"$S\" and p[\"shadow\"] and p[\"parent\"]==$P1 for p in ps) else 1)' && exit 0; sleep 0.2; done; exit 1"
   at_shell "$S" || check "the shadow pane's shell answered" false
   check "shadow: run → 4" runs "$S" 4 '(exit 4)'
   pc send "$S" 'echo SHADOW-$((5*5))Q' >/dev/null
