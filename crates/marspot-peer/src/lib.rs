@@ -29,6 +29,8 @@ pub mod inbox;
 pub mod json;
 pub mod kimi_hook;
 pub mod mcp;
+pub mod mcp_panes;
+mod mcp_serve;
 pub mod notice;
 pub mod panes;
 pub mod peers;

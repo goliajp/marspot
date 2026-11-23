@@ -9,8 +9,10 @@
 //! call without one comes from the session this server runs under
 //! (`peers::me_by_ancestor`).  Messages are newline-delimited JSON-RPC
 //! 2.0.
-
-use std::io::{BufRead, Write};
+//!
+//! The pane tools (`crate::mcp_panes`) are listed for every client.  A
+//! Claude Code client is not offered `ListAgents` and `SendMessage`: it
+//! has tools of those names already.
 
 use crate::frame::Priority;
 use crate::json::{self, Value, obj};
@@ -28,9 +30,43 @@ The recipient has none of your context: say which project and files you mean, wh
 
 A successful send means the message reached that session's inbox, not that it was read. To hear when the recipient finishes what it is doing, pass `notify_when_idle: true`: exactly one [Cross-session idle notice] arrives when it next goes idle (or exits). Omit `message` for a pure subscription that costs that session nothing; include one to deliver it now AND subscribe. Never poll ListAgents or send \"are you done?\" messages instead.";
 
-fn tools() -> Value {
+/// What one server knows about the client it serves.
+#[derive(Clone)]
+pub struct Server {
+    /// The name from `initialize`'s `clientInfo`, empty until then.
+    client: String,
+    /// The tool-call deadline marspot wrote into this client's config.
+    configured_timeout_s: Option<u32>,
+    socket: std::path::PathBuf,
+}
+
+impl Server {
+    pub fn new(configured_timeout_s: Option<u32>) -> Self {
+        Self::at(crate::control::socket_path(), configured_timeout_s)
+    }
+
+    pub fn at(socket: std::path::PathBuf, configured_timeout_s: Option<u32>) -> Self {
+        Self { client: String::new(), configured_timeout_s, socket }
+    }
+
+    fn cap_s(&self) -> u32 {
+        crate::mcp_panes::timeout_cap(&self.client, self.configured_timeout_s)
+    }
+
+    fn is_claude(&self) -> bool {
+        self.client.to_ascii_lowercase().contains("claude")
+    }
+}
+
+fn tools(server: &Server) -> Value {
+    let mut all = if server.is_claude() { Vec::new() } else { peer_tools() };
+    all.extend(crate::mcp_panes::tools(server.cap_s()));
+    Value::Arr(all)
+}
+
+fn peer_tools() -> Vec<Value> {
     let string = |d: &str| obj([("type", Value::from("string")), ("description", Value::from(d))]);
-    Value::Arr(vec![
+    vec![
         obj([
             ("name", Value::from("ListAgents")),
             ("description", Value::from(format!("{LIST_DESCRIPTION} {}", crate::resolve::FORMS))),
@@ -62,69 +98,97 @@ fn tools() -> Value {
                 ]),
             ),
         ]),
-    ])
+    ]
 }
 
-/// Serve until stdin closes.
-pub fn serve(input: impl BufRead, mut output: impl Write) {
-    for line in input.lines() {
-        let Ok(line) = line else { return };
-        if line.trim().is_empty() {
-            continue;
+pub use crate::mcp_serve::serve;
+
+/// What one request line asks of the server.
+pub(crate) enum Step {
+    /// Answered at once.
+    Answer(Value),
+    /// A tool call: its id and params.
+    Call(Value, Option<Value>),
+    /// `notifications/cancelled` for this request id.
+    Cancelled(Value),
+    Nothing,
+}
+
+impl Server {
+    /// The answer to one request line, a tool call carried out here;
+    /// None for a notification.
+    pub fn handle(&mut self, line: &str, now_ms: i64) -> Option<Value> {
+        match self.step(line) {
+            Step::Answer(v) => Some(v),
+            Step::Call(id, params) => Some(self.answer_call(id, params.as_ref(), now_ms, &Default::default())),
+            Step::Cancelled(_) | Step::Nothing => None,
         }
-        let Some(reply) = handle(&line, now_ms()) else { continue };
-        if writeln!(output, "{}", reply.to_json()).and_then(|()| output.flush()).is_err() {
-            return;
+    }
+
+    pub(crate) fn answer_call(&self, id: Value, params: Option<&Value>, now_ms: i64, cancel: &crate::control::client::Cancel) -> Value {
+        reply(id, self.call(params, now_ms, cancel))
+    }
+
+    pub(crate) fn step(&mut self, line: &str) -> Step {
+        let Ok(req) = json::parse(line) else {
+            return Step::Answer(error(Value::Null, -32700, "parse error"));
+        };
+        let params = req.get("params");
+        let Some(id) = req.get("id").cloned() else {
+            return match (req.str_at("method"), params.and_then(|p| p.get("requestId"))) {
+                (Some("notifications/cancelled"), Some(rid)) => Step::Cancelled(rid.clone()),
+                _ => Step::Nothing,
+            };
+        };
+        let result = match req.str_at("method").unwrap_or_default() {
+            "initialize" => {
+                self.client = params.and_then(|p| p.at(&["clientInfo", "name"])).and_then(Value::str).unwrap_or_default().to_string();
+                let version = params.and_then(|p| p.str_at("protocolVersion")).unwrap_or("2025-06-18");
+                obj([
+                    ("protocolVersion", Value::from(version)),
+                    ("capabilities", obj([("tools", obj([]))])),
+                    ("serverInfo", obj([("name", Value::from("marspot")), ("version", Value::from(env!("CARGO_PKG_VERSION")))])),
+                ])
+            }
+            "ping" => obj([]),
+            "tools/list" => obj([("tools", tools(self))]),
+            "tools/call" => return Step::Call(id, params.cloned()),
+            m => return Step::Answer(error(id, -32601, &format!("method not found: {m}"))),
+        };
+        Step::Answer(reply(id, result))
+    }
+
+    fn call(&self, params: Option<&Value>, now_ms: i64, cancel: &crate::control::client::Cancel) -> Value {
+        let args = params.and_then(|p| p.get("arguments"));
+        let thread = params.and_then(|p| p.at(&["_meta", "threadId"])).and_then(Value::str);
+        let tool = params.and_then(|p| p.str_at("name")).unwrap_or_default();
+        if crate::mcp_panes::is_pane_tool(tool) {
+            let (text, is_error) = crate::mcp_panes::call(&self.socket, tool, args.unwrap_or(&Value::Null), thread, self.cap_s(), cancel);
+            return tool_result(text, is_error);
+        }
+        let entries = peers::live_entries();
+        let panes = crate::panes::live(&entries);
+        let me = match thread {
+            Some(t) => Some(peers::me_by_thread(&entries, t)),
+            None => peers::me_by_ancestor(&entries, std::process::id() as i32, crate::proc::ppid).map(Ok),
+        };
+        let outcome = match tool {
+            "ListAgents" => Ok(peers::listing(&entries, &panes, me.as_ref().and_then(|m| m.as_ref().ok().copied()), now_ms)),
+            "SendMessage" => match me {
+                None => Err("the call carried no thread id and this server does not run under a session marspot has bound to a pane, so the sending session is unknown and nothing was sent".to_string()),
+                Some(Err(e)) => Err(e),
+                Some(Ok(me)) => send(me, &entries, &panes, args),
+            },
+            other => Err(format!("unknown tool {other:?}")),
+        };
+        match outcome {
+            Ok(t) => tool_result(t, false),
+            Err(e) => tool_result(e, true),
         }
     }
 }
 
-/// The answer to one request line; None for a notification.
-pub fn handle(line: &str, now_ms: i64) -> Option<Value> {
-    let Ok(req) = json::parse(line) else {
-        return Some(error(Value::Null, -32700, "parse error"));
-    };
-    let id = req.get("id").cloned()?;
-    let params = req.get("params");
-    let result = match req.str_at("method").unwrap_or_default() {
-        "initialize" => {
-            let version = params.and_then(|p| p.str_at("protocolVersion")).unwrap_or("2025-06-18");
-            obj([
-                ("protocolVersion", Value::from(version)),
-                ("capabilities", obj([("tools", obj([]))])),
-                ("serverInfo", obj([("name", Value::from("marspot")), ("version", Value::from(env!("CARGO_PKG_VERSION")))])),
-            ])
-        }
-        "ping" => obj([]),
-        "tools/list" => obj([("tools", tools())]),
-        "tools/call" => call(params, now_ms),
-        m => return Some(error(id, -32601, &format!("method not found: {m}"))),
-    };
-    Some(obj([("jsonrpc", Value::from("2.0")), ("id", id), ("result", result)]))
-}
-
-fn call(params: Option<&Value>, now_ms: i64) -> Value {
-    let args = params.and_then(|p| p.get("arguments"));
-    let thread = params.and_then(|p| p.at(&["_meta", "threadId"])).and_then(Value::str);
-    let entries = peers::live_entries();
-    let panes = crate::panes::live(&entries);
-    let me = match thread {
-        Some(t) => Some(peers::me_by_thread(&entries, t)),
-        None => peers::me_by_ancestor(&entries, std::process::id() as i32, crate::proc::ppid).map(Ok),
-    };
-    let outcome = match params.and_then(|p| p.str_at("name")).unwrap_or_default() {
-        "ListAgents" => Ok(peers::listing(&entries, &panes, me.as_ref().and_then(|m| m.as_ref().ok().copied()), now_ms)),
-        "SendMessage" => match me {
-            None => Err("the call carried no thread id and this server does not run under a session marspot has bound to a pane, so the sending session is unknown and nothing was sent".to_string()),
-            Some(Err(e)) => Err(e),
-            Some(Ok(me)) => send(me, &entries, &panes, args),
-        },
-        other => Err(format!("unknown tool {other:?}")),
-    };
-    let (text, is_error) = match outcome {
-        Ok(t) => (t, false),
-        Err(e) => (e, true),
-    };
+fn tool_result(text: String, is_error: bool) -> Value {
     obj([
         ("content", Value::Arr(vec![obj([("type", Value::from("text")), ("text", Value::from(text))])])),
         ("isError", Value::from(is_error)),
@@ -156,7 +220,11 @@ fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], panes: 
     Ok(text)
 }
 
-fn error(id: Value, code: i64, message: &str) -> Value {
+fn reply(id: Value, result: Value) -> Value {
+    obj([("jsonrpc", Value::from("2.0")), ("id", id), ("result", result)])
+}
+
+pub(crate) fn error(id: Value, code: i64, message: &str) -> Value {
     obj([
         ("jsonrpc", Value::from("2.0")),
         ("id", id),
@@ -164,40 +232,10 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     ])
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn initialize_and_tool_listing() {
-        let r = handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#, 0).unwrap();
-        assert_eq!(r.at(&["result", "protocolVersion"]).and_then(Value::str), Some("2025-06-18"));
-        assert!(handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, 0).is_none());
-        let r = handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#, 0).unwrap();
-        let names: Vec<&str> = r.at(&["result", "tools"]).unwrap().arr().iter().filter_map(|t| t.str_at("name")).collect();
-        assert_eq!(names, vec!["ListAgents", "SendMessage"]);
-        for t in r.at(&["result", "tools"]).unwrap().arr() {
-            assert!(t.str_at("description").unwrap().contains("`name#code`") && t.str_at("description").unwrap().contains("`kind:name`"));
-        }
-        let r = handle(r#"{"jsonrpc":"2.0","id":2,"method":"nope"}"#, 0).unwrap();
-        assert_eq!(r.at(&["error", "code"]).and_then(Value::i64), Some(-32601));
-    }
-
-    /// A send from a thread marspot has no record for names the reason
-    /// and sends nothing.
-    #[test]
-    fn a_send_from_an_unknown_thread_is_an_error() {
-        let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"SendMessage","arguments":{"to":"x","message":"hi"},"_meta":{"threadId":"00000000-0000-0000-0000-000000000000"}}}"#;
-        let r = handle(line, 0).unwrap();
-        assert_eq!(r.at(&["result", "isError"]).and_then(Value::bool), Some(true));
-        let text = r.at(&["result", "content"]).unwrap().arr()[0].str_at("text").unwrap();
-        assert!(text.contains("has no inbox"), "{text}");
-        let no_meta = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"SendMessage","arguments":{"to":"x","message":"hi"}}}"#;
-        let r = handle(no_meta, 0).unwrap();
-        assert_eq!(r.at(&["result", "isError"]).and_then(Value::bool), Some(true));
-    }
-}
+#[path = "mcp_tests.rs"]
+mod tests;
