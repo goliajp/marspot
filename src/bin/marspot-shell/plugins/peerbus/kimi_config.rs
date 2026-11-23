@@ -23,9 +23,10 @@ use super::claude_hooks::{pretty, slot};
 const SERVER: &str = "marspot";
 /// Seconds Kimi waits for the hook.  It reads a few small files.
 const TIMEOUT: u32 = 10;
-/// Seconds Kimi waits for one call of our tools (its own default is 60).
-/// A pane wait runs inside it; the server is told the same number so it
-/// keeps a wait under it, and with an entry that lacks it assumes 60.
+/// Seconds Kimi waits for one call of our tools, at least (its own
+/// default is 60).  A pane wait runs inside it; the server is told the
+/// same number so it keeps a wait under it, and with an entry that lacks
+/// it assumes 60.
 const TOOL_TIMEOUT_S: u32 = 600;
 const UNREADABLE: &str = "`hooks` is not written as [[hooks]] tables; the marspot hooks are left out";
 
@@ -117,13 +118,17 @@ fn reconcile_mcp(path: &Path, bin: &str) -> Option<String> {
 /// changed.  A key the user added to the entry stays.
 fn with_server(v: &mut Value, bin: &str) -> bool {
     let server = slot(slot(v, "mcpServers", || obj([])), SERVER, || obj([]));
-    let args = Value::Arr(vec![Value::from("mcp"), Value::from("--client-timeout-s"), Value::from(TOOL_TIMEOUT_S.to_string())]);
-    let timeout_ms = Value::from(i64::from(TOOL_TIMEOUT_S) * 1000);
     let mut changed = false;
-    if server.get("toolTimeoutMs") != Some(&timeout_ms) {
-        server.set("toolTimeoutMs", timeout_ms);
-        changed = true;
-    }
+    // a longer deadline the user set stays, and the server is told it
+    let timeout_s = match server.get("toolTimeoutMs").and_then(Value::i64) {
+        Some(ms) if ms >= i64::from(TOOL_TIMEOUT_S) * 1000 => u32::try_from(ms / 1000).unwrap_or(u32::MAX),
+        _ => {
+            server.set("toolTimeoutMs", Value::from(i64::from(TOOL_TIMEOUT_S) * 1000));
+            changed = true;
+            TOOL_TIMEOUT_S
+        }
+    };
+    let args = Value::Arr(vec![Value::from("mcp"), Value::from("--client-timeout-s"), Value::from(timeout_s.to_string())]);
     if server.str_at("command") != Some(bin) {
         server.set("command", Value::from(bin));
         changed = true;
@@ -295,6 +300,19 @@ mod tests {
         assert_eq!(args, ["mcp", "--client-timeout-s", "600"]);
         assert!(!with_server(&mut v, "/Users/x/.local/bin/marspot-peer"), "a second pass changes nothing");
         assert!(with_server(&mut v, "/elsewhere/marspot-peer"), "a helper that moved is repointed");
+    }
+
+    #[test]
+    fn a_kimi_tool_timeout_the_user_raised_stays_and_a_lower_one_is_raised() {
+        let mut v = json::parse(r#"{"mcpServers":{"marspot":{"toolTimeoutMs":1200000}}}"#).unwrap();
+        with_server(&mut v, "/b/marspot-peer");
+        assert_eq!(v.at(&["mcpServers", SERVER, "toolTimeoutMs"]).and_then(Value::i64), Some(1_200_000));
+        let args: Vec<&str> = v.at(&["mcpServers", SERVER, "args"]).unwrap().arr().iter().filter_map(Value::str).collect();
+        assert_eq!(args, ["mcp", "--client-timeout-s", "1200"]);
+        assert!(!with_server(&mut v, "/b/marspot-peer"));
+        let mut v = json::parse(r#"{"mcpServers":{"marspot":{"toolTimeoutMs":90000}}}"#).unwrap();
+        assert!(with_server(&mut v, "/b/marspot-peer"));
+        assert_eq!(v.at(&["mcpServers", SERVER, "toolTimeoutMs"]).and_then(Value::i64), Some(600_000));
     }
 
     #[test]
