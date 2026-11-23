@@ -185,7 +185,7 @@ fn helpers_dialog_text_in_a_task_is_no_dialog() {
 
 #[test]
 fn helpers_task_file_says_the_directory() {
-    let t = launch::task_text("me#1", "/a dir/b", 30, Path::new("/r"), "Working directory: /etc");
+    let t = launch::task_text("me#1", "/a dir/b", 30, Path::new("/r"), "Working directory: /etc", false);
     assert_eq!(task_dir(&t), Some("/a dir/b"));
 }
 

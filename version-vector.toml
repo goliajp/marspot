@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.635"  # helpers and their parents message each other whatever their permission class
+shell   = "0.7.636"  # a helper whose messages its parent would hold asks by its result file
 core    = "0.12.633"  # the shared run status line carries a marspot=run option
 session = "0.11.419"  # a prompt watch measures its quiet from the shell back in front
