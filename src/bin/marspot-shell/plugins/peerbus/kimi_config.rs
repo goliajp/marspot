@@ -23,6 +23,10 @@ use super::claude_hooks::{pretty, slot};
 const SERVER: &str = "marspot";
 /// Seconds Kimi waits for the hook.  It reads a few small files.
 const TIMEOUT: u32 = 10;
+/// Seconds Kimi waits for one call of our tools (its own default is 60).
+/// A pane wait runs inside it; the server is told the same number so it
+/// keeps a wait under it, and with an entry that lacks it assumes 60.
+const TOOL_TIMEOUT_S: u32 = 600;
 const UNREADABLE: &str = "`hooks` is not written as [[hooks]] tables; the marspot hooks are left out";
 
 /// Add or repoint the entries in every Kimi home.  Returns lines worth
@@ -113,8 +117,13 @@ fn reconcile_mcp(path: &Path, bin: &str) -> Option<String> {
 /// changed.  A key the user added to the entry stays.
 fn with_server(v: &mut Value, bin: &str) -> bool {
     let server = slot(slot(v, "mcpServers", || obj([])), SERVER, || obj([]));
-    let args = Value::Arr(vec![Value::from("mcp")]);
+    let args = Value::Arr(vec![Value::from("mcp"), Value::from("--client-timeout-s"), Value::from(TOOL_TIMEOUT_S.to_string())]);
+    let timeout_ms = Value::from(i64::from(TOOL_TIMEOUT_S) * 1000);
     let mut changed = false;
+    if server.get("toolTimeoutMs") != Some(&timeout_ms) {
+        server.set("toolTimeoutMs", timeout_ms);
+        changed = true;
+    }
     if server.str_at("command") != Some(bin) {
         server.set("command", Value::from(bin));
         changed = true;
@@ -280,6 +289,10 @@ mod tests {
         assert!(with_server(&mut v, "/Users/x/.local/bin/marspot-peer"));
         assert_eq!(v.at(&["mcpServers", "mine", "command"]).and_then(Value::str), Some("x"));
         assert_eq!(v.at(&["mcpServers", SERVER, "command"]).and_then(Value::str), Some("/Users/x/.local/bin/marspot-peer"));
+        // the tool-call deadline kimi keeps and the one the server is told agree
+        assert_eq!(v.at(&["mcpServers", SERVER, "toolTimeoutMs"]).and_then(Value::i64), Some(600_000));
+        let args: Vec<&str> = v.at(&["mcpServers", SERVER, "args"]).unwrap().arr().iter().filter_map(Value::str).collect();
+        assert_eq!(args, ["mcp", "--client-timeout-s", "600"]);
         assert!(!with_server(&mut v, "/Users/x/.local/bin/marspot-peer"), "a second pass changes nothing");
         assert!(with_server(&mut v, "/elsewhere/marspot-peer"), "a helper that moved is repointed");
     }
