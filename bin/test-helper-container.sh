@@ -45,9 +45,15 @@ limit() {
 }
 dk() { limit 30 "$DOCKER" "$@"; }
 has_image() { dk image inspect "$1" --format '{{.Id}}'; }
+# docker lists a stopped container until its files are gone
 none_of() { # sid
-  local out
-  out=$(dk ps -aq --filter "label=marspot.helper=$1") && [[ -z $out ]]
+  local out i
+  for (( i = 0; i < 50; i++ )); do
+    out=$(dk ps -aq --filter "label=marspot.helper=$1") || return 1
+    [[ -z $out ]] && return 0
+    sleep 0.2
+  done
+  return 1
 }
 no_image() {
   local out
