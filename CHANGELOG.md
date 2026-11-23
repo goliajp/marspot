@@ -4,6 +4,25 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.10.0
+
+- Agents in Marspot panes can drive other panes. The `marspot-peer mcp`
+  server gives Codex, Gemini and Kimi six tools: list panes, open a
+  pane, type into one, run a shell command and get its exit status,
+  read a pane's screen or wait for text, a prompt, quiet or the end of
+  a command, and resize, move or close a pane. A new pane opens in the
+  background by default, with no window, and ends with the pane that
+  opened it. What a pane shows is handed back marked as screen text,
+  not as instructions. A Claude that Marspot starts (after an account
+  switch, a handoff or a reclaim) gets the same tools; any agent can
+  use the `marspot-peer pane` command line, which a new
+  `marspot-panes` skill describes to all four agents.
+- A background pane opened in its parent's directory no longer changes
+  the parent's name from `spg` to `spg#3381`; the background pane is
+  always called by its full name.
+- In a zsh pane, `exec bash` followed at once by a command sent from
+  another pane no longer garbles that command in the macOS bash.
+
 ## 0.9.0
 
 - A session told that its account is about to run out of quota keeps
