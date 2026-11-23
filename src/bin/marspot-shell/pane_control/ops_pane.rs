@@ -27,7 +27,7 @@ const SHADOW_IDLE_S: u32 = 6 * 3600;
 
 /// How a request may be asked again when nothing came back.
 #[derive(Clone, Copy, PartialEq)]
-enum Again {
+pub(super) enum Again {
     No,
     Yes,
     /// Yes, and a session gone by the second asking is what the first did.
@@ -36,7 +36,7 @@ enum Again {
 
 /// Ask, and for the requests that can be repeated, ask once more when
 /// nothing came back.
-fn ask_done(conn: &mut Conn, sid: u64, msg: MsgType, build: impl Fn(u32) -> std::io::Result<Vec<u8>>, again: Again) -> Result<(), Reject> {
+pub(super) fn ask_done(conn: &mut Conn, sid: u64, msg: MsgType, build: impl Fn(u32) -> std::io::Result<Vec<u8>>, again: Again) -> Result<(), Reject> {
     ask_done_within(conn, sid, msg, build, again, ANSWER_WITHIN)
 }
 

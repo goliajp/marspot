@@ -5,9 +5,6 @@
 //! take turns.  Every call reads the profiles and feeds from disk, so
 //! it belongs off the shell's main loop.
 
-// the helpers plugin is what calls into this
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -90,6 +87,38 @@ pub(in crate::plugins) fn choose(
             Pick::NoAccount(accounts.rooms.iter().map(|(n, room)| Recovery { number: *n, at: at(*n, room) }).collect())
         }
     }
+}
+
+/// The recoveries of the claude accounts when every one of them
+/// refuses `model`; None while one can take it.  Reads the feed and
+/// places nothing.
+pub(in crate::plugins) fn claude_all_refused(model: Option<&str>) -> Option<Vec<Recovery>> {
+    let homes = handoff::profiles(Agent::Claude);
+    let numbers: Vec<u8> = homes.iter().map(|(n, _)| *n).collect();
+    if numbers.is_empty() {
+        return None;
+    }
+    let now = unix_now();
+    let accounts = roomiest::claude_accounts(&numbers, now);
+    let model = feed_model(Agent::Claude, model);
+    match choose(Agent::Claude, &homes, &accounts, model.as_deref(), &mut roomiest::Placed::default(), now) {
+        Pick::NoAccount(r) => Some(r),
+        Pick::Account(_) => None,
+    }
+}
+
+/// `P1 at 2026-11-23T14:00:00+00:00, P2 at an unknown time`.
+pub(in crate::plugins) fn recoveries_text(r: &[Recovery]) -> String {
+    let one = |x: &Recovery| {
+        let name = if x.number == 0 { "default".to_string() } else { format!("P{}", x.number) };
+        x.at.map_or_else(|| format!("{name} at an unknown time"), |t| format!("{name} at {}", super::feed::iso_utc(t)))
+    };
+    r.iter().map(one).collect::<Vec<_>>().join(", ")
+}
+
+/// The soonest known recovery among `r`, as text.
+pub(in crate::plugins) fn earliest_text(r: &[Recovery]) -> Option<String> {
+    r.iter().filter_map(|x| x.at).min().map(super::feed::iso_utc)
 }
 
 fn account(agent: Agent, number: u8, dir: PathBuf) -> HelperAccount {

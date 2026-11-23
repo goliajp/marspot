@@ -81,7 +81,6 @@ static CHANGES: Mutex<Changes> = Mutex::new(Changes { queue: VecDeque::new(), wa
 
 /// Called after each change is queued, so its reader need not look for
 /// changes on a timer.  Replaces any earlier one.
-#[allow(dead_code)] // the helpers plugin calls it
 pub(in crate::plugins) fn on_account_changed(wake: Waker) {
     CHANGES.lock().unwrap_or_else(|e| e.into_inner()).wake = Some(wake);
 }
@@ -101,7 +100,6 @@ pub(in crate::plugins) fn account_changed(change: AccountChanged) {
 }
 
 /// Every change queued since the last call, oldest first.
-#[allow(dead_code)] // the helpers plugin calls it
 pub(in crate::plugins) fn drain_account_changes() -> Vec<AccountChanged> {
     CHANGES.lock().unwrap_or_else(|e| e.into_inner()).queue.drain(..).collect()
 }

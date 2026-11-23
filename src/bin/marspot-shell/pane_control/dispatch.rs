@@ -81,7 +81,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
     }
     let kind = match op {
         Op::Send(_) | Op::Run(_) => Kind::Input,
-        Op::Read(_) | Op::List | Op::Audit { .. } => Kind::Read,
+        Op::Read(_) | Op::List | Op::Audit { .. } | Op::HelperList { .. } => Kind::Read,
         Op::Open(_) => Kind::Spawn,
         _ => Kind::Other,
     };
@@ -97,7 +97,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
         Op::Close { target } => ops_pane::close(conn, ctx, target),
         Op::Resize { target, cols, rows } => ops_pane::resize(conn, ctx, target, *cols, *rows),
         Op::Place { target, place } => ops_pane::place(conn, ctx, target, *place),
-        Op::Helper(name) => Err(Reject::new(ErrorCode::NotSupported, format!("{name} is not served by this build"))),
+        Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::helpers_port::serve(conn, ctx, op),
     }
 }
 
@@ -112,7 +112,9 @@ fn static_name(op: &Op) -> &'static str {
         Op::Place { .. } => "pane.place",
         Op::Close { .. } => "pane.close",
         Op::Audit { .. } => "pane.audit",
-        Op::Helper(_) => "helper",
+        Op::HelperStart(_) => "helper.start",
+        Op::HelperList { .. } => "helper.list",
+        Op::HelperStop(_) => "helper.stop",
     }
 }
 
@@ -165,6 +167,10 @@ pub(super) fn typing_reject() -> Reject {
 
 /// Write down a request that changed something.
 pub(super) fn audit(conn: &Conn, ctx: &Ctx, op: &'static str, sid: u64, content: Option<Vec<u8>>, echo_off: bool, result: &str) {
+    let reached = matches!(result, "written" | "ended" | "timeout") || result.starts_with("exit ");
+    if matches!(op, "pane.send" | "pane.run") && reached {
+        super::helpers_port::input_seen(sid);
+    }
     conn.hub.audit.record(Rec {
         at_ms: super::audit_log::now_ms(),
         caller: ctx.caller_name.clone(),

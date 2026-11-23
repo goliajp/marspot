@@ -66,7 +66,7 @@ pub(super) fn prompt_first(conn: &mut Conn, caller: CallerKey, sid: u64, within:
 }
 
 /// Send `t` and wait for what became of it, counted as in flight.
-fn type_into(conn: &mut Conn, sid: u64, t: PaneType) -> Result<PaneTyped, Reject> {
+pub(super) fn type_into(conn: &mut Conn, sid: u64, t: PaneType) -> Result<PaneTyped, Reject> {
     if !conn.hub.links.begin_input(sid, MAX_IN_FLIGHT) {
         return Err(Reject::new(ErrorCode::PaneBusy, "8 inputs are already on their way to this pane"));
     }

@@ -48,6 +48,7 @@ pub mod beside;
 pub mod claudecode;
 pub mod codex;
 pub mod gemini;
+pub mod helpers;
 pub mod kimi;
 pub mod peerbus;
 pub mod usage;
@@ -95,7 +96,6 @@ pub const PLUGIN_API_VERSION: u32 = 0x0001_0001;
 // subscription per the original comment.
 pub const HOOK_BUDGET: Duration = Duration::from_millis(100);
 const BUDGET_OVERSHOOT_LIMIT: u32 = 3;
-
 
 #[derive(Clone, Debug)]
 pub struct PluginMetadata {
@@ -821,7 +821,6 @@ where
         }
     }
 }
-
 
 /// CPU this thread has actually burned, as opposed to wall-clock.
 ///

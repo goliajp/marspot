@@ -30,8 +30,10 @@ pub enum Op {
     Place { target: String, place: Where },
     Close { target: String },
     Audit { limit: u32 },
-    /// `helper.*`: served by a handler this build may not have.
-    Helper(String),
+    HelperStart(HelperStartArgs),
+    /// `all`: every helper, not only the caller's.
+    HelperList { all: bool },
+    HelperStop(HelperStop),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -120,7 +122,7 @@ impl Where {
 }
 
 impl Op {
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &'static str {
         match self {
             Op::List => "pane.list",
             Op::Open(_) => "pane.open",
@@ -131,13 +133,15 @@ impl Op {
             Op::Place { .. } => "pane.place",
             Op::Close { .. } => "pane.close",
             Op::Audit { .. } => "pane.audit",
-            Op::Helper(n) => n,
+            Op::HelperStart(_) => "helper.start",
+            Op::HelperList { .. } => "helper.list",
+            Op::HelperStop(_) => "helper.stop",
         }
     }
 
     /// Asking again after a lost answer cannot do anything twice.
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Op::List | Op::Read(_) | Op::Audit { .. }) || self.name() == "helper.list"
+        matches!(self, Op::List | Op::Read(_) | Op::Audit { .. } | Op::HelperList { .. })
     }
 }
 
@@ -239,7 +243,9 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
         },
         "pane.close" => Op::Close { target: a.target()? },
         "pane.audit" => Op::Audit { limit: a.uint("limit")?.map_or(50, |n| n.clamp(1, 1000) as u32) },
-        h if h.starts_with("helper.") => Op::Helper(h.to_string()),
+        "helper.start" => Op::HelperStart(helper::start(&a)?),
+        "helper.list" => Op::HelperList { all: a.bool("all", false)? },
+        "helper.stop" => Op::HelperStop(helper::stop(&a)?),
         other => return Err(bad(format!("unknown op `{other}`"))),
     };
     if let Op::Resize { cols, rows, .. } = &op
@@ -253,6 +259,10 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
 #[path = "request_args.rs"]
 mod args;
 use args::{input, run_command, wait};
+
+#[path = "request_helper.rs"]
+pub mod helper;
+pub use helper::{AgentKind, HelperStartArgs, HelperStop, Isolation};
 
 #[path = "request_json.rs"]
 mod encode;

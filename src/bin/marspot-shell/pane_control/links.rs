@@ -109,15 +109,30 @@ impl Links {
         (per_caller, total): (usize, usize),
     ) -> Result<u32, Reject> {
         let mut w = lock(&self.watches);
-        if w.len() >= total {
+        // the helpers plugin's watches have a share of their own
+        let callers = w.keys().filter(|id| *id & HELPER_BIT == 0).count();
+        if callers >= total {
             return Err(Reject::new(ErrorCode::LimitCount, format!("{total} waits are pending, the most at once")));
         }
-        if w.values().filter(|e| e.caller == caller).count() >= per_caller {
+        if w.iter().filter(|(id, e)| *id & HELPER_BIT == 0 && e.caller == caller).count() >= per_caller {
             return Err(Reject::new(ErrorCode::LimitCount, format!("this caller has {per_caller} waits pending, its most at once")));
         }
         body.watch_id = self.watch_id();
         let id = body.watch_id;
         w.insert(id, WatchEntry { sid, caller, body, since: None, tx });
+        Ok(id)
+    }
+
+    /// Register a watch of the helpers plugin, within its own share of
+    /// `max`; its id carries the bit the session keeps a slot for.
+    pub fn add_helper_watch(&self, sid: u64, mut body: WatchBody, tx: Sender<Reply>, max: usize) -> Result<u32, Reject> {
+        let mut w = lock(&self.watches);
+        if w.keys().filter(|id| *id & HELPER_BIT != 0).count() >= max {
+            return Err(Reject::new(ErrorCode::LimitCount, format!("the helpers hold {max} waits, their most")));
+        }
+        body.watch_id = self.watch_id() | HELPER_BIT;
+        let id = body.watch_id;
+        w.insert(id, WatchEntry { sid, caller: CallerKey::External, body, since: None, tx });
         Ok(id)
     }
 

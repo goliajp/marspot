@@ -13,6 +13,7 @@
 
 pub mod b64;
 pub mod cli;
+pub mod cli_helper;
 mod cli_out;
 pub mod client;
 pub mod keys;
@@ -21,7 +22,9 @@ pub mod response;
 pub mod screen;
 pub mod sha256;
 
-pub use request::{Input, Op, OpenArgs, ReadArgs, Request, RunArgs, SendArgs, Wait, Where};
+pub use request::{
+    AgentKind, HelperStartArgs, HelperStop, Input, Isolation, Op, OpenArgs, ReadArgs, Request, RunArgs, SendArgs, Wait, Where,
+};
 pub use response::{Reject, Response};
 
 use std::path::PathBuf;

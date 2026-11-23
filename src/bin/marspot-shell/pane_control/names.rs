@@ -176,6 +176,16 @@ pub fn full_name(sid: u64, obs: &Observation) -> String {
     cwd_of(sid, obs).map_or_else(|| sid.to_string(), |cwd| marspot::pane_name::PaneRef::new(sid, cwd).full_name())
 }
 
+/// [`full_name`], and for a pane too new for `obs` the name its
+/// registry entry gives, as `pane.open` answers it.  Reads a file: not
+/// for the main thread.
+pub fn full_name_or_entry(sid: u64, obs: &Observation) -> String {
+    match cwd_of(sid, obs).or_else(|| cwd_of_entry(sid)) {
+        Some(cwd) => marspot::pane_name::PaneRef::new(sid, cwd).full_name(),
+        None => sid.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
