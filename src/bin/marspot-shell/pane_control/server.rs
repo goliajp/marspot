@@ -38,23 +38,44 @@ pub(super) fn serve(hub: &'static Hub) -> std::io::Result<()> {
 /// fail the same way.
 const OUT_OF_FDS_PAUSE: Duration = Duration::from_millis(100);
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AfterAccept {
+    Retry,
+    RetryAfter(Duration),
+    /// The listener itself is broken: every further accept fails alike.
+    Stop,
+}
+
 /// What to do after `accept` failed with `e`: carry on, after a pause
-/// when the process or the system is out of descriptors.
-pub(super) fn after_accept_error(e: &std::io::Error) -> Option<Duration> {
-    matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)).then_some(OUT_OF_FDS_PAUSE)
+/// when the process or the system is out of descriptors; stop when the
+/// listening socket is no longer one.
+pub(super) fn after_accept_error(e: &std::io::Error) -> AfterAccept {
+    match e.raw_os_error() {
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM) => AfterAccept::RetryAfter(OUT_OF_FDS_PAUSE),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK | libc::EOPNOTSUPP) => AfterAccept::Stop,
+        _ => AfterAccept::Retry,
+    }
 }
 
 pub(super) fn accept_loop(hub: &'static Hub, listener: UnixListener) {
     for conn in listener.incoming() {
         let mut stream = match conn {
             Ok(s) => s,
-            Err(e) => {
-                marspot::lx_warn!("shell.control.accept_failed", &format!("{e}"));
-                if let Some(pause) = after_accept_error(&e) {
-                    std::thread::sleep(pause);
+            Err(e) => match after_accept_error(&e) {
+                AfterAccept::Stop => {
+                    marspot::lx_error!("shell.control.listener_broken", &format!("pane control stops accepting: {e}"));
+                    return;
                 }
-                continue;
-            }
+                AfterAccept::RetryAfter(pause) => {
+                    marspot::lx_warn!("shell.control.accept_failed", &format!("{e}"));
+                    std::thread::sleep(pause);
+                    continue;
+                }
+                AfterAccept::Retry => {
+                    marspot::lx_warn!("shell.control.accept_failed", &format!("{e}"));
+                    continue;
+                }
+            },
         };
         if admit(hub) {
             hub.connected();
