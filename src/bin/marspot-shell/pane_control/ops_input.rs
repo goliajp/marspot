@@ -57,7 +57,10 @@ pub(super) fn prompt_first(conn: &mut Conn, caller: CallerKey, sid: u64, within:
     let body = WatchBody { watch_id: 0, kind: WatchKind::Prompt, since_pos: 0, quiet_ms: 0, text: String::new() };
     // counted from just before the end: the batch that held the end may
     // have drawn the whole prompt, and then no output follows it
-    conn.wait(sid, caller, body, Some(pos.saturating_sub(1)), Instant::now() + within).map(|_| ())
+    // only a help to the input after it: a wait that cannot be had (the
+    // caller's quota is full, say) lets the input through
+    let _ = conn.wait(sid, caller, body, Some(pos.saturating_sub(1)), Instant::now() + within);
+    Ok(())
 }
 
 /// Send `t` and wait for what became of it, counted as in flight.

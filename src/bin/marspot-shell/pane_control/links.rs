@@ -153,7 +153,8 @@ impl Links {
     }
 
     /// When and where the last run on `sid` saw its command end, taken:
-    /// only the input that follows it waits for the prompt.
+    /// only the input that follows it waits for the prompt.  Two callers
+    /// typing into the pane at that moment: the second one does not wait.
     pub fn take_end(&self, sid: u64) -> Option<(Instant, u64)> {
         lock(&self.ends).remove(&sid)
     }

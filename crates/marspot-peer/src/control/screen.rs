@@ -37,7 +37,19 @@ fn dropped(c: char) -> bool {
 
 /// Kept in the text but not counted while a tag is looked for.
 fn skipped(c: char) -> bool {
-    matches!(c as u32, 0x034f | 0x200c..=0x200d | 0xfe00..=0xfe0f | 0xe0100..=0xe01ef)
+    matches!(
+        c as u32,
+        0x034f
+            | 0x115f..=0x1160
+            | 0x17b4..=0x17b5
+            | 0x180b..=0x180d
+            | 0x180f
+            | 0x200c..=0x200d
+            | 0x3164
+            | 0xfe00..=0xfe0f
+            | 0xffa0
+            | 0xe0100..=0xe01ef
+    )
 }
 
 /// `text` without the characters a model must not be handed, and with
@@ -103,7 +115,10 @@ mod pane_control_tests {
 
     #[test]
     fn pane_control_screen_joiners_and_selectors_stay_but_cannot_split_a_tag() {
-        for c in ['\u{200c}', '\u{200d}', '\u{fe0f}', '\u{fe00}', '\u{e0100}', '\u{e01ef}', '\u{34f}'] {
+        for c in [
+            '\u{200c}', '\u{200d}', '\u{fe0f}', '\u{fe00}', '\u{e0100}', '\u{e01ef}', '\u{34f}', '\u{180b}',
+            '\u{180f}', '\u{3164}', '\u{115f}', '\u{1160}', '\u{ffa0}', '\u{17b4}', '\u{17b5}',
+        ] {
             let s = format!("<{c}/pane-screen>|</pane{c}-screen>|<{c}helper-result>");
             let want = format!("&lt;{c}/pane-screen>|&lt;/pane{c}-screen>|&lt;{c}helper-result>");
             assert_eq!(filter(&s), want, "{:x}", c as u32);

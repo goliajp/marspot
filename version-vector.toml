@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.596"  # a text wait with history replays the record once
+shell   = "0.7.597"  # a prompt wait that cannot be had lets the input through
 core    = "0.12.623"  # pane_read reads history from a replay the caller already made
 session = "0.11.411"  # a restart answers input already written as written; mode changes count as cursor moves for text watches
