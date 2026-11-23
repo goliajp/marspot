@@ -217,8 +217,12 @@ fn helpers_run_script_per_agent() {
     assert_eq!(launch::settings_mode("a = 1\nhelpers.mode = \"ask\" # tighter\n").as_deref(), Some("ask"));
     assert_eq!(launch::settings_mode("helpers_mode=auto").as_deref(), Some("auto"));
     assert_eq!(launch::settings_mode("x=1"), None);
-    let text = launch::task_text("spg#1", "/w", 30, &dir.join("result.md"), "-rf everything");
-    assert!(text.starts_with("Task from spg#1, delegated through marspot.") && text.ends_with("-rf everything\n"));
+    let text = launch::task_text("spg#1", "/w", 30, &dir.join("result.md"), "-rf everything", false);
+    assert!(text.starts_with("Task from spg#1, delegated through marspot.") && text.ends_with("-rf everything\n") && text.contains("to spg#1 with SendMessage"));
+    let held = launch::task_text("spg#1", "/w", 30, &dir.join("result.md"), "x", true);
+    assert!(held.contains("write it there") && held.contains("Do not use SendMessage"));
+    assert!(launch::by_result("claude", AgentKind::Codex, "auto") && launch::by_result("claude", AgentKind::Claude, "ask"));
+    assert!(!launch::by_result("claude", AgentKind::Claude, "auto") && !launch::by_result("codex", AgentKind::Codex, "auto"));
 }
 
 pub(super) fn no_panes() -> crate::observe::Observation {

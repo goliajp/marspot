@@ -54,14 +54,14 @@ fn first_line(task: &str) -> String {
 
 impl Service {
     /// Write the task and the script; the result file's path.
-    fn write_files(&self, sid: u64, a: &HelperStartArgs, parent: &str, cwd: &str, account: &launch::Account, mode: &str, resume: bool) -> Result<(), Reject> {
+    fn write_files(&self, sid: u64, a: &HelperStartArgs, (parent, caller): (&str, &str), cwd: &str, account: &launch::Account, mode: &str, resume: bool) -> Result<(), Reject> {
         let dir = self.0.dir_of(sid);
         std::fs::create_dir_all(&dir).map_err(internal)?;
         let (task_file, result) = (dir.join("task.md"), dir.join("result.md"));
         let mut flags = launch::mode_flags(a.agent, mode, &dir)?;
         flags.extend(launch::tool_flags(a.agent, mode, &account.home));
         let script = launch::run_script(a.agent, account, a.model.as_deref(), &flags, resume, &task_file)?;
-        std::fs::write(&task_file, launch::task_text(parent, cwd, a.budget_minutes, &result, &a.task)).map_err(internal)?;
+        std::fs::write(&task_file, launch::task_text(parent, cwd, a.budget_minutes, &result, &a.task, launch::by_result(caller, a.agent, mode))).map_err(internal)?;
         std::fs::write(dir.join("run.sh"), script).map_err(internal)
     }
 
@@ -99,11 +99,11 @@ impl HelperService for Service {
                 _ => true,
             };
         let parent_name = port.full_name(parent);
-        let caller = caller_kind::of(port).to_string();
+        let caller = caller_kind::of(port);
         let (sid, name) = port.open_shadow(parent, &cwd)?;
         let started = Started {
             parent,
-            caller,
+            caller: caller.to_string(),
             agent: a.agent,
             account: account.label(),
             model: a.model.clone().unwrap_or_else(|| "default".into()),
@@ -117,7 +117,7 @@ impl HelperService for Service {
         // written before anything runs in the pane: a shell started over
         // between the two would otherwise find an agent nobody accounts for
         self.0.record(sid, Event::Started(started));
-        if let Err(r) = self.write_files(sid, a, &parent_name, &cwd, &account, &mode, resume) {
+        if let Err(r) = self.write_files(sid, a, (&parent_name, caller), &cwd, &account, &mode, resume) {
             return Err(self.abandon(port, sid, r));
         }
         let run = launch::start_line(&self.0.dir_of(sid));
