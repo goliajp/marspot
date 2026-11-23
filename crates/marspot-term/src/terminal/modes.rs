@@ -52,6 +52,28 @@ impl ScreenModes {
     }
 }
 
+/// DEC `?2004`, bracketed paste, and how many times it was turned off.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BracketedPaste {
+    pub on: bool,
+    offs: u32,
+}
+
+impl BracketedPaste {
+    /// Turning it off counts even when it was off: zsh sends `?2004l`
+    /// for every line it takes.
+    pub fn set(&mut self, on: bool) {
+        if !on {
+            self.offs = self.offs.wrapping_add(1);
+        }
+        self.on = on;
+    }
+
+    pub fn offs(&self) -> u32 {
+        self.offs
+    }
+}
+
 impl Default for ScreenModes {
     fn default() -> Self {
         ScreenModes {
@@ -198,7 +220,7 @@ impl<'a> Handler<'a> {
             1006 => on(*self.mouse_sgr_encoding),
             1007 => on(*self.alt_scroll),
             1034 => on(self.modes.meta_mode),
-            2004 => on(*self.bracketed_paste),
+            2004 => on(self.bracketed_paste.on),
             2026 => on(*self.sync_output),
             _ => 0,
         }
@@ -273,7 +295,7 @@ impl<'a> Handler<'a> {
             // layer wraps Cmd-V paste in `\e[200~ ... \e[201~` so apps
             // can distinguish paste from interactive typing. Read via
             // `Terminal::bracketed_paste_mode()`.
-            2004 => *self.bracketed_paste = set,
+            2004 => self.bracketed_paste.set(set),
             // DECSET ?1004 — focus reporting.  Turning it OFF also
             // forgets what was last reported, so a program that turns
             // it back on is told the current state rather than being

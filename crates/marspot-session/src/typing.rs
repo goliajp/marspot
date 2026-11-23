@@ -12,7 +12,11 @@
 //! and a return typed before it may change that mode: zsh turns it off
 //! as it takes the line, and a line that was `exec bash` leaves a shell
 //! that never turns it on.  Until the program has answered that return,
-//! the mode in hand is the one from before it, so a paste waits.
+//! the mode in hand is the one from before it, so a paste waits (see
+//! `hold`).  A request that writes nothing, a position probe, does not
+//! wait behind it.
+
+mod hold;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,12 +28,14 @@ use crate::SessionImpl;
 use crate::local_session::Written;
 use crate::pane_ctl::{local, local_mut, shell_in_front};
 use crate::watch::Watches;
+use hold::Returned;
 
 /// Requests held at once, the one being typed included.  The control
 /// reader's channel has no bound, and input with a return takes up to
 /// 50 ms: several callers can send faster than it is typed.
 const QUEUE: usize = 8;
-/// Input not written by then is not being read by the pane's program.
+/// Input not written by then is not being read by the pane's program;
+/// a paste held for a return counts from when it started waiting.
 const NOT_READ_AFTER: Duration = Duration::from_secs(2);
 const ECHO_WAIT: Duration = Duration::from_millis(50);
 
@@ -38,13 +44,6 @@ enum Stage {
     /// The input was written then, at that output position: output
     /// past it is the echo.
     Echo { written: Instant, pos: u64 },
-}
-
-/// A return typed then, at that output position.
-#[derive(Clone, Copy)]
-struct Returned {
-    at: Instant,
-    pos: u64,
 }
 
 /// A watch slot a request has reserved: (slot, watch id).
@@ -63,6 +62,8 @@ struct InFlight {
     /// The input itself has a return the program will act on: one
     /// outside paste markers.
     has_return: bool,
+    /// Bracketed paste's off count before the input was queued.
+    offs: u32,
     stage: Stage,
     /// Set by the PTY's writer thread once the input left its queue.
     written: Arc<AtomicBool>,
@@ -81,8 +82,12 @@ pub(crate) struct Typing {
     head: usize,
     len: usize,
     cur: Option<InFlight>,
-    /// The latest return typed, until the next input starts.
+    /// The latest return typed, until a paste starts.
     returned: Option<Returned>,
+    /// The paste at the head of the queue waits for that return's
+    /// answer: since then, and until when to look again.
+    held_since: Option<Instant>,
+    held_until: Option<Instant>,
     /// Wakes the loop; the writer thread calls it when input is written.
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -93,11 +98,11 @@ fn typed(req_id: u32, result: TypedResult, pos: u64, written: usize, echo_off: b
 
 impl Typing {
     pub(crate) fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { queue: Default::default(), head: 0, len: 0, cur: None, returned: None, wake }
+        Self { queue: Default::default(), head: 0, len: 0, cur: None, returned: None, held_since: None, held_until: None, wake }
     }
 
     pub(crate) fn idle(&self) -> bool {
-        self.cur.is_none() && self.len == 0
+        self.cur.is_none() && self.len == 0 && !self.returned.as_ref().is_some_and(Returned::pending)
     }
 
     /// Queue `t`; the refusal when the queue is full.
@@ -132,21 +137,30 @@ impl Typing {
             self.head = (self.head + 1) % QUEUE;
             self.len -= 1;
         }
+        (self.held_since, self.held_until) = (None, None);
         (done, ids)
     }
 
     /// Move the request in flight along, or start the next; what was
     /// decided, if anything.
     pub(crate) fn step(&mut self, session: &mut SessionImpl, watches: &mut Watches) -> Option<Step> {
+        let now = Instant::now();
+        if let Some(r) = self.returned.as_mut() {
+            r.observe(now, local(session).output_pos());
+        }
         if self.cur.is_none() {
-            if self.len == 0 || self.paste_waits(session) {
+            if self.len == 0 {
                 return None;
             }
-            let t = self.queue[self.head].take()?;
-            self.returned = None;
-            self.head = (self.head + 1) % QUEUE;
-            self.len -= 1;
-            if let Some(step) = self.start(t, session, watches) {
+            let (t, since) = if self.paste_waits(session, now) {
+                (self.take_empty()?, now)
+            } else {
+                (self.take(0)?, self.held_since.take().unwrap_or(now))
+            };
+            if t.paste && !t.bytes.is_empty() {
+                self.returned = None;
+            }
+            if let Some(step) = self.start(t, since, session, watches) {
                 return Some(step);
             }
         }
@@ -156,21 +170,45 @@ impl Typing {
     }
 
     /// The next request is a paste into a program in bracketed paste
-    /// mode that has not answered the return typed before it: answered
-    /// is the mode turned off, or output past the return once the echo
-    /// wait is over.  A program that reads nothing is not waited for
-    /// past the time input is given to be read.
-    fn paste_waits(&self, session: &SessionImpl) -> bool {
-        let (Some(r), Some(t)) = (self.returned, self.queue[self.head].as_ref()) else { return false };
-        if !t.paste || !session.terminal().bracketed_paste_mode() {
-            return false;
+    /// mode that has not answered the return typed before it.
+    fn paste_waits(&mut self, session: &SessionImpl, now: Instant) -> bool {
+        let pasting = self.queue[self.head].as_ref().is_some_and(|t| t.paste);
+        let term = session.terminal();
+        self.held_until = match self.returned.as_mut() {
+            Some(r) if pasting && term.bracketed_paste_mode() => {
+                r.wait_until(now, local(session).output_pos(), term.bracketed_paste_offs())
+            }
+            _ => None,
+        };
+        if self.held_until.is_some() {
+            self.held_since.get_or_insert(now);
         }
-        let since = r.at.elapsed();
-        let answered = local(session).output_pos() > r.pos && since >= ECHO_WAIT;
-        !answered && since < NOT_READ_AFTER
+        self.held_until.is_some()
     }
 
-    fn start(&mut self, t: PaneType, session: &mut SessionImpl, watches: &mut Watches) -> Option<Step> {
+    /// The `i`th request queued, taken out; the ones after it move up.
+    fn take(&mut self, i: usize) -> Option<PaneType> {
+        let t = self.queue[(self.head + i) % QUEUE].take()?;
+        if i == 0 {
+            self.head = (self.head + 1) % QUEUE;
+        } else {
+            for j in i + 1..self.len {
+                self.queue[(self.head + j - 1) % QUEUE] = self.queue[(self.head + j) % QUEUE].take();
+            }
+        }
+        self.len -= 1;
+        Some(t)
+    }
+
+    /// The first request queued that writes nothing: its answer does
+    /// not depend on what is typed before it.
+    fn take_empty(&mut self) -> Option<PaneType> {
+        let empty = |t: &Option<PaneType>| t.as_ref().is_some_and(|t| t.bytes.is_empty() && !t.enter);
+        let i = (0..self.len).find(|&i| empty(&self.queue[(self.head + i) % QUEUE]))?;
+        self.take(i)
+    }
+
+    fn start(&mut self, t: PaneType, since: Instant, session: &mut SessionImpl, watches: &mut Watches) -> Option<Step> {
         let watch = match t.watch {
             Some(w) => match watches.reserve(w, session) {
                 Ok(slot) => Some(slot),
@@ -192,12 +230,8 @@ impl Typing {
         };
         let has_return = !marked && bytes.iter().any(|&b| b == b'\r' || b == b'\n');
         let echo_off = echo_off(local(session).raw_master());
-        let flag = Arc::new(AtomicBool::new(false));
-        let (set, wake) = (Arc::clone(&flag), Arc::clone(&self.wake));
-        let on_written: Written = Arc::new(move || {
-            set.store(true, Ordering::Release);
-            wake();
-        });
+        let offs = session.terminal().bracketed_paste_offs();
+        let (flag, on_written) = self.on_written();
         if local_mut(session).write_then(bytes, Some(on_written)).is_err() {
             return Some(Step::Typed(typed(t.req_id, TypedResult::PtyQueueFull, pos, 0, echo_off), watch));
         }
@@ -206,14 +240,27 @@ impl Typing {
             enter: t.enter,
             watch,
             len: bytes.len(),
-            queued_at: Instant::now(),
+            queued_at: since,
             pos,
             echo_off,
             has_return,
+            offs,
             stage: Stage::Writing,
             written: flag,
         });
         None
+    }
+
+    /// A flag the PTY's writer thread sets, waking the loop, once bytes
+    /// left its queue.
+    fn on_written(&self) -> (Arc<AtomicBool>, Written) {
+        let flag = Arc::new(AtomicBool::new(false));
+        let (set, wake) = (Arc::clone(&flag), Arc::clone(&self.wake));
+        let on_written: Written = Arc::new(move || {
+            set.store(true, Ordering::Release);
+            wake();
+        });
+        (flag, on_written)
     }
 
     fn advance(&mut self, session: &mut SessionImpl) -> Option<Step> {
@@ -229,7 +276,7 @@ impl Typing {
             let pos = local(session).output_pos();
             if !cur.enter {
                 if cur.has_return {
-                    self.returned = Some(Returned { at: now, pos });
+                    self.returned = Some(Returned::new(now, cur.offs, Arc::clone(&cur.written), pos));
                 }
                 let r = typed(cur.req_id, TypedResult::Written, pos, cur.len, cur.echo_off);
                 return Some(Step::Typed(r, cur.watch.take()));
@@ -241,27 +288,25 @@ impl Typing {
         if pos == at_written && now < written + ECHO_WAIT {
             return None;
         }
-        if session.write(b"\r").is_err() {
-            let r = typed(cur.req_id, TypedResult::NotReading, cur.pos, cur.len, cur.echo_off);
-            return Some(Step::Typed(r, cur.watch.take()));
+        let offs = session.terminal().bracketed_paste_offs();
+        let (req_id, len, echo_off, watch, queued_pos) = (cur.req_id, cur.len, cur.echo_off, cur.watch.take(), cur.pos);
+        let (flag, on_written) = self.on_written();
+        if local_mut(session).write_then(b"\r", Some(on_written)).is_err() {
+            return Some(Step::Typed(typed(req_id, TypedResult::NotReading, queued_pos, len, echo_off), watch));
         }
-        let r = typed(cur.req_id, TypedResult::Written, pos, cur.len + 1, cur.echo_off);
-        let watch = cur.watch.take();
-        self.returned = Some(Returned { at: now, pos });
-        Some(Step::Typed(r, watch))
+        self.returned = Some(Returned::new(now, offs, flag, pos));
+        Some(Step::Typed(typed(req_id, TypedResult::Written, pos, len + 1, echo_off), watch))
     }
 
     /// When the request in flight has to be looked at again: its
     /// deadline.  Its input being written wakes the loop sooner.
-    /// A paste held for a return's answer is looked at again when the
-    /// echo wait is over and when it stops waiting; output past the
-    /// return wakes the loop anyway.
+    /// A paste held for a return's answer is looked at again when
+    /// `hold` says; output and the return being written wake the loop
+    /// sooner.
     pub(crate) fn due_in(&self, now: Instant) -> Option<Duration> {
         let Some(cur) = self.cur.as_ref() else {
-            let r = self.returned.filter(|_| self.len > 0)?;
-            let echo = r.at + ECHO_WAIT;
-            let at = if now < echo { echo } else { r.at + NOT_READ_AFTER };
-            return Some(at.saturating_duration_since(now));
+            let until = self.held_until.filter(|_| self.len > 0)?;
+            return Some(until.saturating_duration_since(now));
         };
         Some(match cur.stage {
             Stage::Writing => (cur.queued_at + NOT_READ_AFTER).saturating_duration_since(now),

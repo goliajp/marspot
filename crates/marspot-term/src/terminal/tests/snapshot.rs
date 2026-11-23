@@ -72,7 +72,7 @@ fn snapshot_roundtrip_with_saved_cursor_and_modes() {
     dst.apply_snapshot(&bytes).unwrap();
     assert_terms_equivalent(&src, &dst);
     assert!(dst.cursor_key_application_mode);
-    assert!(dst.bracketed_paste_mode);
+    assert!(dst.bracketed_paste_mode.on);
     assert!(!dst.cursor_visible);
     assert!(dst.saved_cursor.is_some());
 }

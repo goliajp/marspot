@@ -246,7 +246,7 @@ impl Terminal {
         self.scroll_top = scroll_top;
         self.scroll_bot = scroll_bot;
         self.cursor_key_application_mode = (modes & (1 << 0)) != 0;
-        self.bracketed_paste_mode = (modes & (1 << 1)) != 0;
+        self.bracketed_paste_mode.on = (modes & (1 << 1)) != 0;
         self.cursor_visible = (modes & (1 << 2)) != 0;
         self.pending_wrap = (modes & (1 << 3)) != 0;
         // bits 5-6 = mouse_tracking_mode,bit 7 = SGR(0.6.66 起加).

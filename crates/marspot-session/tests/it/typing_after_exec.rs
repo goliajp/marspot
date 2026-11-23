@@ -35,3 +35,22 @@ fn typing_right_after_exec_into_bash_without_bracketed_paste() {
         assert_eq!(run(&mut l, 2, "true"), Some(0), "pane {i}: the second");
     }
 }
+
+/// `pane.read` asks for the output position with a request that types
+/// nothing; one between the `exec` and the command must not make the
+/// command forget the return it has to wait for.
+#[test]
+fn typing_after_exec_with_a_paste_probe_in_between() {
+    assert!(std::path::Path::new("/bin/bash").exists(), "/bin/bash is missing");
+    for i in 0..10 {
+        let mut sandbox = sandbox_state_dir();
+        sandbox.env.set("BASH_SILENCE_DEPRECATION_WARNING", "1");
+        let s = with_zsh(&mut sandbox);
+        let mut l = Link::new(&s);
+        let req = l.type_in(b"exec /bin/bash --norc --noprofile", true, true, true, None);
+        assert_eq!(l.typed(req, 5.0).result, TypedResult::Written);
+        let probe = l.type_in(b"", false, false, false, None);
+        assert_eq!(l.typed(probe, 1.0).result, TypedResult::Written, "pane {i}: the probe");
+        assert_eq!(run(&mut l, 1, "false"), Some(1), "pane {i}: the first command after the exec");
+    }
+}

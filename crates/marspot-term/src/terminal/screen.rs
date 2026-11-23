@@ -203,7 +203,7 @@ impl<'a> Handler<'a> {
         *self.cursor_visible = true;
         *self.cursor_shape = 0;
         *self.cursor_key_app_mode = false;
-        *self.bracketed_paste = false;
+        self.bracketed_paste.set(false);
         *self.sync_output = false;
         *self.alt_scroll = false;
         *self.focus_reporting = false;

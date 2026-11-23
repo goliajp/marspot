@@ -24,7 +24,7 @@ mod diff_tests;
 mod lane;
 mod modes;
 mod new;
-pub use modes::{PaletteOverrides, ScreenModes};
+pub use modes::{BracketedPaste, PaletteOverrides, ScreenModes};
 mod osc;
 mod predict;
 mod print;
@@ -194,7 +194,7 @@ pub struct Terminal {
     /// treats each Chinese char in a paste as a separate keystroke and
     /// auto-inserts spaces between CJK characters — the "粘贴中文都
     /// 多了空格" symptom.
-    bracketed_paste_mode: bool,
+    bracketed_paste_mode: BracketedPaste,
     /// Draw `<u>…</u>` as underline — `appearance.render_u_tags`.
     ///
     /// Cached per feed rather than read per character: the setting is
@@ -488,7 +488,7 @@ struct Handler<'a> {
     response_burst_since: &'a mut Option<Instant>,
     response_burst_last_warn: &'a mut Option<Instant>,
     cursor_key_app_mode: &'a mut bool,
-    bracketed_paste: &'a mut bool,
+    bracketed_paste: &'a mut BracketedPaste,
     /// DEC 2026 — see `Terminal::sync_output`.
     sync_output: &'a mut bool,
     /// Sticky companion to `sync_output` — see `Terminal::uses_sync_output`.
