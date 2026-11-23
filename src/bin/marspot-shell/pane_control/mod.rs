@@ -39,6 +39,7 @@ mod ops_pane;
 mod ops_read;
 mod panes;
 mod recent;
+pub(crate) mod run_trailer;
 mod server;
 mod shadow_gate;
 mod shadow_tree;

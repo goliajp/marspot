@@ -275,7 +275,7 @@ fn watch_table_shares_and_reply_routing() {
 
 #[test]
 fn run_puts_the_status_line_on_its_own_line() {
-    assert_eq!(ops_input::run_text("make # done\n", false), "make # done\nprintf '\\033]133;D;%s\\007' $?");
+    assert_eq!(ops_input::run_text("make # done\n", false), "make # done\nprintf '\\033]133;D;%s;marspot=run\\007' $?");
     assert!(ops_input::run_text("true", true).ends_with(" $status"));
 }
 

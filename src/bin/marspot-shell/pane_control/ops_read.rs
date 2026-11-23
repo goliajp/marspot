@@ -16,7 +16,7 @@ use marspot_term::terminal::Terminal;
 use super::super::observe::Observation;
 use super::conn::Conn;
 use super::dispatch::{Ctx, target};
-use super::{names, panes};
+use super::{names, panes, run_trailer};
 
 /// The most text one read hands back.
 pub(super) const MAX_TEXT: usize = 1024 * 1024;
@@ -120,7 +120,8 @@ fn matched_line(v: &mut Value, replay: Option<&super::matched::Replay>, line: u6
     let squeezed: String = needle.split_whitespace().collect();
     let by_row = replay
         .and_then(|r| r.line_at(line))
-        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed));
+        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed))
+        .filter(|l| !run_trailer::is_status_line(l));
     let (text, from) = match by_row {
         Some(l) => (Some(l), "row"),
         None => (v.str_at("text").unwrap_or("").lines().rev().find(|l| l.contains(needle)).map(String::from), "screen"),
@@ -139,8 +140,9 @@ pub(super) fn screen_of(sid: u64, history_lines: u32, pos: Option<u64>, obs: &Ob
 /// [`screen_of`], with the history from `replay` when one is at hand.
 fn screen_from(sid: u64, history_lines: u32, pos: Option<u64>, obs: &Observation, replay: Option<&Terminal>) -> Value {
     let raw = marspot::pane_read::screen_with(sid, history_lines.min(u16::MAX as u32) as u16, replay).unwrap_or_default();
-    let (text, truncated) = cap_text(screen::filter(&raw));
+    let (text, truncated) = cap_text(screen::filter(&run_trailer::drop_status_lines(&raw)));
     let (cols, rows, cursor) = shape(sid);
+    // cursor and rows are screen coordinates; text may have fewer lines once status lines are dropped
     let mut v = obj([
         ("pane", names::full_name(sid, obs).into()),
         ("id", (sid as i64).into()),

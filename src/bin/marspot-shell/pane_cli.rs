@@ -61,6 +61,7 @@ impl ShellApp {
     pub(super) fn run_cli_read(&self, target: &str, extra_lines: u32) -> Result<String, String> {
         let sid = self.resolve_target(target)?;
         marspot::pane_read::screen(sid, extra_lines.min(u16::MAX as u32) as u16)
+            .map(|text| pane_control::run_trailer::drop_status_lines(&text))
             .map_err(|e| format!("cannot read pane {sid}: {e}"))
     }
 
