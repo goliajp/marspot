@@ -143,6 +143,10 @@ DOCKERFILE
 limit 180 "$DOCKER" build -q -t "$TAG" "$SB/image" >/dev/null || { echo "FAIL: the test image did not build" >&2; exit 1; }
 limit 1500 cargo test -q --no-run --bin marspot-shell || exit 1
 limit 1500 cargo test -q --no-run -p marspot-session --test it || exit 1
+# the first run of a new binary waits for the system to look at it, which
+# is no part of what is timed below
+limit 600 cargo test -q --bin marspot-shell -- --list >/dev/null || exit 1
+limit 600 cargo test -q -p marspot-session --test it -- --list >/dev/null || exit 1
 
 mkdir -p "$SB/work/.git/hooks" "$SB/account/.gemini/other" "$SB/account/credentials" "$SB/account/oauth" "$SB/account/other" "$SB/elsewhere" "$SB/state"
 echo "from outside" > "$SB/work/given"
@@ -164,7 +168,11 @@ for run in claude:hangup claude:kill gemini:hangup kimi:kill; do
   rm -f "$SB/work/made"
   echo "a-login" > "$SB/account/.gemini/oauth_creds.json"
   echo "a-login" > "$SB/account/credentials/kimi-code.json"
-  check "the files are written" limit 120 env MARSPOT_STATE_DIR="$SB/state" cargo test -q --bin marspot-shell -- --ignored --exact plugins::helpers::container::tests::container_files_for_the_script
+  limit 120 env MARSPOT_STATE_DIR="$SB/state" cargo test -q --bin marspot-shell -- --ignored --exact plugins::helpers::container::tests::container_files_for_the_script \
+    > "$SB/$sid.files.log" 2>&1
+  rc=$?
+  check "the files are written" test "$rc" = 0
+  (( rc == 0 )) || { echo "       exit $rc"; tail -25 "$SB/$sid.files.log"; }
   # cargo's own success says nothing when no test matched
   check "and are there" test -s "$SB/$sid/run.sh" -a -s "$SB/$sid/name"
   limit 180 cargo test -q -p marspot-session --test it -- --ignored --nocapture --exact helper_container::helper_container_goes_with_its_session \
