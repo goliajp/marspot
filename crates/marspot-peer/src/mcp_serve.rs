@@ -77,7 +77,7 @@ impl InFlight {
     }
 
     fn ended(&self) {
-        *self.threads.lock().unwrap() -= 1;
+        *self.threads.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
         self.ended.notify_all();
     }
 
@@ -99,6 +99,16 @@ impl InFlight {
         while *n > 0 {
             n = self.ended.wait(n).unwrap();
         }
+    }
+}
+
+/// Counts a call thread out even when it unwinds, so `close` cannot wait
+/// forever on a thread that panicked.
+struct Ended(Arc<InFlight>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.ended();
     }
 }
 
@@ -137,11 +147,11 @@ pub fn serve(mut server: Server, input: impl BufRead, output: impl Write + Send 
                 };
                 let (server, out, calls) = (server.clone(), out.clone(), calls.clone());
                 std::thread::spawn(move || {
+                    let _ended = Ended(calls.clone());
                     let v = server.answer_call(id, params.as_ref(), now_ms(), &cancel);
                     if calls.finish(&key, &cancel) {
                         out.send(&v);
                     }
-                    calls.ended();
                 });
             }
             Step::Cancelled(id) => calls.cancel(&id.to_json()),
