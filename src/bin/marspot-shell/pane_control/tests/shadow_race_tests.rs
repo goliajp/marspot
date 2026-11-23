@@ -123,3 +123,21 @@ fn pane_control_shadow_concurrent_opens_hold_the_count_limit() {
     assert!(outs.iter().filter_map(|o| o.as_ref().err()).all(|r| r.code == ErrorCode::LimitCount), "{outs:?}");
     assert_eq!(spawned.load(Ordering::Acquire), 2, "the core was asked for two panes");
 }
+
+#[test]
+fn pane_control_shadow_open_with_no_answer_still_counts() {
+    let (hub, rx) = hub_at(&temp("noanswer"));
+    hub.caps.store(CAP_SHADOWS, Ordering::Release);
+    let cfg = Config { shadows_per_parent: 1, ..Config::default() };
+    let c = ctx(CallerKey::Pane(10), vec![entry(10, "/w")], cfg);
+    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
+    let mut conn = Conn::new(&hub, Peer::default(), None);
+    // the core is sent the spawn but never answers
+    let first = ops_pane::open_within(&mut conn, &c, &open, Duration::from_millis(200)).unwrap_err();
+    assert_eq!(first.code, ErrorCode::Unknown, "{first:?}");
+    assert!(matches!(rx.try_recv(), Ok(MainCmd::Send { msg: MsgType::PaneSpawn, .. })));
+    // the view still shows no shadow, but the pane may exist
+    let second = ops_pane::open_within(&mut conn, &c, &open, Duration::from_millis(200)).unwrap_err();
+    assert_eq!(second.code, ErrorCode::LimitCount, "{second:?}");
+    assert!(rx.try_recv().is_err(), "no second spawn was sent");
+}

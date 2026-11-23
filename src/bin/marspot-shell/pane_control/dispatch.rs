@@ -21,6 +21,16 @@ pub(super) struct Ctx {
     pub caller_name: String,
     pub obs: Arc<Observation>,
     pub cfg: Arc<Config>,
+    /// Where a view taken now comes from.
+    pub view: fn(&Ctx) -> Arc<Observation>,
+}
+
+impl Ctx {
+    /// A view at most the observer's interval old, for a request that
+    /// waited after `obs` was taken.
+    pub fn view_now(&self) -> Arc<Observation> {
+        (self.view)(self)
+    }
 }
 
 /// How recently a key in the focused pane counts as the user typing.
@@ -38,7 +48,8 @@ pub(super) fn handle(conn: &mut Conn, line: &str) -> Response {
         CallerKey::Pane(sid) => names::full_name(sid, &obs),
         CallerKey::External => "external".into(),
     };
-    let ctx = Ctx { caller, caller_name, obs, cfg: conn.hub.config() };
+    // walks are shared per interval, so a later view costs at most one more
+    let ctx = Ctx { caller, caller_name, obs, cfg: conn.hub.config(), view: |_| observe::shared().fresh(observe::INTERVAL) };
     let op_name: &'static str = static_name(&req.op);
     match run(conn, &ctx, &req.op) {
         Ok(v) => Response::Ok(v),

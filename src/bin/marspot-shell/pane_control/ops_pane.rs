@@ -75,27 +75,39 @@ fn counts(tree: &Tree, parent: u64) -> SpawnCounts {
 }
 
 pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Reject> {
-    let parent = match (&a.parent, ctx.caller) {
+    open_within(conn, ctx, a, SPAWN_WITHIN)
+}
+
+/// The count limits and the spawn rate for a new pane under `parent`.
+fn check_open(conn: &Conn, ctx: &Ctx, tree: &Tree, parent: u64, shadow: bool) -> Result<(), Reject> {
+    let now = conn.hub.now_ms();
+    let mut limits = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner());
+    check_spawn(&ctx.cfg, &counts(tree, parent), shadow, session_cap())?;
+    if !shadow && limits.window_panes_of(ctx.caller) >= ctx.cfg.window_panes_per_caller {
+        return Err(Reject::new(ErrorCode::LimitCount, format!("this caller has {} panes open in windows, its most", ctx.cfg.window_panes_per_caller)));
+    }
+    let root = if parent != 0 { shadow_tree::root_and_depth(&|s| tree.parent_of(s), parent).0 } else { 0 };
+    limits.admit_spawn(&ctx.cfg, root, now)
+}
+
+/// The pane a new pane opens under (0: none, a window pane from outside).
+fn open_parent(ctx: &Ctx, a: &OpenArgs) -> Result<u64, Reject> {
+    Ok(match (&a.parent, ctx.caller) {
         (Some(p), _) => target(ctx, p)?,
         (None, CallerKey::Pane(sid)) => sid,
         (None, CallerKey::External) if a.shadow => {
             return Err(Reject::new(ErrorCode::BadRequest, "a shadow pane needs a parent: pass `parent` when calling from outside the panes"));
         }
         (None, CallerKey::External) => 0,
-    };
+    })
+}
+
+pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration) -> Result<Value, Reject> {
+    let parent = open_parent(ctx, a)?;
     conn.need_caps(CAP_SHADOWS)?;
     let gate = conn.hub.shadow_gate.enter(GATE_WITHIN)?;
-    let tree = gate.tree(&ctx.obs);
-    let now = conn.hub.now_ms();
-    {
-        let mut limits = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner());
-        check_spawn(&ctx.cfg, &counts(&tree, parent), a.shadow, session_cap())?;
-        if !a.shadow && limits.window_panes_of(ctx.caller) >= ctx.cfg.window_panes_per_caller {
-            return Err(Reject::new(ErrorCode::LimitCount, format!("this caller has {} panes open in windows, its most", ctx.cfg.window_panes_per_caller)));
-        }
-        let root = if parent != 0 { shadow_tree::root_and_depth(&|s| tree.parent_of(s), parent).0 } else { 0 };
-        limits.admit_spawn(&ctx.cfg, root, now)?;
-    }
+    // the view from before the wait in the gate can be far behind
+    check_open(conn, ctx, &gate.tree(&ctx.view_now()), parent, a.shadow)?;
     let cwd = a.cwd.clone().or_else(|| names::cwd_of(parent, &ctx.obs)).unwrap_or_default();
     let spawn = PaneSpawn {
         req_id: 0,
@@ -109,15 +121,19 @@ pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Re
         cwd,
     };
     let built = |req_id| encode_pane_spawn(&PaneSpawn { req_id, ..spawn.clone() });
-    let sid = match conn.ask(parent, MsgType::PaneSpawn, built, false, SPAWN_WITHIN) {
+    let shadow_parent = if a.shadow { parent } else { 0 };
+    let sid = match conn.ask(parent, MsgType::PaneSpawn, built, false, within) {
         Ok(Reply::Spawned(s)) if s.ok => s.sid,
         Ok(Reply::Spawned(s)) => return Err(Reject::new(ErrorCode::SpawnFailed, s.err)),
         Ok(Reply::Done(d)) => return Err(done_reject(d.code, &d.text)),
         Ok(_) => return Err(Reject::new(ErrorCode::Internal, "an answer of the wrong kind")),
         Err(Asked::Refused(r)) => return Err(r),
-        Err(Asked::NoAnswer) => return Err(Reject::new(ErrorCode::Unknown, "no answer from the core; check with pane.list before opening again")),
+        Err(Asked::NoAnswer) => {
+            gate.record_unanswered(shadow_parent);
+            return Err(Reject::new(ErrorCode::Unknown, "no answer from the core; check with pane.list before opening again"));
+        }
     };
-    gate.record(sid, if a.shadow { parent } else { 0 });
+    gate.record(sid, shadow_parent);
     drop(gate);
     conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened(ctx.caller, sid, a.shadow);
     audit(conn, ctx, "pane.open", sid, a.command.clone().map(String::into_bytes), false, if a.shadow { "shadow" } else { "window" });
@@ -182,7 +198,7 @@ pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where) -> Resul
         // checked even when the registry already names it a shadow, which
         // can run ahead of where the core holds it
         (Where::Shadow, CallerKey::Pane(c), Some(g)) if c != sid => {
-            let tree = g.tree(&ctx.obs);
+            let tree = g.tree(&ctx.view_now());
             shadow_tree::check_adopt(&ctx.cfg, &|s| tree.parent_of(s), &tree.shadows(), c, sid)?;
             c
         }
