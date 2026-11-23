@@ -188,6 +188,7 @@ impl CoreApp {
 
     /// Moves whose session did not answer in time stay undone.
     pub(super) fn expire_places(&mut self, now: Instant) {
+        self.expire_unsaid(now);
         let places = &mut self.pane_control.shadows.places;
         let (late, kept): (Vec<_>, Vec<_>) = places.placing.drain(..).partition(|p| p.deadline <= now);
         places.placing = kept;

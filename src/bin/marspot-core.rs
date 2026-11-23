@@ -2447,6 +2447,8 @@ mod pane_control;
 mod pane_reports;
 #[path = "marspot-core/shadows.rs"]
 mod shadows;
+#[path = "marspot-core/spawn_said.rs"]
+mod spawn_said;
 #[path = "marspot-core/shadow_place.rs"]
 mod shadow_place;
 #[path = "marspot-core/shadow_boot.rs"]
@@ -4786,11 +4788,7 @@ fn main() {
                         app.pending_to_shell.push((MsgType::PaneAwake, marspot::shell_proto::encode_pane_awake(&said)));
                     }
                 }
-                CoreEvent::L3Says(sid, frame) => {
-                    if let Some(pane) = app.pane_by_sid_mut(sid) {
-                        pane.session_mut().l3_session_says(&frame);
-                    }
-                }
+                CoreEvent::L3Says(sid, frame) => app.session_says(sid, &frame),
                 CoreEvent::ShellPaneControl(f) => drop(app.route_pane_control(f)),
                 CoreEvent::PaneReport(sid, f) => app.report_to_shell(sid, f),
                 CoreEvent::L3ControlReconnected(sid, stream) => {

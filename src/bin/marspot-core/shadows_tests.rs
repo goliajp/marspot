@@ -38,11 +38,7 @@ pub(crate) fn drive(app: &mut CoreApp, rx: &Receiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
         match ev {
             CoreEvent::L3SpawnFinished(sid, o) => app.adopt_spawn_outcome(sid, o),
-            CoreEvent::L3Says(sid, f) => {
-                if let Some(p) = app.pane_by_sid_mut(sid) {
-                    p.session_mut().l3_session_says(&f);
-                }
-            }
+            CoreEvent::L3Says(sid, f) => app.session_says(sid, &f),
             CoreEvent::PaneReport(sid, f) => app.report_to_shell(sid, f),
             _ => {}
         }
