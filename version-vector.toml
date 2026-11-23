@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.636"  # a helper whose messages its parent would hold asks by its result file
-core    = "0.12.634"  # the grid notes the rows the cursor goes up from and to
-session = "0.11.421"  # the grid notes the rows the cursor goes up from and to
+core    = "0.12.635"  # a disk writer's pages taken back by a small burst are given back again
+session = "0.11.422"  # a disk writer's pages taken back by a small burst are given back again

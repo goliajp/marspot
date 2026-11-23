@@ -130,6 +130,11 @@ impl Given {
         }
     }
 
+    /// Where the pages given back end; 0 when none are.
+    pub fn end(&self) -> usize {
+        self.hi as usize
+    }
+
     pub fn is_given(&self) -> bool {
         self.hi != 0
     }

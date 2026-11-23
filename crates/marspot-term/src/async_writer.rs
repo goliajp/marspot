@@ -222,7 +222,7 @@ impl AsyncWriter {
             self.hand_over();
         }
         if self.buf.main.len() + bytes.len() > self.room {
-            self.buf.given.take_back(&mut self.buf.main);
+            self.buf.take_back();
             self.room = self.cap;
         }
         self.buf.main.extend_from_slice(bytes);

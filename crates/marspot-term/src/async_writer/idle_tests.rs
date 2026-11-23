@@ -174,3 +174,29 @@ fn small_bursts_take_nothing_back_and_give_nothing_back() {
     drop(w);
     let _ = std::fs::remove_file(&path);
 }
+
+/// A burst that takes the pages back and writes little of them has them
+/// given back when it ends: they count whether or not it wrote them.
+#[test]
+fn pages_a_smaller_burst_took_back_are_given_back_again() {
+    let (mut w, path) = writer("again");
+    flood(&mut w, 0);
+    holding_a_buffer_a_flood_filled(&mut w);
+    w.hand_off();
+    assert!(w.buf.given.is_given());
+    for _ in 0..3 {
+        settled(&w);
+        let before = times_given_back();
+        w.write(&pattern(0, KEPT + 8 * 1024));
+        assert!(!w.buf.given.is_given());
+        w.flush();
+        settled(&w);
+        assert!(times_given_back() > before, "the pages stayed taken");
+        // the one written is the last one the writer put back
+        let last = w.queue.take_free().expect("a free buffer");
+        assert!(last.given.is_given());
+        w.swap_in(last);
+    }
+    drop(w);
+    let _ = std::fs::remove_file(&path);
+}
