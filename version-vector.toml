@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.602"  # pane.place shadow refuses a loop and counts the moved tree; an existing shadow is not checked again
-core    = "0.12.627"  # shadow panes are not read each loop turn, only watched for their end
+core    = "0.12.628"  # a pane frame looks for shadow panes only while there is one
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow
