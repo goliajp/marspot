@@ -21,7 +21,7 @@ use super::inbox::Inbox;
 use super::idle::send_notices;
 use super::others;
 use super::records::private_dir;
-use super::worker::{is_inbox_name, now_ms, write_record, Binding, Worker, RETRY_MIN};
+use super::worker::{now_ms, write_record, Binding, Worker, RETRY_MIN};
 
 /// Whether this Codex shows its thread id in the window title: what
 /// its command line sets (`-c tui.terminal_title=…`), else its home's
@@ -264,7 +264,6 @@ impl Worker {
             owner: self.owner.clone(),
             spool: None,
         };
-        write_record(&dirs, &record);
         lx_info!(
             "peerbus.bind",
             "codex session has an inbox",
@@ -290,7 +289,11 @@ impl Worker {
             last_delivered: None,
             replies: Default::default(),
         };
+        let record = b.record.clone();
         self.bindings.insert(p.sid, b);
+        // a call held for the record is asked about by its thread next
+        self.publish();
+        write_record(&dirs, &record);
         Ok(())
     }
 
@@ -318,49 +321,5 @@ impl Worker {
         if let Err(e) = self.call(home, "thread/unsubscribe", obj([("threadId", Value::from(thread))])) {
             lx_warn!("peerbus.unsubscribe_failed", &e.to_string(), thread = thread.to_string());
         }
-    }
-
-    /// Records a previous run of this marspot left (an execv'd shell
-    /// does not stop its plugins), and their dead sockets.
-    pub(super) fn clear_leftovers(&mut self) {
-        for d in registry::default_dirs() {
-            for e in registry::remove_owned_by(&d, &self.owner) {
-                if let Some(sock) = e.socket.filter(|s| is_inbox_name(s)) {
-                    let _ = std::fs::remove_file(sock);
-                }
-            }
-            registry::sweep_ours(&d);
-        }
-        // an earlier marspot renamed Claude sessions in their own
-        // records; their names are their own again
-        for d in registry::default_dirs() {
-            for (pid, name) in registry::restore_foreign(&d, now_ms()) {
-                lx_info!("peerbus.names.restored", "claude session has its own name back", pid = pid, name = name);
-            }
-        }
-        // the private sockets are this marspot's alone
-        if let Ok(rd) = private_dir().and_then(std::fs::read_dir) {
-            for e in rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "sock")) {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
-
-    pub(super) fn teardown(&mut self) {
-        let sids: Vec<u64> = self.bindings.keys().copied().collect();
-        for sid in sids {
-            if let Some(b) = self.bindings.remove(&sid) {
-                self.unbind(sid, b);
-            }
-        }
-        // marspot is going, not the sessions: their mail stays
-        for (_, g) in self.gemini.drain() {
-            g.unbind(false);
-        }
-        for c in self.conns.values() {
-            c.tx.shutdown();
-        }
-        self.conns.clear();
-        marspot_peer::panes::remove(&self.owner);
     }
 }

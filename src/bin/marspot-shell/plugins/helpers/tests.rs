@@ -195,6 +195,10 @@ fn helpers_run_script_per_agent() {
     let line = launch::run_script(AgentKind::Codex, &acct, None, &[flags, tools].concat(), false, &task).unwrap();
     let approve = " -c 'mcp_servers.marspot.default_tools_approval_mode=\"approve\"' \"$(cat";
     assert!(line.contains(&format!("-a never -s workspace-write --add-dir /st/helpers/42{approve}")), "{line}");
+    // said in the account's config: with a `-c` codex would leave its
+    // home's app-server, and the helper would have no inbox
+    std::fs::write(home.join("config.toml"), "[mcp_servers.marspot]\ncommand = \"/x\"\ndefault_tools_approval_mode = \"approve\"\n").unwrap();
+    assert!(launch::tool_flags(AgentKind::Codex, "auto", &home).is_empty());
     for (agent, mode) in [(AgentKind::Codex, "ask"), (AgentKind::Codex, "--yolo"), (AgentKind::Claude, "auto")] {
         assert!(launch::tool_flags(agent, mode, &home).is_empty(), "{mode}");
     }

@@ -62,6 +62,13 @@ impl Cancel {
         g.1 = Some(s.try_clone()?);
         Ok(true)
     }
+
+    /// A socket that reads as ended once cancelled; None when it is
+    /// already, or none could be made.
+    pub(crate) fn watch(&self) -> Option<UnixStream> {
+        let (held, mine) = UnixStream::pair().ok()?;
+        self.hold(&held).ok()?.then_some(mine)
+    }
 }
 
 fn once(path: &Path, req: &Request, line: &str, cancel: &Cancel) -> Result<Response, Attempt> {

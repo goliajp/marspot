@@ -14,9 +14,11 @@
 //! Claude Code client is not offered `ListAgents` and `SendMessage`: it
 //! has tools of those names already.
 
+use crate::bound::{self, Waiter};
 use crate::frame::Priority;
 use crate::json::{self, Value, obj};
 use crate::peers;
+use crate::registry::{self, Entry};
 
 const LIST_DESCRIPTION: &str = "List the agent sessions on this machine that you can message: Claude Code, Codex, Gemini and Kimi sessions running in marspot panes. Every row leads with the session's name, which is the name of its marspot pane, and that name IS the address for SendMessage. Each row also says which agent the session is, and ends with the pane's full name when the row leads with the plain one. The first line says what this session is called.";
 
@@ -38,6 +40,7 @@ pub struct Server {
     /// The tool-call deadline marspot wrote into this client's config.
     configured_timeout_s: Option<u32>,
     socket: std::path::PathBuf,
+    waiter: Waiter,
 }
 
 impl Server {
@@ -46,7 +49,12 @@ impl Server {
     }
 
     pub fn at(socket: std::path::PathBuf, configured_timeout_s: Option<u32>) -> Self {
-        Self { client: String::new(), configured_timeout_s, socket }
+        Self { client: String::new(), configured_timeout_s, waiter: Waiter::new(socket.clone(), bound::LIMIT), socket }
+    }
+
+    /// The same, a call from a session not bound yet waiting up to `limit`.
+    pub fn waiting(self, limit: std::time::Duration) -> Self {
+        Self { waiter: Waiter::new(self.socket.clone(), limit), ..self }
     }
 
     fn cap_s(&self) -> u32 {
@@ -162,16 +170,22 @@ impl Server {
         let args = params.and_then(|p| p.get("arguments"));
         let thread = params.and_then(|p| p.at(&["_meta", "threadId"])).and_then(Value::str);
         let tool = params.and_then(|p| p.str_at("name")).unwrap_or_default();
-        if crate::mcp_panes::is_pane_tool(tool) {
-            let (text, is_error) = crate::mcp_panes::call(&self.socket, tool, args.unwrap_or(&Value::Null), thread, self.cap_s(), cancel);
+        let pane_tool = crate::mcp_panes::is_pane_tool(tool);
+        // a codex thread is known by its record alone; a pane tool
+        // called without one takes its caller from the process tree;
+        // the two lists answer whoever asks
+        let began = std::time::Instant::now();
+        if !matches!(tool, "ListAgents" | "Panes") && (thread.is_some() || !pane_tool) {
+            self.waiter.until(thread.unwrap_or_default(), &registry::default_dirs(), cancel, || matches!(me(&peers::live_entries(), thread), Some(Ok(_))));
+        }
+        if pane_tool {
+            let cap = self.cap_s().saturating_sub(began.elapsed().as_secs() as u32).max(1);
+            let (text, is_error) = crate::mcp_panes::call(&self.socket, tool, args.unwrap_or(&Value::Null), thread, cap, cancel);
             return tool_result(text, is_error);
         }
         let entries = peers::live_entries();
         let panes = crate::panes::live(&entries);
-        let me = match thread {
-            Some(t) => Some(peers::me_by_thread(&entries, t)),
-            None => peers::me_by_ancestor(&entries, std::process::id() as i32, crate::proc::ppid).map(Ok),
-        };
+        let me = me(&entries, thread);
         let outcome = match tool {
             "ListAgents" => Ok(peers::listing(&entries, &panes, me.as_ref().and_then(|m| m.as_ref().ok().copied()), now_ms)),
             "SendMessage" => match me {
@@ -188,6 +202,14 @@ impl Server {
     }
 }
 
+/// The calling session's record.
+fn me<'a>(entries: &'a [Entry], thread: Option<&str>) -> Option<Result<&'a Entry, String>> {
+    match thread {
+        Some(t) => Some(peers::me_by_thread(entries, t)),
+        None => peers::me_by_ancestor(entries, std::process::id() as i32, crate::proc::ppid).map(Ok),
+    }
+}
+
 fn tool_result(text: String, is_error: bool) -> Value {
     obj([
         ("content", Value::Arr(vec![obj([("type", Value::from("text")), ("text", Value::from(text))])])),
@@ -195,7 +217,7 @@ fn tool_result(text: String, is_error: bool) -> Value {
     ])
 }
 
-fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], panes: &[crate::panes::Pane], args: Option<&Value>) -> Result<String, String> {
+fn send(me: &Entry, entries: &[Entry], panes: &[crate::panes::Pane], args: Option<&Value>) -> Result<String, String> {
     let to = args.and_then(|a| a.str_at("to")).filter(|t| !t.trim().is_empty()).ok_or("`to` is required")?;
     let message = args.and_then(|a| a.str_at("message")).unwrap_or_default();
     let notify = args.and_then(|a| a.get("notify_when_idle")).and_then(Value::bool).unwrap_or(false);

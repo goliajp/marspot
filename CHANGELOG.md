@@ -24,6 +24,19 @@ Per-layer version numbers live in `version-vector.toml`.
   that running a command there types.
 - A command sent to a pane right after another one waits until a slow
   prompt is drawn, in shells that mark where their prompt ends.
+- Codex no longer asks before it runs one of Marspot's own MCP tools.
+  Marspot sets `default_tools_approval_mode = "approve"` in the
+  `marspot` MCP server entry it keeps in each Codex `config.toml`,
+  which a Codex helper needs to answer the session that started it. A
+  mode already set there is kept, for helpers too; set `"prompt"` to be
+  asked. With `"approve"`, in every Codex session of the account,
+  `PaneRun` and the other pane tools run without a Codex prompt and
+  outside Codex's sandbox.
+- A Codex, Gemini or Kimi session takes messages from its helper, and a
+  helper from the session that started it, also when one of the two
+  runs without permission prompts and the other does not.
+- A message an agent sends in its first seconds waits, up to 20
+  seconds, until Marspot knows which pane it runs in.
 
 ## 0.10.0
 

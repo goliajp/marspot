@@ -20,6 +20,8 @@
 #     full name reaches its pane after the pane changed agent or
 #     directory, and the name of a pane whose session is gone is
 #     unknown;
+#   - helpers: a Codex helper in a shadow pane that sends a message as
+#     the first thing it does is bound, named and answered;
 #   - idle notices: a subscription placed with a message comes back as
 #     one `peer_idle_notice` once the Codex session is idle again.
 #
@@ -38,10 +40,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 
-CODEX_VERSION=0.163.0
+CODEX_VERSION=0.171.0
 # The packaged layout, not the bare binary: a bare `codex` refuses to
 # start its app-server ("this CLI has no complete local package").
-CODEX_SHA256=b0344fc2e41f15e0071147e5869008047b8ff4bf2c4a8897975d3bae3f103b34
+CODEX_SHA256=58c88032ec446e72922d911d8f03773102da20c16a6059cf21f6744bce57f210
 CODEX_URL="https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-package-aarch64-apple-darwin.tar.gz"
 CODEX_CACHE="$HOME/.cache/marspot-e2e/codex-$CODEX_VERSION"
 
@@ -161,6 +163,7 @@ trust_level = "trusted"
 [mcp_servers.marspot]
 command = "$SB/bin/marspot-peer"
 args = ["mcp"]
+env = { MARSPOT_STATE_DIR = "$MARSPOT_STATE_DIR" }
 
 [tui]
 screen_reader_detection_done = true
@@ -296,33 +299,10 @@ R1B="$(wait_record "$P1" "$T1" 60)" \
 ok "the reopened Codex bound to its new thread $(cut -f3 <<<"$R1B"), not the one it left"
 round_trip "$P1" "$R1B" PEERBUS-TAG-TWO
 
-# what a sender is answered, on the two paths a message takes
-mcp_send() { # sending thread, recipient, text → the tool's answer; fails when the tool reports an error
-  python3 - "$SB/bin/marspot-peer" "$1" "$2" "$3" <<'PY'
-import json, subprocess, sys
-req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-    "name": "SendMessage", "arguments": {"to": sys.argv[3], "message": sys.argv[4]}, "_meta": {"threadId": sys.argv[2]}}}
-out = subprocess.run([sys.argv[1], "mcp"], input=json.dumps(req) + "\n", capture_output=True, text=True).stdout
-r = json.loads(out.splitlines()[0])["result"]
-print(r["content"][0]["text"])
-sys.exit(1 if r["isError"] else 0)
-PY
-}
-hook_send() { # recipient → what the Claude Code SendMessage hook answers
-  printf '{"hook_event_name":"PreToolUse","tool_name":"SendMessage","session_id":"x","tool_input":{"to":"%s","message":"hi"}}' "$1" \
-    | "$SB/bin/marspot-peer" claude-hook
-}
-hook_field() { # hook answer, field of hookSpecificOutput ("updatedInput.to" for the rewritten recipient)
-  python3 - "$1" "$2" <<'PY' 2>/dev/null
-import json, sys
-v = json.loads(sys.argv[1])["hookSpecificOutput"]
-for k in sys.argv[2].split("."):
-    v = v[k]
-print(v)
-PY
-}
-hook_to() { hook_field "$(hook_send "$1")" updatedInput.to; }
-hook_refusal() { hook_field "$(hook_send "$1")" permissionDecisionReason; }
+source "$ROOT/bin/_peerbus_senders.sh"
+
+# ── a Codex helper in a shadow pane ───────────────────────────────
+source "$ROOT/bin/_peerbus_helper.sh"
 
 # ── 2. a second Codex in the same directory ───────────────────────
 # It is a process called codex before it is Codex, for as long as this
@@ -395,15 +375,6 @@ shows() { # pane, text, what
   local i
   for (( i = 0; i < 60; i++ )); do (( $(seen "$1" "$2") > 0 )) && return 0; sleep 0.5; done
   fail "$3: $2 never showed on pane $1"
-}
-pane_entry() { # socket → name<TAB>code<TAB>base<TAB>agent, from marspot's pane table
-  python3 - "$REGISTRY" "$1" <<'PY'
-import glob, json, os, sys
-for p in glob.glob(os.path.join(sys.argv[1], ".marspot-panes-*.json")):
-    for e in json.load(open(p)).get("panes", []):
-        if e["socket"] == sys.argv[2]:
-            print("\t".join(str(e.get(k, "")) for k in ("name", "code", "base", "agent")))
-PY
 }
 wait_entry() { # socket, regex for the name, seconds → the pane-table entry once its name matches
   local i line

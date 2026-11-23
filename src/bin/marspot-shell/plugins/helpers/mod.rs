@@ -33,6 +33,7 @@ mod dialogs;
 mod first_screens;
 mod launch;
 mod notify;
+mod pair;
 mod passing;
 mod pending;
 mod queue;
@@ -68,6 +69,7 @@ mod tests_repeat;
 #[cfg(test)]
 mod tests_keys;
 
+pub(in crate::plugins) use pair::is_pair;
 use table::{Event, Table};
 
 /// A parent pane with no agent this long loses the helpers an agent

@@ -128,8 +128,8 @@ fn class_of(argv: &[String]) -> Mode {
 
 /// Let `frame` in and keep it at `spool`, or say what the sender is to
 /// be told instead.
-fn keep(frame: &UserFrame, class: Mode, rate: &mut Rate, spool: &Path, cap: usize) -> Result<(), (Receipt, String)> {
-    let admitted = deliver::admit(frame, class, rate, Instant::now()).map_err(|why| (why.receipt(), why.reason()))?;
+fn keep(frame: &UserFrame, class: Mode, pair: bool, rate: &mut Rate, spool: &Path, cap: usize) -> Result<(), (Receipt, String)> {
+    let admitted = deliver::admit(frame, class, pair, rate, Instant::now()).map_err(|why| (why.receipt(), why.reason()))?;
     match spool::append(spool, &admitted.text, cap) {
         Ok(true) => Ok(()),
         // the words the full channel in front of the inbox uses
@@ -259,10 +259,11 @@ impl Worker {
     /// A frame that reached a Gemini inbox: kept for the session's next
     /// turn, or refused with the receipt a Codex inbox would send.
     pub(super) fn deliver_gemini(&mut self, key: u64, frame: &UserFrame, peer_pid: Option<i32>) {
+        let pair = self.is_from_pair(key, frame);
         let Some((sid, g)) = self.gemini.iter_mut().find(|(_, g)| g.key == key) else {
             return; // the inbox closed after the frame was read
         };
-        match keep(frame, g.class, &mut g.rate, &g.spool, spool::MAX_PENDING) {
+        match keep(frame, g.class, pair, &mut g.rate, &g.spool, spool::MAX_PENDING) {
             Ok(()) => {
                 lx_info!("peerbus.gemini.kept", "waiting for the session's next turn", sid = *sid, agent = g.record.agent.label(), peer_pid = peer_pid.unwrap_or(0));
                 crate::plugins::helpers::input_seen(*sid);
@@ -375,10 +376,10 @@ mod tests {
         let d = dir();
         let spool = spool::path_for(&d, "s1");
         let f = frame(Mode::Bypass, "do the thing");
-        assert_eq!(keep(&f, Mode::Bypass, &mut Rate::default(), &spool, 2), Ok(()));
-        assert_eq!(keep(&frame(Mode::Bypass, "and another"), Mode::Bypass, &mut Rate::default(), &spool, 2), Ok(()));
+        assert_eq!(keep(&f, Mode::Bypass, false, &mut Rate::default(), &spool, 2), Ok(()));
+        assert_eq!(keep(&frame(Mode::Bypass, "and another"), Mode::Bypass, false, &mut Rate::default(), &spool, 2), Ok(()));
         // full: the receipt a full inbox channel gives
-        let full = keep(&frame(Mode::Bypass, "one too many"), Mode::Bypass, &mut Rate::default(), &spool, 2);
+        let full = keep(&frame(Mode::Bypass, "one too many"), Mode::Bypass, false, &mut Rate::default(), &spool, 2);
         assert_eq!(full, Err((Receipt::Dropped(DropReason::QueueFull), "recipient inbox is full".to_string())));
         let waiting = spool::take(&spool);
         assert_eq!(waiting.len(), 2);
@@ -391,10 +392,12 @@ mod tests {
     fn a_message_of_another_class_is_refused_and_not_kept() {
         let d = dir();
         let spool = spool::path_for(&d, "s1");
-        let (receipt, reason) = keep(&frame(Mode::Bypass, "x"), Mode::Prompting, &mut Rate::default(), &spool, 2).unwrap_err();
+        let (receipt, reason) = keep(&frame(Mode::Bypass, "x"), Mode::Prompting, false, &mut Rate::default(), &spool, 2).unwrap_err();
         assert_eq!(receipt, Receipt::Refused);
         assert!(reason.contains("prompting"), "{reason}");
         assert!(!spool.exists());
+        // unless it comes from its helper, or from who started it
+        assert_eq!(keep(&frame(Mode::Bypass, "x"), Mode::Prompting, true, &mut Rate::default(), &spool, 2), Ok(()));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

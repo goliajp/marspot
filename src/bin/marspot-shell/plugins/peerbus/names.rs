@@ -63,7 +63,7 @@ impl Panes {
     }
 
     /// The pane whose agent is the claude `pid`.
-    fn pane_of(&self, pid: i32) -> Option<u64> {
+    pub(super) fn pane_of(&self, pid: i32) -> Option<u64> {
         self.claude.get(&pid).copied()
     }
 }
