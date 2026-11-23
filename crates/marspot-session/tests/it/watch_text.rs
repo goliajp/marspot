@@ -5,7 +5,7 @@
 use marspot_term::shell_proto::{WatchKind, WatchReason};
 use marspot_term::test_env::sandbox_state_dir;
 
-use crate::pane_link::{Link, abs_row_of, body, pushed, screen_shows, text, wait, with_zsh};
+use crate::pane_link::{Link, abs_row_exactly, abs_row_of, body, pushed, screen_shows, text, wait, with_zsh};
 use crate::support::{COLS, ROWS};
 
 #[test]
@@ -106,12 +106,14 @@ fn watch_text_in_the_commands_own_echo_waits_for_its_output() {
     assert_eq!(l.typed(req, 5.0).result, marspot_term::shell_proto::TypedResult::Written);
     assert!(l.try_fired(1, 0.7).is_none(), "the command line holds the text, the output does not yet");
     let f = l.fired(1, 5.0);
+    // the output's own row, found by itself: behind a wide prompt the
+    // command line wraps over two rows
     let mut row = None;
-    wait(5.0, "the command line on screen", || {
-        row = abs_row_of(&s, command);
+    wait(5.0, "the output on screen", || {
+        row = abs_row_exactly(&s, "ECHO-DONE");
         row.is_some()
     });
-    assert_eq!(f.line, row.map(|r| r + 1), "the matched line is the output's, below the command");
+    assert_eq!(f.line, row, "the matched line is the output's, not the command line's");
 }
 
 #[test]

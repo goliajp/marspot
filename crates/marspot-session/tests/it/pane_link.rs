@@ -204,6 +204,16 @@ pub(crate) fn abs_row_of(s: &Session, text: &str) -> Option<u64> {
     Some(snap.scroll_push_count + r as u64)
 }
 
+/// The absolute row of the first screen row that is exactly `text`,
+/// blanks around it aside.
+pub(crate) fn abs_row_exactly(s: &Session, text: &str) -> Option<u64> {
+    let mut cells = Vec::new();
+    let snap = s.reader.read(&mut cells, &mut Vec::new())?;
+    let rows = support_rows(&cells);
+    let r = rows.iter().position(|l| l.trim_matches(|c| c == ' ' || c == '\0') == text)?;
+    Some(snap.scroll_push_count + r as u64)
+}
+
 fn support_rows(cells: &[marspot_term::grid::Cell]) -> Vec<String> {
     cells.chunks(COLS as usize).take(ROWS as usize).map(|row| row.iter().map(|c| c.ch).collect()).collect()
 }
