@@ -1,12 +1,13 @@
 //! Every pane's title strip as one tree: a floating node per pane,
-//! where the layout puts the pane, and one over the clickable prefix
-//! of a pane's badge.  Each takes a press itself, tested against the
+//! where the layout puts the pane, with the clickable prefix of its
+//! badge as a spot, and one over the `+N` after its title.  Each takes a press itself, tested against the
 //! kept layout.
 //!
 //! Kept apart from the pane's own instances, so output in a pane does
 //! not paint its strip again, and a renamed pane or a new badge paints
 //! the strips without touching any pane.
 
+use std::fmt::Write;
 use std::hash::{Hash, Hasher};
 
 use crate::font_cache::FontCache;
@@ -14,23 +15,27 @@ use crate::layout::Layout;
 use crate::render::SessionView;
 use crate::ui::components::panel_palette as palette;
 use crate::ui::components::sidebar::clip_chars;
+use crate::ui::components::title_helpers::{self, Marks};
 use crate::ui::core::ViewPainter;
-use crate::ui::theme::spec::chrome;
 use crate::ui::tree::kept::Place;
 use crate::ui::tree::{KeptSurface, preset};
 use golia_ui_core::scene::RectInstance;
 use golia_ui_core::{Action, Length, Ui, WidgetId};
 use marspot_term::layout::Rect;
 
-/// What separates the title from the badge in a node's label.  The
-/// badge is the plugin's and never holds it, so the last one is the
-/// mark whatever a title holds.
+/// What separates the title, the badge and the `+N` in a node's label.
+/// Neither of the last two ever holds it, so the last two are the marks
+/// whatever a title holds.
 const BADGE_MARK: char = '\u{1f}';
 
 /// The actions: a press on pane `n`'s strip, and on the clickable
 /// prefix of its badge, with `arg: n`.
 pub const TITLE: u32 = 5;
 pub const BADGE: u32 = 6;
+/// A press on the `+N` after pane `arg`'s title.
+pub const HELPERS: u32 = 7;
+/// The `+N`s' widgets come after the strips'.
+const HELPERS_IDS: u32 = 10_000;
 
 /// The panes whose strips are drawn, in the layout's cell order.
 pub trait Strips {
@@ -72,20 +77,21 @@ impl TitleStrips<'_> {
 
     /// Each strip's words and whether its pane is in use, folded with
     /// where the strips are.
-    fn fingerprint(&self) -> u64 {
+    fn fingerprint(&self, marks: &Marks) -> u64 {
         let mut h = marspot_term::fast_hash::FxHasher::default();
         for i in 0..self.count() {
             self.strips.title(i).hash(&mut h);
             (self.strips.in_use(i) && self.window_focused).hash(&mut h);
         }
-        (self.layout.gutter.to_bits(), self.hit_key()).hash(&mut h);
+        (self.layout.gutter.to_bits(), self.hit_key(marks)).hash(&mut h);
         h.finish()
     }
 
     /// What a press is tested against: where each strip is, and where
-    /// its badge's prefix is.
-    fn hit_key(&self) -> u64 {
+    /// its badge's prefix and its `+N` are.
+    fn hit_key(&self, marks: &Marks) -> u64 {
         let mut h = marspot_term::fast_hash::FxHasher::default();
+        marks.hash_into(&mut h);
         let l = self.layout;
         for (i, rect) in l.cells.iter().take(self.count()).enumerate() {
             self.strips.badge(i).hash(&mut h);
@@ -125,7 +131,7 @@ impl<'a, F: Fn(usize) -> &'a str> Strips for BadgesOnly<'a, F> {
     }
 }
 
-pub fn describe(ui: &mut Ui<'_>, s: &TitleStrips<'_>) {
+fn describe(ui: &mut Ui<'_>, s: &TitleStrips<'_>, marks: &Marks) {
     let l = s.layout;
     let title_h = l.cell_title_h as f32;
     let measures = [(l.padding as f32).to_bits(), (l.gutter as f32).to_bits()];
@@ -134,7 +140,7 @@ pub fn describe(ui: &mut Ui<'_>, s: &TitleStrips<'_>) {
             return;
         }
         for (i, rect) in l.cells.iter().take(s.count()).enumerate() {
-            let (title, badge) = (s.strips.title(i), s.strips.badge(i));
+            let (title, badge, n) = (s.strips.title(i), s.strips.badge(i), marks.count(i));
             // the strip itself takes a press, with or without a title to
             // draw; the clickable prefix of its badge is its spot
             let strip = ui
@@ -152,7 +158,19 @@ pub fn describe(ui: &mut Ui<'_>, s: &TitleStrips<'_>) {
                     text.push_str(title);
                     text.push(BADGE_MARK);
                     text.push_str(badge);
+                    text.push(BADGE_MARK);
+                    if n > 0 {
+                        // writing to a String cannot fail
+                        let _ = write!(text, "{n}");
+                    }
                 });
+            }
+            let fit = title_helpers::fit((rect.x, rect.w), l.padding, marks.title(i), badge, n, s.cell_w);
+            if let Some((x, w)) = fit.mark.filter(|_| !marks.title(i).is_empty()) {
+                ui.float(x, rect.y_top, |_| {})
+                    .width(Length::Px(w))
+                    .height(Length::Px(l.cell_title_h))
+                    .pressable(WidgetId(HELPERS_IDS + i as u32), Action::new(HELPERS, i as u32));
             }
         }
     });
@@ -162,7 +180,9 @@ pub fn describe(ui: &mut Ui<'_>, s: &TitleStrips<'_>) {
 /// bottom, the name, and the badge with a line under its clickable
 /// prefix.  At the unrounded cell metrics, as it always was.
 pub(crate) fn paint(p: &mut ViewPainter<'_>, rect: Rect, label: &str, data: [u32; 2], in_use: bool) {
-    let (title, badge) = label.rsplit_once(BADGE_MARK).unwrap_or((label, ""));
+    let (rest, count) = label.rsplit_once(BADGE_MARK).unwrap_or((label, ""));
+    let (title, badge) = rest.rsplit_once(BADGE_MARK).unwrap_or((rest, ""));
+    let n = count.parse().unwrap_or(0);
     let (padding, gutter) = (f32::from_bits(data[0]), f32::from_bits(data[1]));
     let (cell_w, cell_h, ascent) = (p.cell_w, p.cell_h, p.ascent);
     let title_h = rect.h as f32;
@@ -182,14 +202,14 @@ pub(crate) fn paint(p: &mut ViewPainter<'_>, rect: Rect, label: &str, data: [u32
     let baseline = rect.y_top as f32 + (title_h - cell_h) * 0.5 + ascent;
     let badge_x = rect.x as f32 + rect.w as f32 - padding - crate::ui::core::text_fit::cells(badge) as f32 * cell_w;
     let badge_shown = !badge.is_empty() && badge_x > label_x;
-    // the name gives way to the badge, and to the pane's edge
-    let title_right = if badge_shown {
-        badge_x - chrome::px(chrome::TITLE_GAP) as f32
-    } else {
-        rect.x as f32 + rect.w as f32 - padding
-    };
-    let room = ((title_right - label_x) / cell_w).floor().max(0.0) as usize;
-    p.text(label_x, baseline, clip_chars(title, room), if in_use { palette::fg() } else { palette::chrome_fg() });
+    // the name gives way to the badge, to the `+N` and to the pane's edge
+    let fit = title_helpers::fit((rect.x, rect.w), padding as f64, title, badge, n, cell_w as f64);
+    let ink = if in_use { palette::fg() } else { palette::chrome_fg() };
+    p.text(label_x, baseline, clip_chars(title, fit.name_chars), ink);
+    if let Some((x, _)) = fit.mark {
+        p.text(x as f32, baseline, "+", ink);
+        p.text(x as f32 + cell_w, baseline, count, ink);
+    }
     if !badge_shown {
         return;
     }
@@ -212,6 +232,7 @@ pub(crate) fn paint(p: &mut ViewPainter<'_>, rect: Rect, label: &str, data: [u32
 #[derive(Default)]
 pub struct TitleStripSurface {
     pub kept: KeptSurface,
+    pub(crate) marks: Marks,
     described: Option<(u64, (f64, f64))>,
     hit_key: Option<u64>,
     data_rev: u64,
@@ -219,10 +240,10 @@ pub struct TitleStripSurface {
 
 impl TitleStripSurface {
     fn place(&mut self, s: &TitleStrips<'_>, window: (f64, f64)) -> Place {
-        let now = Some((s.fingerprint(), window));
+        let now = Some((s.fingerprint(&self.marks), window));
         if self.described != now {
             self.described = now;
-            self.hit_key = Some(s.hit_key());
+            self.hit_key = Some(s.hit_key(&self.marks));
             self.data_rev += 1;
         }
         Place { data_rev: self.data_rev, origin: (0.0, 0.0), avail: window }
@@ -230,8 +251,10 @@ impl TitleStripSurface {
 
     /// Add the strips to the frame `p` is painting.
     pub fn frame(&mut self, p: &mut ViewPainter<'_>, s: &TitleStrips<'_>) {
+        self.marks.keep_titles(s.count(), |i| s.strips.title(i));
         let at = self.place(s, (p.window_w, p.window_h));
-        self.kept.frame(p, at, None, |ui, _| describe(ui, s));
+        let marks = &self.marks;
+        self.kept.frame(p, at, None, |ui, _| describe(ui, s, marks));
     }
 
     /// Lay the strips out again if they or a badge's prefix have moved
@@ -241,10 +264,11 @@ impl TitleStripSurface {
     /// describes the rest again.
     pub fn ready(&mut self, font: &mut FontCache, layout: &Layout, strips: &dyn Strips) {
         let s = TitleStrips { layout, strips, window_focused: false, cell_w: font.cell_w };
-        if self.hit_key == Some(s.hit_key()) {
+        if self.hit_key == Some(s.hit_key(&self.marks)) {
             return;
         }
         let at = self.place(&s, (layout.window_w, layout.window_h));
-        self.kept.lay_out(font, at, |ui, _| describe(ui, &s));
+        let marks = &self.marks;
+        self.kept.lay_out(font, at, |ui, _| describe(ui, &s, marks));
     }
 }

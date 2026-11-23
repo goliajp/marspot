@@ -180,6 +180,14 @@ pub enum Msg {
     ColRss,
     ColProcess,
     ColPid,
+    // Helper panel
+    PanelHelpers,
+    HelpersEmpty,
+    HelperMoveToWindow,
+    HelperClose,
+    HelpersCloseAll,
+    HelpersDeny,
+    HelpersAllow,
     // Agent accounts
     AccountsHeading,
     AccountsAvailability,
@@ -254,6 +262,12 @@ pub enum Arg<'a> {
     HandOffTo(&'a str),
     /// Badge menu: move this pane to another account profile.
     SwitchToProfile(u8),
+    /// Sidebar: how many shadow panes there are.
+    Helpers(u32),
+    /// Badge menu: open the helper panel for a pane with so many.
+    HelpersOf(u32),
+    /// Helper panel: how long a pane has run.
+    RanFor { minutes: u64 },
 }
 
 /// One language: the fixed sentences and the ones built around a value.
@@ -424,6 +438,13 @@ pub const ALL: &[Msg] = &[
     Msg::ColRss,
     Msg::ColProcess,
     Msg::ColPid,
+    Msg::PanelHelpers,
+    Msg::HelpersEmpty,
+    Msg::HelperMoveToWindow,
+    Msg::HelperClose,
+    Msg::HelpersCloseAll,
+    Msg::HelpersDeny,
+    Msg::HelpersAllow,
     Msg::AccountsHeading,
     Msg::AccountsAvailability,
     Msg::AccountsEmpty,

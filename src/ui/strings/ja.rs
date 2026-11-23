@@ -132,6 +132,14 @@ fn text(m: Msg) -> &'static str {
         Msg::ColProcess => "プロセス",
         Msg::ColPid => "pid",
 
+        Msg::PanelHelpers => "ヘルパー",
+        Msg::HelpersEmpty => "実行中のヘルパーはありません",
+        Msg::HelperMoveToWindow => "ウインドウに移動",
+        Msg::HelperClose => "閉じる",
+        Msg::HelpersCloseAll => "このセッションのヘルパーをすべて閉じる",
+        Msg::HelpersDeny => "このディレクトリからのペイン操作を禁止",
+        Msg::HelpersAllow => "このディレクトリからのペイン操作を許可",
+
         Msg::AccountsHeading => "アカウント",
         Msg::AccountsAvailability => "利用可能になる時刻",
         Msg::AccountsEmpty => "使用状況データはまだありません。ペインでClaudeまたはCodexにサインインすると、数分以内に表示されます",
@@ -183,5 +191,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::ProfileRow { n, current: false } => write!(out, "   アカウント{n}"),
         Arg::HandOffTo(target) => write!(out, "{target}に引き継ぐ"),
         Arg::SwitchToProfile(n) => write!(out, "P{n}に切り替える"),
+        Arg::Helpers(n) => write!(out, "ヘルパー（{n}）"),
+        Arg::HelpersOf(n) => write!(out, "ヘルパー（{n}）…"),
+        Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}分"),
+        Arg::RanFor { minutes: m } => write!(out, "{}時間{}分", m / 60, m % 60),
     }
 }

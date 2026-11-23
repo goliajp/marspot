@@ -23,6 +23,11 @@ pub(crate) trait HelperService: Send + Sync {
     /// Answered on the connection's thread from what was published.
     fn list(&self, caller: Option<u64>, all: bool) -> Value;
     fn stop(&self, port: &mut Port, which: &HelperStop) -> Result<Value, Reject>;
+    /// Stop `sid` as the user asked in the window; None when it is not
+    /// a helper.
+    fn stop_sid(&self, _port: &mut Port, _sid: u64) -> Option<Result<(), Reject>> {
+        None
+    }
     /// Input reached pane `sid` through the socket.
     fn input_seen(&self, sid: u64);
 }
@@ -31,6 +36,11 @@ static SERVICE: OnceLock<Box<dyn HelperService>> = OnceLock::new();
 
 pub(crate) fn register(s: Box<dyn HelperService>) {
     let _ = SERVICE.set(s);
+}
+
+/// [`HelperService::stop_sid`] as `ctx` asks it.
+pub(super) fn stop_sid(conn: &mut Conn, ctx: &Ctx, sid: u64) -> Option<Result<(), Reject>> {
+    SERVICE.get()?.stop_sid(&mut Port { conn, ctx }, sid)
 }
 
 pub(super) fn serve(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> {

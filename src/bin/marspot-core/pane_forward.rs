@@ -223,7 +223,19 @@ impl CoreApp {
         }
     }
 
+    /// A pane here is session `sid`, or will be: a window's panes are put
+    /// back after the core starts.  One whose directory is gone has
+    /// ended, and what was said of it would never be dropped again.
+    fn knows_session(&self, sid: u64) -> bool {
+        self.find_window_pane_by_sid(sid).is_some()
+            || self.shadow_index(sid).is_some()
+            || session_registry::session_dir(sid).exists()
+    }
+
     pub(super) fn set_pane_title(&mut self, shelld_session_id: u64, text: String) {
+        if !text.is_empty() && !self.knows_session(shelld_session_id) {
+            return;
+        }
         let prev = self.pane_titles.get(&shelld_session_id).cloned();
         let changed = if text.is_empty() {
             self.pane_titles.remove(&shelld_session_id).is_some()
@@ -234,6 +246,7 @@ impl CoreApp {
             false
         };
         if changed {
+            self.helper_rows_changed();
             self.mark_sid_window_dirty(shelld_session_id);
         }
     }

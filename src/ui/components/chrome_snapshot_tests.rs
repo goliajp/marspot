@@ -232,7 +232,8 @@ pub(super) fn point_on(l: &Layout, t: ChromeTarget) -> (f64, f64) {
         ChromeTarget::Add => mid(l.add_session_button_rect),
         ChromeTarget::Close(i) => mid(l.close_session_rects[i]),
         ChromeTarget::Row(i) => (l.sidebar_w * 0.25, l.top_inset + l.sidebar_top_pad_phys + (i as f64 + 0.5) * row_h),
-        ChromeTarget::Title(i) | ChromeTarget::Badge(i) => (l.cells[i].x + 4.0, l.cells[i].y_top + 1.0),
+        ChromeTarget::AllHelpers => (l.sidebar_w * 0.5, l.window_h - row_h * 0.5),
+        ChromeTarget::Title(i) | ChromeTarget::Badge(i) | ChromeTarget::Helpers(i) => (l.cells[i].x + 4.0, l.cells[i].y_top + 1.0),
     }
 }
 
@@ -261,6 +262,26 @@ pub(super) fn window_on(renderer: &mut MetalRenderer, wr: &mut WindowRender, on:
                 wr.chrome_pointer_leave();
             }
         }
+    });
+}
+
+/// The window of `chrome_snapshot_window` with `all` shadow panes, the
+/// panes' own counted in `under`, on a renderer of the caller's.
+pub(super) fn helpers_on(
+    renderer: &mut MetalRenderer,
+    wr: &mut WindowRender,
+    (all, under): (u32, &[u32]),
+    open: impl FnOnce(&mut MetalRenderer, &mut WindowRender, &ChromeShape<'_>),
+) {
+    snapshot_on(renderer, wr, "helpers_chrome", (1600, 1000), (2, 2), &four_panes(), 1, |renderer, wr, shape| {
+        wr.set_helpers(all, under.iter().copied());
+        open(renderer, wr, shape);
+    });
+}
+
+pub(super) fn window_with_helpers(all: u32, under: &[u32]) {
+    snapshot("helpers_chrome", (1600, 1000), (2, 2), &four_panes(), 1, |_, wr, _| {
+        wr.set_helpers(all, under.iter().copied());
     });
 }
 

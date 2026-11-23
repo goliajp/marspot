@@ -136,6 +136,14 @@ fn text(m: Msg) -> &'static str {
         Msg::ColProcess => "Process",
         Msg::ColPid => "pid",
 
+        Msg::PanelHelpers => "Helpers",
+        Msg::HelpersEmpty => "No helpers are running",
+        Msg::HelperMoveToWindow => "Move to window",
+        Msg::HelperClose => "Close",
+        Msg::HelpersCloseAll => "Close all helpers of this session",
+        Msg::HelpersDeny => "Block pane control from this directory",
+        Msg::HelpersAllow => "Allow pane control from this directory",
+
         Msg::AccountsHeading => "Accounts",
         Msg::AccountsAvailability => "Availability",
         Msg::AccountsEmpty => {
@@ -191,5 +199,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::ProfileRow { n, current: false } => write!(out, "   profile {n}"),
         Arg::HandOffTo(target) => write!(out, "hand off to {target}"),
         Arg::SwitchToProfile(n) => write!(out, "switch to P{n}"),
+        Arg::Helpers(n) => write!(out, "Helpers {n}"),
+        Arg::HelpersOf(n) => write!(out, "helpers ({n})…"),
+        Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}m"),
+        Arg::RanFor { minutes: m } => write!(out, "{}h {}m", m / 60, m % 60),
     }
 }

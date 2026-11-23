@@ -25,6 +25,10 @@ pub enum ChromeTarget {
     Title(usize),
     /// The clickable prefix of a pane's badge.
     Badge(usize),
+    /// The `+N` after a pane's title.
+    Helpers(usize),
+    /// The sidebar's row that counts every shadow pane.
+    AllHelpers,
 }
 
 impl ChromeTarget {
@@ -38,6 +42,8 @@ impl ChromeTarget {
             sidebar_view::CLOSE => Self::Close(i),
             title_strip_view::TITLE => Self::Title(i),
             title_strip_view::BADGE => Self::Badge(i),
+            title_strip_view::HELPERS => Self::Helpers(i),
+            sidebar_view::HELPERS => Self::AllHelpers,
             _ => return None,
         })
     }
@@ -54,7 +60,7 @@ impl ChromeTarget {
     /// pressed on it: a button.  A row and a strip act on the press,
     /// which focuses a pane and, on a strip, may start dragging it.
     pub fn acts_on_release(self) -> bool {
-        matches!(self, Self::Toolbar(_) | Self::Add | Self::Close(_) | Self::Badge(_))
+        matches!(self, Self::Toolbar(_) | Self::Add | Self::Close(_) | Self::Badge(_) | Self::Helpers(_) | Self::AllHelpers)
     }
 }
 
@@ -71,6 +77,8 @@ mod tests {
             ChromeTarget::Close(7),
             ChromeTarget::Title(7),
             ChromeTarget::Badge(7),
+            ChromeTarget::Helpers(7),
+            ChromeTarget::AllHelpers,
         ];
         let actions = [
             Action::new(toolbar_view::PRESS, 3),
@@ -79,6 +87,8 @@ mod tests {
             Action::new(sidebar_view::CLOSE, 7),
             Action::new(title_strip_view::TITLE, 7),
             Action::new(title_strip_view::BADGE, 7),
+            Action::new(title_strip_view::HELPERS, 7),
+            Action::new(sidebar_view::HELPERS, 0),
         ];
         for (t, a) in all.iter().zip(actions) {
             assert_eq!(ChromeTarget::of(a), Some(*t));
@@ -88,6 +98,6 @@ mod tests {
         assert_eq!(ChromeTarget::Row(7).row(), Some(7));
         assert_eq!(ChromeTarget::Add.row(), None);
         let on_release: Vec<bool> = all.iter().map(|t| t.acts_on_release()).collect();
-        assert_eq!(on_release, [true, true, false, true, false, true]);
+        assert_eq!(on_release, [true, true, false, true, false, true, true, true]);
     }
 }

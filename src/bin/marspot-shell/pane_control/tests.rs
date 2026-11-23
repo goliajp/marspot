@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use marspot::control_deny::DenyList;
 use marspot_peer::control::{ErrorCode, OpenArgs};
 use marspot_term::session_registry::SessionEntry;
 
 use super::caller::{CallerKey, Peer, by_ancestry};
-use super::config::{Config, DenyList};
+use super::config::Config;
 use super::conn::Conn;
 use super::dispatch::Ctx;
 use super::limits::{Kind, Limits, SpawnCounts, check_spawn};
@@ -15,6 +16,7 @@ use super::*;
 mod audit_tests;
 mod conn_tests;
 mod list_tests;
+pub(crate) mod panel_act_tests;
 mod server_tests;
 mod shadow_race_tests;
 

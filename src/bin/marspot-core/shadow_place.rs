@@ -39,6 +39,8 @@ pub(super) struct Placing {
     l1_req: u32,
     sid: u64,
     to: PlaceWhere,
+    /// The parent it was asked to take (0: none).
+    parent: u64,
     /// The parent the session had before it was asked (0: none).
     was: u64,
     deadline: Instant,
@@ -73,6 +75,11 @@ pub(super) fn session_shadow_frame(req_id: u32, parent: u64) -> Frame {
         MsgType::SessionShadow,
         encode_session_shadow(&SessionShadow { req_id, parent_sid: parent, idle_s: 0 }),
     )
+}
+
+/// `req_id` is the core's own: nobody in the shell asked it.
+pub(super) fn is_own(req_id: u32) -> bool {
+    (L2_REQ_BASE..L2_REQ_END).contains(&req_id)
 }
 
 /// A request id of the core's own that nobody waits for.
@@ -142,7 +149,7 @@ impl CoreApp {
             return self.answer(MsgType::PanePlace, m.req_id, m.sid, code, "");
         }
         let deadline = Instant::now() + PLACE_WITHIN;
-        let p = Placing { l2_req, l1_req: m.req_id, sid: m.sid, to: m.to, was, deadline };
+        let p = Placing { l2_req, l1_req: m.req_id, sid: m.sid, to: m.to, parent, was, deadline };
         self.pane_control.shadows.places.placing.push(p);
         lx_event!(
             "PANE_PLACE_ASKED",
@@ -158,7 +165,7 @@ impl CoreApp {
     /// `SessionShadow` is consumed here (`true`).
     pub(super) fn session_done(&mut self, sid: u64, f: &Frame) -> bool {
         let Ok(done) = decode_pane_done(&f.payload) else { return false };
-        if !(L2_REQ_BASE..L2_REQ_END).contains(&done.req_id) {
+        if !is_own(done.req_id) {
             return false;
         }
         let places = &mut self.pane_control.shadows.places;
@@ -235,6 +242,7 @@ impl CoreApp {
                 let pane = self.take_out_of_window(wi, idx);
                 unwatched::set(p.sid, true);
                 self.shadows.push(pane);
+                self.pane_control.shadows.family.adopted(p.sid, p.parent);
                 self.rebuild_layout(wi);
                 self.request_close_if_empty(wi);
             }),
@@ -243,6 +251,7 @@ impl CoreApp {
             self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::NoSuchSession, "the pane went while it moved");
             return;
         }
+        self.shadows_changed();
         self.save_session_state();
         lx_event!("PANE_PLACED", "moved a pane between a window and the shadows", session = p.sid,
             to = format!("{:?}", p.to));

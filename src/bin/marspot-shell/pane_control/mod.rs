@@ -38,6 +38,7 @@ pub(crate) mod names;
 mod ops_input;
 mod ops_pane;
 mod ops_read;
+mod panel_act;
 mod panes;
 mod recent;
 pub(crate) mod run_trailer;
@@ -97,7 +98,7 @@ pub(crate) struct Hub {
     /// Panes opened a moment ago, for lists from older observations.
     recent: Mutex<recent::Recent>,
     config: RwLock<Arc<config::Config>>,
-    deny: Mutex<config::DenyList>,
+    deny: Mutex<marspot::control_deny::DenyList>,
     panes: RwLock<Arc<panes::PaneViews>>,
     /// Nobody was connected, so the main loop stopped publishing `panes`.
     views_stale: AtomicBool,
@@ -146,7 +147,7 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         shadow_gate: shadow_gate::Gate::default(),
         recent: Mutex::new(recent::Recent::default()),
         config: RwLock::new(Arc::new(config::Config::load())),
-        deny: Mutex::new(config::DenyList::at(config::deny_path())),
+        deny: Mutex::new(marspot::control_deny::DenyList::at(marspot::control_deny::path())),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),
         views_stale: AtomicBool::new(true),
         views_owed: (Mutex::new(false), Condvar::new()),
@@ -289,9 +290,13 @@ impl Hub {
             }
             return true;
         }
+        if msg == MsgType::HelperPanelAct {
+            panel_act::take(payload);
+            return true;
+        }
         self.links.route(msg, payload)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

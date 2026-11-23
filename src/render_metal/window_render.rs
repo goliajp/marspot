@@ -210,6 +210,12 @@ impl WindowRender {
         self.kept.chrome.at(font, shape, p)
     }
 
+    /// The shadow panes the chrome shows: how many in all, and how many
+    /// under each pane's session, in the panes' order.
+    pub fn set_helpers(&mut self, all: u32, under: impl Iterator<Item = u32> + Clone) {
+        self.kept.chrome.set_helpers(all, under);
+    }
+
     /// What `p` is on in the chrome as the window last laid it out.
     pub fn chrome_hit_painted(&self, p: (f64, f64)) -> Option<ChromeTarget> {
         self.kept.chrome.hit(p)

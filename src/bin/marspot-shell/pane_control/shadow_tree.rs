@@ -24,7 +24,7 @@ pub(super) fn root_and_depth(parent_of: &dyn Fn(u64) -> u64, sid: u64) -> (u64, 
 }
 
 /// `sid` is `top` or somewhere below it.
-fn is_under(parent_of: &dyn Fn(u64) -> u64, sid: u64, top: u64) -> bool {
+pub(super) fn is_under(parent_of: &dyn Fn(u64) -> u64, sid: u64, top: u64) -> bool {
     let mut at = sid;
     for _ in 0..=WALK_MAX {
         if at == top {

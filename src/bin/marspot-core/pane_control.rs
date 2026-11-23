@@ -13,7 +13,7 @@ use super::pane_reports::Reports;
 use super::*;
 use marspot::pane::ControlReach;
 use marspot::shell_proto::{
-    CAP_SHADOWS, CAP_TYPE_AND_WATCH, DoneCode, PaneDone, decode_pane_type, decode_pane_watch,
+    CAP_HELPER_PANEL, CAP_SHADOWS, CAP_TYPE_AND_WATCH, DoneCode, PaneDone, decode_pane_type, decode_pane_watch,
     encode_pane_control_caps, encode_pane_done,
 };
 use marspot_term::frame_writer::FrameWriter;
@@ -55,7 +55,7 @@ impl PaneControl {
         if std::mem::replace(&mut self.caps_sent, true) {
             return;
         }
-        let caps = CAP_TYPE_AND_WATCH | CAP_SHADOWS;
+        let caps = CAP_TYPE_AND_WATCH | CAP_SHADOWS | CAP_HELPER_PANEL;
         self.reports.push(Frame::new(
             MsgType::PaneControlCaps,
             encode_pane_control_caps(caps),
@@ -181,6 +181,9 @@ impl CoreApp {
             session = sid,
             code = code_name(code)
         );
+        if super::shadow_place::is_own(req_id) {
+            return Route::Answered(code);
+        }
         let done = PaneDone {
             req_id,
             code,
@@ -213,6 +216,7 @@ impl CoreApp {
     /// and the dev seams.
     pub(super) fn pane_control_tick(&mut self) {
         self.expire_places(Instant::now());
+        self.helper_panel_tick();
         self.dev_drive_pane_control();
         self.dev_drive_shadows();
     }

@@ -95,6 +95,7 @@ pub mod cc;
 pub mod cc_usage;
 pub mod kimi_usage;
 pub mod commands;
+pub mod control_deny;
 #[cfg(test)]
 mod commands_layout_tests;
 pub mod font_cache;

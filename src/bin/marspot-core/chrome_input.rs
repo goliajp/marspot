@@ -81,6 +81,12 @@ impl CoreApp {
                     self.pending_to_shell.push((MsgType::PaneBadgeClicked, payload));
                 }
             }
+            ChromeTarget::Helpers(i) => {
+                if let Some(sid) = win!(self, wi).panes.get(i).and_then(|p| p.shelld_session_id()) {
+                    self.open_helpers(wi, sid);
+                }
+            }
+            ChromeTarget::AllHelpers => self.open_helpers(wi, 0),
             ChromeTarget::Row(_) | ChromeTarget::Title(_) => return false,
         }
         true

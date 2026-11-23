@@ -90,3 +90,47 @@ fn sidebar_surface_frame() {
         assert_eq!(surface.kept.surface.counters().build, warm.build + 1);
     });
 }
+
+/// With more panes than the column is tall, the row that counts the
+/// helpers is what is drawn and pressed at the bottom, at both
+/// densities; nothing of a pane's row is drawn there.
+#[test]
+fn helper_panel_count_is_on_top_of_the_rows_that_reach_it() {
+    use super::sidebar_view::{CLOSE, HELPERS, ROW};
+    for scale in [1.0, 2.0] {
+        at_scale(scale, || {
+            let Some(mut stage) = Stage::new() else { return };
+            let window = (1400.0 * scale, 900.0 * scale);
+            let row_h = marspot_term::layout::sidebar_row_h();
+            let cell_w = stage.font.cell_w as f32;
+            let mut picture = |n: usize| {
+                let l = layout(&stage, window, scale, n);
+                let rows = rows(n);
+                let rows: &[SidebarEntry] = &rows;
+                let f = SidebarFrame { layout: &l, rows: &rows, focused_idx: n, quiet: false, cell_w };
+                let mut s = SidebarSurface::default();
+                s.set_helpers(3);
+                let mut out: Frame = Default::default();
+                stage.draw(window, &mut out, &mut |p| s.frame(p, &f));
+                let top = (window.1 - row_h) as f32;
+                let low: Vec<_> = out.1.iter().filter(|g| g.origin[1] + g.size[1] > top).map(|g| g.origin).collect();
+                let hits: Vec<Option<u32>> = (0..4)
+                    .flat_map(|i| (1..20).map(move |x| (x, i)))
+                    .map(|(x, i)| (l.sidebar_w * x as f64 / 20.0, window.1 - (i as f64 + 0.5) * row_h * 0.25))
+                    .map(|p| s.kept.surface.hit(p).map(|h| h.action.id))
+                    .collect();
+                (low, hits, s.kept.surface.hit((l.sidebar_w * 0.25, window.1 - row_h * 2.5)).map(|h| h.action.id))
+            };
+            let (few, _, _) = picture(1);
+            assert!(!few.is_empty(), "the label is drawn");
+            for n in [0, 60] {
+                let (many, hits, above) = picture(n);
+                assert_eq!(many, few, "{n} rows at scale {scale}");
+                assert!(hits.iter().all(|h| *h == Some(HELPERS)), "{n} rows at scale {scale}: {hits:?}");
+                if n > 0 {
+                    assert!(matches!(above, Some(ROW | CLOSE)), "the rows reach it: {above:?}");
+                }
+            }
+        });
+    }
+}

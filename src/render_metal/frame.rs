@@ -104,6 +104,7 @@ impl MetalRenderer {
             ref cc_usage,
             ref settings_panel,
             ref shortcuts_panel,
+            ref helpers_panel,
             ..
         } = *self;
 
@@ -127,7 +128,7 @@ impl MetalRenderer {
             window_focused,
             process_panel.as_ref(),
             cc_usage.as_ref(),
-            FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref()),
+            FormPanel::open(settings_panel.as_ref(), shortcuts_panel.as_ref(), helpers_panel.as_ref()),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
             self.drag_source,

@@ -47,6 +47,7 @@ mod settle;
 mod stop_all;
 mod table;
 mod tick;
+pub(crate) mod titles;
 mod timers;
 mod turn;
 mod work;

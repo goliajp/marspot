@@ -17,6 +17,7 @@ use crate::ui::components::context_menu_view::MenuRender;
 use crate::ui::components::layout_view::LayoutModalRender;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::settings_view::SettingsRender;
+use crate::ui::components::helpers_view::HelpersRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::core::view::ViewPainter;
 use crate::ui::components::title_strip_view::TitleStrips;
@@ -41,21 +42,23 @@ pub(crate) struct BuildStats {
     pub(crate) rows_total: u32,
 }
 
-/// The settings panel or the shortcuts panel.  One slot for both:
+/// The settings, the shortcuts or the helper panel.  One slot for all:
 /// only one panel is open at a time.
 #[derive(Clone, Copy)]
 pub(crate) enum FormPanel<'a> {
     Settings(&'a SettingsRender),
     Shortcuts(&'a ShortcutsRender),
+    Helpers(&'a HelpersRender),
 }
 
 impl<'a> FormPanel<'a> {
-    /// Whichever of the two is open.
+    /// Whichever of them is open.
     pub(crate) fn open(
         settings: Option<&'a SettingsRender>,
         shortcuts: Option<&'a ShortcutsRender>,
+        helpers: Option<&'a HelpersRender>,
     ) -> Option<Self> {
-        settings.map(Self::Settings).or(shortcuts.map(Self::Shortcuts))
+        settings.map(Self::Settings).or(shortcuts.map(Self::Shortcuts)).or(helpers.map(Self::Helpers))
     }
 }
 
@@ -173,8 +176,8 @@ pub(crate) fn build_frame(
             cc_usage.is_some(),
             matches!(form_panel, Some(FormPanel::Settings(_))),
         ];
-        // The shortcuts panel has no button to light, and covers the
-        // sidebar like the rest.
+        // The shortcuts and helper panels have no button to light, and
+        // cover the sidebar like the rest.
         let quiet =
             on[1..].contains(&true) || form_panel.is_some() || context_menu_state.is_some();
         let mono_w = font.cell_w;
@@ -386,6 +389,11 @@ fn paint_overlays(
     }
 
     if let Some(FormPanel::Shortcuts(panel)) = form_panel {
+        let mut painter = overlay_painter!();
+        panel.surface.borrow_mut().frame(&mut painter, panel, layout.top_inset);
+    }
+
+    if let Some(FormPanel::Helpers(panel)) = form_panel {
         let mut painter = overlay_painter!();
         panel.surface.borrow_mut().frame(&mut painter, panel, layout.top_inset);
     }

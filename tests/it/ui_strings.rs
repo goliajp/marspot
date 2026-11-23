@@ -27,7 +27,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 129;
+    const EXPECTED: usize = 136;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -104,6 +104,10 @@ const SAMPLES: &[(Arg<'static>, &str, &[&str])] = &[
     (Arg::ProfileRow { n: 3, current: false }, "   profile 3", &["3"]),
     (Arg::HandOffTo("codex P2"), "hand off to codex P2", &["codex P2"]),
     (Arg::SwitchToProfile(4), "switch to P4", &["P4"]),
+    (Arg::Helpers(3), "Helpers 3", &["3"]),
+    (Arg::HelpersOf(3), "helpers (3)…", &["3"]),
+    (Arg::RanFor { minutes: 4 }, "4m", &["4"]),
+    (Arg::RanFor { minutes: 135 }, "2h 15m", &["2", "15"]),
 ];
 
 /// The sentences built around a value read as they did when each call

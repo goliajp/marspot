@@ -6,7 +6,8 @@ use std::time::Duration;
 use marspot_peer::control::{ErrorCode, Op};
 
 use super::super::caller::{CallerKey, Peer};
-use super::super::config::{Config, DenyList, within};
+use super::super::config::Config;
+use marspot::control_deny::{DenyList, within};
 use super::super::conn::Conn;
 use super::super::{dispatch, server};
 use super::{ctx, entry, hub_at, temp};

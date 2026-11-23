@@ -20,6 +20,7 @@ impl CoreApp {
             Some(SurfaceKind::Processes) => w.process_panel = None,
             Some(SurfaceKind::Accounts) => w.cc_usage_modal = None,
             Some(SurfaceKind::Layout) => w.layout_drag = None,
+            Some(SurfaceKind::Helpers) => w.helpers_panel = None,
             Some(SurfaceKind::Shortcuts) | Some(SurfaceKind::Settings) | None => {}
         }
         match change.opened {
@@ -67,6 +68,10 @@ impl CoreApp {
                     surface: Default::default(),
                 });
             }
+            Some(SurfaceKind::Helpers) => {
+                let panel = self.new_helper_panel();
+                win!(self, wi).helpers_panel = Some(panel);
+            }
             Some(SurfaceKind::Shortcuts) => w.shortcuts_surface.borrow_mut().kept.surface.interaction.reset(),
             None => {}
         }
@@ -79,6 +84,7 @@ impl CoreApp {
             SurfaceKind::Layout => self.layout_modal_geometry(wi).chrome.frame,
             SurfaceKind::Accounts => self.cc_usage_modal_rect(wi),
             SurfaceKind::Shortcuts => self.shortcuts_panel_rect(wi),
+            SurfaceKind::Helpers => self.helpers_rect(wi),
             SurfaceKind::Processes => {
                 let (_, cell_h) = self.renderer.cell_dims();
                 let w = &win!(self, wi);
@@ -94,7 +100,7 @@ impl CoreApp {
     pub(super) fn panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x_phys: f64, y_phys: f64) {
         match kind {
             SurfaceKind::Accounts => {}
-            SurfaceKind::Settings | SurfaceKind::Shortcuts => {
+            SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Helpers => {
                 self.tree_panel_content_press(wi, kind, x_phys, y_phys);
             }
             SurfaceKind::Processes => {

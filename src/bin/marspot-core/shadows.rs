@@ -33,6 +33,7 @@ pub(super) struct Shadows {
     /// L1 rate-limits; each leaves when its spawn reports back.
     spawning: HashMap<u64, (u32, bool)>,
     pub(super) places: super::shadow_place::Places,
+    pub(super) family: super::helper_panel::Family,
     /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
     /// to open under the first pane, and when.
     pub(super) dev: Option<(usize, Instant)>,
@@ -148,6 +149,8 @@ impl CoreApp {
         let env = ShadowEnv { parent: m.parent_sid, idle_s: m.idle_s };
         let pane = spawn_l3_pane_async_as(cols, rows, sid, m.cwd, Some(env), &self.event_tx);
         self.shadows.push(pane);
+        self.pane_control.shadows.family.adopted(sid, m.parent_sid);
+        self.shadows_changed();
         self.pane_control.shadows.spawning.insert(sid, (m.req_id, true));
         lx_event!(
             "SHADOW_SPAWN",
@@ -173,6 +176,7 @@ impl CoreApp {
                 if shadow && let Some(i) = self.shadow_index(sid) {
                     let pane = self.shadows.remove(i);
                     self.retire_pane_session(sid, pane.is_l3());
+                    self.shadows_changed();
                 }
                 self.spawned(req_id, 0, &e);
             }
@@ -201,6 +205,7 @@ impl CoreApp {
             }
             let pane = self.shadows.remove(i);
             self.retire_pane_session(sid, pane.is_l3());
+            self.shadows_changed();
             lx_event!("SHADOW_RETIRED", "closed a shadow pane", session = sid, recycled = recycle as u32);
         } else {
             return self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::NoSuchSession, "");

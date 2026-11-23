@@ -112,10 +112,11 @@ impl CoreApp {
             );
             return;
         }
-        let items = items
-            .into_iter()
-            .map(|it| marspot::ui::components::MenuItem::entry(&it.label, it.tag))
-            .collect();
+        let helpers = self.pane_control.shadows.family.count(sid);
+        use marspot::ui::components::MenuItem;
+        let of_helpers = (helpers > 0)
+            .then(|| MenuItem::entry(&strings::text(Arg::HelpersOf(helpers)), helper_panel::MENU_TAG));
+        let items = items.into_iter().map(|it| MenuItem::entry(&it.label, it.tag)).chain(of_helpers).collect();
         win!(self, wi).context_menu = Some(ContextMenuState {
             items,
             anchor_x: marspot::ui::Units::from_px(anchor_x),
