@@ -54,6 +54,9 @@ pub struct Pane {
     pub base: Option<String>,
     /// The agent in it: `claude`, `codex`, `gemini` or `kimi`.
     pub agent: Option<String>,
+    /// A shadow pane, which answers only to its full name.  Written
+    /// only when set; a reader without the key matches it by base too.
+    pub shadow: bool,
 }
 
 impl Pane {
@@ -74,8 +77,8 @@ impl Pane {
     /// The pane as name resolution sees it.
     pub fn target(&self) -> Target<'_> {
         match (&self.base, self.code) {
-            (Some(base), Some(_)) => Target { base, code: self.code, kind: self.agent.as_deref() },
-            _ => Target { base: &self.name, code: None, kind: self.agent.as_deref() },
+            (Some(base), Some(_)) => Target { base, code: self.code, kind: self.agent.as_deref(), shadow: self.shadow },
+            _ => Target { base: &self.name, code: None, kind: self.agent.as_deref(), shadow: self.shadow },
         }
     }
 
@@ -112,6 +115,9 @@ impl Table {
             if let Some(agent) = &p.agent {
                 v.set("agent", Value::from(agent.as_str()));
             }
+            if p.shadow {
+                v.set("shadow", Value::from(true));
+            }
             v
         };
         let (with, without): (Vec<&Pane>, Vec<&Pane>) = self.panes.iter().partition(|p| p.has_inbox());
@@ -143,6 +149,7 @@ impl Table {
                         code: p.get("code").and_then(Value::i64).and_then(|c| u16::try_from(c).ok()),
                         base: p.str_at("base").map(str::to_string),
                         agent: p.str_at("agent").map(str::to_string),
+                        shadow: p.get("shadow").and_then(Value::bool) == Some(true),
                     })
                 })
                 .collect()
@@ -234,7 +241,7 @@ mod tests {
     use super::*;
 
     fn pane(name: &str, pid: i32) -> Pane {
-        Pane { name: name.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock"), code: None, base: None, agent: None }
+        Pane { name: name.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock"), code: None, base: None, agent: None, shadow: false }
     }
 
     #[test]
@@ -245,12 +252,27 @@ mod tests {
         let back = Table::parse(&t.to_json()).unwrap();
         assert_eq!(back, t);
         assert!(back.writer_alive());
-        assert_eq!(back.panes[0].target(), Target { base: "spg", code: Some(3381), kind: Some("codex") });
+        assert_eq!(back.panes[0].target(), Target { base: "spg", code: Some(3381), kind: Some("codex"), shadow: false });
         assert_eq!(back.panes[0].full_name_if_not_shown(), None);
         let lone = Pane { code: Some(3381), base: Some("spg".into()), ..pane("spg", 7) };
         assert_eq!(lone.full_name_if_not_shown().as_deref(), Some("spg#3381"));
         let gone = Table { proc_start: "Thu Jan  1 00:00:00 1970".into(), ..t };
         assert!(!gone.writer_alive(), "a recycled pid is not the writer");
+    }
+
+    /// A shadow pane keeps its mark through the table, so the hook and
+    /// the MCP tools leave the plain name to the pane it helps.
+    #[test]
+    fn shadow_pane_name_survives_the_table() {
+        let me = std::process::id() as i32;
+        let parent = Pane { code: Some(1024), base: Some("spg".into()), ..pane("spg", 7) };
+        let helper = Pane { code: Some(3381), base: Some("spg".into()), shadow: true, ..pane("spg#3381", 8) };
+        let t = Table { owner: "/tmp/owner".into(), pid: me, proc_start: proc::lstart(me).unwrap(), panes: vec![parent, helper] };
+        let back = Table::parse(&t.to_json()).unwrap();
+        assert_eq!(back, t);
+        let targets: Vec<Target> = back.panes.iter().map(Pane::target).collect();
+        assert_eq!(crate::resolve::resolve("spg", &targets).map(|h| h.index), Ok(0));
+        assert_eq!(crate::resolve::resolve("spg#3381", &targets).map(|h| h.index), Ok(1));
     }
 
     /// A table written before entries had a code is read, each entry
@@ -260,7 +282,7 @@ mod tests {
         let old = r#"{"owner":"/o","pid":1,"procStart":"x","panes":[{"name":"spg#2","pid":7,"socket":"/tmp/cc-socks/7.sock"}]}"#;
         let t = Table::parse(old).unwrap();
         assert_eq!(t.panes, vec![pane("spg#2", 7)]);
-        assert_eq!(t.panes[0].target(), Target { base: "spg#2", code: None, kind: None });
+        assert_eq!(t.panes[0].target(), Target { base: "spg#2", code: None, kind: None, shadow: false });
         assert_eq!(of_pid(&t.panes, 7).map(|p| p.name.as_str()), Some("spg#2"));
     }
 

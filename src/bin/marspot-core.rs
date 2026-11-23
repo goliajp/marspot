@@ -3830,21 +3830,7 @@ impl CoreApp {
         // never stored, so it cannot disagree with what `--send` will
         // accept.  A rename would have made the name a second source of
         // truth about which pane is which.
-        // Every pane in every window: whether a name is shared cannot
-        // be known from one window alone.
-        let refs: Vec<marspot::pane_name::PaneRef> = self
-            .windows
-            .iter()
-            .flat_map(|win| win.panes.iter().filter_map(|p| p.shelld_session_id()))
-            .map(|sid| {
-                marspot::pane_name::PaneRef::new(
-                    sid,
-                    self.pane_cwds.get(&sid).cloned().unwrap_or_default(),
-                )
-            })
-            .collect();
-        let pane_names: std::collections::HashMap<u64, String> =
-            marspot::pane_name::assign(&refs).into_iter().collect();
+        let pane_names = self.pane_names();
         let resolved_labels: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 if let Some(name) = win!(self, wi).panes[i]

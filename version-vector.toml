@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.603"  # pane.place shadow checks the tree even for a pane the registry already names a shadow
-core    = "0.12.629"  # an unsent SessionShadow(0) for the pane that stays is logged
+shell   = "0.7.604"  # shadow panes are left out of the shared-name check and always show their full name
+core    = "0.12.630"  # shadow panes are left out of the shared-name check and always show their full name
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

@@ -74,10 +74,16 @@ pub fn cwd_of(sid: u64, obs: &Observation) -> Option<String> {
     Some(cwd.map_or_else(|| s.entry.cwd.clone(), |p| p.to_string_lossy().into_owned()))
 }
 
-/// Every pane with what naming needs.  May read the code file, so not
-/// for the main thread's hot paths.
+/// Every pane with what naming needs, its shadow mark read from its
+/// registry entry.  May read the code file, so not for the main
+/// thread's hot paths.
 pub fn pane_refs_in(obs: &Observation) -> Vec<marspot::pane_name::PaneRef> {
-    live_panes(obs).into_iter().map(|(sid, cwd, _)| marspot::pane_name::PaneRef::new(sid, cwd)).collect()
+    // live_panes lists obs.sessions in order
+    live_panes(obs)
+        .into_iter()
+        .zip(&obs.sessions)
+        .map(|((sid, cwd, _), s)| marspot::pane_name::PaneRef::new(sid, cwd).with_shadow(super::panes::shadow_of(&s.entry) != 0))
+        .collect()
 }
 
 /// `sid → (window, x, y)`, 1-based, from the layout L2 persists.
@@ -125,7 +131,7 @@ pub fn resolve_name_in(target: &str, panes: &[marspot::pane_name::PaneRef]) -> R
     let bases: Vec<String> = panes.iter().map(|p| marspot::pane_name::base_name(&p.cwd)).collect();
     let kinds: Vec<Option<String>> = panes.iter().map(|p| p.code.and_then(agent_of)).collect();
     let targets: Vec<marspot_peer::resolve::Target> = (0..panes.len())
-        .map(|i| marspot_peer::resolve::Target { base: &bases[i], code: panes[i].code, kind: kinds[i].as_deref() })
+        .map(|i| marspot_peer::resolve::Target { base: &bases[i], code: panes[i].code, kind: kinds[i].as_deref(), shadow: panes[i].shadow })
         .collect();
     match marspot_peer::resolve::resolve(target, &targets) {
         Ok(hit) => Ok(panes[hit.index].sid),

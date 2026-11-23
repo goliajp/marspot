@@ -25,8 +25,9 @@ use super::worker::{now_ms, write_record, Worker};
 pub(super) struct Panes {
     /// Pane id → its name as drawn.
     pub names: HashMap<u64, String>,
-    /// Pane id → its directory's name and its code.
-    ids: HashMap<u64, (String, Option<u16>)>,
+    /// Pane id → its directory's name, its code, and whether it is a
+    /// shadow pane.
+    ids: HashMap<u64, (String, Option<u16>, bool)>,
     /// The claude in front of a pane → that pane.
     claude: HashMap<i32, u64>,
 }
@@ -39,7 +40,7 @@ impl Panes {
     fn of(obs: &crate::observe::Observation) -> Panes {
         let refs = crate::ShellApp::pane_refs_in(obs);
         let names = marspot::pane_name::assign(&refs).into_iter().collect();
-        let ids = refs.into_iter().map(|p| (p.sid, (marspot::pane_name::base_name(&p.cwd), p.code))).collect();
+        let ids = refs.into_iter().map(|p| (p.sid, (marspot::pane_name::base_name(&p.cwd), p.code, p.shadow))).collect();
         let claude = obs
             .live()
             .filter_map(|s| crate::plugins::claudecode::pane_claude(s).map(|p| (p.row.pid, s.entry.id)))
@@ -49,7 +50,7 @@ impl Panes {
 
     /// The table entry for the session `pid` in pane `sid`.
     fn entry(&self, sid: u64, pid: i32, socket: &str, agent: &str) -> Option<Pane> {
-        let (base, code) = self.ids.get(&sid)?;
+        let (base, code, shadow) = self.ids.get(&sid)?;
         Some(Pane {
             name: self.names.get(&sid)?.clone(),
             pid,
@@ -57,6 +58,7 @@ impl Panes {
             code: *code,
             base: Some(base.clone()),
             agent: Some(agent.to_string()),
+            shadow: *shadow,
         })
     }
 
