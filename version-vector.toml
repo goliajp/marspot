@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.591"  # pane control: restarts retried and capped, hang-ups noticed, deny by directory prefix, no shadow ops until shadows are known, run settles before the next input
+shell   = "0.7.592"  # pane screens keep zero-width joiners and variation selectors, drop tag characters
 core    = "0.12.622"  # marspot-term published frames carry their scroll count
 session = "0.11.411"  # a restart answers input already written as written; mode changes count as cursor moves for text watches
