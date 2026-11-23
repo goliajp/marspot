@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.617"  # the terminal counts input start marks (OSC 133 ; B)
+shell   = "0.7.618"  # pane.open answers the name pane.list shows; the list adds recent opens and leaves out recent closes
 core    = "0.12.632"  # the terminal counts input start marks (OSC 133 ; B)
 session = "0.11.417"  # a prompt watch in a shell that marks input starts waits for one after its position, a second at most

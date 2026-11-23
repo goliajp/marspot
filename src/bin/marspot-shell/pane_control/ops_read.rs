@@ -31,17 +31,13 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
     let agent_of = |code: Option<u16>| {
         table.iter().find(|p| p.code.is_some() && p.code == code).and_then(|p| p.agent.clone()).map_or(Value::Null, Value::from)
     };
-    let live: std::collections::HashSet<u64> = ctx.obs.live().map(|s| s.entry.id).collect();
-    let mut out = Vec::new();
-    for (sid, cwd, _) in names::live_panes(&ctx.obs) {
-        let Some(s) = ctx.obs.session(sid).filter(|_| live.contains(&sid)) else { continue };
+    let row = |sid: u64, cwd: String, parent: u64| {
         let r = marspot::pane_name::PaneRef::new(sid, cwd.clone());
-        let parent = panes::shadow_of(&s.entry);
         let view = views.get(&sid);
         // a closed window keeps its place in the saved layout, to be reopened
         let shown = cells.get(&sid).filter(|(w, _, _)| open.contains(&(w - 1)));
         let cell = shown.map_or(Value::Null, |(w, x, y)| format!("w({w},{x},{y})").into());
-        out.push(obj([
+        obj([
             ("id", (sid as i64).into()),
             ("name", r.full_name().into()),
             ("cwd", cwd.into()),
@@ -53,7 +49,18 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
             ("state", view.map_or("unknown", |v| v.state.as_str()).into()),
             ("dormant", view.is_some_and(|v| v.dormant).into()),
             ("busy", view.and_then(|v| v.busy).map_or(Value::Null, Value::from)),
-        ]));
+        ])
+    };
+    let live: std::collections::HashSet<u64> = ctx.obs.live().map(|s| s.entry.id).collect();
+    let recent = conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    let mut out = Vec::new();
+    for (sid, cwd, _) in names::live_panes(&ctx.obs) {
+        let Some(s) = ctx.obs.session(sid).filter(|_| live.contains(&sid) && !recent.closed_lately(sid, now)) else { continue };
+        out.push(row(sid, cwd, panes::shadow_of(&s.entry)));
+    }
+    for o in recent.opened_after(ctx.obs.at, now).filter(|o| !live.contains(&o.sid)) {
+        out.push(row(o.sid, o.cwd.clone(), o.parent));
     }
     obj([("panes", Value::Arr(out))])
 }

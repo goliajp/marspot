@@ -14,6 +14,7 @@ use super::*;
 
 mod audit_tests;
 mod conn_tests;
+mod list_tests;
 mod server_tests;
 mod shadow_race_tests;
 
@@ -36,6 +37,7 @@ fn hub_at(dir: &std::path::Path) -> (Hub, std::sync::mpsc::Receiver<MainCmd>) {
         links: links::Links::new(),
         limits: Mutex::new(Limits::default()),
         shadow_gate: shadow_gate::Gate::default(),
+        recent: Mutex::new(recent::Recent::default()),
         config: RwLock::new(Arc::new(Config::default())),
         deny: Mutex::new(DenyList::at(dir.join("control-deny.tsv"))),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),
