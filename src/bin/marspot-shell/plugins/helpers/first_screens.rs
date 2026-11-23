@@ -5,13 +5,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use marspot_peer::control::{AgentKind, ErrorCode};
+use marspot_peer::control::{AgentKind, ErrorCode, Reject};
 
 use super::Shared;
 use super::dialogs::{Ask, Dialog, Look, Press, look};
 use super::launch;
 use super::notify::Stop;
-use super::passing::{Keys, drawn, take_enter, take_told};
+use super::passing::{Keys, drawn, give_enter_back, nothing_sent, take_enter, take_told};
 use super::work::Job;
 use crate::pane_control::helpers_port::{Waited, with_port};
 
@@ -21,6 +21,17 @@ const DRAWN_MS: u32 = 2_000;
 const STOPPED_MS: u32 = 10_000;
 /// How long a dialog may take to act on a key.
 const KEY_TAKEN: Duration = Duration::from_secs(10);
+
+/// What became of a dialog's keys.
+#[derive(Debug, PartialEq)]
+pub(super) enum Pressed {
+    /// The Enter went in here, to this screen, and the dialog is gone.
+    Entered(u64, String),
+    /// A key did not go, and why.
+    NotSent(&'static str),
+    /// It gets no key any more.
+    Over,
+}
 
 pub(super) struct First {
     pub s: Arc<Shared>,
@@ -156,42 +167,76 @@ impl First {
     }
 
     /// Say yes to `d`, which is on the screen: the position of the Enter
-    /// and the screen it went to, once the dialog is gone.  One that does not move when a key goes
-    /// gets no other, now or later.
+    /// and the screen it went to, once the dialog is gone.  One that does
+    /// not move when a key goes gets no other, now or later; one whose
+    /// key was not sent is tried again at the next pass.
     fn answer(&self, d: &Dialog, keys: &mut Keys) -> Option<(u64, String)> {
         if keys.ended() {
             return None;
         }
-        let entered = self.press_through(d, keys);
-        keys.end();
-        self.note(d, if entered.is_some() { "answered" } else { "not answered" });
-        entered
-    }
-
-    fn press_through(&self, asked: &Dialog, keys: &mut Keys) -> Option<(u64, String)> {
-        let mut d = asked.clone();
-        while let Some(press) = keys.next(&d) {
-            if self.refusal(&d).is_some() || !self.current() || press == Press::Enter && !take_enter(&self.s.dir_of(self.sid), d.ask) {
-                return None;
+        match self.press_through(d, keys, || self.look(), |key| with_port(None, |p| p.send_keys(self.sid, key))) {
+            Pressed::Entered(pos, shown) => {
+                keys.end();
+                self.note(d, "answered");
+                Some((pos, shown))
             }
-            let key: &[u8] = match press {
-                Press::Down => b"\x1b[B",
-                Press::Up => b"\x1b[A",
-                Press::Enter => b"\r",
-            };
-            let (shown, _) = self.look();
-            let pos = with_port(None, |p| p.send_keys(self.sid, key))?.ok()?;
-            let was = d.cursor;
-            if press == Press::Enter {
-                let gone = |l: &Look| !matches!(l, Look::Ask(n) if n.ask == asked.ask);
-                return self.until(DRAWN_MS, pos, gone).map(|_| (pos, shown));
+            Pressed::NotSent(why) => {
+                keys.unsent();
+                self.note(d, &format!("key not sent, {why}"));
+                None
             }
-            match self.until(500, pos, |l| !matches!(l, Look::Ask(n) if n.ask == asked.ask && n.cursor == was))? {
-                Look::Ask(n) if n.ask == asked.ask => d = n,
-                _ => return None,
+            Pressed::Over => {
+                keys.end();
+                self.note(d, "not answered");
+                None
             }
         }
-        None
+    }
+
+    /// `look`: what is on the screen now; `send`: a key to the pane, None
+    /// before there is anything to send it through.
+    pub(super) fn press_through(
+        &self,
+        asked: &Dialog,
+        keys: &mut Keys,
+        look: impl Fn() -> (String, Look),
+        send: impl Fn(&[u8]) -> Option<Result<u64, Reject>>,
+    ) -> Pressed {
+        let dir = self.s.dir_of(self.sid);
+        let mut d = asked.clone();
+        while let Some(press) = keys.next(&d) {
+            if self.refusal(&d).is_some() || !self.current() {
+                return Pressed::Over;
+            }
+            let (shown, seen) = look();
+            if !matches!(&seen, Look::Ask(n) if *n == d) {
+                return Pressed::NotSent("the screen changed");
+            }
+            if press == Press::Enter && !take_enter(&dir, d.ask) {
+                return Pressed::Over;
+            }
+            let pos = match send(press.bytes()) {
+                Some(Ok(pos)) => pos,
+                // an Enter that may have gone in is not sent again
+                Some(Err(r)) if press == Press::Enter && !nothing_sent(r.code) => return Pressed::Over,
+                failed => {
+                    if press == Press::Enter {
+                        give_enter_back(&dir, d.ask);
+                    }
+                    return Pressed::NotSent(failed.and_then(Result::err).map_or("no socket yet", |r| r.code.as_str()));
+                }
+            };
+            if press == Press::Enter {
+                let gone = |l: &Look| !matches!(l, Look::Ask(n) if n.ask == asked.ask);
+                return self.until(DRAWN_MS, pos, gone).map_or(Pressed::Over, |_| Pressed::Entered(pos, shown));
+            }
+            let was = d.cursor;
+            match self.until(500, pos, |l| !matches!(l, Look::Ask(n) if n.ask == asked.ask && n.cursor == was)) {
+                Some(Look::Ask(n)) if n.ask == asked.ask => d = n,
+                _ => return Pressed::Over,
+            }
+        }
+        Pressed::Over
     }
 
     /// Wait for the pane to print past `pos` and be still, until what it

@@ -12,6 +12,8 @@
 use std::path::{Path, PathBuf};
 
 const TABLE: &str = "mcp_servers.marspot";
+/// A file whose end is inside a string, as far as this reads it.
+const OPEN: &str = "a string this cannot follow; left as it is";
 const UNREADABLE: &str = "a marspot MCP entry this cannot read; left as it is";
 
 /// Add or repoint the entry in every Codex home.  Returns lines worth
@@ -86,6 +88,34 @@ fn reconcile_file(path: &Path, bin: &str) -> Option<String> {
     }
 }
 
+/// The codex arguments under which a session in `home` is asked about
+/// no tool of marspot's MCP server, however its config has the server.
+pub(crate) fn approved_args(home: &Path) -> Vec<String> {
+    let text = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return Vec::new(),
+    };
+    let bin = super::inbox::peer_bin();
+    approved(&text, bin.as_deref().and_then(Path::to_str))
+}
+
+/// codex starts with no override that is all it has of a server: where
+/// the file has no server, the override gives a whole one.
+fn approved(text: &str, bin: Option<&str>) -> Vec<String> {
+    let mut sets = vec![format!("{TABLE}.default_tools_approval_mode=\"approve\"")];
+    let found = with_server(text, "");
+    match (&found, bin) {
+        (Err(why), _) if *why == OPEN => return Vec::new(),
+        // there, in a form of its own
+        (Err(_), _) => {}
+        (Ok(new), _) if !new.as_ref().is_some_and(|n| n.starts_with(text)) => {}
+        (Ok(_), None) => return Vec::new(),
+        (Ok(_), Some(b)) => sets.extend([format!("{TABLE}.command={}", toml_string(b)), format!("{TABLE}.args=[\"mcp\"]")]),
+    }
+    sets.into_iter().flat_map(|s| ["-c".to_string(), s]).collect()
+}
+
 /// `text` with the table present and its command `bin`; None when it
 /// already is.  Err when the file defines the entry in a form other
 /// than a `[mcp_servers.marspot]` table with a one-line string
@@ -143,7 +173,7 @@ fn with_server(text: &str, bin: &str) -> Result<Option<String>, &'static str> {
         open = ["\"\"\"", "'''"].into_iter().find(|d| value.matches(*d).count() % 2 == 1);
     }
     if open.is_some() {
-        return Err(UNREADABLE);
+        return Err(OPEN);
     }
     if !seen {
         let mut out = text.to_string();
@@ -321,5 +351,32 @@ mod tests {
         assert!(home.join(".codex-profile-3/config.toml").is_file());
         assert!(config_files(&home.join("nobody")).is_empty(), "a home that is not there gets nothing");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Each of these was read by codex 0.171 (`codex mcp get marspot`):
+    /// the mode alone where there is an entry, all three where there is
+    /// none, and never a command over an entry that may have a url.
+    #[test]
+    fn approval_goes_with_whatever_entry_the_config_has() {
+        let mode = ["-c", "mcp_servers.marspot.default_tools_approval_mode=\"approve\""];
+        let whole = [mode[0], mode[1], "-c", "mcp_servers.marspot.command=\"/a b/marspot-peer\"", "-c", "mcp_servers.marspot.args=[\"mcp\"]"];
+        let bin = Some("/a b/marspot-peer");
+        for text in ["", CONFIG, "[mcp_servers.other]\ncommand = \"/o\"\n"] {
+            assert_eq!(approved(text, bin), whole, "{text}");
+            assert!(approved(text, None).is_empty(), "nothing to run: {text}");
+        }
+        for text in [
+            "[mcp_servers.marspot]\ncommand = \"/x/marspot-peer\"\nargs = [\"mcp\", \"-v\"]\n",
+            "[mcp_servers.marspot]\ncommand = \"\"\n",
+            "[mcp_servers]\nmarspot = { command = \"/x\", args = [\"mcp\"] }\n",
+            "[mcp_servers.marspot]\nurl = \"http://127.0.0.1:1/mcp\"\n",
+        ] {
+            assert_eq!(approved(text, bin), mode, "{text}");
+        }
+        assert!(approved("notes = \"\"\"\nno end", bin).is_empty(), "not known what is there");
+        let d = dir();
+        std::fs::write(d.join("config.toml"), with_server(CONFIG, "/x/marspot-peer").unwrap().unwrap()).unwrap();
+        assert_eq!(approved_args(&d), mode);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

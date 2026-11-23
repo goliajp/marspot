@@ -46,6 +46,9 @@ pub(super) struct Helper {
     /// The account it runs on now.
     pub account: String,
     pub results_delivered: u32,
+    /// The digest of the result text a notice last carried; empty: none
+    /// did, or an older build sent it.
+    pub result_sha: String,
     /// The result file changed since a notice last carried it.
     pub result_new: bool,
     /// A stop judged from the screen was told, and neither input nor a
@@ -70,6 +73,7 @@ impl Helper {
             delivered_ms: None,
             account,
             results_delivered: 0,
+            result_sha: String::new(),
             result_new: false,
             noticed: false,
             notices: Vec::new(),
@@ -108,7 +112,8 @@ pub(super) enum Event {
     Preparing,
     TaskDelivered,
     ResultChanged,
-    ResultDelivered,
+    /// `sha`: the digest of its text.
+    ResultDelivered { sha: String },
     InputSeen,
     IdleNoticed,
     BlockedNoticed,
@@ -129,7 +134,7 @@ impl Event {
             Event::Preparing => "preparing",
             Event::TaskDelivered => "task_delivered",
             Event::ResultChanged => "result_changed",
-            Event::ResultDelivered => "result_delivered",
+            Event::ResultDelivered { .. } => "result_delivered",
             Event::InputSeen => "input_seen",
             Event::IdleNoticed => "idle_noticed",
             Event::BlockedNoticed => "blocked_noticed",
@@ -179,8 +184,12 @@ impl Table {
                 h.result_new = true;
                 h.noticed = false;
             }
-            Event::ResultDelivered => {
-                h.results_delivered += 1;
+            Event::ResultDelivered { sha } => {
+                // told again as unchanged: no other result
+                if sha.is_empty() || *sha != h.result_sha {
+                    h.results_delivered += 1;
+                }
+                h.result_sha.clone_from(sha);
                 h.result_new = false;
             }
             Event::InputSeen => h.noticed = false,

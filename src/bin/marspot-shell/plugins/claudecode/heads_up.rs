@@ -192,6 +192,9 @@ pub(super) fn after_warned_move(work_ended: bool) -> String {
     if work_ended { format!("{word}。{ENDED_WORK}") } else { word.to_string() }
 }
 
+/// The socket name marspot's own messages say they are from.
+pub(in crate::plugins) const SENDER: &str = "marspot-quota.sock";
+
 /// The frame for `inbox`, from marspot.
 ///
 /// marspot acts for the person without asking first, which is what
@@ -200,7 +203,7 @@ pub(super) fn after_warned_move(work_ended: bool) -> String {
 /// message asks for no reply.
 pub(in crate::plugins) fn frame_line(inbox: &str, body: &str) -> String {
     let dir = Path::new(inbox).parent().map(|d| d.display().to_string()).unwrap_or_default();
-    let from = format!("uds:{dir}/marspot-quota.sock");
+    let from = format!("uds:{dir}/{SENDER}");
     let header = Header { from: from.clone(), from_name: Some("marspot".into()), from_mode: Some(Mode::Bypass) };
     frame::user_line(&envelope::encode(&header, body), &from, Priority::Next, &marspot_peer::rand::uuid_v4())
 }

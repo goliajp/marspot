@@ -49,12 +49,14 @@ fn helpers_every_event_reads_back_from_its_line() {
     h.notices = vec![5, 6];
     h.suppressed = 2;
     h.result_new = true;
+    h.result_sha = "ef".repeat(32);
     for ev in [
         Event::Started(started(3, "shell", AgentKind::Kimi)),
         Event::Preparing,
         Event::TaskDelivered,
         Event::ResultChanged,
-        Event::ResultDelivered,
+        Event::ResultDelivered { sha: String::new() },
+        Event::ResultDelivered { sha: "cd".repeat(32) },
         Event::InputSeen,
         Event::IdleNoticed,
         Event::BlockedNoticed,
@@ -186,6 +188,17 @@ fn helpers_run_script_per_agent() {
         codex,
         "#!/bin/sh\nexec env CODEX_HOME='/Users/x/.codex-profile-2' codex resume --last -m gpt-5 -a never -s workspace-write --add-dir /st/helpers/42 \"$(cat '/st/helpers/42/task.md')\"\n"
     );
+    // marspot's own tools, in mode auto alone
+    let home = temp("codexhome");
+    std::fs::write(home.join("config.toml"), "[mcp_servers.marspot]\ncommand = \"/x/marspot-peer\"\nargs = [\"mcp\"]\n").unwrap();
+    let tools = launch::tool_flags(AgentKind::Codex, "auto", &home);
+    let line = launch::run_script(AgentKind::Codex, &acct, None, &[flags, tools].concat(), false, &task).unwrap();
+    let approve = " -c 'mcp_servers.marspot.default_tools_approval_mode=\"approve\"' \"$(cat";
+    assert!(line.contains(&format!("-a never -s workspace-write --add-dir /st/helpers/42{approve}")), "{line}");
+    for (agent, mode) in [(AgentKind::Codex, "ask"), (AgentKind::Codex, "--yolo"), (AgentKind::Claude, "auto")] {
+        assert!(launch::tool_flags(agent, mode, &home).is_empty(), "{mode}");
+    }
+    std::fs::remove_dir_all(&home).unwrap();
     let g = launch::mode_flags(AgentKind::Gemini, "auto", dir).unwrap();
     let gem = launch::run_script(AgentKind::Gemini, &launch::test_account("/Users/x/.gemini-profile-1"), None, &g, false, &task).unwrap();
     assert!(gem.contains("GEMINI_CLI_NO_RELAUNCH='true'") && gem.contains("--approval-mode yolo --skip-trust --include-directories /st/helpers/42 -i \"$(cat"), "{gem}");

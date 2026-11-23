@@ -90,19 +90,21 @@ pub(super) fn turn_reported(h: &Helper) -> bool {
 /// on an approval, or its program left the pane.
 pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now_ms: u64, in_turn: &mut HashMap<u64, Turn>) {
     let Ok(Some(v)) = host.pane_status(h.sid) else { return };
-    if matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval)) {
+    // in a turn, not only printing
+    let at_work = matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval));
+    if at_work {
         s.lock().turned.insert(h.sid);
     }
     let seen = in_turn.entry(h.sid).or_default();
     let claude = h.started.agent == AgentKind::Claude;
     let look = if claude && v.status != PaneStatus::Empty { turns::look(h.sid) } else { None };
-    if let Some(Look::Over { began, at }) = look {
+    if let Some(Look::Over { began, at, quiet_after }) = look {
         if at > h.started_ms {
             s.lock().turned.insert(h.sid);
         }
-        return recorded_end(s, t, h, (began, at), now_ms, seen);
+        return recorded_end(s, t, h, (began, at, quiet_after), now_ms, seen);
     }
-    if matches!(v.status, PaneStatus::Busy(_))
+    if at_work
         && let Some(told) = s.lock().turn_told.get_mut(&h.sid)
     {
         told.by_state = false;
@@ -132,8 +134,8 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
 
 /// The turn of `h` is over by claude's own record, whatever it still
 /// draws: it began and ended as `turn` says.
-fn recorded_end(s: &Shared, t: &Table, h: &Helper, turn: (Option<u64>, u64), now_ms: u64, seen: &mut Turn) {
-    let (began, at) = turn;
+fn recorded_end(s: &Shared, t: &Table, h: &Helper, turn: (Option<u64>, u64, Option<u64>), now_ms: u64, seen: &mut Turn) {
+    let (began, at, quiet_after) = turn;
     let told = s.turn_told(h, now_ms);
     let told_now = Told { at, by_state: false };
     if at <= told.at {
@@ -142,6 +144,11 @@ fn recorded_end(s: &Shared, t: &Table, h: &Helper, turn: (Option<u64>, u64), now
         // the record of the end the pane's state already told
         *seen = Turn::Idle;
         s.lock().turn_told.insert(h.sid, told_now);
+    } else if quiet_after.is_some_and(|before| before <= told.at) && !h.notices.is_empty() && !h.result_new {
+        *seen = Turn::Idle;
+        s.lock().turn_told.insert(h.sid, told_now);
+        let why = "its turn read a notice about a helper and did nothing; its stop before that was told";
+        marspot::lx_info!("helpers.stop_not_told", &format!("sid={}: {why}", h.sid));
     } else if s.awaits_helpers(t, h, now_ms) {
         // looked at again each tick: helpers may go with no notice
         *seen = Turn::Held;

@@ -16,7 +16,7 @@ use super::table::{Event, Helper};
 use super::{Shared, records};
 use crate::observe::Observation;
 use crate::pane_control::names::full_name_or_entry as full_name;
-use crate::plugins::claudecode::with_helpers::drain_account_changes;
+use crate::plugins::claudecode::with_helpers::{NOTICE_HEAD, drain_account_changes};
 use crate::plugins::usage::for_helpers;
 
 const JOBS: usize = 64;
@@ -145,7 +145,7 @@ fn handle(s: &Arc<Shared>, job: Job) {
             if close(s, sid)
                 && let (Some(why), Some(h)) = (tell, h)
             {
-                let text = format!("[marspot helper notice] Helper \"{}\" {why} {}", notify::shown(&name), marspot_peer::notice::TRAILER);
+                let text = format!("{NOTICE_HEAD} Helper \"{}\" {why} {}", notify::shown(&name), marspot_peer::notice::TRAILER);
                 send(s, sid, Notice { parent: h.started.parent, body: text, ..Notice::default() });
             }
         }
@@ -251,8 +251,8 @@ fn tell(s: &Arc<Shared>, h: &Helper, stop: Stop) {
         Stop::Exited => Event::ExitedNoticed,
         Stop::Budget => Event::BudgetExpired,
     }];
-    if result.is_some() {
-        events.push(Event::ResultDelivered);
+    if let Some(r) = result.as_deref() {
+        events.push(Event::ResultDelivered { sha: notify::sha(r) });
     }
     send(s, sid, Notice { parent: h.started.parent, body, events, ..Notice::default() });
 }

@@ -65,6 +65,16 @@ pub(super) enum Press {
     Enter,
 }
 
+impl Press {
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            Press::Down => b"\x1b[B",
+            Press::Up => b"\x1b[A",
+            Press::Enter => b"\r",
+        }
+    }
+}
+
 impl Dialog {
     /// Enter only with the cursor on yes.
     pub fn press(&self) -> Press {

@@ -167,7 +167,7 @@ fn helpers_a_scan_reads_the_end_of_a_turn_claude_recorded() {
     };
     assert_eq!(scan(&transcript), Some(turns::Look::NotOver), "its Stop hooks have not run");
     transcript.push_str("{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":5,\"timestamp\":\"2026-11-23T15:14:57.635Z\"}\n");
-    assert_eq!(scan(&transcript), Some(turns::Look::Over { began: Some(1_795_446_892_000), at: 1_795_446_897_635 }));
+    assert_eq!(scan(&transcript), Some(turns::Look::Over { began: Some(1_795_446_892_000), at: 1_795_446_897_635, quiet_after: None }));
     transcript.push_str("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"more\"}}\n");
     assert_eq!(scan(&transcript), Some(turns::Look::NotOver), "the next turn");
 }

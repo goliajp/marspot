@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.632"  # helpers: a claude helper's stop is told at its turn end; caller kind by ancestry; quiet times
+shell   = "0.7.633"  # helpers: a turn that only read a notice is not told again; codex helpers may use the marspot tools
 core    = "0.12.633"  # the shared run status line carries a marspot=run option
 session = "0.11.419"  # a prompt watch measures its quiet from the shell back in front

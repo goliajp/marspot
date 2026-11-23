@@ -15,7 +15,7 @@ use super::{caller_kind, records, service, tick, turn};
 use crate::plugins::claudecode::with_helpers::turns::{self, Look};
 
 fn over(at: u64) -> Look {
-    Look::Over { began: None, at }
+    Look::Over { began: None, at, quiet_after: None }
 }
 
 fn idle_stops(rx: &std::sync::mpsc::Receiver<Job>) -> usize {
@@ -188,21 +188,23 @@ fn helpers_an_end_told_by_the_pane_is_not_told_again_by_its_record() {
     assert_eq!(h.told(BUSY), 0);
     assert_eq!(h.told(PaneStatus::AwaitingUser), 1, "its Stop hooks run long");
     let end = records::now_ms() + 1_000;
-    turns::publish(vec![(1, Look::Over { began, at: end })]);
+    turns::publish(vec![(1, Look::Over { began, at: end, quiet_after: None })]);
     assert_eq!(h.told(BUSY), 0, "the same end");
     turns::publish(vec![(1, over(end + 1))]);
     assert_eq!(h.told(BUSY), 1, "a turn no scan saw running");
-    // told by the pane again; then a user record, or a busy look
-    for busy in [false, true] {
+    // told by the pane again; then a user record, a pane at work, or one
+    // that only drew something
+    let working = PaneStatus::Busy(BusyKind::Working);
+    for (began, then, told) in [(true, None, 1), (false, Some(working), 1), (false, Some(BUSY), 0)] {
         turns::publish(vec![(1, Look::NotOver)]);
         assert_eq!(h.told(BUSY), 0);
         assert_eq!(h.told(PaneStatus::AwaitingUser), 1);
         let at = records::now_ms() + 2_000;
-        if busy {
-            assert_eq!(h.told(BUSY), 0);
+        if let Some(status) = &then {
+            assert_eq!(h.told(status.clone()), 0);
         }
-        turns::publish(vec![(1, Look::Over { began: (!busy).then_some(at - 1_000), at })]);
-        assert_eq!(h.told(BUSY), 1, "busy={busy}");
+        turns::publish(vec![(1, Look::Over { began: began.then_some(at - 1_000), at, quiet_after: None })]);
+        assert_eq!(h.told(BUSY), told, "began={began} then={then:?}");
     }
 }
 
@@ -210,7 +212,7 @@ fn helpers_an_end_told_by_the_pane_is_not_told_again_by_its_record() {
 /// `name`, with this test standing in for the pane's shell.
 fn kind_under(name: &str) -> Option<&'static str> {
     let mut c = Command::new("/bin/sh");
-    c.arg0(name).args(["-c", "/bin/sleep 60 & echo $!; wait"]).stdout(Stdio::piped());
+    c.arg0(name).args(["-c", "exec 3<&0; /bin/cat <&3 >/dev/null & exec 3<&-; echo $!; wait"]).stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = c.spawn().unwrap();
     let mut line = String::new();
     std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
@@ -219,8 +221,8 @@ fn kind_under(name: &str) -> Option<&'static str> {
     let chain = crate::pane_control::caller::chain(asker, pidtree::proc_row, me);
     assert_eq!(chain.iter().map(|r| r.pid).collect::<Vec<_>>(), [asker, child.id() as i32, me]);
     let kind = caller_kind::among(&chain);
-    // SAFETY: started by the process just above, which has not waited for it yet
-    unsafe { libc::kill(asker, libc::SIGKILL) };
+    // the asker reads this pipe: closing it ends both
+    drop(child.stdin.take());
     child.wait().unwrap();
     kind
 }

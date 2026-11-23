@@ -19,7 +19,7 @@
 mod bind;
 pub(crate) mod claude_mcp;
 mod claude_hooks;
-mod codex_config;
+pub(crate) mod codex_config;
 mod daemon;
 mod deliver;
 mod gemini_bind;

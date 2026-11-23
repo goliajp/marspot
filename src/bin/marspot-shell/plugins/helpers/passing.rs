@@ -5,6 +5,8 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
+use marspot_peer::control::ErrorCode;
+
 use super::dialogs::{Ask, Dialog, Press};
 
 /// Moves of the cursor in one dialog at most.
@@ -37,6 +39,12 @@ impl Keys {
             self.arrows += 1;
         }
         Some(press)
+    }
+
+    /// The last key was not sent: it may go again.
+    pub fn unsent(&mut self) {
+        self.arrow_from = None;
+        self.over = false;
     }
 
     /// No key goes to it any more.
@@ -89,6 +97,19 @@ pub(super) fn take_enter(dir: &Path, ask: Ask) -> bool {
             false
         }
     }
+}
+
+/// The Enter [`take_enter`] gave was not sent: it may be taken again.
+pub(super) fn give_enter_back(dir: &Path, ask: Ask) {
+    if let Err(e) = std::fs::remove_file(dir.join(format!("entered-{}", ask.word()))) {
+        marspot::lx_warn!("helpers.mark_failed", &format!("{}: {e}", dir.display()));
+    }
+}
+
+/// Whether a key refused with `code` went nowhere for certain.
+pub(super) fn nothing_sent(code: ErrorCode) -> bool {
+    use ErrorCode::{CoreRestarting, NoSuchPane, NotAttached, OldSession, PaneBusy, PaneDormant, PtyQueueFull};
+    matches!(code, PaneBusy | PaneDormant | PtyQueueFull | NotAttached | NoSuchPane | OldSession | CoreRestarting)
 }
 
 /// Note that the parent is told of `d`; false when it is the dialog it
