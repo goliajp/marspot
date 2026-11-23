@@ -99,10 +99,11 @@ impl CoreApp {
         let chrome =
             win!(self, wi).panels.open().map(|k| PanelChrome::new(self.panel_frame(wi, k), top));
         let cell = self.renderer.cell_dims();
+        let helpers = self.dev_helper_spots(wi);
         let w = &win!(self, wi);
         let id = w.window_id;
         let Some(script) = self.dev_panels.as_mut() else { return };
-        for input in script.play(now, &Scene { layout: &w.layout, chrome, cell }) {
+        for input in script.play(now, &Scene { layout: &w.layout, chrome, cell, helpers }) {
             let _ = self.event_tx.send(match input {
                 DevInput::Move(x, y) => CoreEvent::MouseMove(x, y, id),
                 DevInput::Down(x, y, mods) => CoreEvent::MouseDown(x, y, mods, id),

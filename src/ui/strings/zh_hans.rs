@@ -130,6 +130,14 @@ fn text(m: Msg) -> &'static str {
         Msg::ColProcess => "进程",
         Msg::ColPid => "pid",
 
+        Msg::PanelHelpers => "帮手",
+        Msg::HelpersEmpty => "没有正在运行的帮手",
+        Msg::HelperMoveToWindow => "移到窗口",
+        Msg::HelperClose => "关闭",
+        Msg::HelpersCloseAll => "关闭这个会话的全部帮手",
+        Msg::HelpersDeny => "禁止这个目录的会话操控窗格",
+        Msg::HelpersAllow => "允许这个目录的会话操控窗格",
+
         Msg::AccountsHeading => "账户",
         Msg::AccountsAvailability => "可用时间",
         Msg::AccountsEmpty => "暂无用量数据。在窗格中登录 Claude 或 Codex 后，几分钟内会在此显示",
@@ -174,5 +182,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::ProfileRow { n, current: false } => write!(out, "   账户 {n}"),
         Arg::HandOffTo(target) => write!(out, "交接给 {target}"),
         Arg::SwitchToProfile(n) => write!(out, "切换到 P{n}"),
+        Arg::Helpers(n) => write!(out, "帮手 {n}"),
+        Arg::HelpersOf(n) => write!(out, "帮手（{n}）…"),
+        Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m} 分"),
+        Arg::RanFor { minutes: m } => write!(out, "{} 小时 {} 分", m / 60, m % 60),
     }
 }

@@ -35,7 +35,7 @@ pub(crate) struct ChromeSurfaces {
     seam_rects: Vec<Rect>,
     /// The layout generation and row count the toolbar and the sidebar
     /// were last made ready for input with.
-    ready_for: (u64, usize),
+    ready_for: Option<(u64, usize)>,
 }
 
 /// What the chrome shows beyond where things are.
@@ -79,6 +79,16 @@ pub struct ChromeShape<'a> {
 }
 
 impl ChromeSurfaces {
+    /// The shadow panes to show: how many in all, and how many under
+    /// each pane's session, in the panes' order.
+    pub(crate) fn set_helpers(&mut self, all: u32, under: impl Iterator<Item = u32> + Clone) {
+        self.titles.marks.set(under);
+        if self.sidebar.helpers != all {
+            self.sidebar.set_helpers(all);
+            self.ready_for = None;
+        }
+    }
+
     /// Bring each tree's layout to where the next frame will draw it.
     fn ready(&mut self, font: &mut FontCache, s: &ChromeShape<'_>) {
         self.toolbar.ready(font, s.layout);
@@ -105,8 +115,8 @@ impl ChromeSurfaces {
     /// is a picture to paint again and nothing to lay out.
     pub(crate) fn pointer_move(&mut self, font: &mut FontCache, s: &ChromeShape<'_>, p: (f64, f64)) -> bool {
         // the strips light nothing and are not told
-        if self.ready_for != (s.layout.generation, s.rows) {
-            self.ready_for = (s.layout.generation, s.rows);
+        if self.ready_for != Some((s.layout.generation, s.rows)) {
+            self.ready_for = Some((s.layout.generation, s.rows));
             self.toolbar.ready(font, s.layout);
             self.sidebar.ready(font, s.layout, s.rows);
         }

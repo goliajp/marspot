@@ -32,6 +32,10 @@
 #      and so do the layout, accounts and process panels.
 #      Each is a write of the settings file, logged with its row.
 #   7. The app is still up, with no panic and no error logged.
+#   8. In a second run, with three shadow panes under the first pane:
+#      the `+N` after its title opens the helper panel, and the panel's
+#      buttons deny the directory, move one pane to the window, close
+#      one, and close the rest.
 #
 # Sandbox-only: MARSPOT_STATE_DIR is redirected and the installed app
 # is never touched.  Exits 0 on pass, non-zero on the first failure.
@@ -285,8 +289,57 @@ errors="$(grep -c $'\tERROR\t' "$APPLOG")"
   fail "$errors error line(s) in the log"
 }
 
+# --- 8. the helper panel ------------------------------------------------
+cleanup
+dev_wipe_state
+rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
+mkdir -p "$MARSPOT_STATE_DIR/logs"
+rm -f "$APPLOG" "$MARSPOT_STATE_DIR"/control-deny.tsv
+HELPER_STEPS=(
+  wait:9000
+  click:helpers-mark wait:1000
+  click:helpers-control wait:2000
+  click:helpers-move wait:3000
+  click:helpers-close wait:4000
+  click:helpers-close-all wait:4000
+  esc
+)
+HELPER_SCRIPT="$(IFS=';'; echo "${HELPER_STEPS[*]}")"
+python3 - "$MARSPOT_STATE_DIR" <<'PY' || exit 1
+import struct, sys, pathlib
+d = pathlib.Path(sys.argv[1])
+def s(x): b = x.encode(); return struct.pack('<H', len(b)) + b
+def pane(sid=0): return struct.pack('<Q', sid) + s('') + s('')
+body = struct.pack('<II', 0xA5505010, 2) + struct.pack('<HH', 0, 1)
+body += struct.pack('<HHHH', 2, 1, 0, 2) + pane() + pane()
+(d / 'shell-state.bin').write_bytes(body)
+PY
+echo "==> launching with the script: $HELPER_SCRIPT"
+SHELL=/bin/sh MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+  MARSPOT_DEV_PANELS="$HELPER_SCRIPT" MARSPOT_DEV_SHADOWS=3 \
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
+disown
+wait_for DEV_PANELS_DONE 120 || fail "the helper panel's script never finished"
+grep -q $'\tDEV_PANELS_REJECTED\t' "$APPLOG" && fail "the helper panel's script did not parse"
+grep -q $'\tDEV_PANELS_STEP_FAILED\t' "$APPLOG" && fail "a step of the helper panel's script had nowhere to go"
+
+acted="$(grep -a $'\tHELPER_PANEL_ACT\t' "$APPLOG" | grep -oE $'\t(act|done|failed)=[^\t]*' | tr -d '\t' | paste -sd' ' -)"
+[[ "$acted" == "act=ToggleCwdControl done=1 failed=0 act=CloseHelper done=1 failed=0 act=CloseAllOfParent done=1 failed=0" ]] \
+  || fail "the shell did for the panel's buttons: [$acted]"
+(( $(grep -ac $'\tPANE_PLACED\t' "$APPLOG") == 1 )) || fail "one shadow pane should have moved to the window"
+(( $(grep -ac $'\tSHADOW_RETIRED\t' "$APPLOG") == 2 )) || fail "two shadow panes should have been closed"
+(( $(grep -c . "$MARSPOT_STATE_DIR/control-deny.tsv") == 1 )) || fail "the deny list should hold one directory"
+grep -q '"op":"control.deny"' "$MARSPOT_STATE_DIR/control-audit.log" || fail "the deny is not in the audit log"
+grep -q '"caller":"user".*"op":"pane.close"' "$MARSPOT_STATE_DIR/control-audit.log" || fail "the closes are not in the audit log"
+[[ -n "$(dev_shell_pid)" && -n "$(dev_core_pids)" ]] || fail "the app is gone"
+grep -qi 'panicked' "$APPLOG" "$RUNLOG" && fail "something panicked"
+errors="$(grep -c $'\tERROR\t' "$APPLOG")"
+(( errors == 0 )) || fail "$errors error line(s) in the log of the helper panel's run"
+echo "==> the helper panel: $acted"
+
 echo
 echo "PASS — every panel opens by its button and closes by each of its"
 echo "       rules, one at a time; a drag moves it and a reopen forgets"
 echo "       the move; nothing reaches the panes while one is open; the"
-echo "       settings panel closes and changes its values by keys alone."
+echo "       settings panel closes and changes its values by keys alone; the"
+echo "       helper panel opens by the +N and does what its buttons say."

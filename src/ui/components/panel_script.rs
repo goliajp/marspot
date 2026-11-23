@@ -22,6 +22,8 @@
 //! | `click:header` | clicks the open panel's header |
 //! | `click:outside` | clicks in a pane, outside the open panel |
 //! | `click:pane-under` | clicks inside the open panel's frame, over a pane |
+//! | `click:helpers-mark` | clicks the `+N` after the first pane's title |
+//! | `click:helpers-move`, `-close`, `-close-all`, `-control` | clicks the first such button of the open helper panel |
 //! | `click:pane` | clicks in the first pane |
 //! | `shift-click:<target>` | any of those clicks with shift held, the click a program that asked for mouse reports is sent |
 //! | `move:<target>` | moves the pointer there, pressing nothing |
@@ -53,6 +55,9 @@ pub enum Target {
     Outside,
     PaneUnder,
     Pane,
+    /// The first pane's `+N`, then the first button of each kind on the
+    /// helper panel: `Scene::helpers`, by place.
+    Helpers(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -98,6 +103,8 @@ pub struct Scene<'a> {
     pub chrome: Option<PanelChrome>,
     /// The renderer's cell size.
     pub cell: (f64, f64),
+    /// Where `Target::Helpers` are.
+    pub helpers: [Option<(f64, f64)>; 5],
 }
 
 pub fn parse(script: &str) -> Result<Vec<Step>, String> {
@@ -179,6 +186,11 @@ fn parse_target(text: &str) -> Option<Target> {
         "outside" => Target::Outside,
         "pane-under" => Target::PaneUnder,
         "pane" => Target::Pane,
+        "helpers-mark" => Target::Helpers(0),
+        "helpers-move" => Target::Helpers(1),
+        "helpers-close" => Target::Helpers(2),
+        "helpers-close-all" => Target::Helpers(3),
+        "helpers-control" => Target::Helpers(4),
         _ => return None,
     })
 }
@@ -253,6 +265,12 @@ impl Scene<'_> {
                     .map(|x| (x, y))
                     .ok_or_else(|| "no pane under the panel's lower edge".to_string())
             }
+            Target::Helpers(i) => self
+                .helpers
+                .get(i as usize)
+                .copied()
+                .flatten()
+                .ok_or_else(|| "no such spot of the helpers".to_string()),
             Target::Pane => self.pane_point(|_, _| true).ok_or_else(|| "no pane".to_string()),
         }
     }
@@ -268,7 +286,7 @@ impl Scene<'_> {
                     SurfaceKind::Layout => l.layout_button_rect,
                     SurfaceKind::Processes => l.process_button_rect,
                     SurfaceKind::Accounts => l.cc_button_rect,
-                    SurfaceKind::Shortcuts => Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 },
+                    SurfaceKind::Shortcuts | SurfaceKind::Helpers => Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 },
                 };
                 if rect.w <= 0.0 || rect.h <= 0.0 {
                     return Err("the toolbar has no such button".to_string());
@@ -341,6 +359,11 @@ impl Script {
     /// Is it time for the next step?
     pub fn due(&self, now: Instant) -> bool {
         !self.finished && now >= self.next_at
+    }
+
+    /// The next step is aimed at a [`Target::Helpers`].
+    pub fn wants_helpers(&self) -> bool {
+        matches!(self.steps.front(), Some(Step::Click(Target::Helpers(_)) | Step::Move(Target::Helpers(_))))
     }
 
     pub fn finished(&self) -> bool {
@@ -459,7 +482,7 @@ mod tests {
     #[test]
     fn the_pointer_can_be_moved_onto_a_target_and_out_of_the_window() {
         let l = layout();
-        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL };
+        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 5] };
         let steps = parse("move:close;pointer-exit").unwrap();
         assert_eq!(steps, [Step::Move(Target::Close), Step::PointerExit]);
         let at = |step| match scene.resolve(step).unwrap()[..] {
@@ -488,7 +511,7 @@ mod tests {
     #[test]
     fn a_button_step_presses_the_button_the_toolbar_hit_tests() {
         let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL };
+        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
         use crate::frame_build::chrome::{ChromeShape, ChromeSurfaces};
         use crate::ui::components::chrome_target::ChromeTarget;
         use crate::ui::components::title_strip_view::BadgesOnly;
@@ -517,7 +540,7 @@ mod tests {
     fn targets_land_where_their_names_say() {
         let l = layout();
         let c = panel();
-        let scene = Scene { layout: &l, chrome: Some(c), cell: CELL };
+        let scene = Scene { layout: &l, chrome: Some(c), cell: CELL, helpers: [None; 5] };
         let at = |target| scene.point(target).unwrap();
 
         let (x, y) = at(Target::Close);
@@ -536,7 +559,7 @@ mod tests {
     #[test]
     fn a_panel_target_needs_a_panel() {
         let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL };
+        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
         for target in [Target::Close, Target::Header, Target::Outside, Target::PaneUnder] {
             assert!(scene.resolve(Step::Click(target)).is_err(), "{target:?}");
         }
@@ -552,7 +575,7 @@ mod tests {
     #[test]
     fn a_drag_ends_the_asked_distance_from_where_it_began() {
         let l = layout();
-        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL };
+        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 5] };
         let inputs = scene.resolve(Step::DragHeader(120.0, 40.0)).unwrap();
         let (Some(Input::Down(x, y, _)), Some(Input::Up(ux, uy))) = (inputs.get(1), inputs.last())
         else {
@@ -565,7 +588,7 @@ mod tests {
     #[test]
     fn keys_come_pressed_then_released() {
         let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL };
+        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
         let keys = |step| -> Vec<(KeyState, LogicalKey, Option<String>, bool)> {
             scene
                 .resolve(step)
@@ -596,7 +619,7 @@ mod tests {
     #[test]
     fn steps_are_played_one_at_a_time_and_then_it_is_finished() {
         let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL };
+        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
         let t0 = Instant::now();
         let mut s = Script::new(parse("esc;wait:2000;click:close;type:x").unwrap(), t0);
         assert!(!s.due(t0), "not before the window has had time to fill");
@@ -606,7 +629,7 @@ mod tests {
         // No panes yet: nothing is consumed, and it looks again later.
         let mut empty = layout();
         empty.cells.clear();
-        assert!(s.play(t, &Scene { layout: &empty, chrome: None, cell: CELL }).is_empty());
+        assert!(s.play(t, &Scene { layout: &empty, chrome: None, cell: CELL, helpers: [None; 5] }).is_empty());
         assert!(!s.due(t + STEP_GAP));
         let t = t + START_DELAY;
 

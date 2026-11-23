@@ -44,6 +44,7 @@ use crate::glyph_atlas::SlotMetrics;
 use crate::ui::components::process_panel::ProcessPanelRender;
 use crate::ui::components::cc_usage_modal::CcUsageRender;
 use crate::ui::components::settings_view::SettingsRender;
+use crate::ui::components::helpers_view::HelpersRender;
 use crate::ui::components::shortcuts_view::ShortcutsRender;
 use crate::ui::components::layout_view::LayoutModalRender;
 use crate::ui::components::context_menu_view::MenuRender;
@@ -202,6 +203,7 @@ pub struct MetalRenderer {
     cc_usage: Option<CcUsageRender>,
     settings_panel: Option<SettingsRender>,
     shortcuts_panel: Option<ShortcutsRender>,
+    helpers_panel: Option<HelpersRender>,
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
     /// open, `None` when closed.  See `layout_view::LayoutModalRender`.
     layout_modal_state: Option<LayoutModalRender>,
@@ -296,7 +298,7 @@ impl MetalRenderer {
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
-            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, helpers_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
             frame_done: None,
         })
@@ -324,6 +326,10 @@ impl MetalRenderer {
 
     pub fn set_shortcuts_panel(&mut self, data: Option<ShortcutsRender>) {
         self.shortcuts_panel = data;
+    }
+
+    pub fn set_helpers_panel(&mut self, data: Option<HelpersRender>) {
+        self.helpers_panel = data;
     }
 
     pub fn set_process_panel(&mut self, data: Option<ProcessPanelRender>) {

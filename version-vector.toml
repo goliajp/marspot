@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.640"  # helpers stop from the helper panel and are titled by their task
-core    = "0.12.636"  # the shell does what the helper panel's buttons ask
+core    = "0.12.637"  # the helper panel, +N after a title and the sidebar's count
 session = "0.11.423"  # a text watch reads the rows a batch went up to and came down from

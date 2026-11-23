@@ -60,11 +60,13 @@ pub const SIDEBAR_ADD: u32 = 16;
 /// A sidebar row and its close button, which is the row's spot; its
 /// label is the pane's name, cut to fit.
 pub const SIDEBAR_ROW: u32 = 17;
-/// A pane's title strip; its label is the title, then the badge after
-/// the mark `title_strip_view` puts between them.  See there for `data`.
+/// A pane's title strip; its label is the title, the badge and the
+/// `+N`'s number with the mark `title_strip_view` puts between them.  See there for `data`.
 pub const TITLE_STRIP: u32 = 19;
 /// The title strip of the pane in use.
 pub const TITLE_STRIP_IN_USE: u32 = 20;
+/// The sidebar's row that counts every shadow pane.
+pub const SIDEBAR_HELPERS: u32 = 21;
 
 /// A segmented control whose segment `n` emits
 /// `Action { id: action, arg: n }`.
@@ -219,6 +221,7 @@ pub(super) fn paint(
         VERSION => crate::ui::components::toolbar_view::paint_version(p, data),
         SIDEBAR_ADD => crate::ui::components::sidebar_view::paint_add(p, rect, data, state),
         SIDEBAR_ROW => crate::ui::components::sidebar_view::paint_row(p, rect, spot, label, data, state),
+        SIDEBAR_HELPERS => crate::ui::components::sidebar_view::paint_helpers(p, rect, label, data, state),
         TITLE_STRIP => crate::ui::components::title_strip_view::paint(p, rect, label, data, false),
         TITLE_STRIP_IN_USE => crate::ui::components::title_strip_view::paint(p, rect, label, data, true),
         _ => unreachable!("a node asked for preset {tag}, which nothing here draws"),

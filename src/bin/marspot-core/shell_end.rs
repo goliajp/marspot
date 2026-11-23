@@ -36,6 +36,7 @@ impl CoreApp {
             }
         }
         // a shadow has no window to empty or layout to save
+        let before = self.shadows.len();
         for idx in (0..self.shadows.len()).rev() {
             if !self.shadows[idx].shell_ended() {
                 continue;
@@ -45,6 +46,9 @@ impl CoreApp {
                 lx_event!("SHADOW_SHELL_ENDED", "a shadow pane's shell ended; retiring it", session_id = sid);
                 self.retire_pane_session(sid, pane.is_l3());
             }
+        }
+        if self.shadows.len() != before {
+            self.shadows_changed();
         }
     }
 

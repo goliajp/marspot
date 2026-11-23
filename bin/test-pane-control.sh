@@ -18,7 +18,8 @@
 #   6. A wait in progress still comes true across a restart of the core
 #      and across the session moving to another build.
 #   7. Shadow panes (`pane open` → `run` → `read` → `resize` → `close`,
-#      and one moved into the window with `pane place`) when the core
+#      and one moved into the window with `pane place`, back into the
+#      shadows and into the window again) when the core
 #      announces it opens them (PaneControlCaps bit 1); before that,
 #      `pane open` and `pane close` answer `old_session` and nothing is
 #      opened or closed.
@@ -276,6 +277,22 @@ else
   check "a second shadow pane opened" test -n "$S2"
   check "shadow: place window" pc place "$S2" window
   check "the placed pane is in the window, no shadow" bash -c "for i in \$(seq 25); do $(printf '%q' "$PEER") pane list --json | python3 -c 'import json,sys; ps=json.load(sys.stdin)[\"result\"][\"panes\"]; sys.exit(0 if any(str(p[\"id\"])==\"$S2\" and not p[\"shadow\"] for p in ps) else 1)' && exit 0; sleep 0.2; done; exit 1"
+  # whose shadow it becomes is the caller's pane, so the request comes from one;
+  # the app does not hand its state dir down to a pane's shell
+  check "place shadow, asked from its parent's pane" runs "$P1" 0 "env MARSPOT_STATE_DIR=$SD $(printf '%q' "$PEER") pane place $S2 shadow"
+  # shellcheck disable=SC2016
+  IS_SHADOW='import json,sys; s,p=sys.argv[1:]; ps=json.load(sys.stdin)["result"]["panes"]; sys.exit(0 if any(str(x["id"])==s and x["shadow"] and str(x["parent"])==p for x in ps) else 1)'
+  back_in_the_shadows() {
+    local i
+    for (( i = 0; i < 25; i++ )); do
+      pc list --json | python3 -c "$IS_SHADOW" "$S2" "$P1" && return 0
+      sleep 0.2
+    done
+    return 1
+  }
+  check "the pane is its parent's shadow again" back_in_the_shadows
+  check "shadow again: run → 5" runs "$S2" 5 '(exit 5)'
+  check "shadow: place window, a second time" pc place "$S2" window
   check "the placed pane closes as a window pane" pc close "$S2"
 fi
 

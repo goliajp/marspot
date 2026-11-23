@@ -26,6 +26,21 @@ impl CoreApp {
         surface_stack::place(home, win!(self, wi).panels.offset(), w_phys, h_phys, top_inset)
     }
 
+    /// Only has somewhere to go on a window too short to show the panel
+    /// whole, which is also the only case where the content would
+    /// otherwise be unreachable.
+    pub(super) fn settings_scroll(&mut self, wi: usize, dy_phys: f64) {
+        let rect = self.settings_modal_rect(wi);
+        let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
+        let max =
+            marspot::ui::components::settings_modal::max_scroll(rect, &marspot::settings::get(), &mut measure);
+        let y = marspot::ui::Units::from_px((win!(self, wi).settings_modal_scroll.px() + dy_phys).clamp(0.0, max));
+        if y != win!(self, wi).settings_modal_scroll {
+            win!(self, wi).settings_modal_scroll = y;
+            win!(self, wi).needs_render = true;
+        }
+    }
+
     /// What a frame of the open settings panel is drawn from.
     pub(super) fn settings_render(&mut self, wi: usize) -> SettingsRender {
         let rect = self.settings_modal_rect(wi);
@@ -80,6 +95,11 @@ impl CoreApp {
             }
             // against the frame last drawn: the feed is read where a
             // frame is built, not where the pointer moves
+            SurfaceKind::Helpers => {
+                let surface = win!(self, wi).helpers_panel.as_ref()?.surface.clone();
+                let mut s = surface.borrow_mut();
+                Some(f(&mut s.kept))
+            }
             SurfaceKind::Accounts => {
                 let surface = win!(self, wi).cc_usage_modal.as_ref()?.surface.clone();
                 let mut s = surface.borrow_mut();
@@ -262,6 +282,10 @@ impl CoreApp {
             Some(SurfaceKind::Settings) if action.id == settings_view::CHOOSE => {}
             Some(SurfaceKind::Processes) => {
                 self.process_panel_do(wi, process_view::asked(action));
+                return;
+            }
+            Some(SurfaceKind::Helpers) => {
+                self.helpers_do(wi, marspot::ui::components::helpers_view::asked(action));
                 return;
             }
             Some(SurfaceKind::Layout) => {

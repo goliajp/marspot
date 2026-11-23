@@ -19,6 +19,9 @@ impl CoreApp {
         if win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts) {
             self.tree_panel_hover(wi, SurfaceKind::Shortcuts, x_phys, y_phys);
         }
+        if win!(self, wi).panels.open() == Some(SurfaceKind::Helpers) {
+            self.tree_panel_hover(wi, SurfaceKind::Helpers, x_phys, y_phys);
+        }
         if win!(self, wi).panels.open() == Some(SurfaceKind::Layout) {
             self.tree_panel_hover(wi, SurfaceKind::Layout, x_phys, y_phys);
         }
@@ -68,6 +71,9 @@ impl CoreApp {
         panel |= w.shortcuts_surface.borrow_mut().kept.surface.pointer_leave();
         if let Some(modal) = w.cc_usage_modal.as_mut() {
             panel |= modal.surface.borrow_mut().kept.surface.pointer_leave();
+        }
+        if let Some(p) = w.helpers_panel.as_ref() {
+            panel |= p.surface.borrow_mut().kept.surface.pointer_leave();
         }
         if let Some(p) = w.process_panel.as_mut() {
             panel |= p.surface.borrow_mut().kept.surface.pointer_leave();

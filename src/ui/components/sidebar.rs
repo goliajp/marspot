@@ -42,6 +42,12 @@ impl Sidebar {
         }
     }
 
+    /// The row at the column's bottom, whatever the rows above reach.
+    pub fn bottom_row(&self) -> Rect {
+        let h = chrome::px(chrome::SIDEBAR_ROW_H);
+        Rect { x: self.rect.x, y_top: (self.rect.y_top + self.rect.h - h).max(self.rect.y_top), w: self.rect.w, h }
+    }
+
     /// The hover and selected fill of row `i`: the row, short of the
     /// sidebar's edges.
     pub fn fill_rect(&self, i: usize) -> Rect {
@@ -119,6 +125,19 @@ pub(crate) fn paint_row(p: &mut ViewPainter, rect: Rect, name: &str, state: Sess
     let baseline = (rect.y_top + (rect.h - p.cell_h as f64) * 0.5) as f32 + p.ascent;
     let fg = if selected { palette::fg() } else { palette::chrome_fg() };
     p.text(label_x as f32, baseline, name, fg);
+}
+
+/// The row at the column's bottom: opaque, so a row the column is too
+/// short for does not show through it.
+pub(crate) fn paint_bottom_row(p: &mut ViewPainter, rect: Rect, label: &str, hovered: bool) {
+    p.fill_rounded_rect(rect, palette::pane_bg(false), 0.0, (palette::none(), 0.0));
+    if hovered {
+        let radius = chrome::px(chrome::SIDEBAR_ROW_RADIUS) as f32;
+        p.fill_rounded_rect(row_fill(rect), palette::chrome_hover(), radius, (palette::none(), 0.0));
+    }
+    let x = rect.x + chrome::px(chrome::SIDEBAR_PAD_X);
+    let baseline = (rect.y_top + (rect.h - p.cell_h as f64) * 0.5) as f32 + p.ascent;
+    p.text(x as f32, baseline, label, palette::chrome_fg());
 }
 
 /// A row's close button in `close`.

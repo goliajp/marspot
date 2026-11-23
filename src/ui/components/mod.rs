@@ -18,6 +18,8 @@ pub mod settings_choices;
 pub mod settings_modal;
 pub mod settings_view;
 pub mod settings_rows;
+pub mod helpers_view;
+pub(crate) mod title_helpers;
 pub mod shortcuts_panel;
 pub mod shortcuts_view;
 pub mod scroll_view;
@@ -67,6 +69,8 @@ mod chrome_snapshot_tests;
 mod settings_view_tests;
 #[cfg(test)]
 mod shortcuts_view_tests;
+#[cfg(test)]
+mod helpers_view_tests;
 #[cfg(test)]
 mod layout_view_tests;
 #[cfg(test)]

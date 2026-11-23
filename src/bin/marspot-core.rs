@@ -2248,6 +2248,8 @@ struct WindowState {
     settings_path: std::sync::Arc<str>,
     /// The shortcuts panel's surface.
     shortcuts_surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::shortcuts_view::ShortcutsSurface>>,
+    /// The helper panel's data while it is open.
+    helpers_panel: Option<helper_panel::HelperPanelState>,
     ime_preedit: String,
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
@@ -2340,6 +2342,7 @@ impl WindowState {
             settings_surface: Default::default(),
             settings_path: std::sync::Arc::from(marspot::settings::path().display().to_string()),
             shortcuts_surface: Default::default(),
+            helpers_panel: None,
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -2483,6 +2486,8 @@ mod layout_state;
 mod pane_forward;
 #[path = "marspot-core/panels.rs"]
 mod panels;
+#[path = "marspot-core/helper_panel.rs"]
+mod helper_panel;
 #[path = "marspot-core/process_panel.rs"]
 mod process_panel;
 #[path = "marspot-core/links.rs"]
@@ -2838,18 +2843,9 @@ impl CoreApp {
                 ContextMenuHit::Item(idx) => {
                     let tag = win!(self, wi).context_menu.as_ref().unwrap()
                         .items[idx].action_tag;
-                    // Badge menus carry plugin-opaque tags — route the
-                    // pick back to L1 instead of mapping through
-                    // ContextMenuAction.
+                    // Badge menus carry plugin-opaque tags
                     if let ContextRegion::PaneBadge(sid) = region {
-                        self.pending_to_shell.push((
-                            MsgType::PaneBadgeMenuAction,
-                            marspot::shell_proto::encode_pane_badge_menu_action(
-                                sid, tag,
-                            ),
-                        ));
-                        win!(self, wi).context_menu = None;
-                        win!(self, wi).needs_render = true;
+                        self.pick_badge_row(wi, sid, tag);
                     } else if tag == MOVE_TO_NEW_WINDOW_TAG
                         || (MOVE_TO_WINDOW_TAG_BASE..MOVE_TO_NEW_WINDOW_TAG).contains(&tag)
                     {
@@ -2902,7 +2898,7 @@ impl CoreApp {
         }
         if let Some(kind) = win!(self, wi).panels.open() {
             let frame = self.panel_frame(wi, kind);
-            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Layout | SurfaceKind::Accounts) {
+            let press = if matches!(kind, SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Layout | SurfaceKind::Accounts | SurfaceKind::Helpers) {
                 let on = self.tree_panel_press_on(wi, kind, x_phys, y_phys);
                 win!(self, wi).panels.on_press_on(on, x_phys, y_phys, frame)
             } else {
@@ -3405,22 +3401,8 @@ impl CoreApp {
                 }
                 return;
             }
-            // Only has somewhere to go on a window too short to show
-            // the panel whole, which is also the only case where the
-            // content would otherwise be unreachable.
-            Some(SurfaceKind::Settings) => {
-                let rect = self.settings_modal_rect(wi);
-                let mut measure = marspot::ui::components::controls::font_measure(self.renderer.font_mut());
-                let max = marspot::ui::components::settings_modal::max_scroll(
-                    rect, &marspot::settings::get(), &mut measure,
-                );
-                let y = marspot::ui::Units::from_px((win!(self, wi).settings_modal_scroll.px() + dy_phys).clamp(0.0, max));
-                if y != win!(self, wi).settings_modal_scroll {
-                    win!(self, wi).settings_modal_scroll = y;
-                    win!(self, wi).needs_render = true;
-                }
-                return;
-            }
+            Some(SurfaceKind::Settings) => return self.settings_scroll(wi, dy_phys),
+            Some(SurfaceKind::Helpers) => return self.helpers_scroll(wi, dy_phys),
             Some(SurfaceKind::Layout | SurfaceKind::Accounts | SurfaceKind::Shortcuts) => return,
             None => {}
         }
@@ -3891,6 +3873,7 @@ impl CoreApp {
         let shortcuts =
             (win!(self, wi).panels.open() == Some(SurfaceKind::Shortcuts)).then(|| self.shortcuts_render(wi));
         self.renderer.set_shortcuts_panel(shortcuts);
+        self.publish_helpers(wi, &mut wr);
         // RFC-006 — this window's drop-preview ghost (usually None),
         // and the index of its pane mid-drag (dimmed by the renderer).
         self.renderer.set_drop_preview(win!(self, wi).drop_preview);
