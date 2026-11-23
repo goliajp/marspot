@@ -1,7 +1,7 @@
 //! Building a `Terminal`: choosing file-backed or in-RAM scrollback
 //! and the starting state of every field.
 
-use super::{KittyKeyboardStack, MouseTrackingMode, Osc8, ScreenModes, Terminal};
+use super::{BracketedPaste, KittyKeyboardStack, MouseTrackingMode, Osc8, ScreenModes, Terminal};
 use crate::grid::{CellAttrs, DEFAULT_SCROLLBACK_LINES, Grid};
 use crate::parser::Parser;
 use crate::scrollback::Scrollback;
@@ -91,7 +91,7 @@ impl Terminal {
             response_burst_since: None,
             response_burst_last_warn: None,
             cursor_key_application_mode: false,
-            bracketed_paste_mode: false,
+            bracketed_paste_mode: BracketedPaste::default(),
             render_markup: false,
             u_tags: false,
             u_open: false,

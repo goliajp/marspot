@@ -114,7 +114,7 @@ impl Terminal {
         // bits 0-4: DECCKM, bracketed paste, DECTCEM, pending wrap,
         // on the alternate screen; bits 15-19 are `ScreenModes::to_bits`
         let mut modes = self.cursor_key_application_mode as u32
-            | (self.bracketed_paste_mode as u32) << 1
+            | (self.bracketed_paste_mode.on as u32) << 1
             | (self.cursor_visible as u32) << 2
             | (self.pending_wrap as u32) << 3
             | (self.saved_main.is_some() as u32) << 4

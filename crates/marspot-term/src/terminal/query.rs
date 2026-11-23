@@ -58,7 +58,7 @@ impl Terminal {
     pub fn input_modes(&self) -> crate::input_core::TermModes {
         crate::input_core::TermModes {
             cursor_key_app: self.cursor_key_application_mode,
-            bracketed_paste: self.bracketed_paste_mode,
+            bracketed_paste: self.bracketed_paste_mode.on,
             kitty_keyboard: self.kitty_keyboard.current(),
         }
     }
@@ -93,7 +93,14 @@ impl Terminal {
     /// to wrap pasted content in `\e[200~ ... \e[201~`. Read by the
     /// input layer when handling Cmd-V.
     pub fn bracketed_paste_mode(&self) -> bool {
-        self.bracketed_paste_mode
+        self.bracketed_paste_mode.on
+    }
+
+    /// How many times the program turned bracketed paste off, wrapping.
+    /// zsh does it as it takes a line, so a move since a return was
+    /// typed says the return was read.
+    pub fn bracketed_paste_offs(&self) -> u32 {
+        self.bracketed_paste_mode.offs()
     }
 
     /// Did the program ask for the wheel to arrive as arrow keys?
@@ -198,7 +205,7 @@ impl Terminal {
     pub fn reset_process_owned_modes(&mut self) {
         self.mouse_tracking_mode = MouseTrackingMode::Off;
         self.mouse_sgr_encoding = false;
-        self.bracketed_paste_mode = false;
+        self.bracketed_paste_mode.set(false);
         // A dead program cannot close its update; leaving this set
         // would hold the next program's first frame hostage.
         self.sync_output = false;

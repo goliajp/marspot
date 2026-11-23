@@ -33,7 +33,7 @@ fn assert_terms_equivalent(a: &Terminal, b: &Terminal) {
         "DECCKM"
     );
     assert_eq!(
-        a.bracketed_paste_mode, b.bracketed_paste_mode,
+        a.bracketed_paste_mode.on, b.bracketed_paste_mode.on,
         "bracketed paste"
     );
     assert_eq!(a.cursor_visible, b.cursor_visible, "cursor visible");

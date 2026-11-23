@@ -378,3 +378,24 @@ fn print_after_cursor_move_writes_at_new_position() {
     assert_eq!(t.grid().cell(2, 4).ch, 'X');
     assert_eq!(t.grid().cursor(), (3, 4));
 }
+
+/// Every `?2004l` counts, also one that finds the mode off already;
+/// turning it on and a snapshot round trip do not.
+#[test]
+fn bracketed_paste_offs_count_every_reset() {
+    let mut t = term_with(20, 5, b"");
+    assert_eq!(t.bracketed_paste_offs(), 0);
+    t.feed(b"\x1b[?2004h");
+    assert!(t.bracketed_paste_mode());
+    assert_eq!(t.bracketed_paste_offs(), 0);
+    t.feed(b"\x1b[?2004l\x1b[?2004l");
+    assert!(!t.bracketed_paste_mode());
+    assert_eq!(t.bracketed_paste_offs(), 2);
+    t.feed(b"\x1b[?2004h\x1b[?25;2004l");
+    assert_eq!(t.bracketed_paste_offs(), 3);
+    t.feed(b"\x1b[?2004h");
+    let mut dst = Terminal::new(20, 5);
+    dst.apply_snapshot(&t.serialize_snapshot()).unwrap();
+    assert!(dst.bracketed_paste_mode());
+    assert_eq!(dst.bracketed_paste_offs(), 0);
+}
