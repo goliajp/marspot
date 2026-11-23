@@ -20,6 +20,9 @@ and with no numbers, when the task holds
   FAKE-TRUST-STUCK  the trust dialog, which takes Enter and stays up
   FAKE-BYPASS       the bypass-permissions dialog (after a trust dialog)
   FAKE-LATE         nothing at all for 14 s before each of these
+  FAKE-ASK          (with FAKE-STAY) read lines in the box; FAKE-REFUSE in
+                    one draws what claude says of a login that is refused
+Started with --continue it draws the box and waits.
 Each key it reads there is logged as `key<TAB>what`.
 """
 import os
@@ -131,9 +134,14 @@ if found and "FAKE-SILENT" not in task:
         f.write("RESULT-%s-OK bytes=%d\n" % (name, size))
     print("%s wrote its result" % name, flush=True)
 
-if "FAKE-STAY" in task or "FAKE-SILENT" in task:
+if "FAKE-STAY" in task or "--continue" in args or "FAKE-SILENT" in task:
     # a ruled input box with the cursor in it, empty, as an idle agent shows
     sys.stdout.write("\r\n" + "─" * 40 + "\r\n❯ \r\n" + "─" * 40 + "\x1b[1A\x1b[3G")
     sys.stdout.flush()
+    while "FAKE-ASK" in task:
+        if "FAKE-REFUSE" in sys.stdin.readline():
+            box = "\r\n" + "─" * 40 + "\r\n❯ \r\n" + "─" * 40 + "\x1b[1A\x1b[3G"
+            sys.stdout.write("\r\n\r\n● Please run /login · API Error: 401" + box)
+            sys.stdout.flush()
     while True:
         time.sleep(3600)

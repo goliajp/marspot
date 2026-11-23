@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.642"  # watching a file does not wait on a pipe in its place
+shell   = "0.7.643"  # helpers in a container
 core    = "0.12.640"  # watching a file does not wait on a pipe in its place
 session = "0.11.425"  # watching a file does not wait on a pipe in its place

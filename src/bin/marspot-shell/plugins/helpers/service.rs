@@ -9,7 +9,7 @@ use marspot_peer::control::{AgentKind, ErrorCode, HelperStartArgs, HelperStop, I
 use marspot_peer::json::{Value, obj};
 
 use super::table::{Event, Started};
-use super::{Shared, caller_kind, launch, records, settle, stop_all};
+use super::{Shared, caller_kind, container, launch, records, settle, stop_all};
 use crate::pane_control::helpers_port::{HelperService, Port};
 
 /// How long a new pane's shell may take to show its prompt.
@@ -65,6 +65,16 @@ impl Service {
         std::fs::write(dir.join("run.sh"), script).map_err(internal)
     }
 
+    /// Run the script in the pane.
+    fn begin(&self, port: &mut Port, sid: u64, agent: AgentKind) -> Result<(), Reject> {
+        let pos = port.type_at_prompt(sid, &launch::start_line(&self.0.dir_of(sid)), PROMPT_WITHIN)?;
+        if agent != AgentKind::Kimi {
+            self.0.record(sid, Event::TaskDelivered);
+        }
+        settle::settle(Arc::clone(&self.0), sid, agent, pos);
+        Ok(())
+    }
+
     /// Undo a start that failed after its pane opened.
     fn abandon(&self, port: &mut Port, sid: u64, r: Reject) -> Reject {
         let _ = port.close(sid);
@@ -76,9 +86,6 @@ impl Service {
 
 impl HelperService for Service {
     fn start(&self, port: &mut Port, a: &HelperStartArgs) -> Result<Value, Reject> {
-        if a.isolation == Isolation::Container {
-            return Err(Reject::new(ErrorCode::NotSupported, "helpers in a container are not served by this build; use isolation host"));
-        }
         let parent = match &a.parent {
             Some(p) => port.target(p)?,
             None => port.caller().ok_or_else(|| Reject::new(ErrorCode::BadRequest, "from outside the panes, name the helper's `parent` pane"))?,
@@ -88,7 +95,11 @@ impl HelperService for Service {
             return Err(Reject::new(ErrorCode::BadRequest, format!("{cwd} is not a directory")));
         }
         let mode = launch::mode_of(a.mode.as_deref());
-        let account = launch::pick_account(a.agent, a.profile, a.model.as_deref())?;
+        let boxed = (a.isolation == Isolation::Container).then(|| container::check(a, &cwd)).transpose()?;
+        let account = match &boxed {
+            Some(b) => b.account.clone(),
+            None => launch::pick_account(a.agent, a.profile, a.model.as_deref())?,
+        };
         let mut note = None;
         let resume = a.resume_last
             && match launch::has_last(a.agent, &account.home, &cwd) {
@@ -118,30 +129,32 @@ impl HelperService for Service {
         // written before anything runs in the pane: a shell started over
         // between the two would otherwise find an agent nobody accounts for
         self.0.record(sid, Event::Started(started));
-        if let Err(r) = self.write_files(sid, a, (&parent_name, caller), &cwd, &account, &mode, resume) {
+        let written = match &boxed {
+            Some(b) => container::begin(&self.0, sid, a, &parent_name, &mode, b),
+            None => self.write_files(sid, a, (&parent_name, caller), &cwd, &account, &mode, resume),
+        };
+        if let Err(r) = written {
             return Err(self.abandon(port, sid, r));
         }
-        let run = launch::start_line(&self.0.dir_of(sid));
-        let pos = match port.type_at_prompt(sid, &run, PROMPT_WITHIN) {
-            Ok(p) => p,
-            Err(r) => return Err(self.abandon(port, sid, r)),
-        };
-        if a.agent != AgentKind::Kimi {
-            self.0.record(sid, Event::TaskDelivered);
+        let preparing = boxed.as_ref().is_some_and(|b| !b.image_there);
+        if preparing {
+            self.0.record(sid, Event::Preparing);
+            container::prepare(&self.0, sid, a.agent);
+        } else if let Err(r) = self.begin(port, sid, a.agent) {
+            return Err(self.abandon(port, sid, r));
         }
         self.0.watch_result(sid);
-        settle::settle(Arc::clone(&self.0), sid, a.agent, pos);
         port.audit("helper.start", sid, &format!("{} {} mode={mode} {}", a.agent.as_str(), account.label(), first_line(&a.task)), "started");
         let mut v = obj([
             ("name", name.clone().into()),
             ("id", (sid as i64).into()),
-            ("state", "running".into()),
+            ("state", if preparing { "preparing" } else { "running" }.into()),
             ("agent", a.agent.as_str().into()),
             ("account", account.label().into()),
             ("model", a.model.clone().unwrap_or_else(|| "default".into()).into()),
             ("mode", mode.into()),
             ("isolation", a.isolation.as_str().into()),
-            ("result_path", self.0.dir_of(sid).join("result.md").display().to_string().into()),
+            ("result_path", self.0.result_path(sid).display().to_string().into()),
             ("others_in_cwd", Value::Arr(others_in(&cwd, &[parent_name, name]))),
         ]);
         if let Some(n) = note {
@@ -184,7 +197,7 @@ impl HelperService for Service {
                     ("running_s", secs(now.saturating_sub(h.started_ms))),
                     ("budget_left_s", h.deadline_ms().map_or(Value::Null, |d| secs(d.saturating_sub(now)))),
                     ("quiet_s", quiet_ms(h.sid, now).map_or(Value::Null, secs)),
-                    ("result_path", self.0.dir_of(h.sid).join("result.md").display().to_string().into()),
+                    ("result_path", self.0.result_path(h.sid).display().to_string().into()),
                 ])
             })
             .collect();

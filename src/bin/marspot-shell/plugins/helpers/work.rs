@@ -257,7 +257,7 @@ pub(super) fn still_blocked(s: &Arc<Shared>, sid: u64, screen: Option<String>) {
 /// What a claude helper's stop says when every account refuses its
 /// model; None while one can take it.
 fn refused_note(h: &Helper, stop: Stop) -> Option<String> {
-    if h.started.agent != AgentKind::Claude || stop.is_last() {
+    if h.started.agent != AgentKind::Claude || h.contained() || stop.is_last() {
         return None;
     }
     let model = Some(h.started.model.as_str()).filter(|m| *m != "default");
@@ -270,16 +270,17 @@ fn refused_note(h: &Helper, stop: Stop) -> Option<String> {
 fn tell(s: &Arc<Shared>, h: &Helper, stop: Stop) {
     let sid = h.sid;
     let obs = crate::observe::shared().fresh(crate::observe::INTERVAL);
-    let path = s.dir_of(sid).join("result.md");
+    let path = s.result_path(sid);
     let result = notify::read_result(&path);
     // claude's own stop is the plugin's report, not a guess from the screen
     let lines = match (stop, h.started.agent) {
         (Stop::Budget, _) => 2 * notify::SCREEN_LINES,
-        (Stop::Idle, AgentKind::Claude) => 0,
+        (Stop::Idle, AgentKind::Claude) if !h.contained() => 0,
         _ => notify::SCREEN_LINES,
     };
     let screen = (lines > 0).then(|| screen_end(sid, lines)).flatten();
-    let note = refused_note(h, stop);
+    let over = super::container::at_stop(s, h, stop, screen.as_deref());
+    let note = over.as_ref().map(|o| o.note.clone()).or_else(|| refused_note(h, stop));
     let body = notify::text(&full_name(sid, &obs), h, stop, &path, result.as_deref(), screen.as_deref(), note.as_deref());
     let mut events = vec![match stop {
         Stop::Idle => Event::IdleNoticed,
@@ -291,4 +292,7 @@ fn tell(s: &Arc<Shared>, h: &Helper, stop: Stop) {
         events.push(Event::ResultDelivered { sha: notify::sha(r) });
     }
     send(s, sid, Notice { parent: h.started.parent, body, events, ..Notice::default() });
+    if over.is_some_and(|o| o.renewed) {
+        super::container::restart(s, sid, h.account.clone());
+    }
 }

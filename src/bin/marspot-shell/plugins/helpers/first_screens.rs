@@ -49,7 +49,7 @@ impl First {
     /// Whether the agent's plugin reports its turns, so that nothing
     /// else judges its screen.
     fn by_turns(&self) -> bool {
-        matches!(self.agent, AgentKind::Claude | AgentKind::Kimi)
+        !self.s.contained(self.sid) && matches!(self.agent, AgentKind::Claude | AgentKind::Kimi)
     }
 
     fn look(&self) -> (String, Look) {
@@ -74,7 +74,7 @@ impl First {
         }
         let own = self.s.dir_of(self.sid);
         let ours = if self.agent == AgentKind::Gemini {
-            d.is_about(&own)
+            d.is_about(&self.s.own_dir_shown(self.sid))
         } else {
             let task = std::fs::read_to_string(own.join("task.md")).unwrap_or_default();
             task_dir(&task).is_some_and(|dir| d.is_about(dir.as_ref()))
@@ -148,6 +148,11 @@ impl First {
             }
             (since, quiet) = (pos, DRAWN_MS);
         }
+    }
+
+    /// Whether anything is under the line that started it.
+    pub(super) fn has_drawn(&self) -> bool {
+        drawn(&self.look().0, &launch::start_line(&self.s.dir_of(self.sid)), "")
     }
 
     /// Whether the agent drew what is on the screen.

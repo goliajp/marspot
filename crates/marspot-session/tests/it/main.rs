@@ -9,6 +9,7 @@ mod flood_frames;
 mod flood_interrupt;
 mod focus_reporting;
 mod frame_cells;
+mod helper_container;
 mod history_upgrade;
 mod move_region;
 mod pane_awake;

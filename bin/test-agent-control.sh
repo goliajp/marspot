@@ -28,7 +28,14 @@
 #      parent told once;
 #   6. after the shell restarts, a helper recorded as started whose task
 #      never went in is closed and its parent told, and a running one is
-#      still listed.
+#      still listed;
+#   7. a helper in a container, docker being a stand-in (_fake-docker.sh):
+#      refused for want of a login that outlives the budget, preparing
+#      while its image is built, its result told, its container removed
+#      when its budget ends; an image built across a restart of the shell,
+#      which also removes a container left by a helper that is gone; a
+#      login that came to last too short a time; a container started
+#      again with a renewed login; no codex, no gemini without a login.
 #
 # Sandbox-only: MARSPOT_STATE_DIR and HOME are redirected and the
 # installed app is never touched.  Opens windows, so it runs on the
@@ -51,6 +58,7 @@ REGISTRY="$SB/home/.claude"/sessions
 INBOX="$SB/inbox.log"
 export PEERBUS_REGISTRY="$REGISTRY"
 export FAKE_HELPER_LOG="$SB/helpers.log"
+export FAKE_DOCKER_DIR="$SB/docker"
 
 die() {
   echo "FAIL: $*"
@@ -61,7 +69,11 @@ die() {
   exit 1
 }
 cleanup() {
-  local rc=$?
+  local rc=$? f
+  # the stand-in containers, by the processes recorded for them
+  for f in "$FAKE_DOCKER_DIR"/ps/*; do
+    [[ -f $f ]] && kill "$(sed -n 1p "$f")" 2>/dev/null
+  done
   dev_kill_shell_core
   dev_sweep_dead_inboxes
   (( rc != 0 )) || rm -rf "$SB"
@@ -76,6 +88,7 @@ rm -rf "$SB"
 mkdir -p "$SB/bin" "$SB/proj" "$REGISTRY"
 for p in .claude-profile-1 .codex-profile-1 .gemini-profile-1 .kimi-code-profile-1; do mkdir -p "$SB/home/$p"; done
 for a in claude codex gemini kimi; do ln -s "$ROOT/bin/_fake-helper-agent.py" "$SB/bin/$a"; done
+ln -s "$ROOT/bin/_fake-docker.sh" "$SB/bin/docker"
 chmod +x "$ROOT/bin/_fake-helper-agent.py"
 export HOME="$SB/home"
 export PATH="$SB/bin:$PATH"
@@ -134,6 +147,15 @@ launch_app() {
   env MARSPOT_SESSION_BIN="$BIN/marspot-session" MARSPOT_CORE_BIN="$BIN/marspot-core" \
     nohup "$CLI" >> "$(dev_run_log agent-control)" 2>&1 < /dev/null &
   dev_record_pid $!
+}
+
+restart_app() {
+  local hellos i
+  hellos=$(count "$SD" HELLO_ACK)
+  kill -TERM "$(dev_shell_pid)" 2>/dev/null
+  for (( i = 0; i < 60; i++ )); do [[ -z $(dev_shell_pid) ]] && break; sleep 0.5; done
+  launch_app
+  wait_count "$SD" HELLO_ACK "$hellos" 90 || die "the core never said hello after the restart"
 }
 
 dev_kill_shell_core
@@ -255,11 +277,7 @@ ORPHAN=$(pc open --parent "$P1" --json | field id)
 now=$(python3 -c 'import time; print(int(time.time()*1000))')
 printf '%s\t%s\t%s\tstarted\tparent=%s\tcaller=claude\tagent=codex\taccount=P1\tmodel=default\tmode=auto\tisolation=host\tbudget=30\ttask=never delivered\tsha256=00\tlabel=\n' \
   "$now" "$now" "$ORPHAN" "$P1" >> "$SD/helpers/events.log"
-hellos=$(count "$SD" HELLO_ACK)
-kill -TERM "$(dev_shell_pid)" 2>/dev/null
-for (( i = 0; i < 60; i++ )); do [[ -z $(dev_shell_pid) ]] && break; sleep 0.5; done
-launch_app
-wait_count "$SD" HELLO_ACK "$hellos" 90 || die "the core never said hello after the restart"
+restart_app
 check "the helper whose task never went in was closed" pane_gone "$ORPHAN" 90
 # told once the restarted shell has named its panes, a moment after the close
 for (( i = 0; i < 30; i++ )); do grep -qF 'task had not gone in' "$INBOX" 2>/dev/null && break; sleep 0.5; done
@@ -267,6 +285,105 @@ check "and its parent was told" bash -c "grep -F 'task had not gone in' '$INBOX'
 check "the running helper is still listed" listed "$N_KEEP"
 hc stop --all >/dev/null 2>&1
 hc stop "$N_KEEP" >/dev/null 2>&1
+
+echo "════ 7. a helper in a container ════"
+TOKEN="fake-access-token-$$"
+login_lasting() { # minutes
+  python3 - "$HOME/.claude-profile-1/.credentials.json" "$TOKEN" "$1" <<'PY'
+import json, os, sys, time
+path, token, minutes = sys.argv[1:]
+with open(path, "w") as f:
+    json.dump({"claudeAiOauth": {"accessToken": token, "expiresAt": int((time.time() + 60 * int(minutes)) * 1000)}}, f)
+os.chmod(path, 0o600)
+PY
+}
+DOCKER_LOG="$FAKE_DOCKER_DIR/log"
+login_lasting 25
+A_SHORT=$(start_helper claude 30 --container "Look around. FAKE-STAY")
+check "no login outlives the budget: no_account, with what is left" bash -c "grep -q no_account <<<\"\$1\" && grep -q 'P1 has 2[45] min left' <<<\"\$1\"" _ "$A_SHORT"
+login_lasting 480
+A_BOX=$(start_helper claude 1 --container "Look around. FAKE-STAY")
+N_BOX=$(field name <<<"$A_BOX"); S_BOX=$(field id <<<"$A_BOX")
+[[ -n $N_BOX ]] || die "the container helper did not start: $A_BOX"
+check "the answer says preparing, in a container" bash -c "grep -q '\"state\":\"preparing\"' <<<\"\$1\" && grep -q '\"isolation\":\"container\"' <<<\"\$1\"" _ "$A_BOX"
+check "the env file is private" test "$(stat -f %Lp "$SD/helpers/$S_BOX/env")" = 600
+wait_notices "$N_BOX" 1 90 || echo "    no message for $N_BOX after 90 s"
+event_at() { awk -F'\t' -v s="$S_BOX" -v e="$1" '$3 == s && $4 == e { print NR; exit }' "$SD/helpers/events.log"; }
+check "preparing, then the task went in" bash -c "[[ -n '$(event_at preparing)' && '$(event_at preparing)' -lt '$(event_at task_delivered)' ]]"
+check "the image was built from a Dockerfile" grep -q '^FROM ' "$FAKE_DOCKER_DIR/Dockerfile"
+check "the parent got its result" bash -c "grep -F '$N_BOX' '$INBOX' | grep -q RESULT-claude-OK"
+check "the run got its mounts and the env file" bash -c "grep -a '^run ' '$DOCKER_LOG' | grep -F -- ',target=/work' | grep -F -- '/share,target=/marspot' | grep -qF -- '--env-file $SD/helpers/$S_BOX/env'"
+check "the agent had the token in its environment" grep -q "token of ${#TOKEN} bytes" "$DOCKER_LOG"
+check "the token is on no command line and in no log" bash -c "! grep -rqF '$TOKEN' '$DOCKER_LOG' '$FAKE_HELPER_LOG' '$SD/logs' '$SD/helpers/events.log' '$SD/control-audit.log' '$INBOX'"
+for (( i = 0; i < 100; i++ )); do grep -F "$N_BOX" "$INBOX" | grep -q 'minute budget' && break; sleep 1; done
+check "the parent was told its budget ran out" bash -c "grep -F '$N_BOX' '$INBOX' | grep -q '1-minute budget'"
+check "its pane was closed" pane_gone "$S_BOX" 30
+for (( i = 0; i < 20; i++ )); do grep -q "^rm -f marspot-helper-.*-$S_BOX\$" "$DOCKER_LOG" && break; sleep 0.5; done
+check "docker was told to remove its container" grep -q "^rm -f marspot-helper-.*-$S_BOX\$" "$DOCKER_LOG"
+check "no container is left" bash -c "[[ -z \$(ls '$FAKE_DOCKER_DIR/ps') ]]"
+for (( i = 0; i < 20; i++ )); do [[ ! -e "$SD/helpers/$S_BOX" ]] && break; sleep 0.5; done
+check "its directory is gone" test ! -e "$SD/helpers/$S_BOX"
+check "codex is not supported in a container" bash -c "grep -q not_supported <<<\"\$1\"" _ "$(start_helper codex 30 --container "Look around.")"
+check "gemini with no login there: no_account" bash -c "grep -q no_account <<<\"\$1\"" _ "$(start_helper gemini 30 --container "Look around.")"
+check "and nothing was made in its account" test ! -e "$HOME/.gemini-profile-1/.gemini/oauth_creds.json"
+check "the home directory is refused" bash -c "grep -q bad_request <<<\"\$1\"" _ "$(HELPER_CWD="$HOME" start_helper claude 30 --container "Look around.")"
+mkdir -p "$HOME/.gemini-profile-1/.gemini"
+echo '{}' > "$HOME/.gemini-profile-1/.gemini/oauth_creds.json"
+A_STOP=$(start_helper gemini 30 --container "Look around. FAKE-STAY")
+N_STOP=$(field name <<<"$A_STOP"); S_STOP=$(field id <<<"$A_STOP")
+check "with the image there, the next runs at once" grep -q '"state":"running"' <<<"$A_STOP"
+wait_notices "$N_STOP" 1 100 || echo "    no message for $N_STOP after 100 s"
+check "gemini: the parent got its result" bash -c "grep -F '$N_STOP' '$INBOX' | grep -q RESULT-gemini-OK"
+check "gemini: its login is mounted" bash -c "grep -a '^run ' '$DOCKER_LOG' | grep -qF '.gemini-profile-1/.gemini/oauth_creds.json,target='"
+hc stop "$N_STOP" >/dev/null 2>&1
+for (( i = 0; i < 20; i++ )); do grep -q "^rm -f marspot-helper-.*-$S_STOP\$" "$DOCKER_LOG" && break; sleep 0.5; done
+check "stopped: its container is removed" bash -c "grep -q '^rm -f marspot-helper-.*-$S_STOP\$' '$DOCKER_LOG' && [[ -z \$(ls '$FAKE_DOCKER_DIR/ps') ]]"
+
+echo "════ 8. a container's login, and a restart of the shell ════"
+A_OVER=$(start_helper claude 30 --container "Look around. FAKE-STAY FAKE-ASK")
+N_OVER=$(field name <<<"$A_OVER"); S_OVER=$(field id <<<"$A_OVER")
+wait_notices "$N_OVER" 1 60 || echo "    no message for $N_OVER after 60 s"
+echo 1000 > "$SD/helpers/$S_OVER/expires"
+runs=$(grep -ac '^run ' "$DOCKER_LOG")
+pc send "$N_OVER" "FAKE-REFUSE" >/dev/null || echo "    could not type to $N_OVER"
+wait_notices "$N_OVER" 2 60 || echo "    no second message for $N_OVER after 60 s"
+check "a refused login: the parent is told it starts again" bash -c "grep -F '$N_OVER' '$INBOX' | grep -q 'the container is started again'"
+for (( i = 0; i < 60; i++ )); do (( $(grep -ac '^run ' "$DOCKER_LOG") > runs )) && break; sleep 0.5; done
+check "it ran again, after its container was removed" bash -c "grep -aA9 '^rm -f marspot-helper-.*-$S_OVER\$' '$DOCKER_LOG' | grep -q '^run .*-$S_OVER '"
+for (( i = 0; i < 30; i++ )); do grep -a '^claude' "$FAKE_HELPER_LOG" | grep -q -- --continue && break; sleep 0.5; done
+check "to go on with its conversation" bash -c "grep -a '^claude' '$FAKE_HELPER_LOG' | grep -q -- --continue"
+for (( i = 0; i < 20; i++ )); do [[ $(cat "$SD/helpers/$S_OVER/expires" 2>/dev/null) != 1000 ]] && break; sleep 0.5; done
+check "with the newer login" bash -c "(( \$(cat '$SD/helpers/$S_OVER/expires') > 1000 ))"
+
+build_takes() { echo "$1" > "$FAKE_DOCKER_DIR/build-s"; rm -f "$FAKE_DOCKER_DIR"/images/*; }
+build_takes 8
+A_SHORT2=$(start_helper claude 30 --container "Look around. FAKE-STAY")
+N_SHORT2=$(field name <<<"$A_SHORT2"); S_SHORT2=$(field id <<<"$A_SHORT2")
+login_lasting 35
+python3 -c 'import sys,time; open(sys.argv[1],"w").write(str(int((time.time()+35*60)*1000)))' "$SD/helpers/$S_SHORT2/expires"
+for (( i = 0; i < 60; i++ )); do grep -F "$N_SHORT2" "$INBOX" | grep -q 'came to last less' && break; sleep 0.5; done
+check "a login too short by the time the image is there: closed, with the reason" bash -c "grep -F '$N_SHORT2' '$INBOX' | grep -q 'came to last less'"
+check "its pane is gone" pane_gone "$S_SHORT2" 30
+check "its task never went in" test -z "$(S_BOX=$S_SHORT2 event_at task_delivered)"
+login_lasting 480
+
+build_takes 25
+A_RE=$(start_helper claude 30 --container "Look around. FAKE-STAY")
+N_RE=$(field name <<<"$A_RE"); S_RE=$(field id <<<"$A_RE")
+check "preparing again" grep -q '"state":"preparing"' <<<"$A_RE"
+sleep 600 &
+LEFT=$!
+printf '%s\n%s\n' "$LEFT" 999999 > "$FAKE_DOCKER_DIR/ps/marspot-helper-00000000-999999"
+restart_app
+wait_notices "$N_RE" 1 120 || echo "    no message for $N_RE after 120 s"
+check "prepared across the restart: the parent got its result" bash -c "grep -F '$N_RE' '$INBOX' | grep -q RESULT-claude-OK"
+check "its task went in once" test "$(awk -F'\t' -v s="$S_RE" '$3 == s && $4 == "task_delivered"' "$SD/helpers/events.log" | wc -l | tr -d ' ')" = 1
+check "the container of a helper that is gone was removed" bash -c "[[ ! -e '$FAKE_DOCKER_DIR/ps/marspot-helper-00000000-999999' ]] && ! kill -0 $LEFT 2>/dev/null"
+check "the running container was not" bash -c "ls '$FAKE_DOCKER_DIR/ps' | grep -q -- '-$S_OVER\$'"
+hc stop "$N_RE" >/dev/null 2>&1
+hc stop "$N_OVER" >/dev/null 2>&1
+for (( i = 0; i < 40; i++ )); do [[ -z $(ls "$FAKE_DOCKER_DIR/ps") ]] && break; sleep 0.5; done
+check "no container is left" bash -c "[[ -z \$(ls '$FAKE_DOCKER_DIR/ps') ]]"
 
 check "the app is still up" alive "$(dev_shell_pid)"
 check "no panic in the log" bash -c "! grep -qa $'\tPANIC' $(printf '%q' "$LOG")"

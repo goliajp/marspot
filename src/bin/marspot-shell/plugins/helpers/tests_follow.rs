@@ -81,7 +81,7 @@ fn helpers_an_end_removes_only_what_stopped_or_is_gone() {
     s.sweep_dirs_where(|sid| sid == 1);
     assert!(s.lock().stopped.is_empty(), "nothing to remember");
     // one that is not there is no failure
-    s.remove_dir(1);
+    super::dirs::remove(&s.root(), 1);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

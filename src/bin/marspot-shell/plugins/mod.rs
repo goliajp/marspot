@@ -45,6 +45,8 @@ use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 pub mod agents;
 pub mod autorun;
 pub mod beside;
+mod bounded;
+mod plain_file;
 pub mod claudecode;
 pub mod codex;
 pub mod gemini;

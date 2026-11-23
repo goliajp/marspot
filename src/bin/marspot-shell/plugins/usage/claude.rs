@@ -9,12 +9,14 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use marspot_peer::json::{self, Value};
 
 use super::feed::{Account, Credits, ModelWindow, Reading, Window, WEEK_MINUTES};
 use super::http::{self, Response};
 use super::sha256;
+use crate::plugins::bounded;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// How long to stay away after a 429 that does not say.
@@ -67,7 +69,7 @@ pub(super) fn keychain_service(dir: &Path, home: &Path) -> String {
 }
 
 /// Not `Debug`: it holds the token, and nothing may print one.
-pub(super) struct Login {
+pub(in crate::plugins) struct Login {
     pub token: String,
     /// Unix milliseconds.
     pub expires_at: Option<i64>,
@@ -93,14 +95,27 @@ pub(super) fn parse_login(text: &str) -> Option<Login> {
 /// The login of one config directory: the keychain, then the file the
 /// CLI writes where it has no keychain.
 fn read_login(dir: &Path, home: &Path) -> Option<Login> {
-    let out = Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", &keychain_service(dir, home), "-w"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok();
-    out.filter(|o| o.status.success())
-        .and_then(|o| parse_login(&String::from_utf8_lossy(&o.stdout)))
+    let out = keychain(dir, home).stdin(Stdio::null()).stderr(Stdio::null()).output().ok();
+    let found = out.filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    login_of(found, dir)
+}
+
+/// [`read_login`], the keychain being given `within` to answer: a locked
+/// one asks on the screen.
+pub(super) fn read_login_within(dir: &Path, home: &Path, within: Duration) -> Option<Login> {
+    let out = bounded::run(&mut keychain(dir, home), None, within).ok();
+    login_of(out.filter(|o| o.ok).map(|o| o.stdout), dir)
+}
+
+fn keychain(dir: &Path, home: &Path) -> Command {
+    let mut cmd = Command::new("/usr/bin/security");
+    cmd.args(["find-generic-password", "-s", &keychain_service(dir, home), "-w"]);
+    cmd
+}
+
+fn login_of(found: Option<String>, dir: &Path) -> Option<Login> {
+    found
+        .and_then(|t| parse_login(&t))
         .or_else(|| parse_login(&std::fs::read_to_string(dir.join(".credentials.json")).ok()?))
 }
 
