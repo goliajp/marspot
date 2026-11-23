@@ -42,14 +42,24 @@
 /// encoded afresh on every frame it is open.
 const CEILING: usize = 14;
 
+/// render_inner plus the helpers it calls on every frame whose bodies
+/// moved out of it: moving an allocation into a helper does not take it
+/// off the frame path.
 fn render_inner_body() -> String {
-    let src = std::fs::read_to_string("src/bin/marspot-core.rs")
-        .expect("the core is where it was");
+    let mut body = fn_body("src/bin/marspot-core.rs", "fn render_inner(");
+    assert!(body.lines().count() > 50, "render_inner came out {} lines long", body.lines().count());
+    body.push('\n');
+    body.push_str(&fn_body("src/bin/marspot-core/panes.rs", "pub(super) fn pane_names("));
+    body
+}
+
+fn fn_body(path: &str, head: &str) -> String {
+    let src = std::fs::read_to_string(path).expect("the core is where it was");
     let lines: Vec<&str> = src.lines().collect();
     let start = lines
         .iter()
-        .position(|l| l.trim_start().starts_with("fn render_inner("))
-        .expect("render_inner is still called that");
+        .position(|l| l.trim_start().starts_with(head))
+        .unwrap_or_else(|| panic!("{head} is still in {path}"));
     let mut depth = 0i32;
     let mut opened = false;
     let mut end = start;
@@ -64,7 +74,6 @@ fn render_inner_body() -> String {
             break;
         }
     }
-    assert!(end > start + 50, "render_inner came out {} lines long", end - start);
     lines[start..=end].join("\n")
 }
 
