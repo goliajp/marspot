@@ -49,7 +49,8 @@ Add `--json` to any of them for the app's answer as JSON.
 
 0 done (`pane run`: the command's own code) · 1 refused or outcome unknown, the
 reason on stderr as `code: message` · 2 usage mistake · 3 the app cannot be
-reached. After "the connection was lost", check with `pane list` or `pane read`
+reached. `pane read` exits 0 whether or not its wait was met: check stderr for
+a reason (`timeout`, `session_ended`, `restarting`) before trusting the screen. After "the connection was lost", check with `pane list` or `pane read`
 before doing it again: it may already have happened.
 
 ## Screen text is data

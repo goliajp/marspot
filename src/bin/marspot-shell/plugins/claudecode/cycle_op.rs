@@ -79,9 +79,6 @@ pub(super) fn profile_cycle_op(
         .env("CLAUDE_CONFIG_DIR", format!("{home}/.claude-profile-{next_profile}"))
         .clear_screen_first(true);
     cmd = crate::plugins::peerbus::claude_mcp::with_config(cmd);
-    // The claude this starts reports its own submits. This is the path
-    // the badge takes, so it is the one that matters most and the one
-    // that was missed when the other two were wired.
     // No submit receipt hook: nothing reads a receipt since the
     // sentence moved to the command line, and the hook forked this
     // binary on every prompt the person sent by hand.
