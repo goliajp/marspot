@@ -5,7 +5,7 @@
 //! marspot-peer list
 //! marspot-peer whoami
 //! marspot-peer send [--now] <name | uds:address> <text… | ->
-//! marspot-peer mcp
+//! marspot-peer mcp [--client-timeout-s N]
 //! marspot-peer relay <inbox> <upstream> <send>
 //! marspot-peer claude-hook
 //! marspot-peer gemini-hook
@@ -35,7 +35,7 @@ const USAGE: &str = "usage:
   marspot-peer list
   marspot-peer whoami
   marspot-peer send [--now] <name | uds:address> <text... | ->
-  marspot-peer mcp
+  marspot-peer mcp [--client-timeout-s N]
   marspot-peer relay <inbox> <upstream> <send>
   marspot-peer claude-hook
   marspot-peer gemini-hook
@@ -50,7 +50,14 @@ fn main() -> ExitCode {
         Some("whoami") => whoami(),
         Some("send") => send(&args[1..]),
         Some("mcp") => {
-            marspot_peer::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock());
+            // `--client-timeout-s N`: the tool-call deadline marspot wrote
+            // into this client's own config, when it wrote one
+            let configured = match &args[1..] {
+                [flag, n] if flag == "--client-timeout-s" => n.parse().ok(),
+                _ => None,
+            };
+            let server = marspot_peer::mcp::Server::new(configured);
+            marspot_peer::mcp::serve(server, std::io::stdin().lock(), std::io::stdout().lock());
             Ok(())
         }
         Some("claude-hook") => {
