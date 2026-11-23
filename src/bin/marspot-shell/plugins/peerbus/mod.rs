@@ -17,6 +17,7 @@
 //! worker thread.
 
 mod bind;
+pub(crate) mod claude_mcp;
 mod claude_hooks;
 mod codex_config;
 mod daemon;

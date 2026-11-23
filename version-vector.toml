@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.611"  # an mcp call thread that panics is still counted out
+shell   = "0.7.612"  # every claude marspot starts gets --mcp-config with marspot-peer mcp; the sentence after --
 core    = "0.12.630"  # shadow panes are left out of the shared-name check and always show their full name
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

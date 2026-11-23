@@ -351,3 +351,33 @@ fn a_session_with_no_turn_yet_cycles_by_starting_fresh() {
     assert!(sent.contains("--resume"), "{sent:?}");
     assert!(sent.contains("u-1"), "{sent:?}");
 }
+
+/// The line an account switch types, and the one a reclaim types, both
+/// give claude marspot's MCP config, before `--resume` so the flag's
+/// list of files ends there; the sentence comes after `--` so it is
+/// not read as one more file.
+#[test]
+fn a_switch_or_reclaim_starts_claude_with_the_mcp_config() {
+    let state = TempDir::new("cycle-mcp");
+    let mut env = EnvGuard::new();
+    env.set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer");
+    let typed = |op: pty_op::PtyOp| {
+        op.steps
+            .iter()
+            .find(|s| s.label == "resume")
+            .and_then(|s| match &s.kind {
+                pty_op::StepKind::Send(b) => Some(String::from_utf8_lossy(b).into_owned()),
+                _ => None,
+            })
+            .expect("the resume step writes a command line")
+    };
+    let flag = format!(" --mcp-config '{}' --resume u-1 ", state.join("claude-mcp.json").display());
+    let cycle = typed(
+        profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).unwrap(),
+    );
+    assert!(cycle.contains(&flag), "{cycle}");
+    assert!(cycle.ends_with(&format!(" -- '{}'\r", resume_word())), "{cycle}");
+    let reclaim = typed(reclaim_op("u-1", None, Some(fid(1)), 2, None, &CliChoice::default()).unwrap());
+    assert!(reclaim.contains(flag.trim_end()), "{reclaim}");
+    assert!(state.join("claude-mcp.json").is_file());
+}

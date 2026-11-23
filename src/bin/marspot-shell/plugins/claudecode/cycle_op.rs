@@ -78,6 +78,7 @@ pub(super) fn profile_cycle_op(
     let mut cmd = pty_op::PtyCommand::new("claude")
         .env("CLAUDE_CONFIG_DIR", format!("{home}/.claude-profile-{next_profile}"))
         .clear_screen_first(true);
+    cmd = crate::plugins::peerbus::claude_mcp::with_config(cmd);
     // The claude this starts reports its own submits. This is the path
     // the badge takes, so it is the one that matters most and the one
     // that was missed when the other two were wired.
@@ -126,8 +127,10 @@ pub(super) fn profile_cycle_op(
     // an interactive claude started this way answers the prompt
     // without the composer ever holding it, and it combines with
     // `--resume`.
+    // After `--`: `--mcp-config` takes several values and would read
+    // the sentence as one more config file.
     if let Some(word) = say {
-        cmd = cmd.quoted_arg(word);
+        cmd = cmd.arg("--").quoted_arg(word);
     }
     let line = cmd.to_bytes()?;
     // What the person had typed and not sent. Read before claude is

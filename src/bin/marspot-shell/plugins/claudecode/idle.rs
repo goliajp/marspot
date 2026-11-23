@@ -520,10 +520,7 @@ pub(super) fn reclaim_op(
     if let Some(dir) = config_dir {
         cmd = cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
-    // The pane we are about to bring back reports its own submits, so
-    // the next thing typed into it is confirmed rather than guessed
-    // at. Absent when marspot cannot name its own binary; the pane
-    // then works exactly as it did before.
+    cmd = crate::plugins::peerbus::claude_mcp::with_config(cmd);
     // No submit receipt hook -- see `receipts::claude_settings_arg`.
     // Brought back where it lives. Same reason as the profile switch:
     // `--resume` binds the session to the directory it is run from, and
