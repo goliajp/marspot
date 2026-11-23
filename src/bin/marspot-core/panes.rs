@@ -74,13 +74,20 @@ impl CoreApp {
     /// falls back to a vacant slot whose revive-on-keystroke path is
     /// exactly the retry this needs.
     pub(super) fn adopt_spawn_outcome(&mut self, sid: u64, outcome: SpawnOutcome) {
-        // the slot was closed while the spawn ran: the child is dropped
-        // with the L3Spawn, which kills it, so nothing to reap here
+        // the pane was closed while the spawn ran, when there was no L3
+        // to tell: it is told now.  A pane nobody closed is in a window
+        // that was put away, and its session waits for that window
+        let closed = self.pane_control.shadows.closed.take(sid);
         let Some(pane) = self
             .panes_mut()
             .find(|p| p.shelld_session_id() == Some(sid))
         else {
-            self.spawn_landed(sid, Err("the pane was closed while it started".into()));
+            match outcome.0 {
+                _ if !closed => {}
+                Ok(_) => self.retire_pane_session(sid, true),
+                Err(_) => marspot::session_close::close_dead_session(sid),
+            }
+            self.spawn_landed(sid, Err("the pane went away while it started".into()));
             return;
         };
         let landed = outcome.0.as_ref().map(|_| ()).map_err(Clone::clone);

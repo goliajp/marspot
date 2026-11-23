@@ -4,8 +4,8 @@
 //! the end of that session, so its pane closes exactly as if the user
 //! had closed it: the window goes with its last pane, and the app with
 //! its last window, through L1, which asked for nothing else.  An L3
-//! removes its session dir only in that case, so the dir being gone is
-//! how the core tells it from a crash.
+//! removes its session dir only then and when it is closed, so the dir
+//! being gone is how the core tells it from a crash.
 //!
 //! An L3 that crashed or was killed leaves its pane frozen at the last
 //! frame, its dir kept.  When that is true of every pane, the core

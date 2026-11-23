@@ -44,6 +44,7 @@ mod pane_env;
 mod pointer;
 mod publish_gate;
 mod pty_reader;
+mod session_end;
 mod shell_end;
 mod track;
 mod typing;
@@ -262,7 +263,7 @@ enum SessionEvent {
     /// The client of this generation said the newest frame layout it
     /// reads.
     FrameCells(u64, u32),
-    /// SIGHUP: the app retired this session.  Exit, never execv.
+    /// SIGHUP: exit, never execv; see `session_end::hung_up`.
     CloseRequested,
     /// The background probe of `current/marspot-session` finished; the
     /// payload is whether that image actually started.
@@ -388,8 +389,6 @@ impl Drop for MappedFile {
         }
     }
 }
-
-
 
 /// Placeholder geometry until L2 drives a real resize (later step).
 const INITIAL_COLS: u16 = 80;
@@ -547,7 +546,7 @@ fn main() {
             resumed = true;
             resumed_marks = h.marks;
             shadow_cfg = h.shadow;
-            // Adopt inherited PTY + listener — see do_l3_execv_swap.
+            session_end::end_if_over(id, h.child_pid, || {});
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
             let state_path = session_state_bin_path(id);
             // F2+1 — mmap state.bin instead of std::fs::read so the
@@ -1152,7 +1151,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 SessionEvent::CloseRequested => {
                     lx_event!(
                         "L3_CLOSE_REQUESTED",
-                        "SIGHUP: the app retired this session",
+                        "SIGHUP: the session ends",
                         session_id = session.id()
                     );
                     closing = true;
@@ -1602,10 +1601,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let do_execv = execv_verdict == Some(true);
         if do_execv {
             readers.stop();
-            execv_swap::settle(&mut session, &ev_rx, &mut pane_ctl, poke.as_mut());
+            closing |= execv_swap::settle(&mut session, &ev_rx, &mut pane_ctl, poke.as_mut());
             // the image that takes over may be one from before eight-byte
             // frames: it attaches to the region as it finds it
             frames.reader_gone(&session);
+        }
+        if closing {
+            session_end::hung_up(session, _listener.take(), &snapshot_writer);
+            std::process::exit(0);
         }
         let marks = pane_ctl.marks(&session);
         let SessionImpl::Local(local) = session;
@@ -1636,24 +1639,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 std::process::exit(1);
             }}
         } else {
-            let body = local.terminal().serialize_snapshot();
-            let path = session_state_bin_path(id);
-            let _ = std::fs::write(&path, &body);
-            lx_event!(
-                "L3_SHUTDOWN_EXIT",
-                "clean exit: closed by the app, or the machine is shutting down",
-                session_id = id,
-                pid = std::process::id()
-            );
-            regions::release(id);
-            shell_end::end_with_pane(id, local.child_pid());
+            session_end::shut_down(id, &local, &snapshot_writer);
             std::process::exit(0);
         }
     }
-    // the session is over and no image follows it
-    regions::release(session.id());
-    if let Some(listener) = _listener.take().filter(|_| shell_ended) {
-        listener.end_with_shell();
+    if shell_ended {
+        session_end::finish(session, _listener.take(), &snapshot_writer, false);
+    } else {
+        regions::release(session.id());
     }
 }
 

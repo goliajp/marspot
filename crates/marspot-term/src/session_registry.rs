@@ -24,10 +24,19 @@ use std::path::{Path, PathBuf};
 use crate::paths::sessions_dir;
 
 mod cache;
+mod closed;
 mod entry;
+mod removal;
 
 pub use cache::{RegistryCache, entry_is_live, entry_is_live_with};
-pub use entry::{SessionEntry, parse_session_entry_text, read_session_entry, write_session_entry};
+pub use closed::{clear_closed, closed_session_ids, is_closed, mark_closed};
+pub use entry::{
+    SessionEntry, parse_session_entry_text, read_session_entry, rewrite_session_entry, write_session_entry,
+};
+pub use removal::{
+    RETIRED_TTL_SECS, delete_dead_session, delete_session, purge_expired_retired, retire_dead_session,
+    retire_session_dir, take_session_dir,
+};
 
 /// File holding the next session id to allocate. Lives inside
 /// `sessions_dir()` so it shares the directory's lifecycle.
@@ -250,82 +259,16 @@ pub fn scrollback_idx_path(id: u64) -> PathBuf {
     session_dir(id).join("scrollback.idx")
 }
 
-/// Remove this session's whole directory tree (entry.toml + sock +
-/// bytelog). Called when L2 has confirmed the L3 is dead and the
-/// session id is being retired.
-pub fn delete_session(id: u64) -> io::Result<()> {
-    let dir = session_dir(id);
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// RFC-004 B.4 — recycle-bin retirement.  Instead of `rm -rf`ing a
-/// session dir the boot doesn't need (dead + unreferenced by any
-/// saved slot), move it to `state_root()/retired/<id>-<unix-secs>/`.
-/// History stays recoverable for `RETIRED_TTL_SECS`; the purge pass
-/// below removes expired entries.  `delete_session` (真删) remains
-/// reserved for the user's explicit pane close.
-pub fn retire_session_dir(id: u64) -> io::Result<PathBuf> {
-    let src = session_dir(id);
-    let root = crate::paths::state_root().join("retired");
-    std::fs::create_dir_all(&root)?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let dst = root.join(format!("{id}-{ts}"));
-    std::fs::rename(&src, &dst)?;
-    Ok(dst)
-}
-
-/// How long a retired session dir stays on disk before the purge
-/// pass removes it.  14 days — long enough to notice "my pane's
-/// history vanished" and recover, short enough to bound disk use.
-pub const RETIRED_TTL_SECS: u64 = 14 * 24 * 3600;
-
-/// Remove retired dirs older than `RETIRED_TTL_SECS` (age read from
-/// the `-<unix-secs>` name suffix — immune to mtime updates from
-/// forensic reads).  Returns how many were purged.  Best-effort:
-/// unparseable names are left alone.
-pub fn purge_expired_retired() -> usize {
-    let root = crate::paths::state_root().join("retired");
-    let Ok(read_dir) = std::fs::read_dir(&root) else {
-        return 0;
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut purged = 0usize;
-    for entry in read_dir.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some((_, ts)) = name.rsplit_once('-') else {
-            continue;
-        };
-        let Ok(ts) = ts.parse::<u64>() else { continue };
-        if now.saturating_sub(ts) > RETIRED_TTL_SECS
-            && std::fs::remove_dir_all(entry.path()).is_ok()
-        {
-            purged += 1;
-        }
-    }
-    purged
-}
-
 /// Best-effort unlink of a leftover socket file at a session's UDS
 /// path. L3 calls this on boot so its `bind(2)` doesn't trip over a
-/// stale path left behind by a prior process that died before
-/// `delete_session`.
+/// stale path left behind by a prior process that died.
 pub fn cleanup_stale_socket(id: u64) {
     let p = session_socket_path(id);
     let _ = std::fs::remove_file(&p);
 }
 
-/// Scan `sessions/` and return every entry that parses successfully.
+/// Scan `sessions/` and return every entry that parses successfully,
+/// but those of sessions that were closed.
 /// Stale entries that fail to parse (corrupt write, wrong format) are
 /// skipped — `list_session_entries` is for discovery, callers do
 /// liveness validation (`kill 0`) themselves.
@@ -347,7 +290,9 @@ pub fn list_session_entries() -> Vec<SessionEntry> {
         let Ok(id) = name.parse::<u64>() else {
             continue;
         };
-        if let Ok(e) = read_session_entry(id) {
+        if !is_closed(id)
+            && let Ok(e) = read_session_entry(id)
+        {
             out.push(e);
         }
     }

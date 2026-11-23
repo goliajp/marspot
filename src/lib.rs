@@ -131,6 +131,7 @@ pub mod pidtree;
 #[cfg(feature = "snapshot")]
 pub mod png;
 pub mod qos;
+pub mod session_close;
 pub mod session_signal;
 pub mod render_metal;
 /// Shared with L3, so it lives in the stone crate — every layer

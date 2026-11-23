@@ -135,13 +135,11 @@ fn shadow_open_resize_and_close_through_the_dev_hook() {
     assert_eq!(app.route_pane_control(retire), Route::Answered(DoneCode::Ok));
     assert!(app.shadows.is_empty());
     assert!(!unwatched::is(sid));
-    // the dir itself is not asserted: a session still writing while
-    // the close removes its dir can leave files behind, on the close
-    // path every pane shares
     wait_for("the session's process ended", || {
         // SAFETY: the session is this test process's child; this reaps it
         unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == pid }
     });
+    assert!(!reg::session_dir(sid).exists(), "its dir went before it did");
     let again = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id: 12, sid, mode: RetireMode::Delete }));
     assert_eq!(app.route_pane_control(again), Route::Answered(DoneCode::NoSuchSession));
 }

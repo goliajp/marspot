@@ -440,3 +440,35 @@ fn duplicate_saved_sid_does_not_double_bind() {
     assert_eq!(sids[0], 9);
     assert_ne!(sids[1], 9, "second slot must not re-bind sid 9");
 }
+
+/// A close an earlier core did not finish: the session is neither
+/// restored in its slot nor adopted, and what is left of it goes.
+#[test]
+fn a_closed_session_is_not_restored() {
+    let sb = Sandbox::new();
+    let (tx, _rx) = mpsc::channel();
+    let kept = reg::allocate_next_session_id().unwrap();
+    let dead = reg::allocate_next_session_id().unwrap();
+    let live = reg::allocate_next_session_id().unwrap();
+    for id in [kept, dead] {
+        write_session_entry(&dead_entry(id)).unwrap();
+    }
+    let _running = spawn_l3_pane_with_cwd(60, 16, live, "", &tx).expect("real L3 spawn");
+    let pid = reg::read_session_entry(live).unwrap().pid;
+    sb.own(pid);
+    for id in [dead, live] {
+        reg::mark_closed(id).unwrap();
+    }
+    let layout = saved(&[(dead, "d"), (kept, "k"), (live, "l")]);
+    let (panes, reattached) =
+        assemble_panes_at_boot(Some(&layout), 3, 60, 16, &tx, true, &Default::default());
+    assert_eq!(panes.iter().map(Pane::is_dormant).collect::<Vec<_>>(), [true, false, true]);
+    assert_eq!(pane_sids(&panes)[1], kept);
+    assert!(reattached.is_empty());
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    while reg::session_dir(live).exists() || reg::session_dir(dead).exists() {
+        assert!(Instant::now() < deadline, "what was left of the closed sessions went");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(reg::session_dir(kept).exists());
+}

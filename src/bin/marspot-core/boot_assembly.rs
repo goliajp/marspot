@@ -2,6 +2,58 @@
 
 use super::*;
 
+struct SlotSpec {
+    sid: u64,
+    cwd: String,
+    /// Restore as a dormant placeholder: no reattach,
+    /// no resurrect, no spawn.  A placeholder is layout.
+    dormant: bool,
+}
+
+/// Slot specs come from the saved layout; without one, adopt whatever
+/// the registry holds (numeric order), padded with anonymous slots up
+/// to the grid size.
+fn slot_specs<'a>(
+    saved_state: Option<&marspot::state::SavedWindowLayout>,
+    n_sessions: usize,
+    registered: impl Iterator<Item = &'a u64>,
+    closed: &std::collections::HashSet<u64>,
+) -> Vec<SlotSpec> {
+    let mut specs: Vec<SlotSpec> = match saved_state {
+        Some(s) => s
+            .panes
+            .iter()
+            .take(n_sessions)
+            .map(|p| SlotSpec {
+                sid: p.sid,
+                cwd: p.last_cwd.clone(),
+                dormant: p.flags & marspot::state::PANE_FLAG_DORMANT != 0,
+            })
+            .collect(),
+        None => {
+            let mut ids: Vec<u64> = registered.copied().collect();
+            ids.sort();
+            ids.resize(n_sessions, 0);
+            let fresh = |sid| SlotSpec { sid, cwd: String::new(), dormant: false };
+            ids.into_iter().map(fresh).collect()
+        }
+    };
+    // a slot whose session was closed keeps its place and nothing else
+    let mut emptied = None;
+    for (i, spec) in specs.iter_mut().enumerate() {
+        if closed.contains(&spec.sid) {
+            *spec = SlotSpec { sid: 0, cwd: String::new(), dormant: true };
+            emptied.get_or_insert(i);
+        }
+    }
+    if let Some(i) = emptied
+        && specs.iter().all(|s| s.dormant)
+    {
+        specs[i].dormant = false;
+    }
+    specs
+}
+
 /// RFC-004 B.1 — identity-keyed boot assembly.  Extracted from
 /// `main()` so the slot semantics (order preserved, never
 /// compacted, sid-stable, vacant on failure) are testable with a
@@ -38,6 +90,12 @@ pub(super) fn assemble_panes_at_boot(
     // titles/cwd mis-bound by index, and the first
     // save_session_state locked the damage in) and resurrected
     // dead ids in readdir order (错位 after a full crash).
+    // Closed sessions are no slot's and nobody's orphans.
+    let closed: std::collections::HashSet<u64> =
+        session_registry::closed_session_ids().into_iter().collect();
+    if sweeps_registry {
+        marspot::session_close::finish_closed();
+    }
     let raw_list = list_session_entries();
     for e in &raw_list {
         if !e.title.is_empty() {
@@ -61,41 +119,7 @@ pub(super) fn assemble_panes_at_boot(
     // shadow panes are no window's unless a saved slot names them
     let shadow_ids = shadow_boot::shadow_ids(&raw_list);
 
-    // Slot specs come from the saved layout; without one, adopt
-    // whatever the registry holds (numeric order), padded with
-    // anonymous slots up to the grid size.
-    struct SlotSpec {
-        sid: u64,
-        cwd: String,
-        /// RFC-006 — restore as a dormant placeholder: no reattach,
-        /// no resurrect, no spawn.  A placeholder is layout.
-        dormant: bool,
-    }
-    let slot_specs: Vec<SlotSpec> = match saved_state {
-        Some(s) => s
-            .panes
-            .iter()
-            .take(n_sessions)
-            .map(|p| SlotSpec {
-                sid: p.sid,
-                cwd: p.last_cwd.clone(),
-                dormant: p.flags & marspot::state::PANE_FLAG_DORMANT != 0,
-            })
-            .collect(),
-        None => {
-            let mut ids: Vec<u64> = dir_ids.difference(&shadow_ids).copied().collect();
-            ids.sort();
-            ids.truncate(n_sessions);
-            let mut specs: Vec<SlotSpec> = ids
-                .into_iter()
-                .map(|sid| SlotSpec { sid, cwd: String::new(), dormant: false })
-                .collect();
-            while specs.len() < n_sessions {
-                specs.push(SlotSpec { sid: 0, cwd: String::new(), dormant: false });
-            }
-            specs
-        }
-    };
+    let slot_specs = slot_specs(saved_state, n_sessions, dir_ids.difference(&shadow_ids), &closed);
 
     let mut claimed: std::collections::HashSet<u64> =
         std::collections::HashSet::new();
@@ -339,13 +363,12 @@ pub(super) fn assemble_panes_at_boot(
         }
     }
 
-    // RFC-004 B.4 — recycle-bin GC.  Any session dir that is
-    // neither claimed by a slot nor alive moves to retired/
+    // Recycle-bin GC.  Any session dir that is neither claimed by a
+    // slot nor alive moves to retired/
     // (kept RETIRED_TTL_SECS = 14 days), and expired retired
     // entries purge.  Scans dir names directly (not raw_list) so
     // dirs with corrupt entry.toml — invisible to discovery —
-    // stop accumulating too.  delete_session (真删) stays
-    // reserved for the user's explicit pane close.
+    // stop accumulating too.
     let mut retired = 0usize;
     for id in session_registry::list_session_dir_ids() {
         // Same reason as the orphan loop above: a restored window's
@@ -357,6 +380,8 @@ pub(super) fn assemble_panes_at_boot(
         if !sweeps_registry
             || claimed.contains(&id)
             || alive_ids.contains(&id)
+            || closed.contains(&id)
+            || session_registry::is_closed(id)
             || reserved_sids.contains(&id)
         {
             continue;

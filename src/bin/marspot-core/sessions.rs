@@ -85,35 +85,20 @@ impl CoreApp {
         marspot::session_signal::ask_all_to_update(self.panes_mut())
     }
 
-    /// Terminate `panes[idx]` and keep all parallel state in sync.
-    /// Caller refuses the call when it would leave zero sessions.
-    /// Retire the session behind a pane: signal its L3, drop the
-    /// registry dir + shm region, and forget the sid-keyed caches.
+    /// Retire the session behind a pane: close its L3 and shm regions,
+    /// and forget the sid-keyed caches.
     ///
     /// Takes the id and kind by value rather than a `&Pane` so the
     /// caller does not hold a borrow of `windows` across the call —
     /// and so closing one pane and closing a whole window can share
     /// the teardown while keeping their own bookkeeping.
     ///
-    /// RFC-003 step 3c: L3 panes own their PTY in-process, so the
-    /// close is SIGHUP via entry.toml's pid + delete the registry dir
-    /// (which also wipes the bytelog, so the slot cannot replay if a
-    /// later L3 picks the same id).
+    /// A live L3 ends and removes its own registry dir (which holds the
+    /// bytelog, so the slot cannot replay if a later L3 picks the same
+    /// id); see `session_close`.
     pub(super) fn retire_pane_session(&mut self, id: u64, is_l3: bool) {
         if is_l3 {
-            // SIGHUP is a close and nothing else: SIGTERM also asks an
-            // L3 to update, and with another build staged it would
-            // re-exec instead of ending
-            let _ = marspot::session_signal::signal_session(id, libc::SIGHUP);
-            // the names it published under, so the kernel frees the
-            // pages once every holder has closed them
-            let regions = session_registry::read_session_entry(id)
-                .ok()
-                .and_then(|e| grid_shm::SessionRegions::of_entry(&e));
-            let _ = session_registry::delete_session(id);
-            if let Some(regions) = regions {
-                regions.delete();
-            }
+            marspot::session_close::close_session(id);
         }
         // F3+5 — drop cached cwd state so it can't leak past the pane.
         // The same id may eventually be reused; a fresh pane gets a
@@ -126,6 +111,8 @@ impl CoreApp {
         self.esc_history.remove(&id);
     }
 
+    /// Terminate `panes[idx]` and keep all parallel state in sync.
+    /// Caller refuses the call when it would leave zero sessions.
     pub(super) fn close_session(&mut self, wi: usize, idx: usize) {
         // A pane closing invalidates any armed drag's index math.
         self.pane_drag = None;
@@ -134,8 +121,17 @@ impl CoreApp {
             return;
         }
         if let Some(id) = win!(self, wi).panes[idx].shelld_session_id() {
-            let is_l3 = win!(self, wi).panes[idx].is_l3();
+            let pane = &win!(self, wi).panes[idx];
+            let (is_l3, gone) = (pane.is_l3(), pane.is_exited());
             self.retire_pane_session(id, is_l3);
+            // a spawn may still land, and is closed then
+            if !is_l3 {
+                self.pane_control.shadows.closed.note(id);
+            }
+            // a slot whose session is lost
+            if !is_l3 && gone {
+                marspot::session_close::close_dead_session(id);
+            }
         }
         let (pc, pr) = {
             let g = win!(self, wi).panes[idx].session().grid();
