@@ -116,12 +116,18 @@ pub(super) fn read(conn: &mut Conn, ctx: &Ctx, a: &ReadArgs) -> Result<Value, Re
 /// record no longer holds that row as the session numbered it, the
 /// newest screen line holding the text, and `matched_line_from` says
 /// which of the two it is.
+///
+/// What is said is the line as far as a status line typed on it: the
+/// text waited for has to be in that part, as in the screen's own lines.
 fn matched_line(v: &mut Value, replay: Option<&super::matched::Replay>, line: u64, needle: &str) {
     let squeezed: String = needle.split_whitespace().collect();
     let by_row = replay
         .and_then(|r| r.line_at(line))
-        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed))
-        .filter(|l| !run_trailer::is_status_line(l));
+        .map(|mut l| {
+            l.truncate(run_trailer::before_status(&l).map_or(l.len(), str::len));
+            l
+        })
+        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed));
     let (text, from) = match by_row {
         Some(l) => (Some(l), "row"),
         None => (v.str_at("text").unwrap_or("").lines().rev().find(|l| l.contains(needle)).map(String::from), "screen"),
@@ -189,3 +195,7 @@ pub(super) fn audit(conn: &Conn, limit: u32) -> Value {
     let lines = super::audit_log::tail(&super::audit_log::log_path(), limit as usize);
     obj([("records", Value::Arr(lines.into_iter().map(Value::from).collect()))])
 }
+
+#[cfg(test)]
+#[path = "ops_read_tests.rs"]
+mod status_line_tests;

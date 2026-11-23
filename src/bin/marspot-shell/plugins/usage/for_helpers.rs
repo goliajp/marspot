@@ -74,7 +74,7 @@ pub(in crate::plugins) fn choose(
     placed: &mut roomiest::Placed,
     now: i64,
 ) -> Pick {
-    placed.feed(accounts.feed_at);
+    placed.feed(accounts.feed_at, now);
     match roomiest::roomiest(&accounts.rooms, placed, model) {
         Some(n) => {
             placed.note(n);

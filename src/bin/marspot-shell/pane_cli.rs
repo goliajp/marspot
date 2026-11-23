@@ -60,9 +60,7 @@ impl ShellApp {
     /// mid-reclamation answers as readily as one nobody has touched.
     pub(super) fn run_cli_read(&self, target: &str, extra_lines: u32) -> Result<String, String> {
         let sid = self.resolve_target(target)?;
-        marspot::pane_read::screen(sid, extra_lines.min(u16::MAX as u32) as u16)
-            .map(|text| pane_control::run_trailer::drop_status_lines(&text))
-            .map_err(|e| format!("cannot read pane {sid}: {e}"))
+        read_text(sid, extra_lines).map_err(|e| format!("cannot read pane {sid}: {e}"))
     }
 
     /// Type `text` into the pane called `target`, then Enter.
@@ -106,5 +104,47 @@ impl ShellApp {
             Some(id) => (true, format!("queued on pane {sid} (id={})", id.0)),
             None => (false, format!("pane {sid} has too much queued")),
         }
+    }
+}
+
+/// Pane `sid`'s screen under `extra_lines` of history, without the
+/// status lines runs typed.
+fn read_text(sid: u64, extra_lines: u32) -> std::io::Result<String> {
+    let text = marspot::pane_read::screen(sid, extra_lines.min(u16::MAX as u32) as u16)?;
+    Ok(pane_control::run_trailer::drop_status_lines(&text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marspot_term::session_registry::{SessionEntry, write_session_entry};
+
+    #[test]
+    fn pane_control_read_leaves_the_status_line_out() {
+        let sandbox = marspot_term::test_env::sandbox_state_dir();
+        let sid = 4243u64;
+        write_session_entry(&SessionEntry {
+            id: sid,
+            pid: 1,
+            socket: sandbox.path().join("s.sock"),
+            cols: 100,
+            rows: 10,
+            title: String::new(),
+            cwd: "/tmp".into(),
+            proto_version: marspot_term::shell_proto::PROTO_VERSION,
+            created_at_unix: 0,
+            shm_name: String::new(),
+            shell_child_pid: 0,
+            build: String::new(),
+            stamps_regions: false,
+            shadow_of: 0,
+        })
+        .unwrap();
+        let dir = marspot_term::paths::sessions_dir().join(sid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let typed = marspot::shell_proto::run_trailer(false);
+        let shown = format!("bash-3.2$ echo hi\r\nhi\r\nbash-3.2$ {typed}\r\nbash-3.2$ ");
+        std::fs::write(dir.join("bytelog"), shown).unwrap();
+        assert_eq!(read_text(sid, 0).unwrap().trim_end(), "bash-3.2$ echo hi\nhi\nbash-3.2$\nbash-3.2$");
     }
 }

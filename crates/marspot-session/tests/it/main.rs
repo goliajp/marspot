@@ -21,5 +21,6 @@ mod typing;
 mod typing_after_exec;
 mod typing_run_trailer;
 mod watch;
+mod watch_prompt;
 mod watch_swap;
 mod watch_text;

@@ -43,8 +43,10 @@ Add `--json` to any of them for the app's answer as JSON.
   `pos`. A wait that did not succeed prints its reason on stderr (`timeout`,
   `session_ended`, `restarting`).
 - The screen text leaves out the status line `pane run` typed after the
-  command, so it can have fewer lines than `rows`, and `cursor` is a screen
-  position, not a line of the text. `--wait-text` sees the raw screen,
+  command and keeps what stands before it on its row (a prompt, or output
+  without a final newline); a row with nothing else is left out. So the text
+  can show a prompt with no command after it, it can have fewer lines than
+  `rows`, and `cursor` is a screen position, not a line of the text. `--wait-text` sees the raw screen,
   including that status line: right after a run, a wait for `marspot` or
   `run` can be met by it.
 - `send`/`run` refuse with `user_typing` when the person is typing in that pane;

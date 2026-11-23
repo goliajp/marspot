@@ -149,9 +149,9 @@ pc send "$P1" "source $SD/zdot/hooks.zsh" >/dev/null || die "could not load the 
 at_shell "$P1" || die "pane $P1's zsh with prompt hooks never ran a command"
 check "zsh with hooks: false → 1" runs "$P1" 1 false
 check "zsh with hooks: (exit 6) → 6" runs "$P1" 6 '(exit 6)'
-no_status_line() { # pane: what a run and a read of it answer
+no_status_line() { # pane, command: what a run of it (it prints HOOKED-6Z) and a read answer
   local out
-  out=$("$PEER" pane run "$1" --timeout 20 'echo HOOKED-$((2*3))Z' 2>&1) || { echo "    the run failed: $out"; return 1; }
+  out=$("$PEER" pane run "$1" --timeout 20 "$2" 2>&1) || { echo "    the run failed: $out"; return 1; }
   grep -q HOOKED-6Z <<<"$out" || { echo "    the run did not show the output: $out"; return 1; }
   out+=$'\n'$("$PEER" pane read "$1" -n 200 2>&1)
   if grep -q '133;D' <<<"$out"; then
@@ -159,13 +159,14 @@ no_status_line() { # pane: what a run and a read of it answer
     return 1
   fi
 }
-check "zsh with hooks: neither the run nor a read shows the status line" no_status_line "$P1"
+check "zsh with hooks: neither the run nor a read shows the status line" no_status_line "$P1" 'echo HOOKED-$((2*3))Z'
 
 pc send "$P2" 'exec /bin/bash --norc --noprofile' >/dev/null || die "could not start bash in pane $P2"
 at_shell "$P2" || die "pane $P2's bash never ran a command"
 check "bash: true → 0" runs "$P2" 0 true
 check "bash: false → 1" runs "$P2" 1 false
 check "bash: (exit 3) → 3" runs "$P2" 3 '(exit 3)'
+check "bash: neither the run nor a read shows the status line" no_status_line "$P2" 'echo HOOKED-$((2*3))Z'
 
 if FISH=$(command -v fish); then
   pc send "$P3" "exec $FISH --no-config" >/dev/null || die "could not start fish in pane $P3"
@@ -173,6 +174,7 @@ if FISH=$(command -v fish); then
   check "fish: true → 0" runs "$P3" 0 true
   check "fish: false → 1" runs "$P3" 1 false
   check "fish: (exit 5 in a sub-shell) → 5" runs "$P3" 5 'fish -c "exit 5"'
+  check "fish: neither the run nor a read shows the status line" no_status_line "$P3" 'echo HOOKED-(math "2*3")Z'
 else
   not_applicable "pane run in a fish pane" "fish is not installed on $(hostname -s)"
 fi

@@ -16,9 +16,15 @@ use marspot_term::shell_proto::{
 use crate::SessionImpl;
 use crate::control_writer::ControlWriter;
 use crate::pane_ctl::{local, local_mut, shell_in_front};
-use crate::track::{At, Batch, Track, cursor_at};
+use crate::track::{At, Batch, Track};
 use crate::typing::Reserved;
-use crate::watch_text::{BATCH_ROWS, Needle, REGISTER_ROWS, Span, find, find_on_screen, stream_text};
+use crate::watch_text::{BATCH_ROWS, Needle, stream_text};
+
+mod front;
+mod scan;
+
+use front::Front;
+use scan::{Scan, above_bottom, text_line};
 
 /// Slots per session.  Slot 7 is kept for watch ids with the top bit
 /// set, which the shell gives the watches of its helpers plugin; every
@@ -60,16 +66,6 @@ enum State {
     },
 }
 
-/// Which rows a text watch is checked on.
-#[derive(Clone, Copy)]
-enum Scan {
-    /// From where the output after `since` started to the cursor.
-    Register,
-    /// What a batch wrote.
-    Batch(Batch),
-    None,
-}
-
 struct Slot {
     body: WatchBody,
     state: State,
@@ -77,6 +73,8 @@ struct Slot {
     needle: Option<Box<Needle>>,
     /// Where the output after `since` started.
     from: At,
+    /// For a `prompt` watch.
+    front: Front,
 }
 
 pub(crate) struct Watches {
@@ -138,7 +136,7 @@ impl Watches {
         };
         let id = body.watch_id;
         let needle = if body.kind == WatchKind::Text { Needle::new(&body.text) } else { None };
-        self.slots[at] = Some(Slot { body, state: State::Pending, needle, from: (0, 0) });
+        self.slots[at] = Some(Slot { body, state: State::Pending, needle, from: (0, 0), front: Front::default() });
         // the watch it replaced may have been a text one
         self.stream_texts(session);
         Ok((at, id))
@@ -177,6 +175,9 @@ impl Watches {
         let Some(slot) = self.slots[at].as_mut() else { return };
         slot.from = track.at(slot.body.since_pos);
         slot.state = State::Waiting { parked: false };
+        if slot.body.kind == WatchKind::Prompt {
+            slot.front.seen(shell_in_front(session), Instant::now());
+        }
         self.stream_texts(session);
         self.look(at, session, track, Scan::Register);
     }
@@ -196,6 +197,9 @@ impl Watches {
             if let State::Waiting { parked } = &mut slot.state {
                 *parked &= !(procs || batch.is_some());
                 texts |= slot.body.kind == WatchKind::Text;
+                if procs && slot.body.kind == WatchKind::Prompt {
+                    slot.front.seen(shell_in_front(session), Instant::now());
+                }
             }
         }
         // a held grid has not got the batch yet: whether to check is
@@ -221,20 +225,24 @@ impl Watches {
         let now = Instant::now();
         let after = track.pos() > b.since_pos;
         let last_output = track.last_output();
-        let quiet_for = |d: Duration| after && now >= last_output + d;
+        let quiet_for = |from: Instant, d: Duration| after && now >= from + d;
         let met = match b.kind {
             WatchKind::Change => after.then_some((track.pos(), None, None)),
             WatchKind::CommandEnd => match track.command_end() {
                 Some((pos, status)) if pos > b.since_pos => Some((pos, status.map(i16::from), None)),
                 _ => None,
             },
-            WatchKind::Quiet => quiet_for(Duration::from_millis(b.quiet_ms.into())).then_some((track.pos(), None, None)),
-            WatchKind::Prompt if !*parked && quiet_for(prompt_quiet(track, b.since_pos)) => {
+            WatchKind::Quiet => quiet_for(last_output, Duration::from_millis(b.quiet_ms.into())).then_some((track.pos(), None, None)),
+            WatchKind::Prompt if !*parked && quiet_for(slot.front.quiet_from(last_output), prompt_quiet(track, b.since_pos)) => {
                 *parked = !shell_in_front(session);
-                if !*parked && !track.prompt_drawn(b.since_pos) {
+                if *parked {
+                    slot.front.seen(false, now);
+                }
+                let met = !*parked && !slot.front.back_unseen(now);
+                if met && !track.prompt_drawn(b.since_pos) {
                     track.forget_input_start();
                 }
-                (!*parked).then_some((track.pos(), None, None))
+                met.then_some((track.pos(), None, None))
             }
             WatchKind::Text if after => {
                 let line = slot.needle.as_deref().and_then(|n| text_line(session, n, slot.from, scan, &mut self.cut.0));
@@ -293,13 +301,13 @@ impl Watches {
         let mut due = self.retry.then_some(RETRY);
         for slot in self.slots.iter().flatten() {
             let State::Waiting { parked } = slot.state else { continue };
-            let wait = match slot.body.kind {
-                WatchKind::Quiet => Duration::from_millis(slot.body.quiet_ms.into()),
-                WatchKind::Prompt if !parked => prompt_quiet(track, slot.body.since_pos),
+            let at = match slot.body.kind {
+                WatchKind::Quiet => track.last_output() + Duration::from_millis(slot.body.quiet_ms.into()),
+                WatchKind::Prompt if !parked => slot.front.quiet_from(track.last_output()) + prompt_quiet(track, slot.body.since_pos),
                 _ => continue,
             };
             if track.pos() > slot.body.since_pos {
-                let left = (track.last_output() + wait).saturating_duration_since(now);
+                let left = at.saturating_duration_since(now);
                 due = Some(due.map_or(left, |d| d.min(left)));
             }
         }
@@ -348,31 +356,10 @@ impl Watches {
     }
 }
 
-/// How long the output after `since` must be quiet before a `prompt`
-/// watch holds.
+/// How long the output after `since` must be quiet, the shell in front,
+/// before a `prompt` watch holds.
 fn prompt_quiet(track: &Track, since: u64) -> Duration {
     if track.prompt_drawn(since) { PROMPT_QUIET } else { PROMPT_UNMARKED_QUIET }
-}
-
-/// The line a text watch's text is on, for the rows `scan` reads.
-fn text_line(session: &SessionImpl, n: &Needle, from: At, scan: Scan, cuts: &mut u32) -> Option<u64> {
-    let grid = session.terminal().grid();
-    match scan {
-        Scan::None => None,
-        _ if session.terminal().in_alt_screen() => find_on_screen(grid, n),
-        Scan::Register => {
-            let at = cursor_at(grid).0;
-            find(grid, n, Span { floor: from, lo: from.0.min(at), hi: from.0.max(at) }, REGISTER_ROWS).0
-        }
-        Scan::Batch(Batch { from: a, to: z }) => {
-            // whole rows, from where the cursor was or went up to: a
-            // carriage return rewrites a row from its start
-            let span = Span { floor: from, lo: a.0.min(z.0), hi: a.0.max(z.0) };
-            let (line, cut) = find(grid, n, span, BATCH_ROWS);
-            *cuts += u32::from(cut);
-            line
-        }
-    }
 }
 
 fn invalid(b: &WatchBody) -> Option<Code> {
@@ -384,12 +371,3 @@ fn invalid(b: &WatchBody) -> Option<Code> {
         _ => None,
     }
 }
-
-/// The cursor ended the batch above the screen's last row: a line break
-/// there lands on a row that may still hold old text, which the byte
-/// stream cannot see, so the grid is read.
-fn above_bottom(session: &SessionImpl) -> bool {
-    let grid = session.terminal().grid();
-    grid.cursor().1 + 1 < grid.rows()
-}
-
