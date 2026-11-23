@@ -220,7 +220,42 @@ impl HelperService for Service {
         Ok(obj([("stopped", Value::Arr(stopped))]))
     }
 
+    fn stop_sid(&self, port: &mut Port, sid: u64) -> Option<Result<(), Reject>> {
+        let is_helper = self.0.table().map.contains_key(&sid);
+        is_helper.then(|| stop_all::stop_one(&self.0, sid, || port.close(sid)))
+    }
+
     fn input_seen(&self, sid: u64) {
         self.0.input_seen(sid);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use marspot::shell_proto::RetireMode;
+    use marspot_peer::control::AgentKind;
+
+    use super::super::tests::{feed, shared_at, started, temp};
+    use super::*;
+    use crate::pane_control::helpers_port;
+    use crate::pane_control::tests::panel_act_tests::close_two;
+
+    /// Helper 2, closed on the panel, is stopped: written down, its
+    /// directory gone, its pane deleted and not recycled.
+    #[test]
+    fn helper_panel_close_of_a_helper_stops_it() {
+        let _sandbox = marspot_term::test_env::sandbox_state_dir();
+        let dir = temp("panel-stop");
+        let (s, _rx) = shared_at(&dir);
+        feed(&s, 2, vec![Event::Started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+        std::fs::create_dir_all(s.dir_of(2)).unwrap();
+        helpers_port::register(Box::new(Service(Arc::clone(&s))));
+        let (closed, counts) = close_two();
+        assert_eq!(closed, [(2, RetireMode::Delete)]);
+        assert_eq!(counts, (1, 0));
+        assert!(!s.table().map.contains_key(&2) && !s.dir_of(2).exists());
+        let log = std::fs::read_to_string(dir.join("events.log")).unwrap();
+        assert!(log.lines().last().is_some_and(|l| l.contains("stopped")), "{log}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

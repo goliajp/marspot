@@ -88,6 +88,18 @@ impl<V: Clone + PartialEq> PaneDecls<V> {
         true
     }
 
+    /// [`Self::declare`], cloning only what differs.
+    pub fn declare_ref(&mut self, sid: u64, value: &V) {
+        if self.declared.get(&sid) != Some(value) {
+            self.declare(sid, value.clone());
+        }
+    }
+
+    /// What was last declared for `sid`.
+    pub fn declared(&self, sid: u64) -> Option<&V> {
+        self.declared.get(&sid)
+    }
+
     /// Send every declared value the current core does not have yet.
     /// `send` returns whether the frame reached a core; one that did
     /// not stays pending.

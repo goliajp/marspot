@@ -16,7 +16,7 @@ use super::*;
 mod audit_tests;
 mod conn_tests;
 mod list_tests;
-mod panel_act_tests;
+pub(crate) mod panel_act_tests;
 mod server_tests;
 mod shadow_race_tests;
 

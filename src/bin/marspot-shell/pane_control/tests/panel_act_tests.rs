@@ -96,6 +96,11 @@ fn moved(c: &Ctx, to: &[(u64, u64)]) -> Arc<Observation> {
     Arc::new(Observation::from_parts(std::time::Instant::now(), table, entries, |_| None))
 }
 
+/// Pane 2, a shadow pane, closed on the panel.
+pub(crate) fn close_two() -> (Vec<(u64, RetireMode)>, (u32, u32)) {
+    closes(act(2, PanelAct::CloseHelper))
+}
+
 #[test]
 fn helper_panel_close_of_no_helper_is_a_pane_close() {
     let sandbox = marspot_term::test_env::sandbox_state_dir();
