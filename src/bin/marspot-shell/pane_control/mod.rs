@@ -39,6 +39,7 @@ mod ops_pane;
 mod ops_read;
 mod panes;
 mod server;
+mod shadow_gate;
 mod shadow_tree;
 mod wait;
 
@@ -88,6 +89,8 @@ pub(crate) struct Hub {
     conns: AtomicUsize,
     links: links::Links,
     limits: Mutex<limits::Limits>,
+    /// One new pane or move into the shadows at a time.
+    shadow_gate: shadow_gate::Gate,
     config: RwLock<Arc<config::Config>>,
     deny: Mutex<config::DenyList>,
     panes: RwLock<Arc<panes::PaneViews>>,
@@ -130,6 +133,7 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         conns: AtomicUsize::new(0),
         links: links::Links::new(),
         limits: Mutex::new(limits::Limits::default()),
+        shadow_gate: shadow_gate::Gate::default(),
         config: RwLock::new(Arc::new(config::Config::load())),
         deny: Mutex::new(config::DenyList::at(config::deny_path())),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),

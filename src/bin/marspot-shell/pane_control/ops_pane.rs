@@ -16,6 +16,7 @@ use super::caller::CallerKey;
 use super::conn::{ANSWER_WITHIN, Asked, Conn, done_reject};
 use super::dispatch::{Ctx, audit, target};
 use super::limits::{SpawnCounts, check_spawn, session_cap};
+use super::shadow_gate::{GATE_WITHIN, Tree};
 use super::{Reply, names, panes, shadow_tree};
 
 /// How long a new pane may take to be answered for.
@@ -61,25 +62,14 @@ fn ask_done_within(
     Err(Reject::new(ErrorCode::Unknown, "the core did not answer; check with pane.list"))
 }
 
-fn parent_of(ctx: &Ctx) -> impl Fn(u64) -> u64 + '_ {
-    |sid| ctx.obs.session(sid).map_or(0, |s| panes::shadow_of(&s.entry))
-}
-
-fn root_and_depth(ctx: &Ctx, sid: u64) -> (u64, usize) {
-    shadow_tree::root_and_depth(&parent_of(ctx), sid)
-}
-
-fn shadow_sids(ctx: &Ctx) -> Vec<u64> {
-    ctx.obs.live().filter(|s| panes::shadow_of(&s.entry) != 0).map(|s| s.entry.id).collect()
-}
-
-fn counts(ctx: &Ctx, parent: u64) -> SpawnCounts {
-    let shadows = shadow_sids(ctx);
-    let (root, parent_depth) = root_and_depth(ctx, parent);
+fn counts(tree: &Tree, parent: u64) -> SpawnCounts {
+    let parent_of = |s| tree.parent_of(s);
+    let shadows = tree.shadows();
+    let (root, parent_depth) = shadow_tree::root_and_depth(&parent_of, parent);
     SpawnCounts {
-        live_sessions: ctx.obs.live().count(),
+        live_sessions: tree.live(),
         shadows_total: shadows.len(),
-        shadows_under_root: shadows.iter().filter(|s| root_and_depth(ctx, **s).0 == root).count(),
+        shadows_under_root: shadows.iter().filter(|s| shadow_tree::root_and_depth(&parent_of, **s).0 == root).count(),
         parent_depth,
     }
 }
@@ -94,14 +84,16 @@ pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Re
         (None, CallerKey::External) => 0,
     };
     conn.need_caps(CAP_SHADOWS)?;
+    let gate = conn.hub.shadow_gate.enter(GATE_WITHIN)?;
+    let tree = gate.tree(&ctx.obs);
     let now = conn.hub.now_ms();
     {
         let mut limits = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner());
-        check_spawn(&ctx.cfg, &counts(ctx, parent), a.shadow, session_cap())?;
+        check_spawn(&ctx.cfg, &counts(&tree, parent), a.shadow, session_cap())?;
         if !a.shadow && limits.window_panes_of(ctx.caller) >= ctx.cfg.window_panes_per_caller {
             return Err(Reject::new(ErrorCode::LimitCount, format!("this caller has {} panes open in windows, its most", ctx.cfg.window_panes_per_caller)));
         }
-        let root = if parent != 0 { root_and_depth(ctx, parent).0 } else { 0 };
+        let root = if parent != 0 { shadow_tree::root_and_depth(&|s| tree.parent_of(s), parent).0 } else { 0 };
         limits.admit_spawn(&ctx.cfg, root, now)?;
     }
     let cwd = a.cwd.clone().or_else(|| names::cwd_of(parent, &ctx.obs)).unwrap_or_default();
@@ -125,6 +117,8 @@ pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Re
         Err(Asked::Refused(r)) => return Err(r),
         Err(Asked::NoAnswer) => return Err(Reject::new(ErrorCode::Unknown, "no answer from the core; check with pane.list before opening again")),
     };
+    gate.record(sid, if a.shadow { parent } else { 0 });
+    drop(gate);
     conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened(ctx.caller, sid, a.shadow);
     audit(conn, ctx, "pane.open", sid, a.command.clone().map(String::into_bytes), false, if a.shadow { "shadow" } else { "window" });
     if let Some(cmd) = &a.command {
@@ -170,6 +164,10 @@ pub(super) fn resize(conn: &mut Conn, ctx: &Ctx, t: &str, cols: u16, rows: u16) 
 
 pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Value, Reject> {
     let sid = target(ctx, t)?;
+    place_sid(conn, ctx, sid, w)
+}
+
+pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where) -> Result<Value, Reject> {
     let to = match w {
         Where::Window => PlaceWhere::Window,
         Where::Shadow => PlaceWhere::Shadow,
@@ -177,15 +175,18 @@ pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Val
         Where::Unpeek => PlaceWhere::Unpeek,
     };
     conn.need_caps(if matches!(w, Where::Peek | Where::Unpeek) { CAP_PEEK } else { CAP_SHADOWS })?;
-    let host_sid = match (w, ctx.caller) {
+    // only a move into the shadows can close a loop or add to a count
+    let gate = if matches!(w, Where::Shadow) { Some(conn.hub.shadow_gate.enter(GATE_WITHIN)?) } else { None };
+    let host_sid = match (w, ctx.caller, &gate) {
         // a pane taken out of its window becomes the shadow of the caller's;
         // checked even when the registry already names it a shadow, which
         // can run ahead of where the core holds it
-        (Where::Shadow, CallerKey::Pane(c)) if c != sid => {
-            shadow_tree::check_adopt(&ctx.cfg, &parent_of(ctx), &shadow_sids(ctx), c, sid)?;
+        (Where::Shadow, CallerKey::Pane(c), Some(g)) if c != sid => {
+            let tree = g.tree(&ctx.obs);
+            shadow_tree::check_adopt(&ctx.cfg, &|s| tree.parent_of(s), &tree.shadows(), c, sid)?;
             c
         }
-        (Where::Shadow, _) => return Err(Reject::new(ErrorCode::BadRequest, "a shadow pane needs a parent: call from another pane")),
+        (Where::Shadow, ..) => return Err(Reject::new(ErrorCode::BadRequest, "a shadow pane needs a parent: call from another pane")),
         _ => ctx.obs.session(sid).map_or(0, |s| panes::shadow_of(&s.entry)),
     };
     // the core waits up to ANSWER_WITHIN for the session, then answers itself
@@ -197,6 +198,11 @@ pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Val
         Again::No,
         ANSWER_WITHIN + Duration::from_secs(2),
     );
+    if let Some(g) = gate
+        && out.as_ref().map_or_else(|r| r.code == ErrorCode::Unknown, |_| true)
+    {
+        g.record(sid, host_sid);
+    }
     audit(conn, ctx, "pane.place", sid, None, false, out.as_ref().map_or_else(|r| r.code.as_str(), |_| w.as_str()));
     out.map(|_| obj([("id", (sid as i64).into()), ("where", w.as_str().into())]))
 }
