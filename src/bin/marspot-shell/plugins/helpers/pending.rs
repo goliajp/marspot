@@ -120,10 +120,11 @@ impl Undelivered {
         self.map.contains_key(&sid)
     }
 
-    /// A worker that ended may have taken retries it never made: the
-    /// notices with retries of either kind are due at `now_ms`.
+    /// A worker that ended may have taken retries it never made, or had
+    /// a redelivery `due` handed out in its queue: every notice is due
+    /// at `now_ms`.
     pub fn rearm(&mut self, now_ms: u64) {
-        for n in self.map.values_mut().filter(|n| n.settle_until.is_some() || n.slow > 0) {
+        for n in self.map.values_mut() {
             n.retry_ms = Some(now_ms);
         }
     }

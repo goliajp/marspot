@@ -111,6 +111,27 @@ pub(super) fn tick(s: &Arc<Shared>, host: &dyn PluginHost, in_turn: &mut HashMap
     }
 }
 
+/// When the next tick is wanted for helpers whose session is missing
+/// from `obs` and which nobody closes yet: nothing else may ever bring
+/// one, as a pane that went changes no more.
+pub(super) fn gone_due(t: &Table, closing: &HashSet<u64>, obs: &Observation, now_ms: u64) -> TickDue {
+    let missing = t.map.values().filter(|h| !closing.contains(&h.sid) && obs.session(h.sid).is_none());
+    match missing.map(|h| h.started_ms + START_GRACE_MS + 1).min() {
+        Some(at) if at <= now_ms => TickDue::Cadence,
+        Some(at) => TickDue::At(Instant::now() + Duration::from_millis(at - now_ms)),
+        None => TickDue::Event,
+    }
+}
+
+/// The sooner of two.
+pub(super) fn sooner(a: TickDue, b: TickDue) -> TickDue {
+    match (a, b) {
+        (TickDue::Cadence, _) | (_, TickDue::Cadence) => TickDue::Cadence,
+        (TickDue::At(x), TickDue::At(y)) => TickDue::At(x.min(y)),
+        (TickDue::Event, x) | (x, TickDue::Event) => x,
+    }
+}
+
 /// The parent's own shell holds its terminal in `obs`.
 fn shell_in_front(obs: &Observation, parent: u64) -> bool {
     obs.session(parent).is_some_and(|x| x.shell.is_some() && x.front_pgid == 0)

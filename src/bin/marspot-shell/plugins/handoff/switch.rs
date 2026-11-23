@@ -14,10 +14,11 @@ use std::time::Duration;
 
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
+use super::note::switch_note;
 use super::tags::handoff_tag;
 use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history, launch_line};
 use crate::plugins::pty_op::{self, PtyOp, Step};
-use crate::plugins::{claudecode, codex, gemini, kimi, pidtree};
+use crate::plugins::{claudecode, codex, gemini, helpers, kimi, pidtree};
 use marspot::ui::strings::{self, Arg};
 
 /// An agent's account profiles: number and directory.  gemini or kimi
@@ -134,35 +135,6 @@ fn prepare(sid: u64, dir: &Path, leaving: &Leaving, to: Agent, resume: Option<&s
     prepare_in(sid, dir, leaving, to, resume, ledger, history, &switch)
 }
 
-/// What the receiving agent is told about the switch.  Stopping codex
-/// happens here, before its TUI is taken down: the note has to say
-/// what became of it.
-fn switch_note(leaving: &Leaving, history: Option<&Path>) -> transcript::Switch {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    let (month, day, hour, minute) = marspot::cc_usage::local_mdhm(now);
-    let at = format!("{month}/{day} {hour:02}:{minute:02}");
-    let thread = history.filter(|_| leaving.agent == Agent::Codex).and_then(history::codex_id_of);
-    let (left, stopped) = match thread.map(|t| super::codex_stop::stop_thread(&leaving.home, &t)) {
-        // claude and gemini are their process; so is a codex with no thread yet
-        None => ("has exited".to_string(), true),
-        Some(Ok(s)) => (left_codex(&s), true),
-        Some(Err(e)) => (format!("has exited, but its background thread could not be reached ({e}) and may be carrying on"), false),
-    };
-    transcript::Switch { at, left, stopped }
-}
-
-fn left_codex(s: &super::codex_stop::Stopped) -> String {
-    match (s.goal_paused, s.turn_interrupted) {
-        (true, true) => "has exited, its goal was paused and the turn it was running was interrupted",
-        (true, false) => "has exited and its goal was paused",
-        (false, true) => "has exited and the turn it was running was interrupted",
-        (false, false) => "has exited; it had no active goal and no turn running",
-    }
-    .to_string()
-}
-
 fn prepare_in(
     sid: u64,
     dir: &Path,
@@ -235,14 +207,16 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
     let held = pty_op::Job::new();
 
     let job = pty_op::Job::new();
-    let pending: Arc<Mutex<Option<Ledger>>> = Arc::new(Mutex::new(None));
+    let pending: Arc<Mutex<Option<(Ledger, helpers::Moved)>>> = Arc::new(Mutex::new(None));
     {
         let (j, pending, dir, leaving, resume) =
             (Arc::clone(&job), Arc::clone(&pending), dir.clone(), leaving.clone(), resume.clone());
         let spawned = std::thread::Builder::new().name("handoff".into()).spawn(move || {
+            let from = helpers::leaving(sid).or_else(|| leaving.session_id.clone());
+            let moved = helpers::Moved { pane: sid, from, left: leaving.proc, resumed: resume.clone() };
             let r = prepare(sid, &dir, &leaving, to, resume.as_deref(), &ledger);
             j.finish(r.map(|o| {
-                *pending.lock().unwrap() = Some(o.next);
+                *pending.lock().unwrap() = Some((o.next, moved));
                 o.message
             }));
         });
@@ -251,7 +225,11 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
         }
     }
     let commit: pty_op::CallFn = Arc::new(move || match pending.lock().unwrap().take() {
-        Some(l) => l.save(&dir, sid).map_err(|e| format!("ledger: {e}")),
+        Some((l, moved)) => {
+            // the new agent is up, whatever becomes of the ledger
+            helpers::moved(moved);
+            l.save(&dir, sid).map_err(|e| format!("ledger: {e}"))
+        }
         None => Ok(()),
     });
     let predicate = match to {

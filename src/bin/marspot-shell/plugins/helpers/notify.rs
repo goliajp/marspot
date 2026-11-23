@@ -71,6 +71,12 @@ pub(super) fn last_lines(text: &str, n: usize) -> String {
     lines[end.saturating_sub(n)..end].join("\n")
 }
 
+/// The bottom `n` lines of a helper's screen, as any reader of a pane
+/// gets it: without the status lines `pane.run` typed.
+pub(super) fn screen_end(screen: &str, n: usize) -> String {
+    last_lines(&crate::pane_control::run_trailer::drop_status_lines(screen), n)
+}
+
 /// The result file, cut at [`MAX_RESULT`]; None when there is none.
 pub(super) fn read_result(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
@@ -79,6 +85,13 @@ pub(super) fn read_result(path: &Path) -> Option<String> {
         text.push_str(&format!("\n[cut: the file has {} bytes, this is the first 256 KiB]", bytes.len()));
     }
     Some(text)
+}
+
+/// What tells one prompt from another, by the bottom of the screen it is
+/// on: not by where its cursor is, nor by how the lines are spaced.
+pub(super) fn prompt_sha(screen: &str) -> String {
+    let mark = |c: char| c.is_whitespace() || matches!(c, '❯' | '›' | '→' | '▶' | '●' | '○');
+    sha(&screen.split(mark).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
 }
 
 /// What tells one result text from another.

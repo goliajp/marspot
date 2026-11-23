@@ -28,7 +28,7 @@ pub(super) fn stop_one(s: &Shared, sid: u64, close: impl FnOnce() -> Result<(), 
         return Err(r);
     }
     s.record(sid, Event::Stopped);
-    let _ = std::fs::remove_dir_all(s.dir_of(sid));
+    s.sweep_dirs();
     Ok(())
 }
 

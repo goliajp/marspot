@@ -30,6 +30,7 @@ use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_AP
 mod caller_kind;
 mod close;
 mod dialogs;
+mod dirs;
 mod first_screens;
 mod launch;
 mod notify;
@@ -39,6 +40,7 @@ mod pending;
 mod queue;
 mod rebuild;
 mod records;
+mod results;
 mod screen;
 mod service;
 mod settle;
@@ -68,8 +70,14 @@ mod tests_smoke;
 mod tests_repeat;
 #[cfg(test)]
 mod tests_keys;
+#[cfg(test)]
+mod tests_ends;
+#[cfg(test)]
+mod tests_again;
+#[cfg(test)]
+mod tests_follow;
 
-pub(in crate::plugins) use pair::is_pair;
+pub(in crate::plugins) use pair::{Moved, is_pair, leaving, moved};
 use table::{Event, Table};
 
 /// A parent pane with no agent this long loses the helpers an agent
@@ -116,6 +124,12 @@ struct State {
     child_gone: HashMap<u64, u64>,
     /// Notices that could not be delivered, to try again on an event.
     undelivered: pending::Undelivered,
+    /// Claude and kimi helpers given something after a stop that was
+    /// told, when (ms after the epoch): no turn of theirs was seen since.
+    poked: HashMap<u64, u64>,
+    /// Helpers that stopped, while their session or directory may be
+    /// there (`dirs`).
+    stopped: HashSet<u64>,
     /// Claude and kimi helpers whose plugin has reported a turn.
     turned: HashSet<u64>,
 }
@@ -159,10 +173,15 @@ impl Shared {
         records::append(&self.log, records::ROTATE_AT, &self.table(), sid, now, &ev);
         let mut st = self.lock();
         let parent = st.table.map.get(&sid).map(|h| h.started.parent);
+        if st.table.map.get(&sid).is_some_and(|h| turn::pokes(h, &ev)) {
+            st.poked.insert(sid, now);
+        }
         st.table.apply(sid, now, &ev);
         if matches!(ev, Event::Stopped) {
+            st.stopped.insert(sid);
             st.watchers.remove(&sid);
             st.turned.remove(&sid);
+            st.poked.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
             st.turn_told.remove(&sid);
@@ -187,36 +206,9 @@ impl Shared {
         Arc::clone(&self.published.read().unwrap_or_else(|p| p.into_inner()))
     }
 
-    /// The directory a helper's task, script and result live in.
-    fn dir_of(&self, sid: u64) -> PathBuf {
-        self.log.parent().map_or_else(records::dir, PathBuf::from).join(sid.to_string())
-    }
-
     fn input_seen(&self, sid: u64) {
         if self.table().map.get(&sid).is_some_and(|h| h.noticed) {
             self.record(sid, Event::InputSeen);
-        }
-    }
-
-    /// Watch `sid`'s result file; a change is a fact, told with the next
-    /// stop.  Kept only while `sid` is still a helper: a stop that came
-    /// while the watcher started has already dropped what it had.
-    fn watch_result(self: &Arc<Self>, sid: u64) {
-        let path = self.dir_of(sid).join("result.md");
-        let (me, seen) = (Arc::clone(self), path.clone());
-        let watcher = marspot_term::fs_watch::Watcher::spawn(std::slice::from_ref(&path), move || {
-            if seen.exists() && me.table().map.contains_key(&sid) {
-                me.record(sid, Event::ResultChanged);
-            }
-        });
-        match watcher {
-            Ok(w) => {
-                let mut st = self.lock();
-                if st.table.map.contains_key(&sid) && !self.parked.load(Ordering::Acquire) {
-                    st.watchers.insert(sid, w);
-                }
-            }
-            Err(e) => marspot::lx_warn!("helpers.result_watch_failed", &format!("sid={sid}: {e}")),
         }
     }
 
@@ -288,9 +280,11 @@ impl Plugin for HelpersPlugin {
         let obs = crate::observe::shared().latest();
         let st = shared().lock();
         let no_agent = st.no_agent.keys().copied().collect();
-        let retry = st.undelivered.waiting_on(&obs);
+        let (retry, closing) = (st.undelivered.waiting_on(&obs), st.closing.clone());
         drop(st);
-        tick::due(&shared().table(), &no_agent, &self.parked_parents, &obs, retry, records::now_ms())
+        let (t, now) = (shared().table(), records::now_ms());
+        let due = tick::due(&t, &no_agent, &self.parked_parents, &obs, retry, now);
+        tick::sooner(due, tick::gone_due(&t, &closing, &obs, now))
     }
 
     fn stop(&mut self, _host: &dyn PluginHost) {

@@ -6,11 +6,13 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
+use std::time::Duration;
 
 use marspot_peer::control::AgentKind;
 
 use super::close::close;
 use super::notify::{self, Stop, Verdict};
+use super::pair::Moved;
 use super::pending::{Notice, front_of};
 use super::table::{Event, Helper};
 use super::{Shared, records};
@@ -25,6 +27,10 @@ pub(super) enum Job {
     /// Something came due sooner: work out the sleep again.
     Wake,
     Stopped { sid: u64, stop: Stop, by_screen: bool },
+    /// At an approval prompt, told of one before the shell started.
+    StillBlocked { sid: u64 },
+    /// The pane of helpers' parent was handed to another agent.
+    ParentMoved(Moved),
     /// Tell the stops the rate held back.
     Release { sid: u64 },
     /// Close a helper; `tell`: say why to its parent.
@@ -41,7 +47,8 @@ impl Job {
     pub fn sid(&self) -> u64 {
         match self {
             Job::Wake => 0,
-            Job::Stopped { sid, .. } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Redeliver { sid } => *sid,
+            Job::ParentMoved(m) => m.pane,
+            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Redeliver { sid } => *sid,
         }
     }
 
@@ -49,6 +56,8 @@ impl Job {
         match self {
             Job::Wake => "wake",
             Job::Stopped { .. } => "stopped",
+            Job::StillBlocked { .. } => "still_blocked",
+            Job::ParentMoved(_) => "parent_moved",
             Job::Release { .. } => "release",
             Job::Close { .. } => "close",
             Job::Gone { .. } => "gone",
@@ -130,6 +139,12 @@ fn handle(s: &Arc<Shared>, job: Job) {
             marspot::lx_info!("helpers.job", &format!("sid={sid} stopped {stop:?} by_screen={by_screen}"));
             stopped(s, sid, stop, by_screen);
         }
+        Job::StillBlocked { sid } => still_blocked(s, sid, screen_end(sid, notify::SCREEN_LINES)),
+        Job::ParentMoved(m) => {
+            let obs = crate::observe::shared().fresh(Duration::ZERO);
+            let front = obs.session(m.pane).and_then(|x| x.front()).map(|p| p.row.id());
+            super::pair::parent_moved(s, &m, front);
+        }
         Job::Release { sid } => {
             if let Some(h) = s.table().map.get(&sid).cloned().filter(|h| h.suppressed > 0 && h.may_notify(records::now_ms())) {
                 marspot::lx_info!("helpers.job", &format!("sid={sid} release"));
@@ -180,6 +195,7 @@ fn send(s: &Shared, sid: u64, mut n: Notice) {
     match notify::deliver(&parent, &n.body) {
         Ok(()) => {
             marspot::lx_info!("helpers.notice", &format!("sid={sid}: delivered"));
+            super::pair::settle_now(s, n.parent);
             if s.table().map.contains_key(&sid) {
                 for ev in n.events {
                     s.record(sid, ev);
@@ -201,7 +217,10 @@ pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &
         Some(at) => marspot::lx_info!("helpers.notice", &format!("sid={sid}: not delivered, again at {at}: {e}")),
         None => marspot::lx_warn!("helpers.notice", &format!("sid={sid}: not delivered (try {}): {e}", n.tries)),
     }
-    if !s.lock().undelivered.keep(sid, n) {
+    let kept = s.lock().undelivered.keep(sid, n);
+    // the worker of a later start may be the one to try it
+    s.wake();
+    if !kept {
         marspot::lx_warn!("helpers.notice_dropped", &format!("sid={sid}: not delivered in {} tries", super::pending::TRIES));
     }
 }
@@ -215,6 +234,23 @@ fn stopped(s: &Arc<Shared>, sid: u64, stop: Stop, by_screen: bool) {
     }
     if stop.is_last() {
         close(s, sid);
+    }
+}
+
+/// The bottom of helper `sid`'s screen; None when it cannot be read.
+fn screen_end(sid: u64, lines: usize) -> Option<String> {
+    marspot::pane_read::screen(sid, 0).ok().map(|t| notify::screen_end(&t, lines))
+}
+
+/// Helper `sid`, told of at a prompt before the shell started, is at one
+/// with `screen`: told when that is known to be another.
+pub(super) fn still_blocked(s: &Arc<Shared>, sid: u64, screen: Option<String>) {
+    let Some(h) = s.table().map.get(&sid).cloned() else { return };
+    let now = screen.map(|t| notify::prompt_sha(&t));
+    let same = h.blocked_prompt.is_empty() || now.is_none_or(|n| n == h.blocked_prompt);
+    marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked same={same}"));
+    if !same {
+        stopped(s, sid, Stop::Blocked, false);
     }
 }
 
@@ -242,12 +278,12 @@ fn tell(s: &Arc<Shared>, h: &Helper, stop: Stop) {
         (Stop::Idle, AgentKind::Claude) => 0,
         _ => notify::SCREEN_LINES,
     };
-    let screen = (lines > 0).then(|| marspot::pane_read::screen(sid, 0).ok()).flatten().map(|t| notify::last_lines(&t, lines));
+    let screen = (lines > 0).then(|| screen_end(sid, lines)).flatten();
     let note = refused_note(h, stop);
     let body = notify::text(&full_name(sid, &obs), h, stop, &path, result.as_deref(), screen.as_deref(), note.as_deref());
     let mut events = vec![match stop {
         Stop::Idle => Event::IdleNoticed,
-        Stop::Blocked => Event::BlockedNoticed,
+        Stop::Blocked => Event::BlockedNoticed { prompt: screen.as_deref().map_or_else(String::new, notify::prompt_sha) },
         Stop::Exited => Event::ExitedNoticed,
         Stop::Budget => Event::BudgetExpired,
     }];

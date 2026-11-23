@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use marspot::pidtree::ProcId;
 use marspot_peer::control::{AgentKind, Isolation};
 
 /// How far back the notice rate looks.
@@ -26,6 +27,9 @@ pub(super) struct Started {
     pub task_line: String,
     pub task_sha: String,
     pub label: String,
+    /// The conversation in the parent pane when it was started; None:
+    /// not known then, or an older build started it.
+    pub conv: Option<String>,
 }
 
 impl Started {
@@ -46,6 +50,12 @@ pub(super) struct Helper {
     /// The account it runs on now.
     pub account: String,
     pub results_delivered: u32,
+    /// The parent conversation it belongs to now: the one that started
+    /// it, or what that was handed over to.
+    pub conv: Option<String>,
+    /// The agent that conversation was handed to, until it says which
+    /// conversation it is in.
+    pub heir: Option<ProcId>,
     /// The digest of the result text a notice last carried; empty: none
     /// did, or an older build sent it.
     pub result_sha: String,
@@ -54,6 +64,10 @@ pub(super) struct Helper {
     /// A stop judged from the screen was told, and neither input nor a
     /// new result came since.
     pub noticed: bool,
+    /// The last told stop was at a prompt, and nothing came since.
+    pub blocked_told: bool,
+    /// The digest of the prompt last told of; empty: not known.
+    pub blocked_prompt: String,
     /// When notices went, within the last window.
     pub notices: Vec<u64>,
     /// Stops held back by the rate since the last notice.
@@ -65,6 +79,7 @@ pub(super) struct Helper {
 impl Helper {
     pub fn new(sid: u64, started: Started, at_ms: u64) -> Self {
         let account = started.account.clone();
+        let conv = started.conv.clone();
         Helper {
             sid,
             started,
@@ -73,9 +88,13 @@ impl Helper {
             delivered_ms: None,
             account,
             results_delivered: 0,
+            conv,
+            heir: None,
             result_sha: String::new(),
             result_new: false,
             noticed: false,
+            blocked_told: false,
+            blocked_prompt: String::new(),
             notices: Vec::new(),
             suppressed: 0,
             held_blocked: false,
@@ -116,11 +135,16 @@ pub(super) enum Event {
     ResultDelivered { sha: String },
     InputSeen,
     IdleNoticed,
-    BlockedNoticed,
+    /// `prompt`: the digest of the prompt it is at; empty: not known.
+    BlockedNoticed { prompt: String },
     ExitedNoticed,
     /// A stop the rate held back; `blocked`: at a prompt.
     NoticeSuppressed { blocked: bool },
     AccountChanged(String),
+    /// Its parent was handed to this agent.
+    ParentAgent(ProcId),
+    /// Its parent conversation goes on as this one.
+    ConversationChanged(String),
     BudgetExpired,
     Stopped,
     /// Everything the events before a rotation said, in one line.
@@ -137,10 +161,12 @@ impl Event {
             Event::ResultDelivered { .. } => "result_delivered",
             Event::InputSeen => "input_seen",
             Event::IdleNoticed => "idle_noticed",
-            Event::BlockedNoticed => "blocked_noticed",
+            Event::BlockedNoticed { .. } => "blocked_noticed",
             Event::ExitedNoticed => "exited_noticed",
             Event::NoticeSuppressed { .. } => "notice_suppressed",
             Event::AccountChanged(_) => "account_changed",
+            Event::ParentAgent(_) => "parent_agent",
+            Event::ConversationChanged(_) => "conversation_changed",
             Event::BudgetExpired => "budget_expired",
             Event::Stopped => "stopped",
             Event::Carried(_) => "carried",
@@ -183,6 +209,7 @@ impl Table {
             Event::ResultChanged => {
                 h.result_new = true;
                 h.noticed = false;
+                h.blocked_told = false;
             }
             Event::ResultDelivered { sha } => {
                 // told again as unchanged: no other result
@@ -192,9 +219,16 @@ impl Table {
                 h.result_sha.clone_from(sha);
                 h.result_new = false;
             }
-            Event::InputSeen => h.noticed = false,
-            Event::IdleNoticed | Event::BlockedNoticed | Event::ExitedNoticed => {
+            Event::InputSeen => {
+                h.noticed = false;
+                h.blocked_told = false;
+            }
+            Event::IdleNoticed | Event::BlockedNoticed { .. } | Event::ExitedNoticed => {
                 h.noticed = true;
+                h.blocked_told = matches!(ev, Event::BlockedNoticed { .. });
+                if let Event::BlockedNoticed { prompt } = ev {
+                    h.blocked_prompt.clone_from(prompt);
+                }
                 h.noticed_at(at_ms);
             }
             Event::NoticeSuppressed { blocked } => {
@@ -202,14 +236,19 @@ impl Table {
                 h.held_blocked |= *blocked;
             }
             Event::AccountChanged(a) => h.account = a.clone(),
+            Event::ParentAgent(p) => h.heir = Some(*p),
+            Event::ConversationChanged(c) => {
+                h.conv = Some(c.clone());
+                h.heir = None;
+            }
             Event::BudgetExpired | Event::Started(_) | Event::Carried(_) | Event::Stopped => {}
         }
     }
 
-    /// Whether one of two panes is a helper the other started.
-    pub fn is_pair(&self, a: u64, b: u64) -> bool {
-        let under = |helper, parent| self.map.get(&helper).is_some_and(|h| h.started.parent == parent);
-        under(a, b) || under(b, a)
+    /// The one of two panes that is a helper the other started.
+    pub fn helper_of_pair(&self, a: u64, b: u64) -> Option<&Helper> {
+        let under = |helper: u64, parent| self.map.get(&helper).filter(|h| h.started.parent == parent);
+        under(a, b).or_else(|| under(b, a))
     }
 
     /// The helpers under `parent`.

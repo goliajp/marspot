@@ -164,6 +164,19 @@ fn a_mode_the_user_set_is_not_overridden() {
     }
 }
 
+/// What a multi-line string says is no setting.
+#[test]
+fn a_mode_inside_a_multi_line_string_is_not_the_servers() {
+    for d in ["\"\"\"", "'''"] {
+        let said = "[mcp_servers.marspot]\ndefault_tools_approval_mode = \"prompt\"\n";
+        let text = format!("notes = {d}\n{said}# {d}\nx = 1\n");
+        assert_eq!(mode_said(&text), None, "{text}");
+        assert!(!approved(&text, Some("/b")).is_empty(), "{text}");
+        // after it, one is
+        assert_eq!(mode_said(&format!("{text}{said}")).as_deref(), Some("\"prompt\""));
+    }
+}
+
 #[test]
 fn each_kind_of_edit_has_a_note_of_its_own() {
     let entry = "[mcp_servers.marspot]\ncommand = \"/a\"\n";

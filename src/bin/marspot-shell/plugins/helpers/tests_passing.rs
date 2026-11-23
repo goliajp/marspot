@@ -93,7 +93,7 @@ fn helpers_an_undrawn_screen_is_no_stop_and_hides_no_dialog() {
     let loading = format!("{echo}Loading\n");
     assert!(matches!(f.stop_at(&loading, &Look::Other, ""), Some(Job::Stopped { stop: Stop::Blocked, by_screen: true, .. })));
     assert!(f.stop_at(&loading, &Look::Other, &loading).is_none(), "nothing drawn since the Enter");
-    feed(&s, 1, vec![Event::BlockedNoticed]);
+    feed(&s, 1, vec![Event::BlockedNoticed { prompt: String::new() }]);
     let tells = |l: &Look| {
         let Some(Job::Stopped { stop, by_screen, .. }) = f.stop_at("", l, "") else { panic!("no stop") };
         notify::verdict(&s.table().map[&1], stop, by_screen, super::records::now_ms())

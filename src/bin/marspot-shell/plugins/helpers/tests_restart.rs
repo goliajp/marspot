@@ -101,7 +101,7 @@ fn helpers_a_carried_helper_past_its_deadline_is_closed_at_the_start() {
     let n = super::begin(&s, || HashSet::from([sid]));
     assert_eq!(n.unwrap(), 1, "carried over");
     assert!(within(|| s.table().map.is_empty()), "its budget ran out long ago");
-    assert!(records::replay(&s.log).map.is_empty());
+    assert!(records::replay(&s.log).unwrap().table.map.is_empty());
     s.park();
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -237,7 +237,7 @@ fn helpers_a_second_start_ends_the_first_worker_and_loses_no_fact() {
     assert_eq!(super::begin(&s, || HashSet::from([100])).unwrap(), 1);
     writer.join().unwrap();
     assert_eq!(s.table().map[&100].account, "P399");
-    assert_eq!(*s.table(), records::replay(&s.log));
+    assert_eq!(*s.table(), records::replay(&s.log).unwrap().table);
     assert_eq!(s.epoch.load(Ordering::Acquire), first + 1);
     let ended = || matches!(old.try_send(Job::Wake), Err(TrySendError::Disconnected(_)));
     assert!(within(ended), "the first worker ended");
