@@ -14,12 +14,10 @@ fn answered(app: &CoreApp, req_id: u32) -> Option<u64> {
 fn landed(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64) -> u64 {
     assert_eq!(app.dev_open_shadow(req_id, parent), Route::Forwarded);
     loop {
-        match rx.recv_timeout(Duration::from_secs(30)).expect("the spawn lands") {
-            CoreEvent::L3SpawnFinished(sid, o) => {
-                app.adopt_spawn_outcome(sid, o);
-                return sid;
-            }
-            _ => {}
+        let ev = rx.recv_timeout(Duration::from_secs(30)).expect("the spawn lands");
+        if let CoreEvent::L3SpawnFinished(sid, o) = ev {
+            app.adopt_spawn_outcome(sid, o);
+            return sid;
         }
     }
 }
