@@ -1,11 +1,13 @@
 //! The agent skills marspot ships, kept in every agent's skills
 //! directory.
 //!
-//! One skill today, `marspot-profiles`: how to lay a machine out as one
-//! shared directory plus one directory per account, which is the layout
-//! the profile switch in the claudecode and codex plugins needs.  Its
-//! two files are compiled in and written wherever they are missing or
-//! differ, so an update of marspot updates the skill.
+//! `marspot-profiles`: how to lay a machine out as one shared directory
+//! plus one directory per account, which is the layout the profile
+//! switch in the claudecode and codex plugins needs.  `marspot-panes`:
+//! the `marspot-peer pane` command line, for a session the user started
+//! by hand and so has no pane tools over MCP.  Their files are compiled
+//! in and written wherever they are missing or differ, so an update of
+//! marspot updates the skills.
 //!
 //! Only an agent directory that already exists is written under: a
 //! machine without codex does not get a `~/.codex`.
@@ -15,15 +17,26 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const SKILL_NAME: &str = "marspot-profiles";
+/// Skill name, and its files: file name, text, mode.
+type Skill = (&'static str, &'static [(&'static str, &'static str, u32)]);
 
-/// File name, text, mode.
-const FILES: &[(&str, &str, u32)] = &[
-    ("SKILL.md", include_str!("../../../../assets/skills/marspot-profiles/SKILL.md"), 0o644),
-    ("profiles.sh", include_str!("../../../../assets/skills/marspot-profiles/profiles.sh"), 0o755),
+const SKILLS: &[Skill] = &[
+    (
+        "marspot-profiles",
+        &[
+            ("SKILL.md", include_str!("../../../../assets/skills/marspot-profiles/SKILL.md"), 0o644),
+            ("profiles.sh", include_str!("../../../../assets/skills/marspot-profiles/profiles.sh"), 0o755),
+        ],
+    ),
+    ("marspot-panes", &[("SKILL.md", include_str!("../../../../assets/skills/marspot-panes/SKILL.md"), 0o644)]),
 ];
 
-/// Bring every agent's copy of the skill in line with the compiled-in
+/// Every file of every skill, under its skill's directory name.
+fn all_files() -> impl Iterator<Item = (&'static str, &'static str, &'static str, u32)> {
+    SKILLS.iter().flat_map(|(skill, files)| files.iter().map(move |(name, text, mode)| (*skill, *name, *text, *mode)))
+}
+
+/// Bring every agent's copy of the skills in line with the compiled-in
 /// one.  Returns lines worth logging: what was written, what failed.
 pub(crate) fn reconcile() -> Vec<String> {
     // a sandbox shares the developer's HOME, and these are the
@@ -81,23 +94,22 @@ fn skills_dirs(home: &Path, gemini_home: Option<&Path>) -> Vec<PathBuf> {
     out
 }
 
-/// The skill's files wherever `reconcile` keeps them.
+/// The skills' files wherever `reconcile` keeps them.
 pub(crate) fn files() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
     let gemini_home = std::env::var_os("GEMINI_CLI_HOME").map(PathBuf::from);
     let dirs = skills_dirs(&home, gemini_home.as_deref());
-    dirs.iter().flat_map(|d| FILES.iter().map(move |(name, _, _)| d.join(SKILL_NAME).join(name))).collect()
+    dirs.iter().flat_map(|d| all_files().map(move |(skill, name, _, _)| d.join(skill).join(name))).collect()
 }
 
 fn install_into(skills_dirs: &[PathBuf]) -> Vec<String> {
     let mut notes = Vec::new();
     for skills in skills_dirs {
-        let dir = skills.join(SKILL_NAME);
-        for (name, text, mode) in FILES {
-            let path = dir.join(name);
-            match install_file(&path, text, *mode) {
+        for (skill, name, text, mode) in all_files() {
+            let path = skills.join(skill).join(name);
+            match install_file(&path, text, mode) {
                 Ok(true) => notes.push(format!("{}: written", path.display())),
                 Ok(false) => {}
                 Err(e) => notes.push(format!("{}: {e}", path.display())),
@@ -119,7 +131,7 @@ fn install_file(path: &Path, text: &str, mode: u32) -> io::Result<bool> {
     fs::create_dir_all(dir)?;
     // renamed into place: an agent reading the skill never sees half
     // of it
-    let tmp = dir.join(format!(".{}.{}.tmp", SKILL_NAME, std::process::id()));
+    let tmp = dir.join(format!(".{}.{}.tmp", path.file_name().expect("a file name").to_string_lossy(), std::process::id()));
     fs::write(&tmp, text)?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
     fs::rename(&tmp, path)?;
@@ -130,6 +142,12 @@ fn install_file(path: &Path, text: &str, mode: u32) -> io::Result<bool> {
 mod tests {
     use super::*;
 
+    const PROFILES: &str = "marspot-profiles";
+
+    fn text_of(skill: &str, name: &str) -> &'static str {
+        all_files().find(|f| f.0 == skill && f.1 == name).expect("a compiled-in file").2
+    }
+
     fn home() -> PathBuf {
         let d = std::env::temp_dir().join(format!("skills-{}", marspot_peer::rand::hex(6)));
         fs::create_dir_all(&d).unwrap();
@@ -137,7 +155,7 @@ mod tests {
     }
 
     fn installed(skills: &Path) -> (PathBuf, PathBuf) {
-        (skills.join(SKILL_NAME).join("SKILL.md"), skills.join(SKILL_NAME).join("profiles.sh"))
+        (skills.join(PROFILES).join("SKILL.md"), skills.join(PROFILES).join("profiles.sh"))
     }
 
     #[test]
@@ -145,10 +163,10 @@ mod tests {
         let h = home();
         fs::create_dir_all(h.join(".claude")).unwrap();
         let notes = install_into(&skills_dirs(&h, None));
-        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert_eq!(notes.len(), 3, "{notes:?}");
         let (md, sh) = installed(&h.join(".claude/skills"));
-        assert_eq!(fs::read_to_string(&md).unwrap(), FILES[0].1);
-        assert_eq!(fs::read_to_string(&sh).unwrap(), FILES[1].1);
+        assert_eq!(fs::read_to_string(&md).unwrap(), text_of(PROFILES, "SKILL.md"));
+        assert_eq!(fs::read_to_string(&sh).unwrap(), text_of(PROFILES, "profiles.sh"));
         assert_eq!(fs::metadata(&sh).unwrap().permissions().mode() & 0o777, 0o755);
         assert_eq!(fs::metadata(&md).unwrap().permissions().mode() & 0o777, 0o644);
         // nothing of the write is left beside them
@@ -180,7 +198,7 @@ mod tests {
         fs::set_permissions(&sh, fs::Permissions::from_mode(0o644)).unwrap();
         let notes = install_into(&skills_dirs(&h, None));
         assert_eq!(notes.len(), 2, "{notes:?}");
-        assert_eq!(fs::read_to_string(&md).unwrap(), FILES[0].1);
+        assert_eq!(fs::read_to_string(&md).unwrap(), text_of(PROFILES, "SKILL.md"));
         assert_eq!(fs::metadata(&sh).unwrap().permissions().mode() & 0o777, 0o755);
         fs::remove_dir_all(&h).unwrap();
     }
@@ -214,9 +232,9 @@ mod tests {
         std::os::unix::fs::symlink(h.join(".codex-profile-1"), h.join(".codex")).unwrap();
         let dirs = skills_dirs(&h, None);
         assert_eq!(dirs, vec![h.join(".claude-shared/skills"), h.join(".codex-profile-1/skills")]);
-        assert_eq!(install_into(&dirs).len(), 4);
+        assert_eq!(install_into(&dirs).len(), 6);
         // reached through either profile, and still a symlink
-        assert!(h.join(".claude-profile-2/skills").join(SKILL_NAME).join("profiles.sh").is_file());
+        assert!(h.join(".claude-profile-2/skills").join(PROFILES).join("profiles.sh").is_file());
         assert!(h.join(".claude-profile-1/skills").symlink_metadata().unwrap().file_type().is_symlink());
         fs::remove_dir_all(&h).unwrap();
     }
@@ -249,5 +267,38 @@ mod tests {
         assert!(installed(&h.join(".gemini-profile-2/.gemini/skills")).0.is_file());
         assert!(!h.join(".gemini-profile-3/.gemini").exists());
         fs::remove_dir_all(&h).unwrap();
+    }
+    /// The pane-control skill goes to all four agents, each into its
+    /// own skills directory, beside the profiles skill.
+    #[test]
+    fn skills_include_marspot_panes_for_all_four_agents() {
+        let h = home();
+        for d in [".claude", ".codex", ".gemini", ".kimi-code"] {
+            fs::create_dir_all(h.join(d)).unwrap();
+        }
+        let dirs = skills_dirs(&h, None);
+        assert_eq!(dirs.len(), 4, "{dirs:?}");
+        install_into(&dirs);
+        for skills in [".claude/skills", ".codex/skills", ".gemini/skills", ".kimi-code/skills"] {
+            let md = h.join(skills).join("marspot-panes/SKILL.md");
+            let text = fs::read_to_string(&md).unwrap();
+            assert_eq!(text, text_of("marspot-panes", "SKILL.md"));
+            assert!(text.starts_with("---\nname: marspot-panes\n"), "{text}");
+            assert!(installed(&h.join(skills)).0.is_file(), "the profiles skill is still there");
+        }
+        fs::remove_dir_all(&h).unwrap();
+    }
+
+    /// It is read only when used, but it still enters the context then:
+    /// short, and it documents only commands the command line accepts.
+    #[test]
+    fn skills_marspot_panes_is_short_and_names_real_commands() {
+        let text = text_of("marspot-panes", "SKILL.md");
+        assert!(text.len() <= 4096, "{} bytes", text.len());
+        for sub in ["list", "open", "send", "keys", "run", "read", "resize", "place", "close", "audit"] {
+            assert!(text.contains(&format!("marspot-peer pane {sub}")), "{sub}");
+            assert!(marspot_peer::control::cli::USAGE.contains(&format!("marspot-peer pane {sub}")), "{sub}");
+        }
+        assert!(!text.contains("marspot-peer helper"), "helpers are not on the command line yet");
     }
 }

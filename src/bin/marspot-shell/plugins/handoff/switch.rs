@@ -112,7 +112,9 @@ fn command(to: Agent, to_home: &Path, resume: Option<&str>, gemini_model: Option
     let home = to_home.to_str()?;
     let cmd = match to {
         Agent::Claude => {
-            let c = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home);
+            let c = crate::plugins::peerbus::claude_mcp::with_config(
+                PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home),
+            );
             // No submit receipt hook -- see
             // `receipts::claude_settings_arg` for why nothing asks for
             // one any more.
@@ -404,6 +406,24 @@ mod tests {
         assert!(told.contains("go on with the task") && !told.contains("Do not run commands"), "{told}");
         let untold = said(false);
         assert!(untold.contains("wait for my next instruction") && untold.contains("Do not run commands"), "{untold}");
+    }
+
+    /// A claude started by a handoff gets marspot's MCP config, ahead
+    /// of `--resume`; the other agents' lines do not.
+    #[test]
+    fn a_switch_to_claude_starts_it_with_the_mcp_config() {
+        let state = marspot_term::test_env::TempDir::new("switch-mcp");
+        let mut env = marspot_term::test_env::EnvGuard::new();
+        env.set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer");
+        let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
+        let mcp = format!("--mcp-config '{}'", state.join("claude-mcp.json").display());
+        let claude = s(command(Agent::Claude, Path::new("/Users/x/.claude-profile-3"), Some("u-1"), None).unwrap());
+        assert!(claude.ends_with(&format!(" claude {mcp} --resume u-1\r")), "{claude}");
+        let fresh = s(command(Agent::Claude, Path::new("/Users/x/.claude-profile-3"), None, None).unwrap());
+        assert!(fresh.ends_with(&format!(" claude {mcp}\r")), "{fresh}");
+        assert!(state.join("claude-mcp.json").is_file());
+        let codex = s(command(Agent::Codex, Path::new("/Users/x/.codex-profile-2"), None, None).unwrap());
+        assert!(!codex.contains("--mcp-config"), "{codex}");
     }
 
     #[test]
