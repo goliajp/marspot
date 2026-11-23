@@ -69,7 +69,7 @@ impl Service {
     fn abandon(&self, port: &mut Port, sid: u64, r: Reject) -> Reject {
         let _ = port.close(sid);
         self.0.record(sid, Event::Stopped);
-        let _ = std::fs::remove_dir_all(self.0.dir_of(sid));
+        self.0.sweep_dirs();
         r
     }
 }
@@ -113,6 +113,7 @@ impl HelperService for Service {
             task_line: first_line(&a.task),
             task_sha: sha256::digest(a.task.as_bytes()).iter().map(|b| format!("{b:02x}")).collect(),
             label: a.name.clone().unwrap_or_default(),
+            conv: crate::plugins::peerbus::conversation_of(parent).map(|c| c.id),
         };
         // written before anything runs in the pane: a shell started over
         // between the two would otherwise find an agent nobody accounts for

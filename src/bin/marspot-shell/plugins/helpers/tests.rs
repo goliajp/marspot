@@ -31,6 +31,7 @@ pub(super) fn started(parent: u64, caller: &str, agent: AgentKind) -> Started {
         task_line: "review\tthe \\ parser".into(),
         task_sha: "ab".repeat(32),
         label: String::new(),
+        conv: None,
     }
 }
 
@@ -59,7 +60,10 @@ fn helpers_every_event_reads_back_from_its_line() {
         Event::ResultDelivered { sha: "cd".repeat(32) },
         Event::InputSeen,
         Event::IdleNoticed,
-        Event::BlockedNoticed,
+        Event::BlockedNoticed { prompt: String::new() },
+        Event::BlockedNoticed { prompt: "ab".into() },
+        Event::ParentAgent(marspot::pidtree::ProcId { pid: 5, start_us: 6 }),
+        Event::ConversationChanged("c".into()),
         Event::ExitedNoticed,
         Event::NoticeSuppressed { blocked: false },
         Event::NoticeSuppressed { blocked: true },
@@ -91,7 +95,7 @@ fn helpers_replay_gives_the_table_and_survives_rotation() {
     feed(&s, 2, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered, Event::AccountChanged("P4".into())]);
     feed(&s, 3, vec![Event::Started(started(11, "codex", AgentKind::Gemini)), Event::TaskDelivered, Event::Stopped]);
     let before = s.table();
-    assert_eq!(records::replay(&s.log), *before);
+    assert_eq!(records::replay(&s.log).unwrap().table, *before);
     assert_eq!(before.map.len(), 2);
     assert_eq!(before.map[&2].account, "P4");
     assert!(before.map[&1].noticed && before.map[&1].result_new);
@@ -101,7 +105,7 @@ fn helpers_replay_gives_the_table_and_survives_rotation() {
     let size = std::fs::metadata(&s.log).unwrap().len();
     std::fs::copy(&s.log, &log2).unwrap();
     records::append(&log2, size, &before, 1, records::now_ms(), &Event::InputSeen);
-    let after = records::replay(&log2);
+    let after = records::replay(&log2).unwrap().table;
     let mut expect = (*before).clone();
     expect.apply(1, 0, &Event::InputSeen);
     assert_eq!(after, expect, "the rotated log replays to the same table");
@@ -147,7 +151,7 @@ fn helpers_notices_dedup_and_rate() {
     assert_eq!(notify::verdict(&t.map[&1], Stop::Idle, true, now + 3), Verdict::Send);
     t.apply(1, now + 3, &Event::IdleNoticed);
     t.apply(1, now + 4, &Event::ResultChanged);
-    t.apply(1, now + 5, &Event::BlockedNoticed);
+    t.apply(1, now + 5, &Event::BlockedNoticed { prompt: String::new() });
     // three in ten minutes: the fourth is held and counted
     t.apply(1, now + 6, &Event::ResultChanged);
     assert_eq!(notify::verdict(&t.map[&1], Stop::Idle, true, now + 7), Verdict::Hold);

@@ -135,7 +135,7 @@ fn helpers_held_stop_at_a_prompt_keeps_its_kind() {
     assert!(t.map[&1].held_blocked && t.map[&1].suppressed == 3);
     let l = records::line(5, 2, 1, &Event::NoticeSuppressed { blocked: true });
     assert_eq!(records::parse(&l).map(|p| p.2), Some(Event::NoticeSuppressed { blocked: true }));
-    t.apply(1, 4, &Event::BlockedNoticed);
+    t.apply(1, 4, &Event::BlockedNoticed { prompt: String::new() });
     assert!(!t.map[&1].held_blocked && t.map[&1].suppressed == 0);
 }
 
@@ -182,7 +182,7 @@ fn helpers_account_change_is_where_it_runs_now() {
     account_changed(AccountChanged { sid: 99, agent: "claude", from: 1, to: 3, at: 0 });
     super::work::account_changes(&s);
     assert_eq!(s.table().map[&4].account, "P5");
-    assert_eq!(records::replay(&dir.join("events.log")).map[&4].account, "P5", "and the log says so");
+    assert_eq!(records::replay(&dir.join("events.log")).unwrap().table.map[&4].account, "P5", "and the log says so");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

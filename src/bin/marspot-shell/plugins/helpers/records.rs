@@ -9,9 +9,11 @@
 //! sums up did.  `started` alone would not do: the next start of the
 //! shell would find no `task_delivered` and close every helper.
 
-use std::io::Write;
+use std::collections::HashSet;
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use marspot::pidtree::ProcId;
 use marspot_peer::control::{AgentKind, Isolation};
 
 use super::table::{Event, Helper, Started, Table};
@@ -49,7 +51,7 @@ fn unesc(s: &str) -> String {
 }
 
 fn started_kv(s: &Started) -> Vec<(&'static str, String)> {
-    vec![
+    let mut v = vec![
         ("parent", s.parent.to_string()),
         ("caller", s.caller.clone()),
         ("agent", s.agent.as_str().into()),
@@ -61,7 +63,18 @@ fn started_kv(s: &Started) -> Vec<(&'static str, String)> {
         ("task", s.task_line.clone()),
         ("sha256", s.task_sha.clone()),
         ("label", s.label.clone()),
-    ]
+    ];
+    v.extend(s.conv.clone().map(|c| ("conv", c)));
+    v
+}
+
+fn proc_text(p: &ProcId) -> String {
+    format!("{}:{}", p.pid, p.start_us)
+}
+
+fn proc_of(text: &str) -> Option<ProcId> {
+    let (pid, start_us) = text.split_once(':')?;
+    Some(ProcId { pid: pid.parse().ok()?, start_us: start_us.parse().ok()? })
 }
 
 fn kv(ev: &Event) -> Vec<(&'static str, String)> {
@@ -69,6 +82,9 @@ fn kv(ev: &Event) -> Vec<(&'static str, String)> {
         Event::Started(s) => started_kv(s),
         Event::ResultDelivered { sha } if !sha.is_empty() => vec![("sha256", sha.clone())],
         Event::AccountChanged(a) => vec![("account", a.clone())],
+        Event::BlockedNoticed { prompt } if !prompt.is_empty() => vec![("prompt", prompt.clone())],
+        Event::ParentAgent(p) => vec![("agent_proc", proc_text(p))],
+        Event::ConversationChanged(c) => vec![("conv", c.clone())],
         Event::NoticeSuppressed { blocked: true } => vec![("stop", "blocked".into())],
         Event::Carried(h) => {
             let mut v = started_kv(&h.started);
@@ -82,10 +98,14 @@ fn kv(ev: &Event) -> Vec<(&'static str, String)> {
                 ("result_sha", h.result_sha.clone()),
                 ("result_new", h.result_new.to_string()),
                 ("noticed", h.noticed.to_string()),
+                ("blocked_told", h.blocked_told.to_string()),
+                ("blocked_prompt", h.blocked_prompt.clone()),
                 ("notices", list(&h.notices)),
                 ("suppressed", h.suppressed.to_string()),
                 ("held_blocked", h.held_blocked.to_string()),
             ]);
+            v.extend(h.conv.clone().map(|c| ("now_conv", c)));
+            v.extend(h.heir.as_ref().map(|p| ("heir", proc_text(p))));
             v
         }
         _ => Vec::new(),
@@ -117,6 +137,7 @@ fn started_of(get: &dyn Fn(&str) -> Option<String>) -> Option<Started> {
         task_line: get("task").unwrap_or_default(),
         task_sha: get("sha256").unwrap_or_default(),
         label: get("label").unwrap_or_default(),
+        conv: get("conv"),
     })
 }
 
@@ -131,6 +152,10 @@ fn carried_of(sid: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<Helper> 
     h.result_sha = get("result_sha").unwrap_or_default();
     h.result_new = flag("result_new");
     h.noticed = flag("noticed");
+    h.blocked_told = flag("blocked_told");
+    h.blocked_prompt = get("blocked_prompt").unwrap_or_default();
+    h.conv = get("now_conv").or(h.conv);
+    h.heir = get("heir").as_deref().and_then(proc_of);
     h.notices = get("notices").unwrap_or_default().split(',').filter_map(|t| t.parse().ok()).collect();
     h.suppressed = get("suppressed").and_then(|r| r.parse().ok()).unwrap_or(0);
     h.held_blocked = flag("held_blocked");
@@ -155,10 +180,12 @@ pub(super) fn parse(l: &str) -> Option<(u64, u64, Event)> {
         "result_delivered" => Event::ResultDelivered { sha: get("sha256").unwrap_or_default() },
         "input_seen" => Event::InputSeen,
         "idle_noticed" => Event::IdleNoticed,
-        "blocked_noticed" => Event::BlockedNoticed,
+        "blocked_noticed" => Event::BlockedNoticed { prompt: get("prompt").unwrap_or_default() },
         "exited_noticed" => Event::ExitedNoticed,
         "notice_suppressed" => Event::NoticeSuppressed { blocked: get("stop").as_deref() == Some("blocked") },
         "account_changed" => Event::AccountChanged(get("account")?),
+        "parent_agent" => Event::ParentAgent(proc_of(&get("agent_proc")?)?),
+        "conversation_changed" => Event::ConversationChanged(get("conv")?),
         "budget_expired" => Event::BudgetExpired,
         "stopped" => Event::Stopped,
         "carried" => Event::Carried(Box::new(carried_of(sid, &get)?)),
@@ -167,14 +194,55 @@ pub(super) fn parse(l: &str) -> Option<(u64, u64, Event)> {
     Some((at, sid, ev))
 }
 
-/// The table the log at `path` says.
-pub(super) fn replay(path: &Path) -> Table {
-    let mut t = Table::default();
-    let body = std::fs::read_to_string(path).unwrap_or_default();
-    for (at, sid, ev) in body.lines().filter_map(parse) {
-        t.apply(sid, at, &ev);
+/// What a log says.
+#[derive(Debug, Default)]
+pub(super) struct Replayed {
+    pub table: Table,
+    /// The helpers it says stopped.
+    pub stopped: HashSet<u64>,
+}
+
+/// Replay the log at `path`; none there is an empty one.  A line that
+/// cannot be read is skipped by itself.
+pub(super) fn replay(path: &Path) -> std::io::Result<Replayed> {
+    let mut r = Replayed::default();
+    let body = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(r),
+        Err(e) => return Err(e),
+    };
+    for (at, sid, ev) in body.split(|b| *b == b'\n').filter_map(|l| parse(std::str::from_utf8(l).ok()?)) {
+        match ev {
+            Event::Stopped => {
+                r.stopped.insert(sid);
+            }
+            Event::Started(_) | Event::Carried(_) => {
+                r.stopped.remove(&sid);
+            }
+            _ => {}
+        }
+        r.table.apply(sid, at, &ev);
     }
-    t
+    Ok(r)
+}
+
+/// Whether `f` ends in the middle of a line: a write that was cut short.
+fn ends_in_a_line(f: &mut std::fs::File) -> std::io::Result<bool> {
+    let mut last = [b'\n'];
+    if f.seek(SeekFrom::End(0))? > 0 {
+        f.seek(SeekFrom::End(-1))?;
+        f.read_exact(&mut last)?;
+    }
+    Ok(last != [b'\n'])
+}
+
+/// Append `body` on a line of its own.
+fn append_to(path: &Path, mut body: String) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new().create(true).read(true).append(true).open(path)?;
+    if ends_in_a_line(&mut f)? {
+        body.insert(0, '\n');
+    }
+    f.write_all(body.as_bytes())
 }
 
 /// Append `ev`, rotating first when the file would pass `rotate_at`:
@@ -193,9 +261,7 @@ pub(super) fn append(path: &Path, rotate_at: u64, table: &Table, sid: u64, at_ms
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(path);
-    match file.and_then(|mut f| f.write_all(body.as_bytes())) {
-        Ok(()) => {}
-        Err(e) => marspot::lx_warn!("helpers.log_write_failed", &format!("{}: {e}", path.display())),
+    if let Err(e) = append_to(path, body) {
+        marspot::lx_warn!("helpers.log_write_failed", &format!("{}: {e}", path.display()));
     }
 }

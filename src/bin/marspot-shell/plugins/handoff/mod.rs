@@ -10,6 +10,7 @@ pub(crate) mod launch_line;
 pub(crate) mod history;
 pub(crate) use marspot_peer::json;
 mod ledger;
+mod note;
 mod resume;
 mod switch;
 mod tags;

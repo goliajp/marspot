@@ -10,7 +10,7 @@ use marspot_peer::control::AgentKind;
 
 use super::Shared;
 use super::notify::Stop;
-use super::table::{Helper, Table};
+use super::table::{Event, Helper, Table};
 use super::tick::START_GRACE_MS;
 use super::work::Job;
 use crate::plugins::PluginHost;
@@ -33,16 +33,34 @@ pub(super) enum Turn {
     Held,
     /// Stopped at an approval prompt, and that was told.
     BlockedTold,
+    /// The same, told before the shell started: the prompt it is at now
+    /// may be another.
+    BlockedBefore,
 }
 
 /// The turns a start begins with.  A helper whose task went in and
 /// whose last stop was not told may have ended its turn while no plugin
 /// ran, or had its stop lost with the queue: it counts as working, so
 /// that its wait for input is told.  One with a stop held back by the
-/// rate is told of that one.
+/// rate is told of that one.  One last told of at an approval prompt
+/// may still be at it.
 pub(super) fn turns_at_start(t: &Table) -> HashMap<u64, Turn> {
     let untold = t.map.values().filter(|h| turn_reported(h) && h.delivered_ms.is_some() && !h.noticed && h.suppressed == 0);
-    untold.map(|h| (h.sid, Turn::Working)).collect()
+    let blocked = t.map.values().filter(|h| turn_reported(h) && h.blocked_told);
+    untold.map(|h| (h.sid, Turn::Working)).chain(blocked.map(|h| (h.sid, Turn::BlockedBefore))).collect()
+}
+
+/// Whether `ev` is something given to `h` after a stop of its that was
+/// told: its next turn may be about to start, or may not.
+pub(super) fn pokes(h: &Helper, ev: &Event) -> bool {
+    turn_reported(h) && h.noticed && matches!(ev, Event::InputSeen | Event::ResultChanged)
+}
+
+/// The helpers [`pokes`] was true of, as far as the table of a start
+/// says: one in a turn shows it soon.
+pub(super) fn poked_at_start(t: &Table, now_ms: u64) -> HashMap<u64, u64> {
+    let told_before = t.map.values().filter(|h| turn_reported(h) && !h.noticed && !h.notices.is_empty() && h.suppressed == 0);
+    told_before.map(|h| (h.sid, now_ms)).collect()
 }
 
 /// The last turn's end of a claude helper that was told.
@@ -76,8 +94,11 @@ impl Shared {
             return false;
         }
         let recent = |at: u64| now_ms.saturating_sub(at) < AFTER_HELPERS_MS;
-        t.under(h.sid).any(|c| !c.noticed || c.notices.last().is_some_and(|at| recent(*at)))
-            || self.lock().child_gone.get(&h.sid).is_some_and(|at| recent(*at))
+        let st = self.lock();
+        // told before, and what it was given since opened no turn
+        let still_stopped = |c: &Helper| st.poked.get(&c.sid).is_some_and(|at| !recent(*at));
+        t.under(h.sid).any(|c| !c.noticed && !still_stopped(c) || c.notices.last().is_some_and(|at| recent(*at)))
+            || st.child_gone.get(&h.sid).is_some_and(|at| recent(*at))
     }
 }
 
@@ -93,7 +114,12 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
     // in a turn, not only printing
     let at_work = matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval));
     if at_work {
-        s.lock().turned.insert(h.sid);
+        let mut st = s.lock();
+        st.turned.insert(h.sid);
+        // an approval prompt may be the one it stopped at before
+        if v.status != PaneStatus::Busy(BusyKind::ToolAwaitingApproval) {
+            st.poked.remove(&h.sid);
+        }
     }
     let seen = in_turn.entry(h.sid).or_default();
     let claude = h.started.agent == AgentKind::Claude;
@@ -110,6 +136,9 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
         told.by_state = false;
     }
     match v.status {
+        PaneStatus::Busy(BusyKind::ToolAwaitingApproval) if v.held >= BLOCKED_AFTER && *seen == Turn::BlockedBefore => {
+            queue(s, h.sid, seen, Turn::BlockedTold, Job::StillBlocked { sid: h.sid });
+        }
         PaneStatus::Busy(BusyKind::ToolAwaitingApproval) if v.held >= BLOCKED_AFTER && *seen != Turn::BlockedTold => {
             queue_stop(s, h.sid, seen, Turn::BlockedTold, Stop::Blocked);
         }
@@ -160,11 +189,16 @@ fn recorded_end(s: &Shared, t: &Table, h: &Helper, turn: (Option<u64>, u64, Opti
 /// Note the turn as `now` and queue its stop; a stop that did not go
 /// leaves the turn as it was, for the next tick.
 fn queue_stop(s: &Shared, sid: u64, seen: &mut Turn, now: Turn, stop: Stop) -> bool {
+    queue(s, sid, seen, now, Job::Stopped { sid, stop, by_screen: false })
+}
+
+fn queue(s: &Shared, sid: u64, seen: &mut Turn, now: Turn, job: Job) -> bool {
+    let name = job.name();
     let was = std::mem::replace(seen, now);
-    let queued = s.queue(Job::Stopped { sid, stop, by_screen: false });
+    let queued = s.queue(job);
     if !queued {
         *seen = was;
-        marspot::lx_warn!("helpers.queue_full", &format!("sid={sid}: {stop:?} not queued"));
+        marspot::lx_warn!("helpers.queue_full", &format!("sid={sid}: {name} not queued"));
     }
     queued
 }

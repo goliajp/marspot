@@ -39,7 +39,7 @@ pub(super) fn close(s: &Arc<Shared>, sid: u64) -> bool {
         return false;
     }
     s.record(sid, Event::Stopped);
-    let _ = std::fs::remove_dir_all(s.dir_of(sid));
+    s.sweep_dirs();
     true
 }
 
