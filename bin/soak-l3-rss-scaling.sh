@@ -116,8 +116,11 @@ echo "PASS: per-session idle L3 RSS ${PER9} KiB ≤ ${PER_SESSION_CAP_KIB} KiB, 
 # shadow's frame region and keeps a `Pane` for it, and draws nothing.
 # Opens a window, so this part runs on the runner:
 #   bin/test-e2e-remote.sh soak-l3-rss-scaling.sh
+# Measured on mini (2026-11-23, 8 shadow panes against none, three runs):
+# 372, 348 and 340 KiB per shadow pane; the cap is 1.5x the largest.
+# SHADOW_CORE_KIB_CAP=0 measures without a verdict.
 SHADOW_N="${SHADOW_N:-8}"
-SHADOW_CORE_KIB_CAP="${SHADOW_CORE_KIB_CAP:-0}"
+SHADOW_CORE_KIB_CAP="${SHADOW_CORE_KIB_CAP:-558}"
 SHELL_BIN="$DEV_TARGET/marspot-shell"
 CORE_BIN="$DEV_TARGET/marspot-core"
 for b in "$SHELL_BIN" "$CORE_BIN"; do
