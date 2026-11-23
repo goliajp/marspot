@@ -15,6 +15,7 @@ use super::*;
 mod audit_tests;
 mod conn_tests;
 mod server_tests;
+mod shadow_race_tests;
 
 fn temp(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("pc-{tag}-{}-{}", std::process::id(), marspot_peer::rand::hex(4)));
@@ -34,6 +35,7 @@ fn hub_at(dir: &std::path::Path) -> (Hub, std::sync::mpsc::Receiver<MainCmd>) {
         conns: AtomicUsize::new(0),
         links: links::Links::new(),
         limits: Mutex::new(Limits::default()),
+        shadow_gate: shadow_gate::Gate::default(),
         config: RwLock::new(Arc::new(Config::default())),
         deny: Mutex::new(DenyList::at(dir.join("control-deny.tsv"))),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),
