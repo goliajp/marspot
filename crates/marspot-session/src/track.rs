@@ -1,6 +1,6 @@
 //! What the pane's output did, batch by batch, in the terms watches are
-//! asked in: the output position, the latest command end, and which
-//! rows a position's output was written on.
+//! asked in: the output position, the latest command end and input
+//! start, and which rows a position's output was written on.
 //!
 //! A row is numbered absolutely: the grid's scroll-push count plus the
 //! row on screen, the same count a published frame's header carries.
@@ -11,7 +11,7 @@ use std::time::Instant;
 use marspot_term::grid::Grid;
 
 use crate::SessionImpl;
-use crate::pane_ctl::local;
+use crate::pane_ctl::{Marks, local, shell_in_front};
 
 /// Pairs of (position, cursor) kept to find where a position's output
 /// went.
@@ -29,6 +29,13 @@ pub(crate) struct Track {
     last_output: Instant,
     commands_seen: u64,
     command_end: Option<(u64, Option<u8>)>,
+    inputs_seen: u64,
+    /// Where the latest `OSC 133 ; B` the shell wrote in front was;
+    /// none while the pane is taken at its quiet alone.
+    input_start: Option<u64>,
+    /// Whether such a mark came since the batch of the latest command
+    /// end.
+    input_since_end: bool,
     /// The terminal's generation at the last look: output a held grid
     /// kept is parsed when the hold ends, without the position moving.
     generation: u64,
@@ -43,7 +50,9 @@ pub(crate) struct Batch {
 }
 
 impl Track {
-    pub(crate) fn new(session: &SessionImpl, command_end: Option<(u64, Option<u8>)>) -> Self {
+    pub(crate) fn new(session: &SessionImpl, resumed: Marks) -> Self {
+        let inputs_seen = session.terminal().input_starts();
+        let input_start = first_input_start(resumed.input_start, inputs_seen);
         let mut t = Self {
             ring: [(0, (0, 0)); RING],
             head: 0,
@@ -51,7 +60,10 @@ impl Track {
             pos: local(session).output_pos(),
             last_output: Instant::now(),
             commands_seen: session.terminal().command_end().0,
-            command_end,
+            command_end: resumed.command_end,
+            inputs_seen,
+            input_start,
+            input_since_end: input_start.is_some(),
             generation: session.terminal().generation(),
         };
         t.mark(session);
@@ -69,6 +81,27 @@ impl Track {
     /// Position and status of the latest `OSC 133 ; D`.
     pub(crate) fn command_end(&self) -> Option<(u64, Option<u8>)> {
         self.command_end
+    }
+
+    /// Position of the latest `OSC 133 ; B`, placed like a command end.
+    pub(crate) fn input_start(&self) -> Option<u64> {
+        self.input_start
+    }
+
+    /// Whether the shell may have drawn its prompt after `since`.  One
+    /// that marks where input starts has only once it marked one after
+    /// it: a `precmd` that runs something slow and silent is quiet long
+    /// before the prompt comes.  One that never marked any is taken at
+    /// its quiet alone.
+    pub(crate) fn prompt_drawn(&self, since: u64) -> bool {
+        self.input_start.is_none_or(|at| at > since)
+    }
+
+    /// Take the pane at its quiet alone again: a prompt watch held
+    /// without the mark it waited for, so the shell no longer sets it.
+    pub(crate) fn forget_input_start(&mut self) {
+        self.input_start = None;
+        self.input_since_end = false;
     }
 
     /// Note the turn's output, if there was any.
@@ -96,14 +129,44 @@ impl Track {
         // the batch's first end: a shell's hook may print its own right
         // behind the one a command printed, with another status
         let (count, latest) = session.terminal().command_end();
-        if count != self.commands_seen {
+        let ended = count != self.commands_seen;
+        if ended {
             let first = session.terminal().command_end_status(self.commands_seen + 1).unwrap_or(latest);
             self.commands_seen = count;
             self.command_end = Some((pos, first));
         }
+        let inputs = session.terminal().input_starts();
+        // a mark from a program the shell runs (ssh) says nothing of
+        // this shell's prompt; the foreground is read after the batch,
+        // so one from a program that already ended (a short `cat` of a
+        // file holding it) still counts, which a prompt watch's longer
+        // quiet then corrects
+        let input = inputs != self.inputs_seen && shell_in_front(session);
+        self.inputs_seen = inputs;
+        self.note_marks(pos, ended, input);
         let from = self.last_at();
         let to = self.mark(session);
         Some(Batch { from, to })
+    }
+
+    /// Keep the input start rule only while the shell marks an input
+    /// start between command ends: one that stopped and still writes
+    /// command ends is taken at its quiet again from its second command
+    /// end on.  One that writes neither (`exec bash`) is left to the
+    /// prompt watch's longer quiet.  A batch holds no order between its
+    /// marks; a shell's hook writes the end before the next prompt's
+    /// input start, so one in the same batch counts for the next end.
+    fn note_marks(&mut self, pos: u64, ended: bool, input: bool) {
+        if ended {
+            if !self.input_since_end && !input {
+                self.input_start = None;
+            }
+            self.input_since_end = false;
+        }
+        if input {
+            self.input_start = Some(pos);
+            self.input_since_end = true;
+        }
     }
 
     /// Remember where the cursor is at the current position.
@@ -140,6 +203,13 @@ impl Track {
     }
 }
 
+/// Where a new track puts the latest input start: the one the image
+/// before handed over, or, for marks parsed before the track began, a
+/// position older than any a watch can be given.
+fn first_input_start(resumed: Option<u64>, inputs_seen: u64) -> Option<u64> {
+    resumed.or((inputs_seen > 0).then_some(0))
+}
+
 /// The cursor, numbered absolutely.
 pub(crate) fn cursor_at(grid: &Grid) -> At {
     let (col, row) = grid.cursor();
@@ -159,6 +229,9 @@ mod tests {
             last_output: Instant::now(),
             commands_seen: 0,
             command_end: None,
+            inputs_seen: 0,
+            input_start: None,
+            input_since_end: false,
             generation: 0,
         };
         for &(p, r) in pairs {
@@ -184,5 +257,39 @@ mod tests {
         let t = track(&pairs);
         assert_eq!(t.at(1990).0, 199);
         assert_eq!(t.at(0).0, 136, "the oldest of the last 64");
+    }
+
+    #[test]
+    fn a_track_that_starts_after_marks_puts_them_before_every_position() {
+        assert_eq!(first_input_start(None, 0), None);
+        assert_eq!(first_input_start(None, 3), Some(0));
+        assert_eq!(first_input_start(Some(40), 3), Some(40));
+        let mut t = track(&[]);
+        t.input_start = first_input_start(None, 1);
+        assert!(!t.prompt_drawn(0), "a mark at 0 is not after a watch from 0");
+        assert!(!t.prompt_drawn(5));
+    }
+
+    #[test]
+    fn a_prompt_counts_as_drawn_only_after_a_mark_past_the_watch() {
+        let mut t = track(&[]);
+        assert!(t.prompt_drawn(10), "no marks: taken at its quiet");
+        t.note_marks(10, false, true);
+        assert!(!t.prompt_drawn(10), "a mark at the watch's own position");
+        assert!(t.prompt_drawn(9));
+    }
+
+    #[test]
+    fn a_shell_that_stops_marking_input_starts_is_taken_at_its_quiet() {
+        let mut t = track(&[]);
+        // a hook writes the end and the next prompt's mark in one batch
+        t.note_marks(10, true, true);
+        t.note_marks(20, true, true);
+        t.note_marks(30, true, false);
+        assert_eq!(t.input_start, Some(20), "the mark at 20 came after the end at 10");
+        t.note_marks(40, true, false);
+        assert_eq!(t.input_start, None, "no mark between the ends at 30 and 40");
+        t.note_marks(50, false, true);
+        assert_eq!(t.input_start, Some(50), "marks again");
     }
 }

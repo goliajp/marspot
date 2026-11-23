@@ -45,7 +45,7 @@ fn parse(out: &[u8], text: Option<(&str, Check)>) -> Duration {
     let (local, tx) = LocalSession::parsing_only(120, 40);
     let mut session = SessionImpl::Local(local);
     let (wake, _woken) = std::sync::mpsc::channel();
-    let mut ctl = PaneCtl::new(&session, None, wake);
+    let mut ctl = PaneCtl::new(&session, Default::default(), wake);
     if let Some((text, check)) = text {
         let since = crate::pane_ctl::local(&session).output_pos();
         let watch = WatchBody { watch_id: 1, kind: WatchKind::Text, since_pos: since, quiet_ms: 0, text: text.into() };

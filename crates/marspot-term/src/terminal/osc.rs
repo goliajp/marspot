@@ -1,6 +1,6 @@
 //! Operating system commands: what `ESC ] … ST` asks for.
 
-use super::Handler;
+use super::{Handler, Terminal};
 use crate::lx_debug;
 
 /// The most a program may put on the clipboard in one OSC 52.
@@ -21,6 +21,8 @@ const ENDS_KEPT: usize = 8;
 pub(super) struct CommandEnds {
     count: u64,
     statuses: [Option<u8>; ENDS_KEPT],
+    /// How many `OSC 133 ; B` (the prompt is drawn, input starts).
+    inputs: u64,
 }
 
 impl CommandEnds {
@@ -33,10 +35,33 @@ impl CommandEnds {
         (self.count, self.status(self.count).flatten())
     }
 
+    pub(super) fn inputs(&self) -> u64 {
+        self.inputs
+    }
+
     /// The status of end number `n` (from 1), if it is still kept.
     pub(super) fn status(&self, n: u64) -> Option<Option<u8>> {
         let kept = n >= 1 && n <= self.count && self.count - n < ENDS_KEPT as u64;
         kept.then(|| self.statuses[((n - 1) % ENDS_KEPT as u64) as usize])
+    }
+}
+
+impl Terminal {
+    /// How many `OSC 133 ; D` the terminal has parsed, and what the
+    /// latest one said the exit status was.
+    pub fn command_end(&self) -> (u64, Option<u8>) {
+        self.command_end.latest()
+    }
+
+    /// The status of the `n`-th `OSC 133 ; D` (from 1), while it is one
+    /// of the latest eight.
+    pub fn command_end_status(&self, n: u64) -> Option<Option<u8>> {
+        self.command_end.status(n)
+    }
+
+    /// How many `OSC 133 ; B` (input starts) the terminal has parsed.
+    pub fn input_starts(&self) -> u64 {
+        self.command_end.inputs()
     }
 }
 
@@ -115,7 +140,10 @@ impl Handler<'_> {
                 let mut parts = body.split(';');
                 let mark = match parts.next() {
                     Some("A") | Some("P") => crate::grid::PromptMark::PromptStart,
-                    Some("B") => crate::grid::PromptMark::InputStart,
+                    Some("B") => {
+                        self.command_end.inputs += 1;
+                        crate::grid::PromptMark::InputStart
+                    }
                     Some("C") => crate::grid::PromptMark::OutputStart,
                     Some("D") => {
                         let status = parts
