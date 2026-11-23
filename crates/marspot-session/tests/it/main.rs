@@ -14,6 +14,7 @@ mod pane_awake;
 mod pane_link;
 mod paste_markers;
 mod self_execv;
+mod shadow_session;
 mod signals_in_the_pane;
 mod stray_pointer;
 mod typing;

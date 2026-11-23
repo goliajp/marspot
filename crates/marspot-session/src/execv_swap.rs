@@ -75,6 +75,7 @@ pub(crate) fn do_l3_execv_swap(
     poke: Option<ControlWriter>,
     snapshots: &SnapshotWriter,
     marks: crate::pane_ctl::Marks,
+    shadow: crate::shadow::ShadowCfg,
 ) -> std::io::Result<()> {
     let started = Instant::now();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
@@ -112,7 +113,7 @@ pub(crate) fn do_l3_execv_swap(
 
     let manifest_path = handoff_manifest_path();
     let handoff = L3Handoff {
-        master_fd, child_pid, listen_fd, cols, rows, control_stream_fd, marks,
+        master_fd, child_pid, listen_fd, cols, rows, control_stream_fd, marks, shadow,
     };
     write_handoff_manifest(&handoff, &manifest_path)?;
 

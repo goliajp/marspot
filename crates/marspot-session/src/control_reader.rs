@@ -217,6 +217,13 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
                         break;
                     }
                 }
+                MsgType::SessionShadow => {
+                    if let Ok(m) = marspot_term::shell_proto::decode_session_shadow(&f.payload)
+                        && tx.send(SessionEvent::Shadow(m)).is_err()
+                    {
+                        break;
+                    }
+                }
                 MsgType::SessionRepublish => {
                     if let Ok(name) = String::from_utf8(f.payload)
                         && tx.send(SessionEvent::Republish(name)).is_err()

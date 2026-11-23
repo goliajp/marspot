@@ -75,6 +75,7 @@ impl SessionListener {
         cwd: &str,
         shm_name: &str,
         shell_child_pid: i32,
+        shadow_of: u64,
         ev_tx: Sender<crate::SessionEvent>,
     ) -> io::Result<Self> {
         let dir = session_dir(id);
@@ -131,6 +132,7 @@ impl SessionListener {
             shell_child_pid,
             build: marspot_term::build::own().to_string(),
             stamps_regions: true,
+            shadow_of,
         };
         if let Err(e) = write_session_entry(&entry) {
             // Narrow rollback so list / scan won't see a phantom
@@ -177,6 +179,7 @@ impl SessionListener {
         shell_child_pid: i32,
         cols: u16,
         rows: u16,
+        shadow_of: u64,
         ev_tx: Sender<crate::SessionEvent>,
     ) -> io::Result<Self> {
         // SAFETY: caller asserts `raw_fd` is a live UnixListener fd
@@ -210,6 +213,7 @@ impl SessionListener {
             shell_child_pid,
             build: marspot_term::build::own().to_string(),
             stamps_regions: true,
+            shadow_of,
         };
         let _ = write_session_entry(&entry);
         Ok(Self {

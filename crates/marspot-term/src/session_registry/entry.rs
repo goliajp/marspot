@@ -37,6 +37,10 @@ pub struct SessionEntry {
     /// (`SessionRepublish`).  A region without an identity is then not
     /// this session's; from an L3 without this, it is all there is.
     pub stamps_regions: bool,
+    /// The session this one is a shadow pane of: a session with no
+    /// window that ends with that one.  `0` = not a shadow, and what an
+    /// entry from before the field reads as.
+    pub shadow_of: u64,
 }
 
 /// Quote a string value.  `\n` and `\r` are escaped so a value can
@@ -114,6 +118,9 @@ pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
     }
     if entry.stamps_regions {
         writeln!(s, "stamps_regions = 1").ok();
+    }
+    if entry.shadow_of != 0 {
+        writeln!(s, "shadow_of = {}", entry.shadow_of).ok();
     }
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(s.as_bytes())?;
@@ -210,6 +217,7 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         shell_child_pid: opt_i32("shell_child_pid"),
         build: opt_str("build"),
         stamps_regions: fields.get("stamps_regions").is_some_and(|v| *v == "1"),
+        shadow_of: fields.get("shadow_of").and_then(|v| v.parse().ok()).unwrap_or(0),
     })
 }
 

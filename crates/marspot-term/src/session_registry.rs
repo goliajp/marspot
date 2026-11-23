@@ -407,6 +407,7 @@ pub(crate) mod test_support {
             shell_child_pid: 99000 + id as i32,
             build: format!("MARSPOT_FP=abc{id}|2026-10-17T00:00:00Z"),
             stamps_regions: true,
+            shadow_of: 0,
         }
     }
 
@@ -544,6 +545,22 @@ mod tests {
         let text = std::fs::read_to_string(session_entry_path(10)).unwrap();
         assert!(!text.contains("stamps_regions"), "nothing written by an L3 that does not stamp");
         assert!(!read_session_entry(10).expect("read").stamps_regions);
+    }
+
+    /// A shadow pane's parent is written and read back; a pane that is
+    /// none writes nothing, and an entry without the key reads as none.
+    #[test]
+    fn shadow_session_parent_is_written_only_when_set_and_reads_back() {
+        let _g = sandbox_state_dir();
+        let mut e = sample_entry(11);
+        e.shadow_of = 4_200_000_007;
+        write_session_entry(&e).expect("write");
+        assert_eq!(read_session_entry(11).expect("read"), e);
+        e.shadow_of = 0;
+        write_session_entry(&e).expect("write");
+        let text = std::fs::read_to_string(session_entry_path(11)).unwrap();
+        assert!(!text.contains("shadow_of"), "nothing written for a pane that is no shadow");
+        assert_eq!(read_session_entry(11).expect("read").shadow_of, 0);
     }
 
     #[test]

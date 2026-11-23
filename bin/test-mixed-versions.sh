@@ -24,6 +24,9 @@
 #             its text; the old core finds no cluster text and no
 #             title for it, which is the accepted cost until the core
 #             is the new one again → new core
+#   shadow    a session started as the pane's shadow goes back to the
+#             old session build: the old build's entry names no
+#             parent, and the session lives on
 #   lost      old app whose session's grid region lost its name → new
 #             core with a new session build staged: the session
 #             updates, moves to a new region and lives → and with no
@@ -76,6 +79,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 source "$ROOT/bin/_sandbox-panes.sh"
 source "$ROOT/bin/_mixed-versions-checks.sh"
+source "$ROOT/bin/_mixed-versions-shadow.sh"
 NEW="$ROOT/target/release"
 OLD="${MARSPOT_OLD_BINS:-}"
 PROBE="$NEW/examples/shm_probe"
@@ -367,6 +371,8 @@ check "no session was started again" lacks_log core.reattach.l3_failed
 check "an old session writes the new core $OLD_CELLS frames" layout_is "$OLD_LAYOUT"
 check "this build reads the frame" frame_shows MARK-M
 bells_keep_the_stream "an old session to the new core"
+
+shadow_goes_back_to_the_old_build
 
 echo "════ lost: an old session without its region, a new session build staged ════"
 start_app "$OLD"

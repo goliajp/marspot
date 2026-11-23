@@ -62,6 +62,7 @@ fn entry(id: u64, cwd: &str) -> SessionEntry {
         shell_child_pid: 0,
         build: String::new(),
         stamps_regions: false,
+        shadow_of: 0,
     }
 }
 
