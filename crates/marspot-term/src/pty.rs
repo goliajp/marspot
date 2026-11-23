@@ -237,8 +237,13 @@ impl Pty {
                 // nor our signals: this process is Rust and ignores
                 // SIGPIPE, and an ignored signal survives exec -- the
                 // shell's `yes | head` would end in "Broken pipe".
-                // A blocked mask would survive the same way.
-                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                // A blocked mask would survive the same way, and so
+                // does what this process was started with: one that
+                // ignores SIGHUP (nohup, a background job) had a shell
+                // that cannot trap it and outlives its pane.
+                for sig in [libc::SIGPIPE, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM] {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
                 let mut none: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut none);
                 libc::sigprocmask(libc::SIG_SETMASK, &none, ptr::null_mut());

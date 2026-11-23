@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.643"  # helpers in a container
-core    = "0.12.640"  # watching a file does not wait on a pipe in its place
-session = "0.11.425"  # watching a file does not wait on a pipe in its place
+shell   = "0.7.644"  # a limited command is no plugin's own signal
+core    = "0.12.641"  # a pane's shell can trap a hangup its session was started ignoring
+session = "0.11.426"  # a pane's shell can trap a hangup its session was started ignoring

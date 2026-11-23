@@ -16,7 +16,7 @@ use marspot_peer::json::{self, Value};
 use super::feed::{Account, Credits, ModelWindow, Reading, Window, WEEK_MINUTES};
 use super::http::{self, Response};
 use super::sha256;
-use crate::plugins::bounded;
+use crate::bounded;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// How long to stay away after a 429 that does not say.
