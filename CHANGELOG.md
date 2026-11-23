@@ -4,6 +4,36 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.12.0
+
+- A pane whose session has shadow panes shows how many after its title
+  (`+2`), and the sidebar's bottom row counts them all. Either opens a
+  panel with a row per shadow pane: its name, its task, how long it has
+  run, and buttons to move it to a window or close it. Under each
+  session are the buttons that close all of them, and that block or
+  allow pane control from the session's directory. A pane's badge menu
+  opens the panel too.
+- A helper can run in a Linux container (`isolation: container`, or
+  `marspot-peer helper start --container`), which needs Docker: it can write its working directory and nothing else of the
+  Mac. Claude, Gemini and Kimi can be run so; Codex cannot yet. The
+  image is built the first time. Claude gets only an access token, from
+  an account whose token outlives the helper's time budget.
+- Closing a pane no longer leaves its session's files behind now and
+  then. The session's history is deleted only when the pane was closed
+  in Marspot: a hangup from anything else saves the screen and keeps it.
+  Closing a window while one of its panes starts keeps that pane, and
+  closing a pane whose session is lost moves its history to the recycle
+  directory for 14 days.
+- A request to a pane right after it was opened is no longer refused as
+  if the pane were an older build.
+- Waiting for a text in a pane finds it when a clear, the text and the
+  next prompt come at once, and is not misled by full-screen programs.
+- Helper messages: an approval prompt is told once, also over an update
+  of the app; a result written during an update is delivered; a session
+  that moves to another agent keeps its helpers.
+- Memory used while a pane printed a lot is given back when it is quiet
+  in two cases where part of it stayed.
+
 ## 0.11.0
 
 - A session can start helpers: other Claude, Codex, Gemini or Kimi
