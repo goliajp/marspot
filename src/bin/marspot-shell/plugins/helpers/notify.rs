@@ -14,6 +14,7 @@ use marspot_peer::control::{screen, sha256};
 
 use super::table::Helper;
 use crate::plugins::claudecode::with_helpers::NOTICE_HEAD;
+use crate::plugins::plain_file;
 
 /// The most of a result file a notice carries.
 pub(super) const MAX_RESULT: usize = 256 * 1024;
@@ -79,10 +80,11 @@ pub(super) fn screen_end(screen: &str, n: usize) -> String {
 
 /// The result file, cut at [`MAX_RESULT`]; None when there is none.
 pub(super) fn read_result(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_RESULT)]).into_owned();
-    if bytes.len() > MAX_RESULT {
-        text.push_str(&format!("\n[cut: the file has {} bytes, this is the first 256 KiB]", bytes.len()));
+    // a helper in a container writes there
+    let (bytes, len) = plain_file::read(path, MAX_RESULT as u64)?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if len > MAX_RESULT as u64 {
+        text.push_str(&format!("\n[cut: the file has {len} bytes, this is the first 256 KiB]"));
     }
     Some(text)
 }
@@ -135,6 +137,9 @@ pub(super) fn text(name: &str, h: &Helper, stop: Stop, result_path: &Path, resul
             out.push_str(&screen::wrap_result(name, r));
             out.push('\n');
         }
+        None if result_path.symlink_metadata().is_ok_and(|m| !m.is_file()) => {
+            out.push_str(&format!("What it left in the place of its result file ({}) is not a regular file; it was not read.\n", result_path.display()));
+        }
         None => out.push_str(&format!("It has not written its result file ({}) yet.\n", result_path.display())),
     }
     if let Some(s) = screen_text {
@@ -142,7 +147,8 @@ pub(super) fn text(name: &str, h: &Helper, stop: Stop, result_path: &Path, resul
         out.push('\n');
     }
     if !stop.is_last() {
-        out.push_str("Ask it more with SendMessage or PaneSend; stop it with HelperStop.\n");
+        let by = if h.contained() { "PaneSend" } else { "SendMessage or PaneSend" };
+        out.push_str(&format!("Ask it more with {by}; stop it with HelperStop.\n"));
     }
     out.push_str(marspot_peer::notice::TRAILER);
     out

@@ -5,7 +5,7 @@
 //! take turns.  Every call reads the profiles and feeds from disk, so
 //! it belongs off the shell's main loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use marspot::cc_usage::CxAccount;
@@ -27,6 +27,14 @@ pub(in crate::plugins) struct HelperAccount {
     pub env: Vec<(&'static str, String)>,
 }
 
+pub(in crate::plugins) use super::claude::Login;
+
+/// The login of the claude account at `dir`, as the keychain has it
+/// when it answers `within`.
+pub(in crate::plugins) fn claude_login(dir: &Path, within: std::time::Duration) -> Option<Login> {
+    super::claude::read_login_within(dir, &PathBuf::from(std::env::var_os("HOME")?), within)
+}
+
 /// When an account can take a helper again.
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::plugins) struct Recovery {
@@ -46,7 +54,11 @@ pub(in crate::plugins) enum Pick {
 /// names it; `None` for its default), and count the helper as placed
 /// there until the feed is next written.
 pub(in crate::plugins) fn pick_account(agent: Agent, model: Option<&str>) -> Pick {
-    let homes = handoff::profiles(agent);
+    pick_among(agent, handoff::profiles(agent), model)
+}
+
+/// [`pick_account`] among `homes` only.
+pub(in crate::plugins) fn pick_among(agent: Agent, homes: Vec<(u8, PathBuf)>, model: Option<&str>) -> Pick {
     let now = unix_now();
     if homes.is_empty() && matches!(agent, Agent::Claude | Agent::Codex) {
         return default_home(agent);

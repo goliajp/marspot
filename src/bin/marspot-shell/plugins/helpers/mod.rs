@@ -29,6 +29,7 @@ use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_AP
 
 mod caller_kind;
 mod close;
+mod container;
 mod dialogs;
 mod dirs;
 mod first_screens;
@@ -177,6 +178,7 @@ impl Shared {
         if st.table.map.get(&sid).is_some_and(|h| turn::pokes(h, &ev)) {
             st.poked.insert(sid, now);
         }
+        let contained = st.table.map.get(&sid).is_some_and(|h| h.contained());
         st.table.apply(sid, now, &ev);
         if matches!(ev, Event::Stopped) {
             st.stopped.insert(sid);
@@ -193,6 +195,9 @@ impl Shared {
         }
         *self.published.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(st.table.clone());
         drop(st);
+        if contained && matches!(ev, Event::Stopped) {
+            container::remove_later(sid, self.root());
+        }
         // a new deadline, or a notice held back: the worker's sleep changes
         if matches!(ev, Event::TaskDelivered | Event::NoticeSuppressed { .. }) {
             self.wake();

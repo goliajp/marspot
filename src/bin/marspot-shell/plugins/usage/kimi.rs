@@ -20,11 +20,14 @@ use super::claude::{outcome_with, Outcome, Waits};
 use super::feed::{Account, Reading, Window};
 use super::http;
 use crate::plugins::kimi::{default_home, managed, profile_dirs_in};
+use crate::plugins::plain_file;
 
 const MAINLAND_BASE: &str = "https://api.kimi.com/coding/v1";
 const GLOBAL_BASE: &str = "https://api.kimi.ai/coding/v1";
 /// The name a login's token is kept under when its config names none.
 const DEFAULT_SLOT: &str = "kimi-code";
+/// The most of a login that is read.
+const MAX_LOGIN: u64 = 64 * 1024;
 /// A token this close to running out is not sent: it would run out on
 /// the way.
 const SPARE_SECS: i64 = 15;
@@ -86,6 +89,13 @@ pub(super) fn parse_login(text: &str) -> Option<Login> {
     let v = json::parse(text.trim()).ok()?;
     let token = v.str_at("access_token").filter(|t| !t.is_empty())?;
     Some(Login { token: token.to_string(), expires_at: v.get("expires_at").and_then(Value::i64).unwrap_or(0) })
+}
+
+/// The login in `file`, whose directory a helper in a container may
+/// write to.
+fn read_login(file: &Path) -> Option<Login> {
+    let (bytes, _) = plain_file::read(file, MAX_LOGIN)?;
+    parse_login(std::str::from_utf8(&bytes).ok()?)
 }
 
 /// Where an account stands with the collector.
@@ -217,8 +227,8 @@ impl Kimi {
 
     /// Ask the service about one account, when its token allows.
     fn poll(&mut self, base: &str, file: &Path, account: &mut Account, waits: &mut Waits, now: i64) -> State {
-        let login = std::fs::read_to_string(file).ok().and_then(|t| parse_login(&t));
-        let written = std::fs::metadata(file).and_then(|m| m.modified()).ok();
+        let login = read_login(file);
+        let written = std::fs::symlink_metadata(file).and_then(|m| m.modified()).ok();
         let refused = written.is_some() && self.refused.get(&account.name) == written.as_ref();
         let state = state_of(login.as_ref(), refused, now);
         let Some(login) = login.filter(|_| state == State::Collecting && !waits.blocked(&account.name, now)) else {
@@ -275,6 +285,32 @@ mod tests {
       },
       "boosterWallet": {"balance": {"type": "BOOSTER", "amount": 5000000, "amountLeft": "2500000"}}
     }"#;
+
+    #[test]
+    fn container_login_is_never_read_through_a_link_or_a_pipe() {
+        let dir = std::env::temp_dir().join(format!("marspot-kimi-login-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (real, file) = (dir.join("real"), dir.join("kimi-code.json"));
+        let body = r#"{"access_token":"t","expires_at":9}"#;
+        std::fs::write(&real, body).unwrap();
+        let state = |file: &Path| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let at = file.to_path_buf();
+            // a read that waits for the pipe's other end never ends
+            std::thread::spawn(move || tx.send(Kimi::default().poll("http://127.0.0.1:1", &at, &mut Account::default(), &mut Waits::default(), NOW)));
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+        };
+        assert_eq!(state(&real), Ok(State::TokenExpired));
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+        assert_eq!(state(&file), Ok(State::NoLogin), "a link");
+        std::fs::remove_file(&file).unwrap();
+        assert!(std::process::Command::new("/usr/bin/mkfifo").arg(&file).status().unwrap().success());
+        assert_eq!(state(&file), Ok(State::NoLogin), "a pipe");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, format!("{body}{}", " ".repeat(MAX_LOGIN as usize))).unwrap();
+        assert_eq!(plain_file::read(&file, MAX_LOGIN).unwrap().0.len() as u64, MAX_LOGIN, "cut");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_usage_body_becomes_the_five_hour_and_seven_day_windows() {

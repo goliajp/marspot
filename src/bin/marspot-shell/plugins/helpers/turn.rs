@@ -104,7 +104,7 @@ impl Shared {
 
 /// Agents whose plugin reports turns: their stops come from the tick.
 pub(super) fn turn_reported(h: &Helper) -> bool {
-    matches!(h.started.agent, AgentKind::Claude | AgentKind::Kimi)
+    !h.contained() && matches!(h.started.agent, AgentKind::Claude | AgentKind::Kimi)
 }
 
 /// A claude or kimi helper's turn ended (it waits for input), it waits

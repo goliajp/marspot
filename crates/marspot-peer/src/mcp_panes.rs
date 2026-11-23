@@ -84,6 +84,7 @@ fn schema(tool: &str, cap_s: u32) -> Value {
             ("profile", prop("integer")),
             ("mode", prop("string")),
             ("resume", prop("string")),
+            ("isolation", obj([("type", Value::from("string")), ("enum", Value::Arr(["host", "container"].map(Value::from).to_vec()))])),
             ("budget_minutes", prop("integer")),
             ("name", prop("string")),
         ],

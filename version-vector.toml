@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.641"  # a closed session removes its own directory once it writes no more
-core    = "0.12.639"  # a new pane is answered when its session takes requests
-session = "0.11.424"  # a closed session removes its own directory once it writes no more
+shell   = "0.7.643"  # helpers in a container
+core    = "0.12.640"  # watching a file does not wait on a pipe in its place
+session = "0.11.425"  # watching a file does not wait on a pipe in its place

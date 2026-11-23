@@ -12,10 +12,10 @@ impl Shared {
     /// stop.  Kept only while `sid` is still a helper: a stop that came
     /// while the watcher started has already dropped what it had.
     pub(super) fn watch_result(self: &Arc<Self>, sid: u64) {
-        let path = self.dir_of(sid).join("result.md");
+        let path = self.result_path(sid);
         let (me, seen) = (Arc::clone(self), path.clone());
-        let watcher = marspot_term::fs_watch::Watcher::spawn(std::slice::from_ref(&path), move || {
-            if seen.exists() && me.table().map.contains_key(&sid) {
+        let watcher = marspot_term::fs_watch::Watcher::spawn_no_follow(std::slice::from_ref(&path), move || {
+            if seen.symlink_metadata().is_ok() && me.table().map.contains_key(&sid) {
                 me.record(sid, Event::ResultChanged);
             }
         });
@@ -38,7 +38,7 @@ impl Shared {
         if h.result_new || unknown {
             return;
         }
-        let text = notify::read_result(&self.dir_of(h.sid).join("result.md"));
+        let text = notify::read_result(&self.result_path(h.sid));
         if text.is_some_and(|r| notify::sha(&r) != h.result_sha) {
             self.record(h.sid, Event::ResultChanged);
         }

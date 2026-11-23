@@ -32,8 +32,14 @@ pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> u
         s.sweep_dirs_where(|sid| !live.contains(&sid));
     }
     let t = s.table();
+    super::container::sweep(s, live);
     for h in t.map.values() {
-        if h.delivered_ms.is_none() && !h.preparing {
+        if h.preparing {
+            s.watch_result(h.sid);
+            super::container::prepare(s, h.sid, h.started.agent);
+            continue;
+        }
+        if h.delivered_ms.is_none() {
             s.queue_closing(h.sid, Job::Close { sid: h.sid, tell: Some("was started, but its task had not gone in when marspot restarted; it was closed.") });
             continue;
         }

@@ -3,13 +3,21 @@
 
 use std::cell::OnceCell;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{Shared, records};
+use super::{Shared, container, records};
+
+/// Remove `sid`'s directory, if there is one.
+pub(super) fn remove(root: &Path, sid: u64) {
+    match std::fs::remove_dir_all(root.join(sid.to_string())) {
+        Err(e) if e.kind() != ErrorKind::NotFound => marspot::lx_warn!("helpers.dir_left", &format!("sid={sid}: {e}")),
+        _ => {}
+    }
+}
 
 impl Shared {
-    fn root(&self) -> PathBuf {
+    pub(super) fn root(&self) -> PathBuf {
         self.log.parent().map_or_else(records::dir, PathBuf::from)
     }
 
@@ -19,7 +27,8 @@ impl Shared {
     }
 
     /// Whether `sid`'s directory may go: the log or this run says the
-    /// helper stopped, or its session is `gone`.  Not being in the table
+    /// helper stopped, or its session is `gone`, and no container of it
+    /// may still write there.  Not being in the table
     /// is no reason, as the table may lack a helper that runs: one whose
     /// line could not be written, or not be read back.
     pub(super) fn dir_is_over(&self, sid: u64, gone: impl FnOnce(u64) -> bool) -> bool {
@@ -29,15 +38,7 @@ impl Shared {
         }
         let stopped = st.stopped.contains(&sid);
         drop(st);
-        stopped || gone(sid)
-    }
-
-    /// Remove `sid`'s directory, if there is one.
-    pub(super) fn remove_dir(&self, sid: u64) {
-        match std::fs::remove_dir_all(self.dir_of(sid)) {
-            Err(e) if e.kind() != ErrorKind::NotFound => marspot::lx_warn!("helpers.dir_left", &format!("sid={sid}: {e}")),
-            _ => {}
-        }
+        (stopped || gone(sid)) && !container::pending(&self.root(), sid)
     }
 
     /// Remove the directories that are over, the one of the helper that
@@ -61,7 +62,7 @@ impl Shared {
         let Ok(rd) = std::fs::read_dir(self.root()) else { return };
         let found: Vec<u64> = rd.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect();
         for sid in found.iter().copied().filter(|sid| self.dir_is_over(*sid, &gone)) {
-            self.remove_dir(sid);
+            remove(&self.root(), sid);
         }
         // no directory and no session to make one: nothing to remember
         let stopped: Vec<u64> = self.lock().stopped.iter().copied().filter(|sid| !found.contains(sid)).collect();

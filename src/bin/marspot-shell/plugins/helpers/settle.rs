@@ -46,7 +46,7 @@ fn spawn(sid: u64, f: impl FnOnce() + Send + 'static) {
 /// already.
 fn follow(f: &First, pos: u64) {
     f.pass(pos);
-    if matches!(f.agent, AgentKind::Codex | AgentKind::Gemini) {
+    if f.s.contained(f.sid) || matches!(f.agent, AgentKind::Codex | AgentKind::Gemini) {
         watch_screen(&f.s, f.sid, f.agent, Some(pos), f.epoch);
     }
 }
@@ -54,7 +54,16 @@ fn follow(f: &First, pos: u64) {
 /// Once kimi's screen is up, its task: the task file, header and all, as
 /// it says where the result goes.
 fn deliver_to_kimi(f: &First, pos: u64) -> bool {
-    let first = with_port(None, |p| p.wait_quiet(f.sid, 1_500, Some(pos), Instant::now() + Duration::from_secs(60)));
+    let until = Instant::now() + Duration::from_secs(60);
+    let quiet = |since| with_port(None, |p| p.wait_quiet(f.sid, 1_500, Some(since), until));
+    let mut first = quiet(pos);
+    // a container takes seconds to start, which is as quiet as a screen that is up
+    while let Some(Ok(Waited::Met { pos: at })) = &first
+        && f.s.contained(f.sid)
+        && !f.has_drawn()
+    {
+        first = quiet(*at);
+    }
     let up = matches!(first, Some(Ok(Waited::Met { .. })));
     let task = std::fs::read_to_string(f.s.dir_of(f.sid).join("task.md")).ok();
     let delivered = up && task.as_deref().is_some_and(|t| paste_task(f.sid, t));
