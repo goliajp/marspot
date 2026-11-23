@@ -26,6 +26,9 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("PaneRun", "Run one command at a pane's shell prompt and wait for it: exit_status and the screen. On reason:timeout, wait on with PaneRead wait:{command_end:true} since:pos."),
     ("PaneRead", "Read a pane's screen, history_lines more above it. wait: first wait, after since (a pos), for one of {text}, {quiet_ms}, {command_end:true}, {prompt:true}, {change:true}, {exit:true}; reason says what ended it."),
     ("PaneSet", "Change a pane: cols+rows resize a shadow pane; where (window, shadow, peek, unpeek) moves it; close:true closes it."),
+    ("HelperStart", "Start an agent (claude, codex, gemini, kimi) on a task in a shadow pane under yours; its result reaches your inbox when it stops. Optional: cwd, model, profile, mode (auto/ask), resume:\"last\", budget_minutes (30). If others_in_cwd names a session there, SendMessage it first."),
+    ("Helpers", "List your helpers (all:true: every one): name, agent, account, state, time left, result_path."),
+    ("HelperStop", "Stop a helper by name, or all:true for all of yours."),
 ];
 
 /// The longest wait, in seconds, a client named `client` lets one tool
@@ -72,9 +75,27 @@ fn schema(tool: &str, cap_s: u32) -> Value {
             ("where", obj([("type", Value::from("string")), ("enum", Value::Arr(["window", "shadow", "peek", "unpeek"].map(Value::from).to_vec()))])),
             ("close", prop("boolean")),
         ],
+        "HelperStart" => vec![
+            ("agent", obj([("type", Value::from("string")), ("enum", Value::Arr(["claude", "codex", "gemini", "kimi"].map(Value::from).to_vec()))])),
+            ("task", prop("string")),
+            ("cwd", prop("string")),
+            ("parent", prop("string")),
+            ("model", prop("string")),
+            ("profile", prop("integer")),
+            ("mode", prop("string")),
+            ("resume", prop("string")),
+            ("budget_minutes", prop("integer")),
+            ("name", prop("string")),
+        ],
+        "Helpers" => vec![("all", prop("boolean"))],
+        "HelperStop" => vec![("name", prop("string")), ("all", prop("boolean"))],
         _ => Vec::new(),
     };
-    let required = if props.iter().any(|(k, _)| *k == "target") { vec![Value::from("target")] } else { Vec::new() };
+    let required = match tool {
+        "HelperStart" => vec![Value::from("agent"), Value::from("task")],
+        _ if props.iter().any(|(k, _)| *k == "target") => vec![Value::from("target")],
+        _ => Vec::new(),
+    };
     Value::Obj(vec![
         ("type".into(), "object".into()),
         ("properties".into(), Value::Obj(props.into_iter().map(|(k, v)| (k.to_string(), v)).collect())),
@@ -128,6 +149,9 @@ pub fn request_for(tool: &str, args: &Value, thread: Option<&str>, cap_s: u32) -
         "PaneRun" => "pane.run",
         "PaneRead" => "pane.read",
         "PaneSet" => set_op(&args)?,
+        "HelperStart" => "helper.start",
+        "Helpers" => "helper.list",
+        "HelperStop" => "helper.stop",
         other => return Err(bad(&format!("unknown tool {other:?}"))),
     };
     if matches!(op, "pane.run" | "pane.read") {

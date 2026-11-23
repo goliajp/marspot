@@ -41,15 +41,20 @@ pub fn main(args: &[String]) -> u8 {
             return 2;
         }
     };
+    ask(op, json)
+}
+
+/// Send `op` and print its answer; the process exit code.
+pub(super) fn ask(op: Op, json: bool) -> u8 {
     let caller_thread = std::env::var("CODEX_THREAD_ID").ok();
     let req = Request { op, caller_thread };
     match client::call(&req) {
         Err(CallError::Unreachable(e)) => {
-            eprintln!("marspot-peer pane: cannot reach the app ({e})");
+            eprintln!("marspot-peer: cannot reach the app ({e})");
             3
         }
         Err(CallError::Lost) => {
-            eprintln!("marspot-peer pane: the connection was lost before the answer; the result is unknown, check with `pane list` or `pane read` before doing it again");
+            eprintln!("marspot-peer: the connection was lost before the answer; the result is unknown, check with `pane list` or `helper list` before doing it again");
             1
         }
         Ok(resp) if json => {
@@ -72,7 +77,7 @@ pub fn main(args: &[String]) -> u8 {
     }
 }
 
-fn take_value(rest: &mut Vec<String>, flag: &str) -> Result<Option<String>, String> {
+pub(super) fn take_value(rest: &mut Vec<String>, flag: &str) -> Result<Option<String>, String> {
     let Some(i) = rest.iter().position(|a| a == flag) else { return Ok(None) };
     if i + 1 >= rest.len() {
         return Err(format!("{flag} needs a value"));
@@ -82,7 +87,7 @@ fn take_value(rest: &mut Vec<String>, flag: &str) -> Result<Option<String>, Stri
     Ok(Some(v))
 }
 
-fn take_flag(rest: &mut Vec<String>, flag: &str) -> bool {
+pub(super) fn take_flag(rest: &mut Vec<String>, flag: &str) -> bool {
     match rest.iter().position(|a| a == flag) {
         Some(i) => {
             rest.remove(i);
@@ -92,7 +97,7 @@ fn take_flag(rest: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
-fn number<T: std::str::FromStr>(v: Option<String>, what: &str) -> Result<Option<T>, String> {
+pub(super) fn number<T: std::str::FromStr>(v: Option<String>, what: &str) -> Result<Option<T>, String> {
     v.map(|s| s.parse().map_err(|_| format!("{what}: {s:?} is not a number"))).transpose()
 }
 
@@ -101,7 +106,7 @@ fn size(s: &str) -> Result<(u16, u16), String> {
     Ok((c.parse().map_err(|_| format!("{c:?} is not a number"))?, r.parse().map_err(|_| format!("{r:?} is not a number"))?))
 }
 
-fn text_or_stdin(words: &[String]) -> Result<String, String> {
+pub(super) fn text_or_stdin(words: &[String]) -> Result<String, String> {
     if words == ["-"] {
         let mut s = String::new();
         std::io::stdin().read_to_string(&mut s).map_err(|_| "stdin is not UTF-8 text".to_string())?;

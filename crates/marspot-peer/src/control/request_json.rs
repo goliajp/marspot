@@ -32,7 +32,10 @@ impl Request {
     pub fn to_json(&self) -> String {
         let mut a: Vec<(String, Value)> = Vec::new();
         match &self.op {
-            Op::List | Op::Helper(_) => {}
+            Op::List => {}
+            Op::HelperStart(h) => a = super::helper::start_json(h),
+            Op::HelperList { all } => put(&mut a, "all", *all),
+            Op::HelperStop(h) => a = super::helper::stop_json(h),
             Op::Open(o) => {
                 put_opt(&mut a, "cwd", &o.cwd);
                 put(&mut a, "shadow", o.shadow);

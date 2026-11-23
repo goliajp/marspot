@@ -88,6 +88,12 @@ pub fn wrap_part(pane: &str, pos: Option<u64>, part: Option<&str>, text: &str) -
     format!("<pane-screen pane=\"{name}\"{pos}{part}>\n{}\n</pane-screen>", filter(text))
 }
 
+/// A helper's result file, filtered, inside `<helper-result helper=…>`.
+pub fn wrap_result(helper: &str, text: &str) -> String {
+    let name = filter(helper).replace('"', "'");
+    format!("<helper-result helper=\"{name}\">\n{}\n</helper-result>", filter(text))
+}
+
 #[cfg(test)]
 mod pane_control_tests {
     use super::*;

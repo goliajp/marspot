@@ -12,8 +12,14 @@ const HELPER_SHARE: usize = 512;
 
 #[test]
 fn mcp_pane_tool_descriptions_fit_the_budget() {
-    let total: usize = tools(1795).iter().map(|t| t.str_at("description").unwrap().len()).sum();
-    assert!(total <= BUDGET - HELPER_SHARE, "{total} bytes of pane tool descriptions");
+    let helper = |t: &Value| t.str_at("name").is_some_and(|n| n.starts_with("Helper"));
+    let len = |t: &Value| t.str_at("description").unwrap().len();
+    let all = tools(1795);
+    let panes: usize = all.iter().filter(|t| !helper(t)).map(len).sum();
+    let helpers: usize = all.iter().filter(|t| helper(t)).map(len).sum();
+    assert_eq!(all.iter().filter(|t| helper(t)).count(), 3);
+    assert!(panes <= BUDGET - HELPER_SHARE, "{panes} bytes of pane tool descriptions");
+    assert!(helpers <= HELPER_SHARE, "{helpers} bytes of helper tool descriptions");
     for t in tools(55) {
         let d = t.str_at("description").unwrap();
         let screen = matches!(t.str_at("name"), Some("PaneRead" | "PaneRun"));
@@ -50,6 +56,13 @@ fn mcp_pane_args_pass_through_unchanged() {
         assert_eq!(request_for(tool, &args(a), Some("th-1"), 295).unwrap(), direct(op, Some("th-1"), a), "{tool} {a}");
     }
     // a wrong argument is refused the way the app refuses it
+    for (tool, op, a) in [
+        ("HelperStart", "helper.start", r#"{"agent":"codex","task":"review","cwd":"/w","resume":"last","budget_minutes":10}"#),
+        ("Helpers", "helper.list", r#"{"all":true}"#),
+        ("HelperStop", "helper.stop", r#"{"name":"spg#5521"}"#),
+    ] {
+        assert_eq!(request_for(tool, &args(a), Some("th-1"), 55).unwrap(), direct(op, Some("th-1"), a), "{tool} {a}");
+    }
     let r = request_for("PaneSend", &args(r#"{"target":"x","text":"a","keys":["up"]}"#), None, 55).unwrap_err();
     assert_eq!(r.code, ErrorCode::BadRequest);
     let r = request_for("PaneSet", &args(r#"{"target":"x","where":"window","close":true}"#), None, 55).unwrap_err();

@@ -6,6 +6,7 @@ mod codex;
 mod codex_stop;
 mod gemini;
 mod kimi;
+pub(crate) mod launch_line;
 pub(crate) mod history;
 pub(crate) use marspot_peer::json;
 mod ledger;

@@ -15,8 +15,8 @@ use std::time::Duration;
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
 use super::tags::handoff_tag;
-use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history};
-use crate::plugins::pty_op::{self, PtyCommand, PtyOp, Step};
+use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history, launch_line};
+use crate::plugins::pty_op::{self, PtyOp, Step};
 use crate::plugins::{claudecode, codex, gemini, kimi, pidtree};
 use marspot::ui::strings::{self, Arg};
 
@@ -109,41 +109,10 @@ fn resumable(ledger: &Ledger, to: Agent, to_home: &Path, shell_cwd: Option<&str>
 /// The line that starts `to`.  `gemini_model` is what the gemini
 /// session being resumed was set to when the pane left it.
 fn command(to: Agent, to_home: &Path, resume: Option<&str>, gemini_model: Option<&str>) -> Option<Vec<u8>> {
-    let home = to_home.to_str()?;
-    let cmd = match to {
-        Agent::Claude => {
-            let c = crate::plugins::peerbus::claude_mcp::with_config(
-                PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", home),
-            );
-            // No submit receipt hook -- see
-            // `receipts::claude_settings_arg` for why nothing asks for
-            // one any more.
-            match resume {
-                Some(id) => c.arg("--resume").arg(id),
-                None => c,
-            }
-        }
-        Agent::Codex => {
-            let c = PtyCommand::new("codex").env("CODEX_HOME", home);
-            match resume {
-                Some(id) => c.arg("resume").arg(id),
-                None => c,
-            }
-        }
-        Agent::Gemini => {
-            let c = gemini::launch(to_home)?;
-            let c = match gemini_model {
-                Some(model) => c.arg("-m").arg(model),
-                None => c,
-            };
-            match resume {
-                Some(id) => c.arg("--resume").arg(id),
-                None => c,
-            }
-        }
-        Agent::Kimi => kimi::launch(to_home, resume)?,
-    };
-    cmd.clear_screen_first(true).to_bytes()
+    let resume = resume.map_or(launch_line::Resume::New, launch_line::Resume::Id);
+    let model = gemini_model.filter(|_| to == Agent::Gemini);
+    let l = launch_line::Launch { resume, model, flags: &[] };
+    launch_line::agent_command(to, to_home, &l)?.clear_screen_first(true).to_bytes()
 }
 
 /// Everything the job thread decides, in one place so it can be

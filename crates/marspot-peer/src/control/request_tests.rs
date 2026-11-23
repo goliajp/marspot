@@ -70,7 +70,22 @@ fn pane_control_every_request_round_trips() {
         Op::Place { target: "x".into(), place: Where::Peek },
         Op::Close { target: "x".into() },
         Op::Audit { limit: 7 },
-        Op::Helper("helper.list".into()),
+        Op::HelperList { all: true },
+        Op::HelperStop(HelperStop::All),
+        Op::HelperStop(HelperStop::Name("spg#5521".into())),
+        Op::HelperStart(HelperStartArgs {
+            agent: AgentKind::Codex,
+            task: "fix \"it\"\n$(x)".into(),
+            cwd: Some("/w".into()),
+            parent: Some("self".into()),
+            model: Some("gpt-5".into()),
+            profile: Some(3),
+            isolation: Isolation::Host,
+            mode: Some("ask".into()),
+            resume_last: true,
+            budget_minutes: 45,
+            name: Some("reviewer".into()),
+        }),
     ];
     for op in reqs {
         let r = Request { op, caller_thread: Some("th".into()) };
@@ -82,7 +97,31 @@ fn pane_control_every_request_round_trips() {
 fn pane_control_only_reads_are_retried() {
     assert!(Op::List.is_read_only());
     assert!(Op::Audit { limit: 1 }.is_read_only());
-    assert!(Op::Helper("helper.list".into()).is_read_only());
+    assert!(Op::HelperList { all: false }.is_read_only());
     assert!(!Op::Close { target: "x".into() }.is_read_only());
-    assert!(!Op::Helper("helper.start".into()).is_read_only());
+    assert!(!Op::HelperStop(HelperStop::All).is_read_only());
+}
+
+#[test]
+fn helpers_start_defaults_and_refusals() {
+    let r = parse(r#"{"op":"helper.start","args":{"agent":"kimi","task":"t","budget_minutes":9999,"profile":"P2"}}"#).unwrap();
+    let Op::HelperStart(a) = r.op else { panic!() };
+    assert_eq!((a.agent, a.isolation, a.budget_minutes, a.profile, a.resume_last), (AgentKind::Kimi, Isolation::Host, 360, Some(2), false));
+    let r = parse(r#"{"op":"helper.start","args":{"agent":"claude","task":"t"}}"#).unwrap();
+    let Op::HelperStart(a) = r.op else { panic!() };
+    assert_eq!(a.budget_minutes, 30);
+    for line in [
+        r#"{"op":"helper.start","args":{"task":"t"}}"#,
+        r#"{"op":"helper.start","args":{"agent":"gpt","task":"t"}}"#,
+        r#"{"op":"helper.start","args":{"agent":"codex","task":"  "}}"#,
+        r#"{"op":"helper.start","args":{"agent":"codex","task":"t","isolation":"vm"}}"#,
+        r#"{"op":"helper.start","args":{"agent":"codex","task":"t","resume":"first"}}"#,
+        r#"{"op":"helper.stop","args":{}}"#,
+        r#"{"op":"helper.fly"}"#,
+    ] {
+        assert_eq!(code_of(line), ErrorCode::BadRequest, "{line}");
+    }
+    let big = "x".repeat(64 * 1024 + 1);
+    let line = format!(r#"{{"op":"helper.start","args":{{"agent":"codex","task":"{big}"}}}}"#);
+    assert_eq!(code_of(&line), ErrorCode::LimitBytes);
 }

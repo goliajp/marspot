@@ -14,14 +14,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant};
+use std::{sync::mpsc::{Receiver, RecvTimeoutError, SyncSender}, time::{Duration, Instant}};
 
 use marspot::pidtree;
 use marspot_peer::envelope::Mode;
 use marspot_peer::frame::{IdleState, Priority, Receipt, UserFrame};
-use marspot_peer::json::{obj, Value};
-use marspot_peer::registry::{self, Record, Status};
+use marspot_peer::{json::{obj, Value}, registry::{self, Record, Status}};
 use marspot_peer::rpc::{RpcError, RpcSender};
 use marspot_term::{lx_info, lx_warn};
 
@@ -432,6 +430,7 @@ impl Worker {
         match &result {
             Ok(_) => {
                 lx_info!("peerbus.deliver", "queued for the codex session", sid = sid, via = via, peer_pid = peer_pid.unwrap_or(0));
+                crate::plugins::helpers::input_seen(sid);
                 if let Some(b) = self.bindings.get_mut(&sid) {
                     b.last_delivered = Some(Instant::now());
                     // the answer can only be followed on a subscribed thread

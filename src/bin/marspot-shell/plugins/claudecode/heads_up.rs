@@ -198,7 +198,7 @@ pub(super) fn after_warned_move(work_ended: bool) -> String {
 /// `bypass` names, and the sessions it serves run the same way. The
 /// reply address sits beside the inbox and nothing listens on it; the
 /// message asks for no reply.
-fn frame_line(inbox: &str, body: &str) -> String {
+pub(in crate::plugins) fn frame_line(inbox: &str, body: &str) -> String {
     let dir = Path::new(inbox).parent().map(|d| d.display().to_string()).unwrap_or_default();
     let from = format!("uds:{dir}/marspot-quota.sock");
     let header = Header { from: from.clone(), from_name: Some("marspot".into()), from_mode: Some(Mode::Bypass) };

@@ -106,6 +106,18 @@ impl Conn<'_> {
         out
     }
 
+    /// [`Conn::wait`] for the helpers plugin: within the share kept for
+    /// it, one watch per shadow pane at most, never a caller's.
+    pub fn wait_as_helper(&mut self, sid: u64, body: WatchBody, since: Option<u64>, deadline: Instant) -> Result<Option<PaneWatchFired>, Reject> {
+        self.need_caps(CAP_TYPE_AND_WATCH)?;
+        let max = self.hub.config().shadows_total;
+        let id = self.hub.links.add_helper_watch(sid, body.clone(), self.tx.clone(), max)?;
+        let body = WatchBody { watch_id: id, ..body };
+        let out = self.register(sid, &body, since).and_then(|base| self.wait_registered(sid, &body, base.or(since).unwrap_or(0), deadline));
+        self.end_watch(sid, id);
+        out
+    }
+
     /// Take a watch id for `body` within the caller's and the table's share.
     pub fn add_watch(&mut self, sid: u64, caller: CallerKey, body: WatchBody) -> Result<WatchBody, Reject> {
         let cfg = self.hub.config();

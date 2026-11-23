@@ -25,9 +25,7 @@
 //! Kimi panes are bound the same way and their mail waits the same
 //! way; what differs for them is in `kimi_bind`.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::{collections::HashSet, path::{Path, PathBuf}, time::Instant};
 
 use marspot::pidtree;
 use marspot_peer::envelope::Mode;
@@ -267,6 +265,7 @@ impl Worker {
         match keep(frame, g.class, &mut g.rate, &g.spool, spool::MAX_PENDING) {
             Ok(()) => {
                 lx_info!("peerbus.gemini.kept", "waiting for the session's next turn", sid = *sid, agent = g.record.agent.label(), peer_pid = peer_pid.unwrap_or(0));
+                crate::plugins::helpers::input_seen(*sid);
             }
             Err((receipt, reason)) => {
                 lx_info!("peerbus.refused", &reason, sid = *sid, peer_pid = peer_pid.unwrap_or(0));

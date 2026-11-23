@@ -29,6 +29,7 @@ mod config;
 mod conn;
 mod dispatch;
 mod hangup;
+pub(crate) mod helpers_port;
 mod links;
 mod matched;
 mod limits;
@@ -120,6 +121,11 @@ pub(crate) fn key_pressed() {
     }
 }
 
+/// Rotate a log as the audit log is: `log` becomes `log.1`, and so on.
+pub(crate) fn rotate_log(path: &std::path::Path) {
+    audit_log::rotate(path);
+}
+
 /// The hub, once [`start`] ran.
 pub(crate) fn hub() -> Option<&'static Hub> {
     HUB.get()
@@ -170,6 +176,11 @@ impl Hub {
             (self.wake)();
         }
         ok
+    }
+
+    /// Knock on the main loop.
+    pub(crate) fn knock(&self) {
+        (self.wake)();
     }
 
     pub(crate) fn caps(&self) -> u32 {
