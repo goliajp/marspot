@@ -1,14 +1,13 @@
 //! Shadow panes in the core, against real `marspot-session` processes
 //! in the boot-assembly tests' sandbox.
 
-use super::super::shadow_place::UNANSWERED;
 use super::super::spawn::spawn_l3_shadow_with_cwd;
 use super::*;
 use crate::boot_assembly_tests::Sandbox;
 use crate::window_state_tests::{app_in, win};
 use marspot::shell_proto::{
-    PaneDone, PanePlace, PaneRetire, PaneSize, PlaceWhere, decode_pane_done, decode_pane_spawned,
-    encode_pane_place, encode_pane_retire, encode_pane_size,
+    PaneDone, PaneRetire, PaneSize, decode_pane_done, decode_pane_spawned, encode_pane_retire,
+    encode_pane_size,
 };
 use marspot::state::{SavedPane, SavedWindowLayout};
 use marspot_term::session_registry as reg;
@@ -16,7 +15,7 @@ use std::sync::mpsc::Receiver;
 
 /// Every session started here runs this shell: it reads lines until
 /// one says `q`, then ends.
-fn sandbox() -> Sandbox {
+pub(crate) fn sandbox() -> Sandbox {
     let mut sb = Sandbox::new();
     let shell = sb.dir().join("shell");
     std::fs::write(&shell, "#!/bin/sh\nwhile IFS= read -r a; do [ \"$a\" = q ] && exit 0; done\n").unwrap();
@@ -26,7 +25,7 @@ fn sandbox() -> Sandbox {
     sb
 }
 
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+pub(crate) fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !done() {
         assert!(Instant::now() < deadline, "never happened: {what}");
@@ -35,7 +34,7 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// What the loop does with the events these tests care about.
-fn drive(app: &mut CoreApp, rx: &Receiver<CoreEvent>) {
+pub(crate) fn drive(app: &mut CoreApp, rx: &Receiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
         match ev {
             CoreEvent::L3SpawnFinished(sid, o) => app.adopt_spawn_outcome(sid, o),
@@ -50,7 +49,7 @@ fn drive(app: &mut CoreApp, rx: &Receiver<CoreEvent>) {
     }
 }
 
-fn done_for(app: &CoreApp, req_id: u32) -> Option<PaneDone> {
+pub(crate) fn done_for(app: &CoreApp, req_id: u32) -> Option<PaneDone> {
     app.pane_control
         .reports
         .frames()
@@ -59,7 +58,7 @@ fn done_for(app: &CoreApp, req_id: u32) -> Option<PaneDone> {
         .find(|d| d.req_id == req_id)
 }
 
-fn wait_done(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32) -> PaneDone {
+pub(crate) fn wait_done(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32) -> PaneDone {
     let mut got = None;
     wait_for(&format!("an answer to request {req_id}"), || {
         drive(app, rx);
@@ -70,7 +69,7 @@ fn wait_done(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32) -> PaneDo
 }
 
 /// A window with one live pane, and the channel its sessions report on.
-fn app_with_parent(sb: &Sandbox) -> (CoreApp, Receiver<CoreEvent>, u64) {
+pub(crate) fn app_with_parent(sb: &Sandbox) -> (CoreApp, Receiver<CoreEvent>, u64) {
     let (tx, rx) = mpsc::channel();
     let psid = reg::allocate_next_session_id().unwrap();
     let parent = spawn_l3_pane_with_cwd(60, 16, psid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
@@ -81,7 +80,7 @@ fn app_with_parent(sb: &Sandbox) -> (CoreApp, Receiver<CoreEvent>, u64) {
 
 /// Open a shadow pane under `parent` and wait until it is answered and
 /// its session reads pane control.
-fn open_shadow(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64) -> u64 {
+pub(crate) fn open_shadow(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64) -> u64 {
     assert_eq!(app.dev_open_shadow(req_id, parent), Route::Forwarded);
     let mut spawned = None;
     wait_for("the shadow pane's spawn was answered", || {
@@ -105,7 +104,7 @@ fn open_shadow(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent:
     s.sid
 }
 
-fn frame(t: MsgType, p: Vec<u8>) -> Frame {
+pub(crate) fn frame(t: MsgType, p: Vec<u8>) -> Frame {
     Frame::new(t, p)
 }
 
@@ -196,52 +195,6 @@ fn shadow_sessions_go_back_to_the_shadows_at_boot_and_a_saved_window_wins() {
         "the session's answer to the core's own request did not go on to L1"
     );
     assert_eq!(reg::read_session_entry(asid).unwrap().shadow_of, psid, "the other is still a shadow");
-}
-
-fn place(req_id: u32, sid: u64, to: PlaceWhere, host_sid: u64) -> Frame {
-    frame(MsgType::PanePlace, encode_pane_place(&PanePlace { req_id, sid, to, host_sid }))
-}
-
-#[test]
-fn shadow_place_moves_after_the_answer_and_without_one_puts_the_pane_back() {
-    let sb = sandbox();
-    let (mut app, rx, psid) = app_with_parent(&sb);
-    let sid = open_shadow(&mut app, &rx, 7, psid);
-
-    assert_eq!(app.route_pane_control(place(20, sid, PlaceWhere::Window, psid)), Route::Forwarded);
-    assert!(app.shadow_index(sid).is_some(), "nothing moves before the session answers");
-    assert_eq!(wait_done(&mut app, &rx, 20).code, DoneCode::Ok);
-    assert_eq!(app.find_window_pane_by_sid(sid), Some((0, 1)), "into the parent's window");
-    assert!(app.shadows.is_empty() && !unwatched::is(sid));
-    assert_eq!(reg::read_session_entry(sid).unwrap().shadow_of, 0);
-
-    assert_eq!(app.route_pane_control(place(21, sid, PlaceWhere::Shadow, psid)), Route::Forwarded);
-    assert_eq!(wait_done(&mut app, &rx, 21).code, DoneCode::Ok);
-    assert_eq!(app.shadow_index(sid), Some(0));
-    assert!(unwatched::is(sid));
-    assert_eq!(reg::read_session_entry(sid).unwrap().shadow_of, psid);
-
-    // a session that cannot answer
-    let pid = reg::read_session_entry(sid).unwrap().pid;
-    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
-    assert_eq!(app.route_pane_control(place(22, sid, PlaceWhere::Window, psid)), Route::Forwarded);
-    app.expire_places(Instant::now() + Duration::from_secs(4));
-    let d = done_for(&app, 22).expect("answered at the deadline");
-    assert_eq!((d.code, d.text.as_str()), (DoneCode::Other, UNANSWERED));
-    assert_eq!(app.shadow_index(sid), Some(0), "the pane stayed in the shadows");
-    assert_eq!(app.windows[0].panes.len(), 2, "the window holds the parent and the placeholder only");
-
-    // its late answer is undone
-    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
-    wait_for("the late answer arrived", || {
-        drive(&mut app, &rx);
-        app.pane_control.shadows.places.expired.is_empty()
-    });
-    wait_for("the session is the parent's shadow again", || {
-        drive(&mut app, &rx);
-        reg::read_session_entry(sid).is_ok_and(|e| e.shadow_of == psid)
-    });
-    assert!(app.pane_control.reports.frames().all(|f| decode_pane_done(&f.payload).map_or(true, |d| d.req_id < 0xF000_0000)));
 }
 
 #[test]

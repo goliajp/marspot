@@ -31,6 +31,7 @@ const EXPIRED_CAP: usize = 16;
 /// The text of a `PaneDone` for a move the session did not answer in
 /// time; L1 reads it as `unknown`.
 pub(super) const UNANSWERED: &str = "unanswered";
+const LAST_PANE_STAYS: &str = "the last pane in the windows stays there";
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Placing {
@@ -96,8 +97,11 @@ impl CoreApp {
             PlaceWhere::Shadow if m.host_sid == 0 || m.host_sid == m.sid => {
                 answer(self, DoneCode::Other, "a shadow pane needs a parent")
             }
+            PlaceWhere::Shadow if !self.panes_mut().any(|p| p.shelld_session_id() == Some(m.host_sid)) => {
+                answer(self, DoneCode::Other, "no such parent pane")
+            }
             PlaceWhere::Shadow if self.last_drawn_pane(m.sid) => {
-                answer(self, DoneCode::Other, "the last pane in the windows stays there")
+                answer(self, DoneCode::Other, LAST_PANE_STAYS)
             }
             PlaceWhere::Shadow => self.start_place(m, m.host_sid, 0),
             _ => answer(self, DoneCode::Other, "not_supported"),
@@ -210,6 +214,16 @@ impl CoreApp {
                 self.rebuild_layout(wi);
                 win!(self, wi).needs_render = true;
             }),
+            // the other panes may have gone while the session answered
+            _ if self.find_window_pane_by_sid(p.sid).is_some() && self.last_drawn_pane(p.sid) => {
+                if let Some(pane) = self.pane_by_sid_mut(p.sid) {
+                    pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, 0));
+                }
+                lx_warn!("core.shadow.place_last_pane", "the pane became the last one in the windows while it moved; it stays",
+                    session = p.sid);
+                self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::Other, LAST_PANE_STAYS);
+                return;
+            }
             _ => self.find_window_pane_by_sid(p.sid).map(|(wi, idx)| {
                 let pane = self.take_out_of_window(wi, idx);
                 unwatched::set(p.sid, true);
@@ -228,3 +242,7 @@ impl CoreApp {
         self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::Ok, "");
     }
 }
+
+#[cfg(test)]
+#[path = "shadow_place_tests.rs"]
+mod tests;

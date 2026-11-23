@@ -269,4 +269,4 @@ fn recycle_session(sid: u64) {
 
 #[cfg(test)]
 #[path = "shadows_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.602"  # pane.place shadow refuses a loop and counts the moved tree; an existing shadow is not checked again
-core    = "0.12.625"  # shadow panes: opened, closed, moved, resized for the shell; back in the shadows at boot; wake nothing
+core    = "0.12.626"  # a move into the shadows checks again for the last pane when the session answers, and that the parent is a pane
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow
