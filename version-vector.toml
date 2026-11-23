@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.638"  # helpers leave nothing behind and lose nothing over a restart
-core    = "0.12.635"  # a disk writer's pages taken back by a small burst are given back again
+shell   = "0.7.639"  # the shell does what the helper panel's buttons ask
+core    = "0.12.636"  # the shell does what the helper panel's buttons ask
 session = "0.11.423"  # a text watch reads the rows a batch went up to and came down from

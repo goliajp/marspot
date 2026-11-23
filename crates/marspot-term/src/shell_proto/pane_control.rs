@@ -59,6 +59,8 @@ wire_enum!(PlaceWhere { Shadow = 0, Window = 1, Peek = 2, Unpeek = 3 });
 wire_enum!(TypedResult { Written = 0, PtyQueueFull = 1, QueueFull = 2, NotReading = 3, NotAtShell = 4 });
 wire_enum!(DoneCode { Ok = 0, NotAttached = 1, NoSuchSession = 2, WatchTableFull = 3, OldSession = 4, Other = 5 });
 wire_enum!(PanelAct { CloseHelper = 1, CloseAllOfParent = 2, ToggleCwdControl = 3 });
+// `Flip`: a build before this one, which did not say
+wire_enum!(CwdControl { Flip = 0, Deny = 1, Allow = 2 });
 
 /// L1 → L2: open a pane; answered by `PaneSpawned`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,12 +282,15 @@ pub fn decode_pane_control_caps(p: &[u8]) -> io::Result<u32> {
 pub struct HelperPanelAct {
     pub sid: u64,
     pub act: PanelAct,
+    /// What `ToggleCwdControl` is to leave the directory as.
+    pub want: CwdControl,
 }
 
 pub fn encode_helper_panel_act(m: &HelperPanelAct) -> Vec<u8> {
-    let mut v = Vec::with_capacity(9);
+    let mut v = Vec::with_capacity(10);
     v.extend_from_slice(&m.sid.to_le_bytes());
     v.push(m.act.to_u8());
+    v.push(m.want.to_u8());
     v
 }
 
@@ -294,6 +299,7 @@ pub fn decode_helper_panel_act(p: &[u8]) -> io::Result<HelperPanelAct> {
     Ok(HelperPanelAct {
         sid: r.u64()?,
         act: PanelAct::from_u8(r.u8()?),
+        want: CwdControl::from_u8(if p.len() > 9 { r.u8()? } else { 0 }),
     })
 }
 

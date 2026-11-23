@@ -171,6 +171,7 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
             encode_helper_panel_act(&HelperPanelAct {
                 sid: 4,
                 act: PanelAct::ToggleCwdControl,
+                want: CwdControl::Allow,
             }),
             |p| shown(decode_helper_panel_act(p)),
         ),
@@ -320,11 +321,13 @@ fn pane_control_each_frame_round_trips() {
     let m = HelperPanelAct {
         sid: 4,
         act: PanelAct::CloseAllOfParent,
+        want: CwdControl::Deny,
     };
-    assert_eq!(
-        decode_helper_panel_act(&encode_helper_panel_act(&m)).unwrap(),
-        m
-    );
+    let p = encode_helper_panel_act(&m);
+    assert_eq!(decode_helper_panel_act(&p).unwrap(), m);
+    // as first laid out, with nothing after the act
+    let old = HelperPanelAct { want: CwdControl::Flip, ..m };
+    assert_eq!(decode_helper_panel_act(&p[..9]).unwrap(), old);
 }
 
 #[test]
@@ -346,7 +349,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
         26,
         7 + 3,
         4,
-        9,
+        10,
     ];
     assert_eq!(sizes, expected);
 }
@@ -389,7 +392,9 @@ fn pane_control_type_with_and_without_a_watch() {
 fn pane_control_truncated_payloads_are_refused_at_every_length() {
     for (t, p, decode) in samples() {
         assert!(decode(&p).is_ok(), "{t:?} decodes whole");
-        for n in 0..p.len() {
+        // the last byte came later, and may be missing
+        let least = p.len() - usize::from(t == MsgType::HelperPanelAct);
+        for n in 0..least {
             assert!(
                 decode(&p[..n]).is_err(),
                 "{t:?} cut to {n} of {} bytes decoded",

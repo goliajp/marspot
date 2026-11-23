@@ -1,10 +1,5 @@
 //! The numbers and switches the control socket follows: `control_*`
-//! keys in `settings.toml` (re-read whenever L1 sees the file change),
-//! and the directories whose panes may not use it, one per line in
-//! `<state dir>/control-deny.tsv`.
-
-use std::collections::HashSet;
-use std::time::SystemTime;
+//! keys in `settings.toml` (re-read whenever L1 sees the file change).
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Config {
@@ -88,53 +83,5 @@ impl Config {
             }
         }
         c
-    }
-}
-
-/// The deny list, read again when its file's modification time moves.
-/// A directory listed denies the panes in it and below it.
-pub(super) struct DenyList {
-    path: std::path::PathBuf,
-    stamp: Option<SystemTime>,
-    dirs: HashSet<String>,
-}
-
-pub(super) fn deny_path() -> std::path::PathBuf {
-    marspot_term::paths::state_root().join("control-deny.tsv")
-}
-
-fn norm(dir: &str) -> &str {
-    let t = dir.trim();
-    if t.len() > 1 { t.trim_end_matches('/') } else { t }
-}
-
-impl DenyList {
-    pub fn at(path: std::path::PathBuf) -> Self {
-        Self { path, stamp: None, dirs: HashSet::new() }
-    }
-
-    /// Whether panes in `cwd` are refused, after a `stat` of the file.
-    pub fn denies(&mut self, cwd: &str) -> bool {
-        let stamp = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
-        if stamp != self.stamp {
-            self.stamp = stamp;
-            self.dirs = std::fs::read_to_string(&self.path)
-                .unwrap_or_default()
-                .lines()
-                .map(norm)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(String::from)
-                .collect();
-        }
-        let cwd = norm(cwd);
-        self.dirs.iter().any(|d| within(cwd, d))
-    }
-}
-
-/// `path` is `dir` or below it, component by component.
-pub(super) fn within(path: &str, dir: &str) -> bool {
-    match path.strip_prefix(dir) {
-        Some(rest) => rest.is_empty() || rest.starts_with('/') || dir.ends_with('/'),
-        None => false,
     }
 }
