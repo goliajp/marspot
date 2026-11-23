@@ -13,7 +13,7 @@ fn an_absent_table_is_appended_and_a_present_one_is_not_touched() {
     let d = dir();
     let f = d.join("config.toml");
     std::fs::write(&f, CONFIG).unwrap();
-    assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some("marspot MCP server set"));
+    assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some(edit_note(CONFIG)));
     let text = std::fs::read_to_string(&f).unwrap();
     assert_eq!(text, format!("{CONFIG}\n[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\ndefault_tools_approval_mode = \"approve\"\n"));
     assert_eq!(reconcile_file(&f, "/a/marspot-peer"), None);
@@ -118,8 +118,7 @@ fn approval_goes_with_whatever_entry_the_config_has() {
     for text in [
         "[mcp_servers.marspot]\ncommand = \"/x/marspot-peer\"\nargs = [\"mcp\", \"-v\"]\n",
         "[mcp_servers.marspot]\ncommand = \"\"\n",
-        "[mcp_servers.marspot]\ncommand = \"/x\"\ndefault_tools_approval_mode = \"prompt\"\n",
-        "[mcp_servers.marspot]\ncommand = \"/x\"\ndefault_tools_approval_mode = 1\n",
+        "[mcp_servers.marspot]\ncommand = \"/x\"\n[mcp_servers.o]\ndefault_tools_approval_mode = \"prompt\"\n",
         "[mcp_servers]\nmarspot = { command = \"/x\", args = [\"mcp\"] }\n",
         "[mcp_servers.marspot]\nurl = \"http://127.0.0.1:1/mcp\"\n",
     ] {
@@ -144,4 +143,32 @@ fn a_mode_the_user_set_is_kept() {
     assert_eq!(with_server(other, "/a").unwrap().unwrap(), other.replace("\"/a\"\n", "\"/a\"\ndefault_tools_approval_mode = \"approve\"\n"));
     let last = "[mcp_servers.marspot]\ncommand = \"/a\"";
     assert_eq!(with_server(last, "/a").unwrap().unwrap(), format!("{last}\ndefault_tools_approval_mode = \"approve\"\n"));
+}
+
+/// Nothing on a helper's command line overrides a mode in the file,
+/// in any form the entry can have.
+#[test]
+fn a_mode_the_user_set_is_not_overridden() {
+    for (text, mode) in [
+        ("[mcp_servers.marspot]\ncommand = \"/x\"\ndefault_tools_approval_mode = \"prompt\" # ask\n", "\"prompt\""),
+        ("[mcp_servers.marspot]\ncommand = \"/x\"\ndefault_tools_approval_mode = 1\n", "1"),
+        ("[mcp_servers.marspot]\nurl = \"http://127.0.0.1:1/mcp\"\n\"default_tools_approval_mode\" = 'auto'\n", "'auto'"),
+        ("mcp_servers.marspot.default_tools_approval_mode = \"prompt\"\n", "\"prompt\""),
+        ("[mcp_servers]\nmarspot = { command = \"/x\", default_tools_approval_mode = \"prompt\" }\n", "\"prompt\""),
+    ] {
+        assert_eq!(mode_said(text).as_deref(), Some(mode), "{text}");
+        assert!(approved(text, Some("/b")).is_empty(), "{text}");
+    }
+    for text in ["", CONFIG, "[mcp_servers.marspot]\n# default_tools_approval_mode = \"prompt\"\n", "[mcp_servers]\nother = { default_tools_approval_mode = \"prompt\" }\n"] {
+        assert_eq!(mode_said(text), None, "{text}");
+    }
+}
+
+#[test]
+fn each_kind_of_edit_has_a_note_of_its_own() {
+    let entry = "[mcp_servers.marspot]\ncommand = \"/a\"\n";
+    let with_mode = format!("{entry}default_tools_approval_mode = \"prompt\"\n");
+    assert!(edit_note(CONFIG).starts_with("marspot MCP server set"));
+    assert!(edit_note(entry).starts_with("marspot MCP server's tools approved"));
+    assert_eq!(edit_note(&with_mode), "marspot MCP server repointed");
 }

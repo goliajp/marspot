@@ -176,9 +176,10 @@ fn send(args: &[String]) -> Result<(), Fail> {
     } else {
         words.join(" ")
     };
-    if std::env::var_os("CODEX_THREAD_ID").is_some() {
+    if let Some(thread) = std::env::var_os("CODEX_THREAD_ID") {
         let found = || me(&peers::live_entries()).is_ok();
-        bound::Waiter::new(bound::LIMIT).until(&marspot_peer::registry::default_dirs(), &Default::default(), found);
+        let waiter = bound::Waiter::new(marspot_peer::control::socket_path(), bound::LIMIT);
+        waiter.until(&thread.to_string_lossy(), &marspot_peer::registry::default_dirs(), &Default::default(), found);
     }
     let entries = peers::live_entries();
     let panes = marspot_peer::panes::live(&entries);

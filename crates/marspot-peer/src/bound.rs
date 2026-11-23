@@ -7,9 +7,9 @@
 
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::control::client::Cancel;
@@ -18,25 +18,45 @@ use crate::control::client::Cancel;
 /// gives a tool call (60 s).
 pub const LIMIT: Duration = Duration::from_secs(20);
 
+/// How many sessions whose wait ran out are remembered.
+const MAX_GIVEN_UP: usize = 64;
+
 /// One server's waiting, shared by its calls.
 #[derive(Clone)]
 pub struct Waiter {
     limit: Duration,
-    /// A wait ran out: this session is one nothing binds, and its later
-    /// calls are answered at once.
-    gave_up: Arc<AtomicBool>,
+    /// The app's control socket: with no app behind it nothing is bound.
+    app: PathBuf,
+    /// Whose wait ran out: sessions nothing binds, whose later calls are
+    /// answered at once.  Oldest first.
+    gave_up: Arc<Mutex<Vec<String>>>,
 }
 
 impl Waiter {
-    pub fn new(limit: Duration) -> Self {
-        Self { limit, gave_up: Arc::default() }
+    pub fn new(app: PathBuf, limit: Duration) -> Self {
+        Self { limit, app, gave_up: Arc::default() }
     }
 
-    /// Wait until `found`, asked again whenever something in `dirs`
-    /// changes.  What it last said.
-    pub fn until(&self, dirs: &[PathBuf], cancel: &Cancel, found: impl Fn() -> bool) -> bool {
-        if self.gave_up.load(Ordering::Relaxed) || dirs.is_empty() || found() {
-            return found();
+    fn given_up(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
+        self.gave_up.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn give_up(&self, who: &str) {
+        let mut gone = self.given_up();
+        if gone.len() == MAX_GIVEN_UP {
+            gone.remove(0);
+        }
+        gone.push(who.to_string());
+    }
+
+    /// Wait for `who` (a thread id) until `found`, asked again whenever
+    /// something in `dirs` changes.  What it last said.
+    pub fn until(&self, who: &str, dirs: &[PathBuf], cancel: &Cancel, found: impl Fn() -> bool) -> bool {
+        if found() {
+            return true;
+        }
+        if dirs.is_empty() || self.given_up().iter().any(|g| g == who) || UnixStream::connect(&self.app).is_err() {
+            return false;
         }
         let Some((watch, cancelled)) = cancel.watch().and_then(|c| Some((Watch::new(dirs, c.as_raw_fd())?, c))) else {
             return found();
@@ -49,7 +69,7 @@ impl Waiter {
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                self.gave_up.store(true, Ordering::Relaxed);
+                self.give_up(who);
                 return false;
             }
             if watch.next(left) == Some(cancelled.as_raw_fd()) {
@@ -109,11 +129,19 @@ impl Watch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
 
     fn dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("peer-bound-{}", crate::rand::hex(6)));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A waiter with an app behind its socket.
+    fn waiter(d: &std::path::Path, limit: Duration) -> (Waiter, UnixListener) {
+        let app = d.join("app.sock");
+        let l = UnixListener::bind(&app).unwrap();
+        (Waiter::new(app, limit), l)
     }
 
     /// Written and renamed into place, as a record is.
@@ -130,8 +158,8 @@ mod tests {
             }
         });
         let began = Instant::now();
-        let w = Waiter::new(LIMIT);
-        assert!(w.until(std::slice::from_ref(&d), &Cancel::default(), || rec.exists()));
+        let (w, _app) = waiter(&d, LIMIT);
+        assert!(w.until("t", std::slice::from_ref(&d), &Cancel::default(), || rec.exists()));
         assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
         t.join().unwrap();
         std::fs::remove_dir_all(&d).unwrap();
@@ -140,16 +168,41 @@ mod tests {
     #[test]
     fn a_wait_that_ran_out_is_the_last() {
         let d = dir();
-        let w = Waiter::new(Duration::from_millis(200));
+        let (w, _app) = waiter(&d, Duration::from_millis(200));
         let dirs = std::slice::from_ref(&d);
         let began = Instant::now();
-        assert!(!w.until(dirs, &Cancel::default(), || false));
+        assert!(!w.until("t", dirs, &Cancel::default(), || false));
         assert!(began.elapsed() >= Duration::from_millis(200));
         let long = Waiter { limit: LIMIT, ..w.clone() };
         let began = Instant::now();
-        assert!(!long.until(dirs, &Cancel::default(), || false));
+        assert!(!long.until("t", dirs, &Cancel::default(), || false));
         assert!(began.elapsed() < Duration::from_secs(5));
-        assert!(long.until(dirs, &Cancel::default(), || true), "found all the same");
+        assert!(long.until("t", dirs, &Cancel::default(), || true), "found all the same");
+        // another thread of the same server has a wait of its own
+        let began = Instant::now();
+        assert!(!w.until("u", dirs, &Cancel::default(), || false));
+        assert!(began.elapsed() >= Duration::from_millis(200));
+        for i in 0..2 * MAX_GIVEN_UP {
+            w.give_up(&i.to_string());
+        }
+        assert_eq!(w.given_up().len(), MAX_GIVEN_UP);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// No socket, or one a crashed app left behind.
+    #[test]
+    fn with_no_app_running_nothing_waits() {
+        let d = dir();
+        let (left, listener) = waiter(&d, LIMIT);
+        drop(listener);
+        let none = Waiter::new(d.join("none.sock"), LIMIT);
+        for w in [left, none] {
+            let began = Instant::now();
+            assert!(!w.until("t", std::slice::from_ref(&d), &Cancel::default(), || false));
+            assert!(began.elapsed() < Duration::from_secs(5), "{:?}", began.elapsed());
+            assert!(w.given_up().is_empty(), "an app started later is waited for");
+            assert!(w.until("t", std::slice::from_ref(&d), &Cancel::default(), || true));
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -165,10 +218,10 @@ mod tests {
             }
         });
         let began = Instant::now();
-        let w = Waiter::new(LIMIT);
-        assert!(!w.until(std::slice::from_ref(&d), &cancel, || false));
+        let (w, _app) = waiter(&d, LIMIT);
+        assert!(!w.until("t", std::slice::from_ref(&d), &cancel, || false));
         assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
-        assert!(!w.gave_up.load(Ordering::Relaxed), "that says nothing about the session");
+        assert!(w.given_up().is_empty(), "that says nothing about the session");
         t.join().unwrap();
         std::fs::remove_dir_all(&d).unwrap();
     }

@@ -106,7 +106,7 @@ pub(super) fn mode_flags(agent: AgentKind, mode: &str, dir: &Path) -> Result<Vec
 /// about.  None where the account's config, which marspot keeps, says so.
 pub(super) fn tool_flags(agent: AgentKind, mode: &str, home: &Path) -> Vec<String> {
     match (agent, mode) {
-        (AgentKind::Codex, "auto") => crate::plugins::peerbus::codex_config::approved_args(home),
+        (AgentKind::Codex, "auto") => crate::plugins::peerbus::codex_approval::approved_args(home),
         _ => Vec::new(),
     }
 }

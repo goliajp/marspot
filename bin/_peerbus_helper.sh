@@ -1,6 +1,7 @@
 # Sourced by test-peerbus.sh, with a Codex in pane $P1 and pane $P2 at its
-# shell.  The parent is started in pane $P2 in the helper's own class: a
-# session that bypasses permissions takes nothing from one that does not.
+# shell.  The parent is started in pane $P2 without permission prompts, a
+# class the helper is not in: the two take each other's messages all the
+# same, and nobody else of that class is heard by the helper.
 #
 # A helper as marspot starts it (`-a never -s workspace-write`, no
 # override that would take it off its home's app-server), whose model
@@ -15,7 +16,7 @@ open(sys.argv[1], "w").write(t.replace(at, at + 'default_tools_approval_mode = "
 PY
 ln -s .codex "$HOME/.codex-profile-1"
 
-send_once "$P2" "cd $SB/proj && codex -a never -s workspace-write"
+send_once "$P2" "cd $SB/proj && codex"
 RP="$(wait_record "$P2" "" 60)" || fail "the helper's parent in pane $P2 never got an inbox"
 HPARENT="$(cut -f1 <<<"$(wait_name "$P2" '^proj#[1-9][0-9]{3}$' 25)")"
 [[ "$HPARENT" =~ ^proj#[1-9][0-9]{3}$ ]] || fail "pane $P2 does not show a full name: $HPARENT"
@@ -41,6 +42,15 @@ mcp_send "$(cut -f3 <<<"$RP")" "$HNAME" PEERBUS-TO-HELPER >/dev/null || fail "th
 for (( i = 0; i < 60; i++ )); do (( $(seen "$HSID" PEERBUS-TO-HELPER) > 0 )) && break; sleep 0.5; done
 (( $(seen "$HSID" PEERBUS-TO-HELPER) > 0 )) || fail "the parent's reply never showed in the helper's pane: $("$SHELL_BIN" --read "$HSID" 2>&1 | tail -20)"
 ok "the parent's reply reached the helper's inbox"
+
+# pane $P1's Codex, in the parent's class, has nothing to do with it
+refusals() { grep -c 'peerbus.refused' "$APPLOG"; }
+BEFORE="$(refusals)"
+mcp_send "$(cut -f3 <<<"$R1B")" "$HNAME" PEERBUS-STRANGER >/dev/null || fail "pane $P1 could not hand its message to the helper's inbox"
+for (( i = 0; i < 40; i++ )); do (( $(refusals) > BEFORE )) && break; sleep 0.5; done
+(( $(refusals) > BEFORE )) || fail "a message of another class from a session that is not the parent was not refused"
+(( $(seen "$HSID" PEERBUS-STRANGER) == 0 )) || fail "a refused message showed in the helper's pane"
+ok "another session of the parent's class is still refused by the helper"
 
 helper stop "$HNAME" >/dev/null || fail "the helper was not stopped"
 HSOCK="$(cut -f4 <<<"$HREC")"

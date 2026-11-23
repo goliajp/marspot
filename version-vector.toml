@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.634"  # codex helpers stay on their home's app-server, so they get an inbox; approval of the marspot tools is in codex's config
+shell   = "0.7.635"  # helpers and their parents message each other whatever their permission class
 core    = "0.12.633"  # the shared run status line carries a marspot=run option
 session = "0.11.419"  # a prompt watch measures its quiet from the shell back in front

@@ -404,6 +404,7 @@ impl Worker {
 
     fn deliver(&mut self, key: u64, frame: UserFrame, peer_pid: Option<i32>) {
         let reply_to = deliver::reply_address(&frame);
+        let pair = self.is_from_pair(key, &frame);
         let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else {
             // a gemini inbox, or one that closed after the frame was read
             return self.deliver_gemini(key, &frame, peer_pid);
@@ -411,7 +412,7 @@ impl Worker {
         let sid = *sid;
         let address = format!("uds:{}", b.inbox.path.display());
         let relay = b.inbox.relay.clone();
-        let admitted = deliver::admit(&frame, b.class, &mut b.rate, Instant::now());
+        let admitted = deliver::admit(&frame, b.class, pair, &mut b.rate, Instant::now());
         let a = match admitted {
             Ok(a) => a,
             Err(why) => {

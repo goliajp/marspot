@@ -83,10 +83,17 @@ pub(super) fn reply_address(f: &UserFrame) -> Option<String> {
         .filter(|a| a.starts_with("uds:") && envelope::is_address(a))
 }
 
-pub(super) fn admit(f: &UserFrame, ours: Mode, rate: &mut Rate, now: Instant) -> Result<Admitted, Refusal> {
+/// Whether `f` declares a class other than `ours`.
+pub(super) fn other_class(f: &UserFrame, ours: Mode) -> bool {
+    envelope::parse(&f.content).and_then(|e| e.from_mode).is_some_and(|m| m != ours)
+}
+
+/// `pair`: the sender is this session's helper or the session that
+/// started it, whose declared class may differ.
+pub(super) fn admit(f: &UserFrame, ours: Mode, pair: bool, rate: &mut Rate, now: Instant) -> Result<Admitted, Refusal> {
     let env = envelope::parse(&f.content);
     let sender = env.as_ref().and_then(|e| e.from_mode);
-    if sender != Some(ours) {
+    if sender != Some(ours) && !(pair && sender.is_some()) {
         return Err(Refusal::ClassMismatch { sender, ours });
     }
     if env.as_ref().and_then(|e| e.hop_chain.as_ref()).is_some_and(|h| h.len() > MAX_HOPS) {
@@ -130,7 +137,7 @@ mod tests {
     #[test]
     fn same_class_is_admitted_as_the_envelope_alone() {
         let f = frame_from(Some(Mode::Bypass), "do the thing");
-        let a = admit(&f, Mode::Bypass, &mut Rate::default(), Instant::now()).unwrap();
+        let a = admit(&f, Mode::Bypass, false, &mut Rate::default(), Instant::now()).unwrap();
         assert_eq!(a.text, f.content, "what a Claude session would be shown");
         assert_eq!(a.reply_to.as_deref(), Some("uds:/tmp/cc-socks/9.sock"));
     }
@@ -139,11 +146,26 @@ mod tests {
     fn missing_or_other_class_is_refused() {
         let mut rate = Rate::default();
         for (m, ours) in [(None, Mode::Bypass), (Some(Mode::Prompting), Mode::Bypass), (Some(Mode::Bypass), Mode::Prompting)] {
-            let err = admit(&frame_from(m, "x"), ours, &mut rate, Instant::now()).unwrap_err();
+            let err = admit(&frame_from(m, "x"), ours, false, &mut rate, Instant::now()).unwrap_err();
             assert_eq!(err, Refusal::ClassMismatch { sender: m, ours });
         }
         let plain = UserFrame { content: "no envelope".into(), from: None, priority: Priority::Next, msg_id: None };
-        assert!(admit(&plain, Mode::Bypass, &mut rate, Instant::now()).is_err());
+        assert!(admit(&plain, Mode::Bypass, false, &mut rate, Instant::now()).is_err());
+    }
+
+    #[test]
+    fn a_pair_is_admitted_whatever_the_classes_but_not_without_one() {
+        for (m, ours) in [(Mode::Prompting, Mode::Bypass), (Mode::Bypass, Mode::Prompting)] {
+            let f = frame_from(Some(m), "x");
+            assert!(other_class(&f, ours) && !other_class(&f, m));
+            let a = admit(&f, ours, true, &mut Rate::default(), Instant::now()).unwrap();
+            assert_eq!(a.text, f.content, "with the class it declared");
+        }
+        let undeclared = frame_from(None, "x");
+        assert!(admit(&undeclared, Mode::Bypass, true, &mut Rate::default(), Instant::now()).is_err());
+        let mut full = Rate::default();
+        while full.admit(Instant::now()) {}
+        assert_eq!(admit(&frame_from(Some(Mode::Prompting), "x"), Mode::Bypass, true, &mut full, Instant::now()), Err(Refusal::RateLimited));
     }
 
     /// Only statuses and drop reasons a Claude Code sender understands.
@@ -172,6 +194,6 @@ mod tests {
         let chain = [hop; MAX_HOPS + 1].join(",");
         let content = format!("<cross-session-message from=\"uds:/a.sock\" hop-chain=\"{chain}\" from-mode=\"bypass\">\nb\n</cross-session-message>");
         let f = UserFrame { content, from: None, priority: Priority::Next, msg_id: None };
-        assert_eq!(admit(&f, Mode::Bypass, &mut Rate::default(), Instant::now()), Err(Refusal::TooManyHops));
+        assert_eq!(admit(&f, Mode::Bypass, false, &mut Rate::default(), Instant::now()), Err(Refusal::TooManyHops));
     }
 }

@@ -49,3 +49,24 @@ fn a_send_from_an_unknown_thread_is_an_error() {
     let r = s.handle(no_meta, 0).unwrap();
     assert_eq!(r.at(&["result", "isError"]).and_then(Value::bool), Some(true));
 }
+
+/// A list answers a session with no record as well as any.
+#[test]
+fn the_lists_do_not_wait_for_a_binding() {
+    use std::time::{Duration, Instant};
+    let d = std::env::temp_dir().join(format!("mcp-lists-{}", crate::rand::hex(6)));
+    std::fs::create_dir_all(&d).unwrap();
+    let socket = d.join("app.sock");
+    let app = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    // hung up on once, then gone
+    let hang_up = std::thread::spawn(move || app.accept().map(drop));
+    let mut s = Server::at(socket, None).waiting(Duration::from_secs(20));
+    let began = Instant::now();
+    let line = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ListAgents","arguments":{},"_meta":{"threadId":"00000000-0000-0000-0000-000000000000"}}}"#;
+    let r = s.handle(line, 0).unwrap();
+    assert_eq!(r.at(&["result", "isError"]).and_then(Value::bool), Some(false));
+    s.handle(&line.replace("ListAgents", "Panes"), 0).unwrap();
+    assert!(began.elapsed() < Duration::from_secs(15), "{:?}", began.elapsed());
+    hang_up.join().unwrap().unwrap();
+    std::fs::remove_dir_all(&d).unwrap();
+}

@@ -13,15 +13,15 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-const TABLE: &str = "mcp_servers.marspot";
+pub(super) const TABLE: &str = "mcp_servers.marspot";
 /// Whether codex asks before a tool of the server runs.  In the file
 /// and not on a helper's command line: codex (0.171) started with a
 /// `-c` like it leaves its home's app-server for one inside the TUI,
 /// whose threads nothing can be delivered into.
-const APPROVAL: &str = "default_tools_approval_mode";
-const APPROVED: &str = "approve";
+pub(super) const APPROVAL: &str = "default_tools_approval_mode";
+pub(super) const APPROVED: &str = "approve";
 /// A file whose end is inside a string, as far as this reads it.
-const OPEN: &str = "a string this cannot follow; left as it is";
+pub(super) const OPEN: &str = "a string this cannot follow; left as it is";
 const UNREADABLE: &str = "a marspot MCP entry this cannot read; left as it is";
 
 /// Add or repoint the entry in every Codex home.  Returns lines worth
@@ -89,45 +89,24 @@ fn reconcile_file(path: &Path, bin: &str) -> Option<String> {
     match with_server(&text, bin) {
         Ok(None) => None,
         Ok(Some(new)) => match crate::plugins::claudecode::write_through_symlink(path, &new) {
-            Ok(()) => Some("marspot MCP server set".into()),
+            Ok(()) => Some(edit_note(&text).into()),
             Err(e) => Some(e.to_string()),
         },
         Err(why) => Some(why.into()),
     }
 }
 
-/// The codex arguments under which a session in `home` is asked about
-/// no tool of marspot's MCP server, however its config has the server:
-/// none where the config says so itself.  A session given any has no
-/// inbox (see `APPROVAL`).
-pub(crate) fn approved_args(home: &Path) -> Vec<String> {
-    let text = match std::fs::read_to_string(home.join("config.toml")) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(_) => return Vec::new(),
-    };
-    let bin = super::inbox::peer_bin();
-    approved(&text, bin.as_deref().and_then(Path::to_str))
-}
-
-/// codex starts with no override that is all it has of a server: where
-/// the file has no server, the override gives a whole one.
-fn approved(text: &str, bin: Option<&str>) -> Vec<String> {
-    let mut sets = vec![format!("{TABLE}.{APPROVAL}=\"{APPROVED}\"")];
-    match (scan(text), bin) {
-        (Err(why), _) if why == OPEN => return Vec::new(),
-        // there, in a form of its own
-        (Err(_), _) => {}
-        (Ok(Some(t)), _) if t.approval.as_deref().and_then(string_value).as_deref() == Some(APPROVED) => return Vec::new(),
-        (Ok(Some(_)), _) => {}
-        (Ok(None), None) => return Vec::new(),
-        (Ok(None), Some(b)) => sets.extend([format!("{TABLE}.command={}", toml_string(b)), format!("{TABLE}.args=[\"mcp\"]")]),
+/// What `with_server` did to `text`, which it changed.
+fn edit_note(text: &str) -> &'static str {
+    match scan(text) {
+        Ok(Some(t)) if t.approval.is_some() => "marspot MCP server repointed",
+        Ok(Some(_)) => "marspot MCP server's tools approved: default_tools_approval_mode = \"approve\" added",
+        _ => "marspot MCP server set, its tools approved: default_tools_approval_mode = \"approve\"",
     }
-    sets.into_iter().flat_map(|s| ["-c".to_string(), s]).collect()
 }
 
 /// The `[mcp_servers.marspot]` table of a config.
-struct Table {
+pub(super) struct Table {
     /// The `command` value, where it is in the text.
     command: Range<usize>,
     /// Where the line of `command` ends, its line break included.
@@ -139,7 +118,7 @@ struct Table {
 /// The table in `text`, if there is one.  Err when the file defines the
 /// entry in a form other than a `[mcp_servers.marspot]` table with a
 /// one-line string `command`.
-fn scan(text: &str) -> Result<Option<Table>, &'static str> {
+pub(super) fn scan(text: &str) -> Result<Option<Table>, &'static str> {
     let mut table = String::new();
     let mut seen = false;
     let mut command: Option<(Range<usize>, usize)> = None;
@@ -239,7 +218,7 @@ fn with_server(text: &str, bin: &str) -> Result<Option<String>, &'static str> {
 
 /// The table a header line names, without spaces and key quotes:
 /// `[ mcp_servers."marspot" ] # x` is `mcp_servers.marspot`.
-fn header(body: &str) -> String {
+pub(super) fn header(body: &str) -> String {
     let mut name = String::new();
     let mut quote: Option<char> = None;
     for c in body.trim_start_matches('[').chars() {
@@ -256,7 +235,7 @@ fn header(body: &str) -> String {
 
 /// The length of the one-line string `value` starts with, when the
 /// string is all the line holds besides a comment.
-fn string_token(value: &str) -> Option<usize> {
+pub(super) fn string_token(value: &str) -> Option<usize> {
     let quote = value.chars().next().filter(|c| matches!(c, '"' | '\''))?;
     if value.starts_with("\"\"\"") || value.starts_with("'''") {
         return None;
@@ -274,7 +253,7 @@ fn string_token(value: &str) -> Option<usize> {
 /// What a one-line string token says.  None for an escape other than
 /// the two `toml_string` writes: such a value is not one written here,
 /// and it is repointed.
-fn string_value(token: &str) -> Option<String> {
+pub(super) fn string_value(token: &str) -> Option<String> {
     let inner = token.get(1..token.len().checked_sub(1)?)?;
     if token.starts_with('\'') {
         return Some(inner.to_string());
@@ -290,10 +269,12 @@ fn string_value(token: &str) -> Option<String> {
     Some(out)
 }
 
-fn toml_string(s: &str) -> String {
+pub(super) fn toml_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+#[cfg(test)]
+use super::codex_approval::{approved, approved_args, mode_said};
 #[cfg(test)]
 #[path = "codex_config_tests.rs"]
 mod tests;

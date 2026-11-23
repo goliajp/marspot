@@ -206,6 +206,12 @@ impl Table {
         }
     }
 
+    /// Whether one of two panes is a helper the other started.
+    pub fn is_pair(&self, a: u64, b: u64) -> bool {
+        let under = |helper, parent| self.map.get(&helper).is_some_and(|h| h.started.parent == parent);
+        under(a, b) || under(b, a)
+    }
+
     /// The helpers under `parent`.
     pub fn under(&self, parent: u64) -> impl Iterator<Item = &Helper> {
         self.map.values().filter(move |h| h.started.parent == parent)

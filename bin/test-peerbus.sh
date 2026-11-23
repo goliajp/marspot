@@ -163,6 +163,7 @@ trust_level = "trusted"
 [mcp_servers.marspot]
 command = "$SB/bin/marspot-peer"
 args = ["mcp"]
+env = { MARSPOT_STATE_DIR = "$MARSPOT_STATE_DIR" }
 
 [tui]
 screen_reader_detection_done = true

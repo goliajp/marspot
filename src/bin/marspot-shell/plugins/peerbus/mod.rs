@@ -19,7 +19,8 @@
 mod bind;
 pub(crate) mod claude_mcp;
 mod claude_hooks;
-pub(crate) mod codex_config;
+pub(crate) mod codex_approval;
+mod codex_config;
 mod daemon;
 mod deliver;
 mod gemini_bind;
@@ -32,6 +33,7 @@ mod leftovers;
 mod lifecycle;
 mod names;
 mod others;
+mod pair;
 mod records;
 mod reply;
 #[cfg(test)]

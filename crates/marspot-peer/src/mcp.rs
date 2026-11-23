@@ -49,12 +49,12 @@ impl Server {
     }
 
     pub fn at(socket: std::path::PathBuf, configured_timeout_s: Option<u32>) -> Self {
-        Self { client: String::new(), configured_timeout_s, socket, waiter: Waiter::new(bound::LIMIT) }
+        Self { client: String::new(), configured_timeout_s, waiter: Waiter::new(socket.clone(), bound::LIMIT), socket }
     }
 
     /// The same, a call from a session not bound yet waiting up to `limit`.
     pub fn waiting(self, limit: std::time::Duration) -> Self {
-        Self { waiter: Waiter::new(limit), ..self }
+        Self { waiter: Waiter::new(self.socket.clone(), limit), ..self }
     }
 
     fn cap_s(&self) -> u32 {
@@ -172,10 +172,11 @@ impl Server {
         let tool = params.and_then(|p| p.str_at("name")).unwrap_or_default();
         let pane_tool = crate::mcp_panes::is_pane_tool(tool);
         // a codex thread is known by its record alone; a pane tool
-        // called without one takes its caller from the process tree
+        // called without one takes its caller from the process tree;
+        // the two lists answer whoever asks
         let began = std::time::Instant::now();
-        if thread.is_some() || !pane_tool {
-            self.waiter.until(&registry::default_dirs(), cancel, || matches!(me(&peers::live_entries(), thread), Some(Ok(_))));
+        if !matches!(tool, "ListAgents" | "Panes") && (thread.is_some() || !pane_tool) {
+            self.waiter.until(thread.unwrap_or_default(), &registry::default_dirs(), cancel, || matches!(me(&peers::live_entries(), thread), Some(Ok(_))));
         }
         if pane_tool {
             let cap = self.cap_s().saturating_sub(began.elapsed().as_secs() as u32).max(1);
