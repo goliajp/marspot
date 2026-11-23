@@ -59,6 +59,9 @@ pub(super) struct ScanResult {
     /// Per pane: the newest request for Fable that was refused under
     /// its claude, its own or a background agent's.
     pub(super) fable_refused: HashMap<u64, super::fable_need::Ask>,
+    /// Which live sessions are helpers or have helpers, from the
+    /// registry this pass read.
+    pub(super) helpers: super::with_helpers::HelperRoles,
 }
 
 /// The files the quota sweep judges by besides the bindings: the usage

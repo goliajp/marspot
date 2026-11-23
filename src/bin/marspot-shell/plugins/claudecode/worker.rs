@@ -814,8 +814,7 @@ impl WorkerCtx {
         self.last_model_by_pane.retain(|sid, _| sessions_seen.contains(sid));
         self.banner_tried.retain(|sid, _| sessions_seen.contains(sid));
         self.caches.work.retain(|sid, _| sessions_seen.contains(sid));
-        // What the badge already knows, handed to the chooser as a
-        // fact rather than re-derived from the badge's text.
+        // what the badge already knows, handed to the chooser as a fact
         let new_models = self
             .last_model_by_pane
             .iter()
@@ -826,6 +825,7 @@ impl WorkerCtx {
         ScanResult {
             new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes,
             scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused, fable_refused,
+            helpers: super::with_helpers::HelperRoles::of_observation(obs),
         }
     }
 }

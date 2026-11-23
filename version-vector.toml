@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.615"  # the terminal counts how many times bracketed paste was turned off
+shell   = "0.7.616"  # helpers get the roomiest account and sit out idle reclaim and rest-time moves
 core    = "0.12.631"  # the terminal counts how many times bracketed paste was turned off
 session = "0.11.416"  # a held paste waits for bracketed paste to turn off, a second at most, and lets position probes past

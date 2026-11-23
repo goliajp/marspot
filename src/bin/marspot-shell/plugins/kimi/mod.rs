@@ -10,7 +10,7 @@
 //! session's record.  A record that cannot be read leaves the pane
 //! with its bare badge and no report.
 
-mod accounts;
+pub(in crate::plugins) mod accounts;
 mod badge;
 mod balance;
 mod config;

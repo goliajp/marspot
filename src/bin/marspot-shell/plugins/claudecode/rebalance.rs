@@ -108,6 +108,9 @@ pub(super) struct Pane {
     pub move_in_flight: bool,
     /// The machine's one-minute load average, when it says.
     pub host_load: Option<f64>,
+    /// It is a helper, or helpers work for it: it rests while it waits
+    /// on them, and a restart costs their exchange its prompt cache.
+    pub helper_bound: bool,
 }
 
 /// Why the pane is not to be touched now, or `None` when it may be.
@@ -117,6 +120,9 @@ pub(super) fn not_now(p: &Pane) -> Option<&'static str> {
     }
     if !p.awaiting_user {
         return Some("it is working");
+    }
+    if p.helper_bound {
+        return Some("it is a helper or helpers work for it");
     }
     if p.user_here {
         // they may be typing; the restart would come up under them
@@ -163,6 +169,7 @@ mod tests {
             since_last: None,
             move_in_flight: false,
             host_load: Some(4.0),
+            helper_bound: false,
         }
     }
 
@@ -178,12 +185,22 @@ mod tests {
             (Pane { idle_for: Duration::from_secs(59), ..resting() }, "it wrote within the last minute"),
             (Pane { since_last: Some(Duration::from_secs(1799)), ..resting() }, "it was moved within the half hour"),
             (Pane { host_load: Some(22.5), ..resting() }, "the machine is overloaded"),
+            (Pane { helper_bound: true, ..resting() }, "it is a helper or helpers work for it"),
         ];
         for (pane, why) in cases {
             assert_eq!(not_now(&pane), Some(why));
         }
         assert_eq!(not_now(&Pane { since_last: Some(COOLDOWN), ..resting() }), None);
         assert_eq!(not_now(&Pane { host_load: None, ..resting() }), None, "no answer is not busy");
+    }
+
+    #[test]
+    fn rebalance_leaves_a_helper_and_a_pane_with_live_helpers() {
+        let roles = super::super::with_helpers::HelperRoles::of([(1, 0), (2, 0), (3, 2)]);
+        let pane = |sid| Pane { helper_bound: roles.sits_out(sid), ..resting() };
+        assert_eq!(not_now(&pane(1)), None);
+        assert_eq!(not_now(&pane(2)), Some("it is a helper or helpers work for it"), "its helper is live");
+        assert_eq!(not_now(&pane(3)), Some("it is a helper or helpers work for it"), "it is a helper");
     }
 
     /// The feed at 2026-11-05 05:33 UTC, addresses replaced.  None of
