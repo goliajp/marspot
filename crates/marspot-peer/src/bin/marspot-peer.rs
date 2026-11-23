@@ -53,11 +53,17 @@ fn main() -> ExitCode {
             // `--client-timeout-s N`: the tool-call deadline marspot wrote
             // into this client's own config, when it wrote one
             let configured = match &args[1..] {
-                [flag, n] if flag == "--client-timeout-s" => n.parse().ok(),
+                [flag, n] if flag == "--client-timeout-s" => match n.parse() {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        eprintln!("marspot-peer mcp: --client-timeout-s {n:?}: {e}; using the client's default deadline");
+                        None
+                    }
+                },
                 _ => None,
             };
             let server = marspot_peer::mcp::Server::new(configured);
-            marspot_peer::mcp::serve(server, std::io::stdin().lock(), std::io::stdout().lock());
+            marspot_peer::mcp::serve(server, std::io::stdin().lock(), std::io::stdout());
             Ok(())
         }
         Some("claude-hook") => {

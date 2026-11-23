@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.608"  # kimi waits 600 s for a marspot tool call and the server is told so
+shell   = "0.7.609"  # marspot-peer mcp runs each tool call on its own thread and drops a cancelled one
 core    = "0.12.630"  # shadow panes are left out of the shared-name check and always show their full name
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

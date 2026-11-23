@@ -76,9 +76,16 @@ fn opens_forgeable(after: &str) -> bool {
 
 /// The filtered text inside `<pane-screen pane=… pos=…>`.
 pub fn wrap(pane: &str, pos: Option<u64>, text: &str) -> String {
+    wrap_part(pane, pos, None, text)
+}
+
+/// [`wrap`], with a `part` attribute naming which piece of the pane's
+/// text this is when it is not the screen.
+pub fn wrap_part(pane: &str, pos: Option<u64>, part: Option<&str>, text: &str) -> String {
     let name = filter(pane).replace('"', "'");
     let pos = pos.map(|p| format!(" pos=\"{p}\"")).unwrap_or_default();
-    format!("<pane-screen pane=\"{name}\"{pos}>\n{}\n</pane-screen>", filter(text))
+    let part = part.map(|p| format!(" part=\"{p}\"")).unwrap_or_default();
+    format!("<pane-screen pane=\"{name}\"{pos}{part}>\n{}\n</pane-screen>", filter(text))
 }
 
 #[cfg(test)]

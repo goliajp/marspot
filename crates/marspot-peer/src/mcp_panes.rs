@@ -147,12 +147,13 @@ pub fn request_for(tool: &str, args: &Value, thread: Option<&str>, cap_s: u32) -
 }
 
 /// Carry out one pane tool call: (text for the model, is an error).
-pub fn call(socket: &Path, tool: &str, args: &Value, thread: Option<&str>, cap_s: u32) -> (String, bool) {
+/// `cancel` ends a wait early; its result is then not for anyone.
+pub fn call(socket: &Path, tool: &str, args: &Value, thread: Option<&str>, cap_s: u32, cancel: &client::Cancel) -> (String, bool) {
     let req = match request_for(tool, args, thread, cap_s) {
         Ok(r) => r,
         Err(r) => return (refusal(&r), true),
     };
-    match client::call_at(socket, &req) {
+    match client::call_cancellable(socket, &req, cancel) {
         Ok(Response::Ok(v)) => (answer(tool, v), false),
         Ok(Response::Err(r)) => (refusal(&r), true),
         Err(CallError::Unreachable(e)) => (format!("cannot reach the marspot app ({e}); nothing was done"), true),
@@ -173,19 +174,26 @@ fn refusal(r: &Reject) -> String {
     t
 }
 
-/// The answer as JSON; a screen goes after it, filtered and wrapped.
+/// The answer as JSON; the screen, and the line a text wait matched,
+/// go after it, filtered and wrapped.
 fn answer(tool: &str, mut v: Value) -> String {
     if !matches!(tool, "PaneRead" | "PaneRun") {
         return v.to_json();
     }
-    let text = match &mut v {
-        Value::Obj(kv) => kv.iter().position(|(k, _)| k == "text").map(|i| kv.remove(i).1),
+    let mut take = |key: &str| match &mut v {
+        Value::Obj(kv) => kv.iter().position(|(k, _)| k == key).map(|i| kv.remove(i).1),
         _ => None,
     };
+    let (text, matched) = (take("text"), take("matched_line"));
     let Some(text) = text.as_ref().and_then(Value::str) else { return v.to_json() };
     let pane = v.str_at("pane").unwrap_or("?").to_string();
     let pos = v.get("pos").and_then(Value::i64).map(|p| p.max(0) as u64);
-    format!("{}\n{}", v.to_json(), screen::wrap(&pane, pos, text))
+    let mut out = format!("{}\n{}", v.to_json(), screen::wrap(&pane, pos, text));
+    if let Some(m) = matched.as_ref().and_then(Value::str) {
+        out.push('\n');
+        out.push_str(&screen::wrap_part(&pane, pos, Some("matched_line"), m));
+    }
+    out
 }
 
 #[cfg(test)]

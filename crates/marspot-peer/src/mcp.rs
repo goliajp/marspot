@@ -14,8 +14,6 @@
 //! Claude Code client is not offered `ListAgents` and `SendMessage`: it
 //! has tools of those names already.
 
-use std::io::{BufRead, Write};
-
 use crate::frame::Priority;
 use crate::json::{self, Value, obj};
 use crate::peers;
@@ -33,6 +31,7 @@ The recipient has none of your context: say which project and files you mean, wh
 A successful send means the message reached that session's inbox, not that it was read. To hear when the recipient finishes what it is doing, pass `notify_when_idle: true`: exactly one [Cross-session idle notice] arrives when it next goes idle (or exits). Omit `message` for a pure subscription that costs that session nothing; include one to deliver it now AND subscribe. Never poll ListAgents or send \"are you done?\" messages instead.";
 
 /// What one server knows about the client it serves.
+#[derive(Clone)]
 pub struct Server {
     /// The name from `initialize`'s `clientInfo`, empty until then.
     client: String,
@@ -102,28 +101,45 @@ fn peer_tools() -> Vec<Value> {
     ]
 }
 
-/// Serve until stdin closes.
-pub fn serve(mut server: Server, input: impl BufRead, mut output: impl Write) {
-    for line in input.lines() {
-        let Ok(line) = line else { return };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some(reply) = server.handle(&line, now_ms()) else { continue };
-        if writeln!(output, "{}", reply.to_json()).and_then(|()| output.flush()).is_err() {
-            return;
-        }
-    }
+pub use crate::mcp_serve::serve;
+
+/// What one request line asks of the server.
+pub(crate) enum Step {
+    /// Answered at once.
+    Answer(Value),
+    /// A tool call: its id and params.
+    Call(Value, Option<Value>),
+    /// `notifications/cancelled` for this request id.
+    Cancelled(Value),
+    Nothing,
 }
 
 impl Server {
-    /// The answer to one request line; None for a notification.
+    /// The answer to one request line, a tool call carried out here;
+    /// None for a notification.
     pub fn handle(&mut self, line: &str, now_ms: i64) -> Option<Value> {
+        match self.step(line) {
+            Step::Answer(v) => Some(v),
+            Step::Call(id, params) => Some(self.answer_call(id, params.as_ref(), now_ms, &Default::default())),
+            Step::Cancelled(_) | Step::Nothing => None,
+        }
+    }
+
+    pub(crate) fn answer_call(&self, id: Value, params: Option<&Value>, now_ms: i64, cancel: &crate::control::client::Cancel) -> Value {
+        reply(id, self.call(params, now_ms, cancel))
+    }
+
+    pub(crate) fn step(&mut self, line: &str) -> Step {
         let Ok(req) = json::parse(line) else {
-            return Some(error(Value::Null, -32700, "parse error"));
+            return Step::Answer(error(Value::Null, -32700, "parse error"));
         };
-        let id = req.get("id").cloned()?;
         let params = req.get("params");
+        let Some(id) = req.get("id").cloned() else {
+            return match (req.str_at("method"), params.and_then(|p| p.get("requestId"))) {
+                (Some("notifications/cancelled"), Some(rid)) => Step::Cancelled(rid.clone()),
+                _ => Step::Nothing,
+            };
+        };
         let result = match req.str_at("method").unwrap_or_default() {
             "initialize" => {
                 self.client = params.and_then(|p| p.at(&["clientInfo", "name"])).and_then(Value::str).unwrap_or_default().to_string();
@@ -136,18 +152,18 @@ impl Server {
             }
             "ping" => obj([]),
             "tools/list" => obj([("tools", tools(self))]),
-            "tools/call" => self.call(params, now_ms),
-            m => return Some(error(id, -32601, &format!("method not found: {m}"))),
+            "tools/call" => return Step::Call(id, params.cloned()),
+            m => return Step::Answer(error(id, -32601, &format!("method not found: {m}"))),
         };
-        Some(obj([("jsonrpc", Value::from("2.0")), ("id", id), ("result", result)]))
+        Step::Answer(reply(id, result))
     }
 
-    fn call(&self, params: Option<&Value>, now_ms: i64) -> Value {
+    fn call(&self, params: Option<&Value>, now_ms: i64, cancel: &crate::control::client::Cancel) -> Value {
         let args = params.and_then(|p| p.get("arguments"));
         let thread = params.and_then(|p| p.at(&["_meta", "threadId"])).and_then(Value::str);
         let tool = params.and_then(|p| p.str_at("name")).unwrap_or_default();
         if crate::mcp_panes::is_pane_tool(tool) {
-            let (text, is_error) = crate::mcp_panes::call(&self.socket, tool, args.unwrap_or(&Value::Null), thread, self.cap_s());
+            let (text, is_error) = crate::mcp_panes::call(&self.socket, tool, args.unwrap_or(&Value::Null), thread, self.cap_s(), cancel);
             return tool_result(text, is_error);
         }
         let entries = peers::live_entries();
@@ -204,7 +220,11 @@ fn send(me: &crate::registry::Entry, entries: &[crate::registry::Entry], panes: 
     Ok(text)
 }
 
-fn error(id: Value, code: i64, message: &str) -> Value {
+fn reply(id: Value, result: Value) -> Value {
+    obj([("jsonrpc", Value::from("2.0")), ("id", id), ("result", result)])
+}
+
+pub(crate) fn error(id: Value, code: i64, message: &str) -> Value {
     obj([
         ("jsonrpc", Value::from("2.0")),
         ("id", id),
@@ -212,7 +232,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     ])
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
