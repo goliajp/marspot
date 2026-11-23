@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.605"  # new panes and moves into the shadows are checked and made one at a time
+shell   = "0.7.606"  # unanswered new panes count, the shadow overlay never drops a change in use, checks read a fresh view
 core    = "0.12.630"  # shadow panes are left out of the shared-name check and always show their full name
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

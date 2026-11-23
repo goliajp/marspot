@@ -75,7 +75,7 @@ fn ctx(caller: CallerKey, sessions: Vec<SessionEntry>, cfg: Config) -> Ctx {
         sessions.into_iter().map(|e| (e, true)).collect(),
         |_| None,
     );
-    Ctx { caller, caller_name: "t".into(), obs: Arc::new(obs), cfg: Arc::new(cfg) }
+    Ctx { caller, caller_name: "t".into(), obs: Arc::new(obs), cfg: Arc::new(cfg), view: |c| c.obs.clone() }
 }
 
 #[test]
