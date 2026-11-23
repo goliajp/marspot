@@ -101,6 +101,14 @@ impl Watches {
         self.every_batch = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn met(&self) -> Option<Option<u64>> {
+        self.slots.iter().flatten().find_map(|s| match &s.state {
+            State::Fired { report, .. } if report.reason == WatchReason::Met => Some(report.line),
+            _ => None,
+        })
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.slots.iter().all(Option::is_none)
     }
@@ -204,15 +212,17 @@ impl Watches {
         }
         // a held grid has not got the batch yet: whether to check is
         // asked again once the hold ends and the grid changes
+        let mut whole = 0u8;
         let check = texts && batch.is_some() && !local(session).is_holding() && {
-            let stream = local_mut(session).take_text_check();
+            let (stream, held) = local_mut(session).take_text_check();
+            whole = held;
             stream || self.every_batch || above_bottom(session)
         };
-        let scan = match batch {
-            Some(b) if check => Scan::Batch(b),
-            _ => Scan::None,
-        };
         for at in 0..SLOTS {
+            let scan = match batch {
+                Some(batch) if check => Scan::Batch { batch, whole: whole & 1 << at != 0 },
+                _ => Scan::None,
+            };
             self.look(at, session, track, scan);
         }
         self.log_cut(session.id());
@@ -245,7 +255,7 @@ impl Watches {
                 met.then_some((track.pos(), None, None))
             }
             WatchKind::Text if after => {
-                let line = slot.needle.as_deref().and_then(|n| text_line(session, n, slot.from, scan, &mut self.cut.0));
+                let line = slot.needle.as_deref().and_then(|n| text_line(session, n, (b.since_pos, slot.from), scan, &mut self.cut.0));
                 line.map(|l| (track.pos(), None, Some(l)))
             }
             _ => None,
@@ -263,14 +273,15 @@ impl Watches {
     /// Set the texts the session reads its output for: one per waiting
     /// text watch.
     fn stream_texts(&mut self, session: &mut SessionImpl) {
-        let mut set: [&[u8]; SLOTS] = [&[]; SLOTS];
+        let mut set: [(usize, &[u8]); SLOTS] = [(0, &[]); SLOTS];
         let mut n = 0;
         self.every_batch = false;
-        for slot in self.slots.iter().flatten() {
+        for (at, slot) in self.slots.iter().enumerate() {
+            let Some(slot) = slot else { continue };
             if slot.body.kind == WatchKind::Text && matches!(slot.state, State::Waiting { .. }) {
                 match stream_text(&slot.body.text) {
                     Some(t) => {
-                        set[n] = t;
+                        set[n] = (at, t);
                         n += 1;
                     }
                     None => self.every_batch = true,

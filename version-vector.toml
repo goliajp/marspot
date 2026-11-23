@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.636"  # a helper whose messages its parent would hold asks by its result file
-core    = "0.12.633"  # the shared run status line carries a marspot=run option
-session = "0.11.420"  # a disk writer's empty buffer keeps its pages given back until a write needs them
+core    = "0.12.635"  # a disk writer's pages taken back by a small burst are given back again
+session = "0.11.423"  # a text watch reads the rows a batch went up to and came down from

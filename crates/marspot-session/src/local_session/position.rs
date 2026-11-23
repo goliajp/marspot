@@ -41,15 +41,16 @@ impl LocalSession {
         self.out.pos
     }
 
-    /// Look for these texts in what is taken in from now on; none
-    /// stops looking.
-    pub(crate) fn look_for_texts(&mut self, texts: &[&[u8]]) {
+    /// Look for these texts, each with an id under 8, in what is taken
+    /// in from now on; none stops looking.
+    pub(crate) fn look_for_texts(&mut self, texts: &[(usize, &[u8])]) {
         self.out.texts.set(texts);
     }
 
     /// Whether what was taken in since the last ask can have put one of
-    /// the texts on the grid.
-    pub(crate) fn take_text_check(&mut self) -> bool {
+    /// the texts on the grid, and a bit for the id of each text that
+    /// was in it whole.
+    pub(crate) fn take_text_check(&mut self) -> (bool, u8) {
         self.out.texts.take()
     }
 }

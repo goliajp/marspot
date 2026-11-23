@@ -924,7 +924,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // region the program set up.
                 let n = param(params, 0, 1);
                 let to = row.saturating_sub(n).max(self.up_limit(row));
-                self.grid.set_cursor(col, to);
+                self.grid.move_cursor(col, to);
             }
             b'B' => {
                 *self.pending_wrap = false;
@@ -940,8 +940,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 *self.pending_wrap = false;
                 // CUF: cursor forward (right).
                 let n = param(params, 0, 1);
-                self.grid
-                    .set_cursor(col.saturating_add(n).min(cols - 1), row);
+                self.grid.set_cursor(col.saturating_add(n).min(cols - 1), row);
             }
             b'E' => {
                 *self.pending_wrap = false;
@@ -963,7 +962,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // Same margin as CUU; it is CUU with a carriage return.
                 let n = param(params, 0, 1);
                 let to = row.saturating_sub(n).max(self.up_limit(row));
-                self.grid.set_cursor(0, to);
+                self.grid.move_cursor(0, to);
             }
             b'D' => {
                 *self.pending_wrap = false;
@@ -976,7 +975,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // CUP / HVP: cursor position (1-indexed row;col → 0-indexed).
                 let r = self.absolute_row(param(params, 0, 1).saturating_sub(1));
                 let c = param(params, 1, 1).saturating_sub(1);
-                self.grid.set_cursor(c, r);
+                self.grid.move_cursor(c, r);
             }
             b'G' => {
                 *self.pending_wrap = false;
@@ -1013,7 +1012,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // VPA: vertical position absolute (1-indexed), inside
                 // the origin like CUP.
                 let r = self.absolute_row(param(params, 0, 1).saturating_sub(1));
-                self.grid.set_cursor(col, r);
+                self.grid.move_cursor(col, r);
             }
             b'J' => {
                 *self.pending_wrap = false;

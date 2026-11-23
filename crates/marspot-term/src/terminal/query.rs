@@ -6,6 +6,23 @@ use super::{MouseTrackingMode, Osc8, ScreenModes, Terminal};
 use crate::grid::{CellAttrs, Grid};
 
 impl Terminal {
+    /// How far the main screen's cursor has gone up since the last ask.
+    pub fn take_cursor_reach(&mut self) -> Option<crate::grid::Reach> {
+        self.saved_main.as_mut().map_or(&mut self.grid, |s| &mut s.grid).take_reach()
+    }
+
+    /// The main screen's cursor, its row numbered as a [`Reach`] is:
+    /// on the alternate screen, the one put back when it is left.
+    ///
+    /// [`Reach`]: crate::grid::Reach
+    pub fn main_cursor(&self) -> (u64, u16) {
+        let (grid, (col, row)) = match &self.saved_main {
+            Some(s) => (&s.grid, s.cursor),
+            None => (&self.grid, self.grid.cursor()),
+        };
+        (grid.scroll_push_count() + u64::from(row), col)
+    }
+
     pub fn grid(&self) -> &Grid {
         &self.grid
     }

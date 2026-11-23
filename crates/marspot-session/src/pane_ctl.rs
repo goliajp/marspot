@@ -67,6 +67,12 @@ impl PaneCtl {
         self.watches.check_every_batch();
     }
 
+    /// The line of the first watch that was met, if one was.
+    #[cfg(test)]
+    pub(crate) fn met(&self) -> Option<Option<u64>> {
+        self.watches.met()
+    }
+
     pub(crate) fn marks(&self, session: &SessionImpl) -> Marks {
         Marks { pos: local(session).output_pos(), command_end: self.track.command_end(), input_start: self.track.input_start() }
     }
@@ -217,3 +223,7 @@ fn drain(poke: Option<&mut ControlWriter>) {
 #[cfg(test)]
 #[path = "watch_perf_tests.rs"]
 mod watch_perf_tests;
+
+#[cfg(test)]
+#[path = "watch_batch_tests.rs"]
+mod watch_batch_tests;

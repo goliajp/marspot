@@ -8,23 +8,29 @@
 
 use std::time::Instant;
 
-use marspot_term::grid::Grid;
+use marspot_term::grid::{Grid, Reach};
 
 use crate::SessionImpl;
 use crate::pane_ctl::{Marks, local, shell_in_front};
 
-/// Pairs of (position, cursor) kept to find where a position's output
-/// went.
+/// Points kept to find where a position's output went.
 const RING: usize = 64;
 
 /// A cell, numbered absolutely: (row, column).
 pub(crate) type At = (u64, u16);
 
+/// A position, and where the main screen's cursor was at it.
+type Point = (u64, At);
+
+const NOWHERE: Point = (0, (0, 0));
+
 pub(crate) struct Track {
-    ring: [(u64, At); RING],
+    ring: [Point; RING],
     /// Next slot to write, and how many are filled.
     head: usize,
     len: usize,
+    /// The latest point taken on the main screen.
+    main: Point,
     pos: u64,
     last_output: Instant,
     commands_seen: u64,
@@ -45,8 +51,23 @@ pub(crate) struct Track {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Batch {
     /// Where the cursor was before the batch, and where it is.
-    pub(crate) from: At,
+    from: At,
     pub(crate) to: At,
+    /// The rows it went up from and to in between, on the main screen.
+    pub(crate) reach: Option<Reach>,
+    /// The latest point on the main screen before the batch: `from`,
+    /// or where the output that left the main screen started.
+    main: Point,
+}
+
+impl Batch {
+    /// The cell a watch from `since` is checked from.  What the batch
+    /// that went to the alternate screen wrote before it was not read
+    /// then; it is now, by a watch that is older than it.
+    pub(crate) fn start(&self, since: u64) -> At {
+        let (pos, at) = self.main;
+        if since <= pos { at } else { self.from }
+    }
 }
 
 impl Track {
@@ -54,9 +75,10 @@ impl Track {
         let inputs_seen = session.terminal().input_starts();
         let input_start = first_input_start(resumed.input_start, inputs_seen);
         let mut t = Self {
-            ring: [(0, (0, 0)); RING],
+            ring: [NOWHERE; RING],
             head: 0,
             len: 0,
+            main: NOWHERE,
             pos: local(session).output_pos(),
             last_output: Instant::now(),
             commands_seen: session.terminal().command_end().0,
@@ -66,7 +88,7 @@ impl Track {
             input_since_end: input_start.is_some(),
             generation: session.terminal().generation(),
         };
-        t.mark(session);
+        t.main = (t.pos, t.mark(session));
         t
     }
 
@@ -115,7 +137,7 @@ impl Track {
     ///
     /// A turn that only parsed output a held grid had kept is a batch
     /// too: the position does not move, the grid does.
-    pub(crate) fn after_batch(&mut self, session: &SessionImpl) -> Option<Batch> {
+    pub(crate) fn after_batch(&mut self, session: &mut SessionImpl) -> Option<Batch> {
         let pos = local(session).output_pos();
         let generation = session.terminal().generation();
         if pos == self.pos && generation == self.generation {
@@ -144,9 +166,13 @@ impl Track {
         let input = inputs != self.inputs_seen && shell_in_front(session);
         self.inputs_seen = inputs;
         self.note_marks(pos, ended, input);
-        let from = self.last_at();
+        let (from, main) = (self.last_at(), self.main);
+        // taken on the alternate screen too, and then let go: by the
+        // time that is left, a watch may be younger than those rows
+        let reach = session.terminal_mut().take_cursor_reach();
+        let reach = reach.filter(|_| !session.terminal().in_alt_screen());
         let to = self.mark(session);
-        Some(Batch { from, to })
+        Some(Batch { from, to, reach, main })
     }
 
     /// Keep the input start rule only while the shell marks an input
@@ -169,12 +195,17 @@ impl Track {
         }
     }
 
-    /// Remember where the cursor is at the current position.
+    /// Remember where the main screen's cursor is at the current
+    /// position.
     pub(crate) fn mark(&mut self, session: &SessionImpl) -> At {
-        let at = cursor_at(session.terminal().grid());
+        let at = session.terminal().main_cursor();
         let pos = local(session).output_pos();
-        if self.len > 0 && self.ring[(self.head + RING - 1) % RING].0 == pos {
-            self.ring[(self.head + RING - 1) % RING].1 = at;
+        if !session.terminal().in_alt_screen() {
+            self.main = (pos, at);
+        }
+        let last = &mut self.ring[(self.head + RING - 1) % RING];
+        if self.len > 0 && last.0 == pos {
+            last.1 = at;
             return at;
         }
         self.ring[self.head] = (pos, at);
@@ -222,9 +253,10 @@ mod tests {
 
     fn track(pairs: &[(u64, u64)]) -> Track {
         let mut t = Track {
-            ring: [(0, (0, 0)); RING],
+            ring: [NOWHERE; RING],
             head: 0,
             len: 0,
+            main: NOWHERE,
             pos: 0,
             last_output: Instant::now(),
             commands_seen: 0,

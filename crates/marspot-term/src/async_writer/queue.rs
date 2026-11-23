@@ -67,6 +67,16 @@ impl Buf {
         self.given.give_back(&mut self.main, KEPT, self.high);
         self.high = 0;
     }
+
+    /// Make the pages given back writable again.  They count in the
+    /// footprint from here on, however little of them is then written,
+    /// so the buffer is one whose pages are to be given back.
+    pub(super) fn take_back(&mut self) {
+        if self.given.is_given() {
+            self.high = self.high.max(self.given.end()).max(WORTH_GIVING_BACK);
+            self.given.take_back(&mut self.main);
+        }
+    }
 }
 
 pub(super) enum Msg {
