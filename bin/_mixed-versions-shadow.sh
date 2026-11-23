@@ -5,6 +5,16 @@
 # the suite's SD, SID, NEW, OLD_BUILD, NEW_BUILD, count/check, die and
 # same_pane.
 
+# The old build's `bin` reports version `min` or later.  Session
+# 0.11.412 and core 0.12.625 are the first that know shadow panes.
+old_build_at_least() { # binary name, min version
+  local v
+  v=$(MARSPOT_NO_REDIRECT=1 "$OLD/$1" --version 2>/dev/null) || return 1
+  v=${v##* }
+  [[ $v == *.*.* ]] || return 1
+  [[ $(printf '%s\n%s\n' "$2" "$v" | sort -V | head -1) == "$2" ]]
+}
+
 # Wait until `key` in session `sid`'s entry reads `want`.
 entry_becomes() { # session id, key, want
   local i
@@ -38,7 +48,12 @@ shadow_goes_back_to_the_old_build() {
   kill -TERM "$shadow_pid"
   wait_count "$SD" L3_EXECV_INVOKE "$execs" 120 || die "the shadow's session never moved to the old build"
   check "the shadow's session runs the old build" entry_becomes "$shadow_sid" build "$OLD_BUILD"
-  check "the old build's entry names no parent" test -z "$(entry "$SD" "$shadow_sid" shadow_of)"
+  if old_build_at_least marspot-session 0.11.412; then
+    not_applicable "the old build's entry names no parent" "the old session build knows shadow panes"
+    check "the old build's entry still names its parent" test "$(entry "$SD" "$shadow_sid" shadow_of)" = "$SID"
+  else
+    check "the old build's entry names no parent" test -z "$(entry "$SD" "$shadow_sid" shadow_of)"
+  fi
   check "the shadow's session is the same process" test "$(entry "$SD" "$shadow_sid" pid)" = "$shadow_pid"
   sleep 1
   check "the shadow's session is alive" alive "$shadow_pid"
@@ -76,7 +91,12 @@ shadow_shows_as_a_pane_under_the_old_core() {
   check "and not into the window" not_logged_for core.boot.orphan_adopted "$sh"
   swap_core "$SD" "$OLD/marspot-core"
   sleep 1
-  check "the old core shows the shadow as a pane of its window" logged_for core.boot.orphan_adopted "$sh"
+  if old_build_at_least marspot-core 0.12.625; then
+    not_applicable "the old core shows the shadow as a pane of its window" "the old core knows shadow panes"
+    check "the old core puts the shadow back in the shadows" logged_for SHADOW_ADOPTED "$sh"
+  else
+    check "the old core shows the shadow as a pane of its window" logged_for core.boot.orphan_adopted "$sh"
+  fi
   check "the shadow's session is the same process" test "$(entry "$SD" "$sh" pid)" = "$pid"
   check "the shadow's session is alive" alive "$pid"
   same_pane
