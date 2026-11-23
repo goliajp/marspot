@@ -81,7 +81,9 @@ fn a_pane_is_told_once_per_running_low_not_once_per_read() {
     let mut plugin = stranded_plugin(pane_on_p1(&home, "u-97"), sid);
     let mut result = scan_of(sid, CcActivity::Working);
     sweep(&mut plugin, &host, &mut result);
-    let first = Arc::as_ptr(&plugin.heads_up.get(&sid).expect("told").delivered);
+    // held, so the allocator cannot hand its address to the next telling
+    let first_told = Arc::clone(&plugin.heads_up.get(&sid).expect("told").delivered);
+    let first = Arc::as_ptr(&first_told);
 
     feed_renewing(&home, "h1", ("allowed", 0.99), 4102444799, ("allowed", 0.2));
     sweep(&mut plugin, &host, &mut result);
