@@ -101,6 +101,19 @@ pub(super) fn mode_flags(agent: AgentKind, mode: &str, dir: &Path) -> Result<Vec
     Ok(f)
 }
 
+/// Whether `mode` asked for claude's bypass of permissions.
+pub(super) fn asks_bypass(mode: &str) -> bool {
+    let words: Vec<&str> = mode.split_whitespace().collect();
+    mode == "auto"
+        || words.iter().any(|w| matches!(*w, "--dangerously-skip-permissions" | "--permission-mode=bypassPermissions"))
+        || words.windows(2).any(|w| w == ["--permission-mode", "bypassPermissions"])
+}
+
+/// The line typed into the pane of the helper whose directory is `dir`.
+pub(super) fn start_line(dir: &Path) -> String {
+    format!("sh '{}'", dir.join("run.sh").display())
+}
+
 /// Whether `cwd` holds a conversation `agent` under `home` can go on
 /// with; None when this build cannot tell (the agent decides).
 pub(super) fn has_last(agent: AgentKind, home: &Path, cwd: &str) -> Option<bool> {

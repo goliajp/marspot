@@ -144,6 +144,9 @@ pub(super) fn tick(s: &Arc<Shared>, host: &dyn PluginHost, in_turn: &mut HashMap
 /// on an approval, or its program left the pane.
 fn turn(s: &Shared, host: &dyn PluginHost, h: &Helper, now_ms: u64, in_turn: &mut HashMap<u64, Turn>) {
     let Ok(Some(v)) = host.pane_status(h.sid) else { return };
+    if matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval)) {
+        s.lock().turned.insert(h.sid);
+    }
     let seen = in_turn.entry(h.sid).or_default();
     match v.status {
         PaneStatus::Busy(BusyKind::ToolAwaitingApproval) if v.held >= BLOCKED_AFTER && *seen != Turn::BlockedTold => {

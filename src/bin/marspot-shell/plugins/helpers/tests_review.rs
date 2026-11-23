@@ -11,7 +11,7 @@ use super::pending::{Notice, TRIES, Undelivered};
 use super::table::{Event, Helper};
 use super::tests::{feed, host_with, shared_at, started, temp};
 use super::work::Job;
-use super::{Shared, launch, records, settle, stop_all, tick, timers};
+use super::{Shared, launch, records, stop_all, tick, timers};
 use crate::observe::{Observation, Session};
 use crate::plugins::TickDue;
 
@@ -195,15 +195,4 @@ fn helpers_command_line_words_and_claude_dirs() {
     assert!(line.contains(" -m 'gpt 5' -s 'danger;rm' '*' --add-dir /st/helpers/42 "), "{line}");
     assert_eq!(launch::claude_project_dir("/Users/x/my.repo_v2/a b"), "-Users-x-my-repo-v2-a-b");
     assert_eq!(launch::claude_project_dir("/private/tmp/claude-501/-Users-x"), "-private-tmp-claude-501--Users-x");
-}
-
-#[test]
-fn helpers_claude_dialog_is_told_from_echoed_task_text() {
-    let dialog = "Do you trust the files in this folder?\nIs this a project you created or one you trust\n ❯ 1. Yes, proceed\n   2. No, exit\n";
-    assert!(settle::claude_dialog(dialog, false));
-    let bypass = "WARNING: Claude Code running in Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\n";
-    assert!(settle::claude_dialog(bypass, false));
-    // the same words in the task, shown above claude's input box
-    assert!(!settle::claude_dialog(bypass, true));
-    assert!(!settle::claude_dialog("> explain Bypass Permissions mode and No, exit\n", false));
 }

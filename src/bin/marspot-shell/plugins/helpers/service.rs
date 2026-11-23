@@ -127,7 +127,7 @@ impl HelperService for Service {
         if let Err(r) = self.write_files(sid, a, &parent_name, &cwd, &account, &mode, resume) {
             return Err(self.abandon(port, sid, r));
         }
-        let run = format!("sh '{}'", self.0.dir_of(sid).join("run.sh").display());
+        let run = launch::start_line(&self.0.dir_of(sid));
         let pos = match port.type_at_prompt(sid, &run, PROMPT_WITHIN) {
             Ok(p) => p,
             Err(r) => return Err(self.abandon(port, sid, r)),

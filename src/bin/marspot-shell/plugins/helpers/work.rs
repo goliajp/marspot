@@ -1,6 +1,6 @@
 //! The helpers' threads: one worker that tells parents and closes
-//! helpers, in order; a short-lived one per new helper that answers its
-//! first screens; and, for the agents no plugin reports turns for
+//! helpers, in order; one per helper until it is past its first
+//! screens (`first_screens`); and, for the agents no plugin reports turns for
 //! (codex, gemini), one per helper asleep on a quiet wait in its pane.
 
 use std::sync::Arc;

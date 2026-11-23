@@ -12,14 +12,85 @@ The task says what to do:
   FAKE-EXIT    write the result file the task names, then exit
   FAKE-STAY    write it, then draw an empty input box and wait
   FAKE-SILENT  write nothing, draw the box and wait
+
+claude shows its first-run dialogs before that, the cursor on "No, exit"
+and with no numbers, when the task holds
+  FAKE-TRUST        the trust dialog for the directory it runs in
+  FAKE-TRUST-OTHER  the trust dialog for another directory
+  FAKE-TRUST-STUCK  the trust dialog, which takes Enter and stays up
+  FAKE-BYPASS       the bypass-permissions dialog (after a trust dialog)
+  FAKE-LATE         nothing at all for 14 s before each of these
+Each key it reads there is logged as `key<TAB>what`.
 """
 import os
 import re
 import sys
+import termios
 import time
+import tty
 
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
+
+
+def log(line):
+    with open(os.environ["FAKE_HELPER_LOG"], "a") as f:
+        f.write(line + "\n")
+
+
+def dialog(head, yes, stuck=False):
+    """Draw it, take keys, and exit on No or Esc as claude does."""
+    options, at = ["No, exit", yes], 0
+    was = termios.tcgetattr(0)
+    tty.setraw(0)
+    while True:
+        rows = [" " + r for r in head] + [""]
+        rows += [(" ❯ " if i == at else "   ") + o for i, o in enumerate(options)]
+        rows += ["", " Enter to confirm · Esc to cancel"]
+        sys.stdout.write("\x1b[2J\x1b[H" + "\r\n".join(rows))
+        sys.stdout.flush()
+        key = os.read(0, 16)
+        if key in (b"\x1b[B", b"\x1b[A"):
+            at = min(max(at + (1 if key == b"\x1b[B" else -1), 0), 1)
+            log("key\tarrow to " + options[at])
+        elif key == b"\r" and stuck:
+            log("key\tenter kept on " + options[at])
+        elif key == b"\r":
+            log("key\tenter on " + options[at])
+            break
+        elif key == b"\x1b":
+            log("key\tesc")
+            at = 0
+            break
+    termios.tcsetattr(0, termios.TCSANOW, was)
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.flush()
+    if at == 0:
+        sys.exit(1)
+
+
+def trust(where, stuck):
+    rows = [where[i:i + 118] for i in range(0, len(where), 118)]
+    dialog(["Accessing workspace:", ""] + rows + [
+        "",
+        "Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+        "project, or work from your team). If not, take a moment to review what's in this folder first.",
+        "",
+        "Claude Code'll be able to read, edit, and execute files here.",
+        "",
+        "Security guide",
+    ], "Yes, I trust this folder", stuck)
+
+
+def bypass():
+    dialog([
+        "WARNING: Claude Code running in Bypass Permissions mode",
+        "",
+        "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.",
+        "",
+        "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.",
+    ], "Yes, I accept")
+
 
 if name == "kimi":
     print("kimi stand-in ready", flush=True)
@@ -42,6 +113,15 @@ else:
 size = len(task.encode())
 with open(os.environ["FAKE_HELPER_LOG"], "a") as f:
     f.write("%s\t%d\t%s\n" % (name, size, " ".join(a for a in args if len(a) < 300)))
+
+if name == "claude":
+    late = 14 if "FAKE-LATE" in task else 0
+    if "FAKE-TRUST" in task:
+        time.sleep(late)
+        trust("/private/etc" if "FAKE-TRUST-OTHER" in task else os.getcwd(), "FAKE-TRUST-STUCK" in task)
+    if "FAKE-BYPASS" in task:
+        time.sleep(late)
+        bypass()
 
 found = re.search(r"write your final result to (\S+result\.md)", task)
 print("%s stand-in working on %d bytes" % (name, size), flush=True)
