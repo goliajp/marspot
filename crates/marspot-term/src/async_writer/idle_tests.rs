@@ -29,46 +29,88 @@ fn flood(w: &mut AsyncWriter, at: usize) -> usize {
     n
 }
 
-/// Wait for the writer to have given back every free buffer a burst
-/// wrote far into; how many it has given back.  The time limit only
-/// tells never from not yet.
-fn settled(w: &AsyncWriter) -> usize {
+/// Wait for the writer to have nothing left to do; how many free
+/// buffers it then has, and how many of them have given their pages
+/// back.  The time limit only tells never from not yet.
+fn settled(w: &AsyncWriter) -> (usize, usize) {
     let give_up = Instant::now() + Duration::from_secs(20);
     loop {
-        let (given, far, drained) = w.queue.free_pages();
-        if drained && far == 0 && given > 0 {
-            return given;
+        let (free, given, asleep) = w.queue.free_pages();
+        if asleep {
+            return (free, given);
         }
-        assert!(Instant::now() < give_up, "the writer never gave back its free buffers: {given} given, {far} not");
+        assert!(Instant::now() < give_up, "the writer never went idle: {free} free, {given} given back");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// A flood into a pipe nobody reads yet, so that each of `full` buffers
+/// is filled and in flight at once whatever the two threads' timing,
+/// then read and flushed.  Into an ordinary file a writer that keeps
+/// pace has the producer fill the same two in turn.  The buffers are
+/// bigger than what the pipe takes with nobody reading.
+fn flood_every_buffer(name: &str, full: usize) -> AsyncWriter {
+    const BIG: usize = 256 * 1024;
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::env::temp_dir().join(format!("marspot-aw-idle-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path");
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0, "a pipe to write into");
+    let pipe = std::fs::OpenOptions::new().read(true).write(true).open(&path).expect("open the pipe");
+    let mut reader = std::fs::File::open(&path).expect("open its other end");
+    std::fs::remove_file(&path).expect("unlink the pipe");
+    let mut w = AsyncWriter::new(pipe, BIG, full);
+    for i in 0..full {
+        w.write(&pattern(i * BIG, BIG));
+    }
+    let read = std::thread::spawn(move || {
+        let mut got = vec![0; full * BIG];
+        reader.read_exact(&mut got).expect("read the flood");
+        got
+    });
+    w.flush();
+    assert!(read.join().expect("the reading thread") == pattern(0, full * BIG));
+    w
 }
 
 /// After a flood, the free buffers give their pages back once the
 /// writer has nothing to do.
 #[test]
 fn a_flood_s_free_buffers_give_their_pages_back_when_the_writer_is_idle() {
-    let (mut w, path) = writer("free");
     let given_before = times_given_back();
-    flood(&mut w, 0);
-    // flush, not hand_off: a hand-off refused by a busy writer keeps the
-    // last buffer and an empty spare in the producer, leaving one free
-    // buffer instead of two on a loaded machine
-    w.flush();
-    let given = settled(&w);
-    assert!(given >= 2, "{given} free buffers given back");
+    let w = flood_every_buffer("free", 3);
+    let (free, given) = settled(&w);
+    // of the three filled, the flush may have one for the next write
+    let held = usize::from(w.buf.given.is_given() || w.buf.high > 0);
+    assert_eq!(given + held, 3, "{given} of {free} free buffers given back, {held} held");
     assert!(times_given_back() >= given_before + given);
-    drop(w);
-    let _ = std::fs::remove_file(&path);
+}
+
+/// A buffer taken to be filled and not written far into -- a flush
+/// hands one over empty, a flood may end as it fills the one before --
+/// does not take its pages back.
+#[test]
+fn a_buffer_taken_and_not_filled_keeps_its_pages_given_back() {
+    let mut w = flood_every_buffer("unfilled", 3);
+    settled(&w);
+    let taken = times_taken_back();
+    for _ in 0..4 {
+        w.flush();
+        settled(&w);
+    }
+    assert_eq!(times_taken_back(), taken, "a flush took pages back");
 }
 
 /// Everything written, and in hand an empty buffer that a flood wrote
 /// to the brim -- as the one swapped in at the end of a flood is.  The
 /// one `flush` swaps in may be one the idle writer has already given
-/// back and so taken back clean, depending on how soon it went idle.
+/// back, depending on how soon it went idle.
 fn holding_a_buffer_a_flood_filled(w: &mut AsyncWriter) {
     w.flush();
-    assert!(!w.buf.given.is_given() && w.buf.is_empty());
+    assert!(w.buf.is_empty());
+    w.buf.given.take_back(&mut w.buf.main);
+    w.room = CAP;
     w.buf.high = CAP;
 }
 

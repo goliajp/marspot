@@ -144,17 +144,17 @@ impl Queue {
         drop(extra);
     }
 
-    /// Free buffers whose pages are given back, free buffers that a
-    /// burst wrote far into and still have theirs, and whether every
-    /// buffer handed over has been written and come back to the free
-    /// list (until then a buffer still being written is in neither count).
+    /// Free buffers, those of them whose pages are given back, and
+    /// whether the writer is asleep with nothing left to do: until then
+    /// it may hold a buffer it is writing or giving back, which is in
+    /// neither count.
     #[cfg(test)]
     pub(super) fn free_pages(&self) -> (usize, usize, bool) {
         let st = self.state.lock().expect("the writer queue");
         (
+            st.free.len(),
             st.free.iter().filter(|b| b.given.is_given()).count(),
-            st.free.iter().filter(|b| b.worth_giving_back()).count(),
-            st.queued.is_empty() && st.writing == 0,
+            st.idle && st.queued.is_empty(),
         )
     }
 

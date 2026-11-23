@@ -180,18 +180,21 @@ impl AsyncWriter {
         self.queue.push(Msg::Data(full), false);
     }
 
-    /// An empty buffer to fill whole: the one a flood fills next, or one
-    /// a flush or a write too big for the rest of a buffer starts.
+    /// An empty buffer to fill: the one a flood fills next, or one a
+    /// flush or a write too big for the rest of a buffer starts.
+    ///
+    /// It keeps any pages it has given back until a write needs them.
+    /// Taken back here, the pages of a buffer the output then ended on,
+    /// or that a flush handed over empty, stayed taken: nothing had been
+    /// written far into it, so nothing gave them back again.
     fn take_empty(&mut self) -> Buf {
-        let mut b = match self.spare.take().or_else(|| self.queue.take_free()) {
+        match self.spare.take().or_else(|| self.queue.take_free()) {
             Some(mut b) => {
                 b.clear();
                 b
             }
             None => Buf::sized(self.cap),
-        };
-        b.given.take_back(&mut b.main);
-        b
+        }
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
@@ -211,19 +214,16 @@ impl AsyncWriter {
     /// up twice the size it was made with.
     ///
     /// A buffer whose pages are given back comes here at the first
-    /// write past what it kept, and takes them back.
+    /// write past what it kept, and takes them back; one that is handed
+    /// over instead keeps them given.
     #[cold]
     fn write_to_the_brim(&mut self, bytes: &[u8]) {
-        if self.buf.given.is_given() {
-            self.buf.given.take_back(&mut self.buf.main);
-            self.room = self.cap;
-            if self.buf.main.len() + bytes.len() < self.cap {
-                self.buf.main.extend_from_slice(bytes);
-                return;
-            }
-        }
         if !self.buf.main.is_empty() && self.buf.main.len() + bytes.len() > self.cap {
             self.hand_over();
+        }
+        if self.buf.main.len() + bytes.len() > self.room {
+            self.buf.given.take_back(&mut self.buf.main);
+            self.room = self.cap;
         }
         self.buf.main.extend_from_slice(bytes);
         if self.buf.main.len() >= self.cap {

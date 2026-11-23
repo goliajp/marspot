@@ -4,9 +4,10 @@
 //! `LocalSession::pump`, the bytelog counter, the text prefilter and the
 //! loop's `after_turn` -- without a PTY to read, so that the parse is
 //! all there is to time.  Each round parses the same output once
-//! without a watch and once with one, alternating, and the fastest of
-//! each is compared: a host that is busy for a moment slows one round,
-//! not the fastest.
+//! without a watch and once with one, alternating, and the cheapest of
+//! each is compared, in instructions: a host that is busy for all of
+//! the rounds of one of them moves even the fastest time by several
+//! percent, and the instructions hardly at all.
 
 use std::time::{Duration, Instant};
 
@@ -40,8 +41,36 @@ enum Check {
     Grid,
 }
 
-/// Seconds to parse `out` with a text watch for `text`, if any.
-fn parse(out: &[u8], text: Option<(&str, Check)>) -> Duration {
+/// What a parse cost.
+#[derive(Clone, Copy)]
+struct Cost {
+    took: Duration,
+    /// Instructions this process retired meanwhile; 0 on a host that
+    /// does not count them (a virtual machine).
+    instructions: u64,
+}
+
+impl Cost {
+    const MOST: Self = Self { took: Duration::MAX, instructions: u64::MAX };
+
+    fn min(self, o: Self) -> Self {
+        Self { took: self.took.min(o.took), instructions: self.instructions.min(o.instructions) }
+    }
+}
+
+fn instructions() -> u64 {
+    // SAFETY: an all-zero rusage_info_v4 is valid, and RUSAGE_INFO_V4
+    // tells the kernel to fill exactly that struct
+    unsafe {
+        let mut info: libc::rusage_info_v4 = std::mem::zeroed();
+        let rc = libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V4, (&raw mut info).cast());
+        assert_eq!(rc, 0, "proc_pid_rusage");
+        info.ri_instructions
+    }
+}
+
+/// What it costs to parse `out` with a text watch for `text`, if any.
+fn parse(out: &[u8], text: Option<(&str, Check)>) -> Cost {
     let (local, tx) = LocalSession::parsing_only(120, 40);
     let mut session = SessionImpl::Local(local);
     let (wake, _woken) = std::sync::mpsc::channel();
@@ -55,6 +84,7 @@ fn parse(out: &[u8], text: Option<(&str, Check)>) -> Duration {
         }
     }
     let chunks: Vec<Vec<u8>> = out.chunks(CHUNK).map(<[u8]>::to_vec).collect();
+    let before = instructions();
     let started = Instant::now();
     for chunk in chunks {
         tx.send(chunk.into()).expect("queue a chunk");
@@ -62,13 +92,14 @@ fn parse(out: &[u8], text: Option<(&str, Check)>) -> Duration {
         ctl.after_turn(&mut session, false, None);
     }
     let took = started.elapsed();
+    let cost = Cost { took, instructions: instructions() - before };
     assert_eq!(crate::pane_ctl::local(&session).output_pos(), out.len() as u64, "every byte counted once");
-    took
+    cost
 }
 
-/// Fastest of `ROUNDS` without a watch and with one for `text`.
-fn fastest(out: &[u8], text: &str, check: Check) -> (Duration, Duration) {
-    let (mut bare, mut watched) = (Duration::MAX, Duration::MAX);
+/// Least of `ROUNDS` without a watch and with one for `text`.
+fn least(out: &[u8], text: &str, check: Check) -> (Cost, Cost) {
+    let (mut bare, mut watched) = (Cost::MOST, Cost::MOST);
     // which goes first alternates, so neither is always the one after a
     // session was torn down
     for round in 0..ROUNDS {
@@ -87,18 +118,23 @@ fn mib_s(bytes: usize, d: Duration) -> f64 {
     bytes as f64 / d.as_secs_f64() / (1024.0 * 1024.0)
 }
 
-fn line(what: &str, bytes: usize, (bare, watched): (Duration, Duration)) -> f64 {
-    let ratio = bare.as_secs_f64() / watched.as_secs_f64();
+fn line(what: &str, bytes: usize, (bare, watched): (Cost, Cost)) -> f64 {
+    let ratio = bare.instructions as f64 / watched.instructions as f64;
+    let timed = bare.took.as_secs_f64() / watched.took.as_secs_f64();
     eprintln!(
-        "watch perf, {what}: no watch {:.1} MiB/s, watched {:.1} MiB/s, ratio {ratio:.3}",
-        mib_s(bytes, bare),
-        mib_s(bytes, watched)
+        "watch perf, {what}: no watch {:.1} MiB/s, watched {:.1} MiB/s, ratio {timed:.3}; \
+         instructions a byte {:.1} and {:.1}, ratio {ratio:.4}",
+        mib_s(bytes, bare.took),
+        mib_s(bytes, watched.took),
+        bare.instructions as f64 / bytes as f64,
+        watched.instructions as f64 / bytes as f64,
     );
     ratio
 }
 
 /// A text watch that never matches, whose last byte the output never
-/// has, keeps at least 95% of the parse's throughput.  The worst case,
+/// has, costs the parse no more than a twentieth of what it keeps: 95%
+/// of the instructions with it are the parse's own.  The worst case,
 /// a last byte on every line, is printed beside it, read off the bytes
 /// as the session does and, for comparison, checked on the grid after
 /// every batch; it keeps at least half.
@@ -112,12 +148,13 @@ fn watch_pending_text_keeps_the_parse_within_five_percent() {
         out.len() >> 20,
         worst.len() >> 20
     );
-    let ratio = line("text never printed", out.len(), fastest(&out, "@never printed@", Check::Stream));
-    let stream = line("last byte on every line", worst.len(), fastest(worst, "never printed ms", Check::Stream));
-    line("last byte on every line, grid every batch", worst.len(), fastest(worst, "never printed ms", Check::Grid));
-    if !marspot_term::host_load::quiet_enough_to_time("a waiting text watch's cost to the parse") {
+    let ratio = line("text never printed", out.len(), least(&out, "@never printed@", Check::Stream));
+    let stream = line("last byte on every line", worst.len(), least(worst, "never printed ms", Check::Stream));
+    line("last byte on every line, grid every batch", worst.len(), least(worst, "never printed ms", Check::Grid));
+    if instructions() == 0 {
+        eprintln!("skipping the assertion on a waiting text watch's cost: this host does not count instructions");
         return;
     }
-    assert!(ratio >= 0.95, "a waiting text watch kept {:.1}% of the parse's throughput", ratio * 100.0);
-    assert!(stream >= 0.5, "the worst case kept {:.1}% of the parse's throughput", stream * 100.0);
+    assert!(ratio >= 0.95, "with a waiting text watch {:.1}% of the instructions are the parse's", ratio * 100.0);
+    assert!(stream >= 0.5, "in the worst case {:.1}% of the instructions are the parse's", stream * 100.0);
 }
