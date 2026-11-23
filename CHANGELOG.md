@@ -4,6 +4,27 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.11.0
+
+- A session can start helpers: other Claude, Codex, Gemini or Kimi
+  sessions that work in the background on a task it hands them, under
+  an account picked by the room left on it. The result comes back to
+  the session that asked as a message; nobody has to open or watch
+  anything. A helper ends with its time budget (30 minutes unless
+  asked otherwise), when it is stopped, or with the pane that started
+  it. The MCP tools are `HelperStart`, `Helpers` and `HelperStop`; on
+  the command line it is `marspot-peer helper`. Helpers run without
+  asking for each step; `helpers.mode` in the settings file changes
+  that. Every start, stop and answered first-run screen is in the
+  control audit log.
+- A pane opened by an agent is answered with the name it is listed
+  under, and a pane just opened or just closed is right in the next
+  list.
+- What an agent reads from a pane no longer contains the status line
+  that running a command there types.
+- A command sent to a pane right after another one waits until a slow
+  prompt is drawn, in shells that mark where their prompt ends.
+
 ## 0.10.0
 
 - Agents in Marspot panes can drive other panes. The `marspot-peer mcp`
