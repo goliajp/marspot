@@ -6,7 +6,7 @@ use super::*;
 use marspot::shell_proto::{decode_helper_panel_act, encode_pane_retire, PaneRetire, RetireMode};
 
 fn acts(app: &mut CoreApp) -> Vec<(u64, PanelAct, CwdControl)> {
-    let frames: Vec<_> = app.pending_to_shell.drain(..).collect();
+    let frames = std::mem::take(&mut app.pending_to_shell);
     frames
         .iter()
         .filter(|(t, _)| *t == MsgType::HelperPanelAct)

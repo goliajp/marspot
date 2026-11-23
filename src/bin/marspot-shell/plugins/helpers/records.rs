@@ -228,12 +228,12 @@ pub(super) fn replay(path: &Path) -> std::io::Result<Replayed> {
 
 /// Whether `f` ends in the middle of a line: a write that was cut short.
 fn ends_in_a_line(f: &mut std::fs::File) -> std::io::Result<bool> {
-    let mut last = [b'\n'];
+    let mut last = *b"\n";
     if f.seek(SeekFrom::End(0))? > 0 {
         f.seek(SeekFrom::End(-1))?;
         f.read_exact(&mut last)?;
     }
-    Ok(last != [b'\n'])
+    Ok(last != *b"\n")
 }
 
 /// Append `body` on a line of its own.
