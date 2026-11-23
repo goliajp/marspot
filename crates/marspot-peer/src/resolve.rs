@@ -23,6 +23,10 @@ pub struct Target<'a> {
     pub code: Option<u16>,
     /// The agent it runs, when known.
     pub kind: Option<&'a str>,
+    /// A shadow pane answers only to its full name: its base alone, or
+    /// with an agent in front, means the pane it helps, which usually
+    /// shares its directory.
+    pub shadow: bool,
 }
 
 impl Target<'_> {
@@ -97,7 +101,9 @@ pub fn resolve(to: &str, targets: &[Target]) -> Result<Hit, Miss> {
     let to = to.trim();
     let asked = split(to);
     let named = |kind: Option<&str>, base: &str, fold: bool| -> Vec<usize> {
-        (0..targets.len()).filter(|&i| same(targets[i].base, base, fold) && kind.is_none_or(|k| targets[i].kind == Some(k))).collect()
+        (0..targets.len())
+            .filter(|&i| !targets[i].shadow && same(targets[i].base, base, fold) && kind.is_none_or(|k| targets[i].kind == Some(k)))
+            .collect()
     };
     // as written first, then without regard to case
     for fold in [false, true] {
@@ -174,7 +180,7 @@ mod tests {
     use super::*;
 
     fn t<'a>(base: &'a str, code: u16, kind: &'a str) -> Target<'a> {
-        Target { base, code: Some(code), kind: Some(kind) }
+        Target { base, code: Some(code), kind: Some(kind), shadow: false }
     }
 
     fn hit(to: &str, targets: &[Target]) -> usize {
@@ -247,7 +253,7 @@ mod tests {
         let ts = [t("marspot", 1024, "codex")];
         let m = miss("claude:marspot#1024", &ts);
         assert_eq!((m.text.as_str(), m.unknown), ("marspot#1024 runs codex, not claude", false));
-        let unknown = [Target { base: "marspot", code: Some(1024), kind: None }];
+        let unknown = [Target { base: "marspot", code: Some(1024), kind: None, shadow: false }];
         assert_eq!(miss("claude:marspot#1024", &unknown).text, "marspot#1024 does not run claude");
         assert_eq!(hit("marspot#1024", &unknown), 0);
     }
@@ -272,8 +278,24 @@ mod tests {
     /// name it was listed under, and by nothing else.
     #[test]
     fn a_pane_without_a_code_is_found_by_its_listed_name() {
-        let ts = [Target { base: "spg#2", code: None, kind: Some("codex") }, t("gds", 5000, "claude")];
+        let ts = [Target { base: "spg#2", code: None, kind: Some("codex"), shadow: false }, t("gds", 5000, "claude")];
         assert_eq!(hit("spg#2", &ts), 0);
         assert!(miss("spg", &ts).unknown);
+    }
+
+    /// A shadow pane in its parent's directory leaves the parent the
+    /// plain name and is reached by its own full name.
+    #[test]
+    fn shadow_pane_name_is_only_its_full_name() {
+        let shadow = Target { shadow: true, ..t("spg", 3381, "codex") };
+        let ts = [t("spg", 1024, "claude"), shadow.clone()];
+        assert_eq!(hit("spg", &ts), 0);
+        assert_eq!(hit("spg#3381", &ts), 1);
+        assert_eq!(hit("codex:spg#3381", &ts), 1);
+        assert!(miss("codex:spg", &ts).unknown);
+        // alone in its directory it still has no plain name
+        let alone = [shadow];
+        assert_eq!(miss("spg", &alone).text, "no pane is named \"spg\". The panes are: spg#3381 (codex)");
+        assert_eq!(hit("spg#3381", &alone), 0);
     }
 }

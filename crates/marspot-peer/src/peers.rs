@@ -268,7 +268,7 @@ mod tests {
     }
 
     fn pane(base: &str, code: u16, agent: &str, shown: &str, pid: i32) -> Pane {
-        Pane { name: shown.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock"), code: Some(code), base: Some(base.into()), agent: Some(agent.into()) }
+        Pane { name: shown.into(), pid, socket: format!("/tmp/cc-socks/{pid}.sock"), code: Some(code), base: Some(base.into()), agent: Some(agent.into()), shadow: false }
     }
 
     #[test]

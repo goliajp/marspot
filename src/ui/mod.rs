@@ -332,9 +332,9 @@ mod tests {
     #[test]
     fn a_shared_long_name_keeps_each_code_in_the_sidebar() {
         let panes = [
-            crate::pane_name::PaneRef { sid: 1, cwd: "/w/golia-claude-configs".into(), code: Some(1024) },
-            crate::pane_name::PaneRef { sid: 2, cwd: "/x/golia-claude-configs".into(), code: Some(9906) },
-            crate::pane_name::PaneRef { sid: 3, cwd: "/w/marspot".into(), code: Some(3381) },
+            crate::pane_name::PaneRef { sid: 1, cwd: "/w/golia-claude-configs".into(), code: Some(1024), shadow: false },
+            crate::pane_name::PaneRef { sid: 2, cwd: "/x/golia-claude-configs".into(), code: Some(9906), shadow: false },
+            crate::pane_name::PaneRef { sid: 3, cwd: "/w/marspot".into(), code: Some(3381), shadow: false },
         ];
         let labels: Vec<String> = crate::pane_name::assign(&panes).into_iter().map(|(_, n)| truncate_for_sidebar(&n, MAX_SIDEBAR_LABEL_CHARS)).collect();
         assert_eq!(labels, ["golia-clau...#1024", "golia-clau...#9906", "marspot"]);

@@ -24,11 +24,18 @@ pub struct PaneRef {
     pub cwd: String,
     /// None only when the code file could not be read or written.
     pub code: Option<u16>,
+    /// A shadow pane: not drawn in any window, usually a helper in its
+    /// parent's directory.
+    pub shadow: bool,
 }
 
 impl PaneRef {
     pub fn new(sid: u64, cwd: impl Into<String>) -> Self {
-        Self { sid, cwd: cwd.into(), code: marspot_term::pane_code::code_for(sid).ok() }
+        Self { sid, cwd: cwd.into(), code: marspot_term::pane_code::code_for(sid).ok(), shadow: false }
+    }
+
+    pub fn with_shadow(self, shadow: bool) -> Self {
+        Self { shadow, ..self }
     }
 
     /// `base#code`.
@@ -41,15 +48,17 @@ impl PaneRef {
 }
 
 /// Every pane's display name, in input order.
+///
+/// A shadow pane always shows its full name and is not counted when
+/// asking whether a base is shared: a helper opened in its parent's
+/// directory must not turn the parent's `spg` into `spg#3381`.
 pub fn assign(panes: &[PaneRef]) -> Vec<(u64, String)> {
     let bases: Vec<String> = panes.iter().map(|p| base_name(&p.cwd)).collect();
+    let shown = |base: &String| panes.iter().zip(&bases).filter(|(p, b)| !p.shadow && *b == base).count();
     panes
         .iter()
         .zip(&bases)
-        .map(|(p, base)| {
-            let shared = bases.iter().filter(|b| *b == base).count() > 1;
-            (p.sid, if shared { p.full_name() } else { base.clone() })
-        })
+        .map(|(p, base)| (p.sid, if p.shadow || shown(base) > 1 { p.full_name() } else { base.clone() }))
         .collect()
 }
 
@@ -73,7 +82,7 @@ pub fn base_name(cwd: &str) -> String {
 pub fn resolve(target: &str, panes: &[PaneRef], kind_of: impl Fn(u16) -> Option<String>) -> Result<u64, String> {
     let bases: Vec<String> = panes.iter().map(|p| base_name(&p.cwd)).collect();
     let kinds: Vec<Option<String>> = panes.iter().map(|p| p.code.and_then(&kind_of)).collect();
-    let targets: Vec<Target> = (0..panes.len()).map(|i| Target { base: &bases[i], code: panes[i].code, kind: kinds[i].as_deref() }).collect();
+    let targets: Vec<Target> = (0..panes.len()).map(|i| Target { base: &bases[i], code: panes[i].code, kind: kinds[i].as_deref(), shadow: panes[i].shadow }).collect();
     match marspot_peer::resolve::resolve(target, &targets) {
         Ok(hit) => Ok(panes[hit.index].sid),
         Err(miss) => Err(miss.text),
@@ -85,7 +94,7 @@ mod tests {
     use super::*;
 
     fn pane(sid: u64, cwd: &str, code: u16) -> PaneRef {
-        PaneRef { sid, cwd: cwd.into(), code: Some(code) }
+        PaneRef { sid, cwd: cwd.into(), code: Some(code), shadow: false }
     }
 
     fn name_of(panes: &[PaneRef], sid: u64) -> String {
@@ -173,13 +182,53 @@ mod tests {
         assert!(resolve("old", &ps, no_agents).is_err());
     }
 
+    fn shadow(sid: u64, cwd: &str, code: u16) -> PaneRef {
+        pane(sid, cwd, code).with_shadow(true)
+    }
+
+    #[test]
+    fn a_shadow_is_not_counted_as_a_rival() {
+        let ps = vec![pane(390, "/w/goliajp/spg", 1024), shadow(391, "/w/goliajp/spg", 3381)];
+        assert_eq!(name_of(&ps, 390), "spg", "opening a helper leaves the parent's name alone");
+        assert_eq!(resolve("spg", &ps, no_agents), Ok(390));
+        assert_eq!(resolve("spg#3381", &ps, no_agents), Ok(391));
+    }
+
+    #[test]
+    fn a_shadow_always_shows_its_full_name() {
+        let ps = vec![shadow(391, "/w/goliajp/spg", 3381)];
+        assert_eq!(name_of(&ps, 391), "spg#3381");
+        assert_eq!(resolve("spg#3381", &ps, no_agents), Ok(391));
+        assert!(resolve("spg", &ps, no_agents).unwrap_err().starts_with("no pane is named \"spg\""));
+    }
+
+    #[test]
+    fn two_shadows_in_one_directory_keep_their_own_full_names() {
+        let ps = vec![shadow(391, "/w/spg", 3381), shadow(392, "/w/spg", 4410)];
+        assert_eq!(name_of(&ps, 391), "spg#3381");
+        assert_eq!(name_of(&ps, 392), "spg#4410");
+        assert_eq!(resolve("spg#4410", &ps, no_agents), Ok(392));
+        let with_parent = [vec![pane(390, "/w/spg", 1024)], ps].concat();
+        assert_eq!(name_of(&with_parent, 390), "spg");
+    }
+
+    #[test]
+    fn a_window_pane_beside_a_shadow_keeps_its_short_name_until_a_real_rival_comes() {
+        let ps = vec![shadow(391, "/w/spg", 3381), pane(500, "/x/spg", 5000)];
+        assert_eq!(name_of(&ps, 500), "spg");
+        let rival = [ps, vec![pane(501, "/y/spg", 6000)]].concat();
+        assert_eq!(name_of(&rival, 500), "spg#5000");
+        assert_eq!(name_of(&rival, 501), "spg#6000");
+        assert_eq!(name_of(&rival, 391), "spg#3381");
+    }
+
     #[test]
     fn odd_directories_still_get_a_name() {
         assert_eq!(base_name("/w/spg/"), "spg");
         assert_eq!(base_name("/"), "?");
         assert_eq!(base_name(""), "?");
         assert_eq!(base_name("/w/c#-notes"), "c--notes");
-        let uncoded = PaneRef { sid: 1, cwd: "/w/spg".into(), code: None };
+        let uncoded = PaneRef { sid: 1, cwd: "/w/spg".into(), code: None, shadow: false };
         assert_eq!(uncoded.full_name(), "spg");
     }
 }

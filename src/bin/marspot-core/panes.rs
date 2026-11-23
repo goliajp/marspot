@@ -16,6 +16,22 @@ impl CoreApp {
             .chain(self.shadows.iter_mut())
     }
 
+    /// Every pane's display name by session id.  Every window and the
+    /// shadows: whether a name is shared cannot be known from one
+    /// window alone, and a shadow pane is named the way L1 names it.
+    pub(super) fn pane_names(&self) -> std::collections::HashMap<u64, String> {
+        let drawn = self.windows.iter().flat_map(|w| w.panes.iter()).map(|p| (p, false));
+        let refs: Vec<marspot::pane_name::PaneRef> = drawn
+            .chain(self.shadows.iter().map(|p| (p, true)))
+            .filter_map(|(p, shadow)| {
+                let sid = p.shelld_session_id()?;
+                let cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
+                Some(marspot::pane_name::PaneRef::new(sid, cwd).with_shadow(shadow))
+            })
+            .collect();
+        marspot::pane_name::assign(&refs).into_iter().collect()
+    }
+
     /// The pane whose L3 is session `sid`, drawn or not.
     pub(super) fn pane_by_sid_mut(&mut self, sid: u64) -> Option<&mut Pane> {
         self.panes_mut()
