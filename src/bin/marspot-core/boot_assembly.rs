@@ -58,6 +58,8 @@ pub(super) fn assemble_panes_at_boot(
         .collect();
     let dir_ids: std::collections::HashSet<u64> =
         raw_list.iter().map(|e| e.id).collect();
+    // shadow panes are no window's unless a saved slot names them
+    let shadow_ids = shadow_boot::shadow_ids(&raw_list);
 
     // Slot specs come from the saved layout; without one, adopt
     // whatever the registry holds (numeric order), padded with
@@ -81,7 +83,7 @@ pub(super) fn assemble_panes_at_boot(
             })
             .collect(),
         None => {
-            let mut ids: Vec<u64> = dir_ids.iter().copied().collect();
+            let mut ids: Vec<u64> = dir_ids.difference(&shadow_ids).copied().collect();
             ids.sort();
             ids.truncate(n_sessions);
             let mut specs: Vec<SlotSpec> = ids
@@ -139,6 +141,9 @@ pub(super) fn assemble_panes_at_boot(
         if sid != 0 && alive_ids.contains(&sid) {
             match reattach_l3_pane(sid, event_tx) {
                 Ok(pane) => {
+                    if shadow_ids.contains(&sid) {
+                        shadow_boot::unshadow_in_window(&pane, sid);
+                    }
                     panes.push(pane);
                     claimed.insert(sid);
                     reattached_ids.push(sid);
@@ -279,7 +284,7 @@ pub(super) fn assemble_panes_at_boot(
     // adopt the boot window's panes a second time and retire the dirs
     // of every session it simply never heard of.
     for id in raw_list.iter().map(|e| e.id).filter(|_| sweeps_registry) {
-        if !alive_ids.contains(&id) || claimed.contains(&id) {
+        if !alive_ids.contains(&id) || claimed.contains(&id) || shadow_ids.contains(&id) {
             continue;
         }
         // Spoken for by ANOTHER window's saved record.  Without this,
@@ -387,16 +392,6 @@ pub(super) fn assemble_panes_at_boot(
         purged_expired = purged
     );
 
-    // Per-pane custom titles.  F3+6 — `saved_state.panes` wins over
-    // `session_titles` (the entry.toml-derived source) because the
-    // bin file reflects the user's last interactive state, including
-    // titles set after the last L3 reattach hop.
-    //
-    // RFC-004 B.3 — titles bind by IDENTITY, not index: the
-    // positional entry is only trusted when its recorded sid matches
-    // A pane's name is derived from its directory (`pane_name`), so
-    // there is nothing here to restore: what used to be carried across
-    // a swap was the user-set title, and there is no such thing now.
     (panes, reattached_ids)
 }
 

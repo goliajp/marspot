@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.598"  # marspot-term SessionEntry carries shadow_of
-core    = "0.12.624"  # marspot-term SessionEntry carries shadow_of
+shell   = "0.7.599"  # shadow panes are told apart by the registry entry and may be opened, moved and closed
+core    = "0.12.625"  # shadow panes: opened, closed, moved, resized for the shell; back in the shadows at boot; wake nothing
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

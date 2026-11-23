@@ -142,4 +142,30 @@ impl CoreApp {
             self.rebuild_layout(wi);
         }
     }
+
+    /// Dev seam (`MARSPOT_DEV_SHADOWS=n`): open n shadow panes under
+    /// the first live pane, one per loop turn, as L1's `PaneSpawn`
+    /// would.  Request ids from the top of L1's range; L1 drops the
+    /// answers as answers to nothing it asked.
+    pub(super) fn dev_drive_shadows(&mut self) {
+        let Some((n, at)) = self.pane_control.shadows.dev else { return };
+        if Instant::now() < at {
+            return;
+        }
+        let parent = self
+            .windows
+            .iter()
+            .flat_map(|w| w.panes.iter())
+            .find_map(|p| p.session().l3_session_id());
+        let Some(parent) = parent else { return };
+        self.pane_control.shadows.dev = (n > 1).then_some((n - 1, at));
+        let route = self.dev_open_shadow(u32::MAX - 2 - n as u32, parent);
+        lx_event!(
+            "DEV_SHADOW",
+            "opened a shadow pane (dev seam)",
+            parent = parent,
+            left = (n - 1) as u32,
+            route = format!("{route:?}")
+        );
+    }
 }

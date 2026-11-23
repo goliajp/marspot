@@ -247,10 +247,10 @@ fn the_two_motion_modes_are_told_apart_on_a_real_pty() {
 /// A pasteboard only this test process names, selected for the
 /// product's copy and paste, and handed back to the pasteboard server
 /// when dropped: a named pasteboard otherwise lasts until logout.
-struct OwnPasteboard(String);
+pub(super) struct OwnPasteboard(String);
 
 impl OwnPasteboard {
-    fn new(sb: &mut Sandbox) -> Self {
+    pub(super) fn new(sb: &mut Sandbox) -> Self {
         let name = format!("marspot-test-{}", std::process::id());
         sb.set(marspot::input::PASTEBOARD_ENV, &name);
         Self(name)

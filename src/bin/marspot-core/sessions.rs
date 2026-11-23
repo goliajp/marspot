@@ -4,8 +4,19 @@ use super::*;
 
 impl CoreApp {
     pub(super) fn spawn_session(&mut self, wi: usize) {
+        let from = win!(self, wi)
+            .try_focused_pane()
+            .and_then(|p| p.shelld_session_id())
+            .map(live_cwd_of)
+            .unwrap_or_default();
+        self.spawn_session_at(wi, from);
+    }
+
+    /// A new pane at the end of window `wi`, its shell in `from`
+    /// (empty: `$HOME`).  The id it got, or `None` when none was made.
+    pub(super) fn spawn_session_at(&mut self, wi: usize, from: String) -> Option<u64> {
         if win!(self, wi).panes.len() >= SESSION_COUNT_HARD_CAP {
-            return;
+            return None;
         }
         let (cols, rows) = win!(self, wi)
             .layout
@@ -21,11 +32,6 @@ impl CoreApp {
         // id (a flock + a directory scan) and pushes a "starting…"
         // slot.  Clicking [+] used to freeze every pane for as long
         // as the new L3 took to register and handshake.
-        let from = win!(self, wi)
-            .try_focused_pane()
-            .and_then(|p| p.shelld_session_id())
-            .map(live_cwd_of)
-            .unwrap_or_default();
         match allocate_next_session_id().map(|id| {
             spawn_l3_pane_async(cols, rows, id, from, &self.event_tx)
         }) {
@@ -42,8 +48,12 @@ impl CoreApp {
                     self.resolve_pane_cwd(sid);
                 }
                 self.save_session_state();
+                new_sid
             }
-            Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
+            Err(e) => {
+                lx_error!("core.spawn.l3_failed", &format!("{e}"));
+                None
+            }
         }
     }
 
@@ -108,6 +118,7 @@ impl CoreApp {
         // F3+5 — drop cached cwd state so it can't leak past the pane.
         // The same id may eventually be reused; a fresh pane gets a
         // fresh resolve.
+        unwatched::set(id, false);
         self.pane_cwds.remove(&id);
         self.shell_child_pids.remove(&id);
         self.pane_badges.remove(&id);

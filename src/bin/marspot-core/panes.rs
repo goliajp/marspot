@@ -22,6 +22,38 @@ impl CoreApp {
             .find(|p| p.session().l3_session_id() == Some(sid))
     }
 
+    /// Take pane `idx` out of window `wi`, leaving a placeholder.
+    ///
+    /// RFC-006 §3 — a move-out leaves a DORMANT PLACEHOLDER, not a
+    /// hole: the user is arranging space, and the arrangement they
+    /// left behind holds still.  Nothing shifts, so no index
+    /// arithmetic; only state that pointed AT the moved pane is
+    /// dropped.  (Close keeps its compacting semantics — close
+    /// means "done with this space"; move means "keep my layout".)
+    pub(super) fn take_out_of_window(&mut self, wi: usize, idx: usize) -> Pane {
+        let (pc, pr) = {
+            let g = win!(self, wi).panes[idx].session().grid();
+            (g.cols(), g.rows())
+        };
+        let pane = std::mem::replace(&mut win!(self, wi).panes[idx], Pane::new_dormant(pc, pr));
+        let w = &mut win!(self, wi);
+        if w.focused_idx == idx {
+            // Focus the nearest live pane; a placeholder is space,
+            // not a focus target.
+            w.focused_idx = (0..w.panes.len())
+                .filter(|&i| !w.panes[i].is_dormant())
+                .min_by_key(|&i| i.abs_diff(idx))
+                .unwrap_or(idx);
+        }
+        if let Some(sel) = w.selection
+            && sel.session_idx == idx
+        {
+            w.selection = None;
+            w.selection_dragging = false;
+        }
+        pane
+    }
+
     /// An off-loop spawn finished: the pending slot takes the L3, or
     /// falls back to a vacant slot whose revive-on-keystroke path is
     /// exactly the retry this needs.
@@ -32,8 +64,10 @@ impl CoreApp {
             .panes_mut()
             .find(|p| p.shelld_session_id() == Some(sid))
         else {
+            self.spawn_landed(sid, Err("the pane was closed while it started".into()));
             return;
         };
+        let landed = outcome.0.as_ref().map(|_| ()).map_err(Clone::clone);
         match outcome.0 {
             Ok(spawn) => {
                 pane.adopt_backend(marspot::pane::PaneBackend::L3(marspot::pane::L3Conn::new(
@@ -59,6 +93,7 @@ impl CoreApp {
             }
         }
         self.mark_sid_window_dirty(sid);
+        self.spawn_landed(sid, landed);
     }
 }
 

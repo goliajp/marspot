@@ -15,10 +15,11 @@
 #      `not_attached`.
 #   6. A wait in progress still comes true across a restart of the core
 #      and across the session moving to another build.
-#   7. Shadow panes (`pane open` → `run` → `read` → `close`) when the
-#      core announces it opens them (PaneControlCaps bit 1); before
-#      that, `pane open` and `pane close` answer `old_session` and
-#      nothing is opened or closed.
+#   7. Shadow panes (`pane open` → `run` → `read` → `resize` → `close`,
+#      and one moved into the window with `pane place`) when the core
+#      announces it opens them (PaneControlCaps bit 1); before that,
+#      `pane open` and `pane close` answer `old_session` and nothing is
+#      opened or closed.
 #
 # Sandbox-only: MARSPOT_STATE_DIR is redirected and the installed app is
 # never touched.  Opens windows, so it runs on the runner:
@@ -224,7 +225,6 @@ else
 fi
 
 echo "════ 7. shadow panes ════"
-# the shell refuses shadow panes until it can tell them apart, whatever the core announces
 before=$(pc list --json | ids_json)
 OPENED=$(pc open --parent "$P1" --json 2>&1)
 if (( (CAPS & 2) == 0 )) || [[ $OPENED == *old_session* ]]; then
@@ -246,6 +246,11 @@ else
   check "shadow: resize" pc resize "$S" 100x30
   check "shadow: close" pc close "$S"
   check "the shadow pane is gone" bash -c "for i in \$(seq 50); do $(printf '%q' "$PEER") pane list --json | grep -q '\"id\":$S,' || exit 0; sleep 0.2; done; exit 1"
+  S2=$(pc open --parent "$P1" --json 2>&1 | field id)
+  check "a second shadow pane opened" test -n "$S2"
+  check "shadow: place window" pc place "$S2" window
+  check "the placed pane is in the window, no shadow" bash -c "for i in \$(seq 25); do $(printf '%q' "$PEER") pane list --json | python3 -c 'import json,sys; ps=json.load(sys.stdin)[\"result\"][\"panes\"]; sys.exit(0 if any(str(p[\"id\"])==\"$S2\" and not p[\"shadow\"] for p in ps) else 1)' && exit 0; sleep 0.2; done; exit 1"
+  check "the placed pane closes as a window pane" pc close "$S2"
 fi
 
 check "the app is still up" alive "$(dev_shell_pid)"
