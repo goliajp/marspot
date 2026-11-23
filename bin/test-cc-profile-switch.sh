@@ -47,6 +47,8 @@ SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SESSION_BIN="$ROOT/target/release/marspot-session"
 UUID=11111111-2222-3333-4444-555555555555
+# the stand-in in the shadow pane is on a conversation of its own
+SHADOW_UUID=66666666-7777-8888-9999-000000000000
 
 fail() {
   echo "FAIL: $*"
@@ -121,6 +123,13 @@ int main(int argc, char **argv) {
     const char *cfg = getenv("CLAUDE_CONFIG_DIR");
     char cwd[4096];
     if (!getcwd(cwd, sizeof cwd)) strcpy(cwd, "-");
+    // The conversation: the one resumed, else the one the test names,
+    // else the test's first. Two live claudes on one conversation would
+    // leave the plugin unable to say which pane is on it.
+    const char *uuid = getenv("STUB_SESSION_ID");
+    if (!uuid) uuid = "$UUID";
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--resume")) uuid = argv[i + 1];
     // The record every live claude keeps: which conversation this pid
     // is on. The plugin reads it to bind the pane, and without it
     // there is no session to resume and no switch to test.
@@ -131,7 +140,7 @@ int main(int argc, char **argv) {
         snprintf(path, sizeof path, "%s/%d.json", dir, getpid());
         FILE *s = fopen(path, "w");
         if (s) {
-            fprintf(s, "{\"sessionId\":\"$UUID\",\"kind\":\"interactive\"}");
+            fprintf(s, "{\"sessionId\":\"%s\",\"kind\":\"interactive\"}", uuid);
             fclose(s);
         }
     }
@@ -157,10 +166,10 @@ int main(int argc, char **argv) {
     FILE *hook = popen("'$SHELL_BIN' --cc-statusline", "w");
     if (hook) {
         fprintf(hook,
-            "{\"session_id\":\"$UUID\",\"transcript_path\":\"%s/projects/x/$UUID.jsonl\","
+            "{\"session_id\":\"%s\",\"transcript_path\":\"%s/projects/x/%s.jsonl\","
             "\"cwd\":\"%s\",\"model\":{\"id\":\"%s\",\"display_name\":\"%s\"},"
             "\"effort\":{\"level\":\"%s\"},\"version\":\"stand-in\"}",
-            cfg ? cfg : "-", cwd, model, shown, effort);
+            uuid, cfg ? cfg : "-", uuid, cwd, model, shown, effort);
         pclose(hook);
     }
     FILE *f = fopen("$CLAUDE_LOG", "a");
@@ -202,8 +211,10 @@ for n in 1 2; do
            "$HOME/.claude-profile-$n/sessions"
 done
 # A transcript for the session, so the switch has something to resume.
-printf '{"type":"assistant","sessionId":"%s","timestamp":"2026-10-01T00:00:00.000Z"}\n' \
-  "$UUID" > "$HOME/.claude-profile-1/projects/$ENCODED/$UUID.jsonl"
+for u in "$UUID" "$SHADOW_UUID"; do
+  printf '{"type":"assistant","sessionId":"%s","timestamp":"2026-10-01T00:00:00.000Z"}\n' \
+    "$u" > "$HOME/.claude-profile-1/projects/$ENCODED/$u.jsonl"
+done
 export PATH="$SB/bin:$PATH"
 : > "$CLAUDE_LOG"
 
@@ -363,7 +374,7 @@ else
     || fail "pane open made no shadow pane"
   "$PEER" pane run "$SHADOW" --timeout 30 true >/dev/null || fail "the shadow pane's shell never ran a command"
   BEFORE="$(starts)"
-  "$PEER" pane send "$SHADOW" "CLAUDE_CONFIG_DIR=$HOME/.claude-profile-1 claude" >/dev/null \
+  "$PEER" pane send "$SHADOW" "STUB_SESSION_ID=$SHADOW_UUID CLAUDE_CONFIG_DIR=$HOME/.claude-profile-1 claude" >/dev/null \
     || fail "could not type into the shadow pane"
   for (( i = 0; i < 100; i++ )); do (( $(starts) > BEFORE )) && break; sleep 0.2; done
   (( $(starts) > BEFORE )) || fail "the stand-in did not start in the shadow pane"
