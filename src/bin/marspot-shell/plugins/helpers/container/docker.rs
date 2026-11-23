@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use marspot_peer::control::{ErrorCode, Reject, sha256};
 
-use crate::plugins::bounded::{self, Out};
+use crate::bounded::{self, Out};
 
 /// Where it is looked for after PATH: an app opened from Finder has the
 /// system's bare one.

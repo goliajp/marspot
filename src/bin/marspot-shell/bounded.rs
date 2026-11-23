@@ -1,5 +1,6 @@
 //! Running a program that may never answer: with a time limit, its
-//! whole process group ended when the limit passes.
+//! whole process group ended when the limit passes.  The processes are
+//! ones started here, never a pane's.
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 /// What is kept of each output stream: its end.
 const KEEP: usize = 64 * 1024;
 
-pub(in crate::plugins) struct Out {
+pub(crate) struct Out {
     pub ok: bool,
     pub stdout: String,
     pub stderr: String,
@@ -31,7 +32,7 @@ fn drain(mut r: impl Read) -> String {
 }
 
 /// Run `cmd` with `input` on its standard input, for `within` at most.
-pub(in crate::plugins) fn run(cmd: &mut Command, input: Option<&'static [u8]>, within: Duration) -> Result<Out, String> {
+pub(crate) fn run(cmd: &mut Command, input: Option<&'static [u8]>, within: Duration) -> Result<Out, String> {
     let what = cmd.get_program().to_string_lossy().into_owned();
     let until = Instant::now() + within;
     cmd.process_group(0)

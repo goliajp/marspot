@@ -11,10 +11,6 @@
 //! we hot-swap during silent updates.  Keeping shell logic minimal
 //! and dependencies thin means the shell almost never has to update,
 //! which is what makes "no window flicker on upgrade" reachable.
-//!
-//! Step 1 scope: bring up the IOSurface link with a stub child that
-//! draws a rotating gradient — proves the cross-process render path
-//! before touching the real renderer.
 
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -40,6 +36,7 @@ use marspot::shell_proto::{
 
 mod apple_events;
 mod banner;
+mod bounded;
 mod core_icons;
 mod launch;
 mod ls_records;
