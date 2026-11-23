@@ -132,6 +132,7 @@ mod tests {
             shell_child_pid: 0,
             build: String::new(),
             stamps_regions: false,
+            shadow_of: 0,
         };
         write_session_entry(&entry).unwrap();
         let by_entry = signal_entry(&entry, libc::SIGKILL);

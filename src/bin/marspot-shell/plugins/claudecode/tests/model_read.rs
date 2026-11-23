@@ -341,6 +341,7 @@ fn a_resumed_pane_reads_its_banner_before_falling_back() {
         shell_child_pid: 0,
         build: String::new(),
         stamps_regions: false,
+        shadow_of: 0,
     })
     .unwrap();
     fs::write(

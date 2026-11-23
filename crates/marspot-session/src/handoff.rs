@@ -53,6 +53,9 @@ pub(crate) struct L3Handoff {
     pub(crate) control_stream_fd: RawFd,
     /// Not in a manifest from an image before them: zero and none.
     pub(crate) marks: crate::pane_ctl::Marks,
+    /// Whose shadow pane this is, and its idle timeout; not in a
+    /// manifest from an image before them: no shadow.
+    pub(crate) shadow: crate::shadow::ShadowCfg,
 }
 
 pub(crate) fn handoff_manifest_path() -> std::path::PathBuf {
@@ -77,6 +80,9 @@ pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> s
     if let Some((pos, status)) = h.marks.command_end {
         let status = status.map_or("-".to_string(), |s| s.to_string());
         body.push_str(&format!("command_end={pos}:{status}\n"));
+    }
+    if h.shadow.parent != 0 {
+        body.push_str(&format!("shadow_of={}\nshadow_idle_s={}\n", h.shadow.parent, h.shadow.idle_s));
     }
     let tmp = path.with_extension("tsv.tmp");
     std::fs::write(&tmp, body)?;
@@ -127,6 +133,10 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
             Some((pos.parse().ok()?, status.parse().ok()))
         }),
     };
+    let shadow = crate::shadow::ShadowCfg::new(
+        fields.get("shadow_of").and_then(|s| s.parse().ok()).unwrap_or(0),
+        fields.get("shadow_idle_s").and_then(|s| s.parse().ok()).unwrap_or(0),
+    );
     Ok(L3Handoff {
         master_fd: fields
             .get("master_fd")
@@ -155,6 +165,7 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
             .map_err(|_| inv("rows"))?,
         control_stream_fd,
         marks,
+        shadow,
     })
 }
 
@@ -220,6 +231,7 @@ mod tests {
             rows: 43,
             control_stream_fd: 11,
             marks: crate::pane_ctl::Marks { pos: 123_456, command_end: Some((120_000, Some(1))) },
+            shadow: crate::shadow::ShadowCfg::default(),
         }
     }
 
@@ -349,6 +361,23 @@ mod tests {
             read_handoff_manifest(&dir.join("never-written.tsv")).is_err(),
             "no file at all"
         );
+    }
+
+    /// A shadow pane stays one across the swap, with its timeout; a
+    /// manifest without the fields, as from an image before them, is a
+    /// pane that is none.
+    #[test]
+    fn shadow_session_parent_and_timeout_cross_the_manifest() {
+        let dir = TempDir::new("handoff");
+        let path = dir.join("m.tsv");
+        let shadow = L3Handoff { shadow: crate::shadow::ShadowCfg::new(4_200_000_007, 2), ..sample() };
+        write_handoff_manifest(&shadow, &path).unwrap();
+        assert_eq!(read_handoff_manifest(&path).unwrap(), shadow);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("shadow_of=4200000007\n") && body.contains("shadow_idle_s=2\n"), "{body}");
+        write_handoff_manifest(&sample(), &path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("shadow"), "nothing for a pane that is none");
+        assert_eq!(read_body(&dir, V2).unwrap().shadow, crate::shadow::ShadowCfg::default());
     }
 
     /// A newer writer may add fields; a reader in range ignores them

@@ -36,6 +36,8 @@ mod keys;
 use keys::{handle_key, handle_paste};
 mod line_discipline;
 mod owner_watch;
+mod resurrect;
+mod shadow;
 mod local_session;
 mod pane_ctl;
 mod pane_env;
@@ -225,6 +227,8 @@ enum SessionEvent {
     Pointer(marspot_term::shell_proto::PointerInput),
     /// `PaneType` or `PaneWatch`, see `pane_ctl`.
     PaneControl(pane_ctl::Request),
+    /// `SessionShadow`, see `shadow`.
+    Shadow(marspot_term::shell_proto::SessionShadow),
     /// The control socket to L2/core hit EOF — our core is gone (crash,
     /// hang-kill, or clean exit). A freshly-booted core re-attaches the
     /// shelld session (PTY + bytelog survive *in shelld*, kept alive with
@@ -469,6 +473,8 @@ fn main() {
         return println!("{}", env!("MARSPOT_VERSION_SESSION"));
     }
 
+    // before logx starts its threads: the variables leave the environment
+    let mut shadow_cfg = shadow::take_env();
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
@@ -540,6 +546,7 @@ fn main() {
         let local = if let Some(h) = try_resume_handoff() {
             resumed = true;
             resumed_command_end = h.marks.command_end;
+            shadow_cfg = h.shadow;
             // Adopt inherited PTY + listener — see do_l3_execv_swap.
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
             let state_path = session_state_bin_path(id);
@@ -608,7 +615,7 @@ fn main() {
             // Adopt inherited UDS listener fd; no rebind, entry.toml
             // already has our (preserved) PID.
             match uds_server::SessionListener::from_handoff(
-                id, h.listen_fd, h.child_pid, h.cols, h.rows, ev_tx.clone(),
+                id, h.listen_fd, h.child_pid, h.cols, h.rows, shadow_cfg.parent, ev_tx.clone(),
             ) {
                 Ok(l) => _listener = Some(l),
                 Err(e) => {
@@ -674,66 +681,12 @@ fn main() {
                     lx_error!("session.local.spawn_failed", &format!("{e}"));
                     std::process::exit(1);
                 });
-            // Cold-start resurrection:if a state.bin exists for this
-            // session id,it's the dump a previous-life L3 wrote on
-            // SIGTERM clean-exit(user closed window).Apply it to the
-            // fresh Terminal so the user sees their saved scrollback
-            // when they reopen the app.PTY child is brand-new, will
-            // re-render its prompt over the saved screen — the
-            // scrollback survives untouched (only the visible window
-            // gets overwritten by the new shell's first paint).
-            let state_path = session_state_bin_path(id);
-            if state_path.exists() {
-                match std::fs::read(&state_path) {
-                    Ok(body) => {
-                        let body_bytes = body.len();
-                        match local.terminal_mut().apply_snapshot(&body) {
-                            Ok(()) => {
-                                // The snapshot's *content* is what we
-                                // want; its *modes* belong to a process
-                                // that no longer exists.  This shell is
-                                // brand-new and has switched nothing on.
-                                //
-                                // Leaving them set is user-visible: a
-                                // restored session whose old TUI had
-                                // mouse tracking on turns every scroll
-                                // into `CSI < 64;x;y M` typed at the
-                                // zsh prompt — "command not found:
-                                // 29M64", over and over.
-                                local.terminal_mut().reset_process_owned_modes();
-                                lx_event!(
-                                    "L3_COLD_SNAPSHOT_APPLIED",
-                                    "restored Terminal from state.bin at cold boot — close→reopen resurrection",
-                                    session_id = id,
-                                    body_bytes = body_bytes
-                                );
-                            }
-                            Err(e) => {
-                                lx_warn!(
-                                    "l3.cold.snapshot_apply_failed",
-                                    &format!("{e}"),
-                                    body_bytes = body_bytes
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        lx_warn!(
-                            "l3.cold.snapshot_read_failed",
-                            &format!("{e}"),
-                            path = state_path.display()
-                        );
-                    }
-                }
-                // state.bin is one-shot — drop so a future SIGKILL doesn't
-                // resurrect stale state on top of the new shell's real output.
-                let _ = std::fs::remove_file(&state_path);
-            }
+            resurrect::cold_snapshot(id, &mut local);
             let cwd = std::env::var("HOME").unwrap_or_default();
             let shm_name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
             let shell_child_pid = local.child_pid();
             match uds_server::SessionListener::bind(
-                id, cols, rows, &cwd, &shm_name, shell_child_pid, ev_tx.clone(),
+                id, cols, rows, &cwd, &shm_name, shell_child_pid, shadow_cfg.parent, ev_tx.clone(),
             ) {
                 Ok(l) => _listener = Some(l),
                 Err(e) => {
@@ -922,7 +875,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let snapshot_writer = SnapshotWriter::spawn(session.id(), ev_tx.clone());
     let mut pointer_gate = pointer::Gate::new();
     // settings and reachability, by file events: see `upkeep`
-    let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone());
+    let mut upkeep = upkeep::Upkeep::new(session.id(), ev_tx.clone(), shadow_cfg);
     loop {
         // A local-echo guess that nothing answers has to be taken
         // back on a timer, not on the next byte — a `sudo` password
@@ -939,7 +892,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let tally_due = ((t.predictions_hit, t.predictions_miss) != predict_seen)
             .then(|| PREDICT_REPORT_EVERY.saturating_sub(last_predict_report.elapsed()));
         // see `reply_guard` and `line_discipline`: both look often for a while
-        let wait = [wait, frames.due_in(), upkeep.wait(), snapshot_due, tally_due, session.reply_poll_every(), pane_ctl.due_in()]
+        let wait = [wait, frames.due_in(), upkeep.wait(pane_ctl::local(&session).output_pos()), snapshot_due, tally_due, session.reply_poll_every(), pane_ctl.due_in()]
             .into_iter()
             .flatten()
             .min();
@@ -956,13 +909,11 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 break;
             }
         };
-        if let Some(reason) = upkeep.look() {
-            lx_event!(
-                "SESSION_REGISTRY_GONE",
-                "this session is unreachable; exiting",
-                session_id = session.id(),
-                reason = reason
-            );
+        if let Some(leave) = upkeep.look(pane_ctl::local(&session).output_pos()) {
+            if leave.act(session.id(), session.child_pid()) {
+                pane_ctl.session_ended(&mut session, poke.as_mut());
+                shell_ended = true;
+            }
             break;
         }
         // Time from here, not from before the `recv` above: a loop
@@ -1091,6 +1042,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 }
                 SessionEvent::Pointer(ev) => pointer_gate.deliver(&mut session, &mut frames, &ev),
                 SessionEvent::PaneControl(r) => pane_ctl.request(r, &mut session, poke.as_mut()),
+                SessionEvent::Shadow(m) => upkeep.set_shadow(m, poke.as_mut()),
                 SessionEvent::Wake => {}
                 SessionEvent::ProcsChanged => {
                     awake.procs_seen();
@@ -1672,7 +1624,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     "fingerprint differs from current/marspot-session — execv",
                     session_id = id
                 );
-                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer, marks) {
+                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer, marks, upkeep.shadow()) {
                     Ok(()) => unreachable!(),
                     Err(e) => {
                         lx_error!(

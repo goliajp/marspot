@@ -7,9 +7,11 @@
 //! raises this as it queues a key, and the parser looks at it every few
 //! kilobytes: one load of a shared byte, no system call.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static WAITING: AtomicBool = AtomicBool::new(false);
+/// Every key, paste and injected or typed input queued so far.
+static ARRIVED: AtomicU64 = AtomicU64::new(0);
 
 /// What the parser looks at between two slices of output.
 pub(crate) fn waiting() -> &'static AtomicBool {
@@ -21,7 +23,13 @@ pub(crate) fn waiting() -> &'static AtomicBool {
 /// Raised after the event is queued, not before: a loop that saw it
 /// raised and found nothing to take would lower it and parse on.
 pub(crate) fn arrived() {
+    ARRIVED.fetch_add(1, Ordering::Relaxed);
     WAITING.store(true, Ordering::Release);
+}
+
+/// How many inputs have been queued since the process started.
+pub(crate) fn count() -> u64 {
+    ARRIVED.load(Ordering::Relaxed)
 }
 
 /// The loop is about to take everything queued for it.

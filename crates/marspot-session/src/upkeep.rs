@@ -27,10 +27,14 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use marspot_term::fs_watch::Watcher;
+use marspot_term::shell_proto::SessionShadow;
 use marspot_term::{lx_event, lx_warn, session_registry};
+
+use crate::control_writer::ControlWriter;
 
 use crate::SessionEvent;
 use crate::owner_watch::OwnerWatch;
+use crate::shadow::{Shadow, ShadowCfg};
 
 /// How often the settings are looked at when they cannot be watched.
 const SETTINGS_EVERY: Duration = Duration::from_secs(1);
@@ -45,6 +49,8 @@ pub(crate) struct Upkeep {
     /// Who answers for this session's coalition, followed through the
     /// same watcher.
     owner: OwnerWatch,
+    /// The parent a shadow pane ends with, followed through the same watcher.
+    shadow: Shadow,
     /// How often reachability is looked at when it cannot be watched.
     /// Five seconds; a test that deletes an entry to watch the session
     /// leave sets `MARSPOT_SESSION_ENTRY_CHECK_MS` instead of sitting
@@ -57,7 +63,7 @@ pub(crate) struct Upkeep {
 impl Upkeep {
     /// Starts watching.  A change sets a flag and wakes the main loop
     /// with `SessionEvent::Wake`; `look` does the rest there.
-    pub(crate) fn new(sid: u64, wake: Sender<SessionEvent>) -> Self {
+    pub(crate) fn new(sid: u64, wake: Sender<SessionEvent>, shadow: ShadowCfg) -> Self {
         let entry = session_registry::session_entry_path(sid);
         let socket = session_registry::session_socket_path(sid);
         let changed = Arc::new(AtomicBool::new(false));
@@ -89,14 +95,17 @@ impl Upkeep {
         // being armed raised no event: the first pass looks once.
         changed.store(watcher.is_ok(), Ordering::Release);
         let now = Instant::now();
+        let watcher = watcher.ok();
+        let shadow = Shadow::new(sid, shadow, watcher.as_ref());
         Self {
             sid,
             pid: std::process::id() as i32,
             entry,
             socket,
             changed,
-            watcher: watcher.ok(),
+            watcher,
             owner: OwnerWatch::new(sid),
+            shadow,
             entry_every,
             settings_looked: now,
             entry_looked: now,
@@ -108,20 +117,39 @@ impl Upkeep {
     }
 
     /// The longest the main loop may sleep on this account: without
-    /// limit while the files are watched.
-    pub(crate) fn wait(&self) -> Option<Duration> {
+    /// limit while the files are watched.  `pos` is the output position
+    /// now, after this pass's events: activity they brought counts from
+    /// now, not from the next wake.
+    pub(crate) fn wait(&mut self, pos: u64) -> Option<Duration> {
+        self.shadow.note(pos);
         if self.changed.load(Ordering::Acquire) {
             return Some(Duration::ZERO);
         }
-        (!self.watching()).then(|| self.entry_every.min(Duration::from_secs(5)))
+        let beat = (!self.watching()).then(|| self.entry_every.min(Duration::from_secs(5)));
+        [beat, self.shadow.due_in()].into_iter().flatten().min()
     }
 
-    /// Call on every pass of the main loop.  Does nothing unless a file
-    /// changed (or, unwatched, its beat is due).  `Some(why)` when this
-    /// session can no longer be reached and has to exit.
-    pub(crate) fn look(&mut self) -> Option<&'static str> {
+    pub(crate) fn shadow(&self) -> ShadowCfg {
+        self.shadow.cfg()
+    }
+
+    /// `SessionShadow` from the core.
+    pub(crate) fn set_shadow(&mut self, m: SessionShadow, poke: Option<&mut ControlWriter>) {
+        self.shadow.set(m, self.watcher.as_ref(), poke);
+    }
+
+    /// Call on every pass of the main loop, with the output position.
+    /// Does nothing unless a file changed (or, unwatched, its beat is
+    /// due) or a shadow's timeout ran out.  `Some` when this session has
+    /// to exit.
+    pub(crate) fn look(&mut self, pos: u64) -> Option<Leave> {
         let changed = self.changed.swap(false, Ordering::AcqRel);
         let timed = !self.watching();
+        let beat = changed || (timed && self.entry_looked.elapsed() >= self.entry_every);
+        if let Some(why) = self.shadow.ended(pos, beat) {
+            // a directory someone else owns now is not this session's to remove
+            return Some(self.unreachable().map_or(Leave::Ended(why), Leave::Unreachable));
+        }
         // A setting L3 owns -- character width -- bites as soon as the
         // file says so.  New content is parsed with the new rule; cells
         // already on screen keep the width they were laid out with, and
@@ -137,11 +165,16 @@ impl Upkeep {
             }
             marspot_term::system_theme::changed("colour queries are answered from the theme now in force");
         }
-        if !(changed || (timed && self.entry_looked.elapsed() >= self.entry_every)) {
+        if !beat {
             return None;
         }
         self.entry_looked = Instant::now();
         self.owner.look(self.watcher.as_ref());
+        self.unreachable().map(Leave::Unreachable)
+    }
+
+    /// Why nobody can reach this session any more, if so.
+    fn unreachable(&self) -> Option<&'static str> {
         if !self.entry.exists() {
             Some("entry.toml removed")
         } else if !self.socket.exists() {
@@ -153,6 +186,34 @@ impl Upkeep {
                 // like eviction.
                 Ok(e) if e.pid != self.pid => Some("entry reassigned to another pid"),
                 _ => None,
+            }
+        }
+    }
+}
+
+/// Why a session leaves on its own.
+pub(crate) enum Leave {
+    /// Nobody can reach it: it goes, and leaves its directory to whoever
+    /// took it away.
+    Unreachable(&'static str),
+    /// A shadow pane whose parent went or that sat idle too long: it ends
+    /// as when its shell exits.
+    Ended(&'static str),
+}
+
+impl Leave {
+    /// Say why, and hang up the shell of a session that ends.  True when
+    /// the session ends with its pane, its directory removed.
+    pub(crate) fn act(&self, sid: u64, shell: i32) -> bool {
+        match self {
+            Leave::Unreachable(why) => {
+                lx_event!("SESSION_REGISTRY_GONE", "this session is unreachable; exiting", session_id = sid, reason = why);
+                false
+            }
+            Leave::Ended(why) => {
+                lx_event!("L3_SHADOW_ENDED", "a shadow pane ends", session_id = sid, reason = why);
+                crate::shell_end::end_with_pane(sid, shell);
+                true
             }
         }
     }

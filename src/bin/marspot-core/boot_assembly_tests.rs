@@ -143,6 +143,7 @@ fn dead_entry(id: u64) -> SessionEntry {
         shell_child_pid: 0,
         build: String::new(),
         stamps_regions: false,
+        shadow_of: 0,
     }
 }
 

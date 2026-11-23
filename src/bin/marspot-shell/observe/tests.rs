@@ -30,6 +30,7 @@ pub(crate) fn entry(id: u64, pid: i32, shell: i32) -> SessionEntry {
         shell_child_pid: shell,
         build: String::new(),
         stamps_regions: false,
+        shadow_of: 0,
     }
 }
 

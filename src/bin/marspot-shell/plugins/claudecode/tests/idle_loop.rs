@@ -142,6 +142,7 @@ fn the_whole_idle_loop_runs_on_a_pty_this_test_owns() {
             shell_child_pid: shell_pid,
             build: String::new(),
             stamps_regions: false,
+            shadow_of: 0,
         },
     )
     .unwrap();
