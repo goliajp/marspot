@@ -108,3 +108,84 @@ ok=$(python3 -c "print(1 if $PER9 <= $PER1 * $LINEARITY_MAX else 0)")
   fail "per-session RSS grows with pane count: N=9 ${PER9} KiB vs N=1 ${PER1} KiB = ${ratio}× > ${LINEARITY_MAX}× (superlinear per-session state)"
 
 echo "PASS: per-session idle L3 RSS ${PER9} KiB ≤ ${PER_SESSION_CAP_KIB} KiB, linear (${ratio}× ≤ ${LINEARITY_MAX}×), no orphans"
+
+
+# Shadow panes (sessions with no window) in a sandbox app: their L3s are
+# held to the same per-session cap, and the core's resident size may grow
+# by at most SHADOW_CORE_KIB_CAP per shadow pane.  The core maps each
+# shadow's frame region and keeps a `Pane` for it, and draws nothing.
+# Opens a window, so this part runs on the runner:
+#   bin/test-e2e-remote.sh soak-l3-rss-scaling.sh
+# Measured on mini (2026-11-23, 8 shadow panes against none, three runs):
+# 372, 348 and 340 KiB per shadow pane; the cap is 1.5x the largest.
+# SHADOW_CORE_KIB_CAP=0 measures without a verdict.
+SHADOW_N="${SHADOW_N:-8}"
+SHADOW_CORE_KIB_CAP="${SHADOW_CORE_KIB_CAP:-558}"
+SHELL_BIN="$DEV_TARGET/marspot-shell"
+CORE_BIN="$DEV_TARGET/marspot-core"
+for b in "$SHELL_BIN" "$CORE_BIN"; do
+  [[ -x $b ]] || fail "$b is not built (bin/test-e2e-remote.sh builds release first)"
+done
+trap dev_kill_shell_core EXIT
+
+# the core's resident KiB with $1 shadow panes beside one window pane,
+# then the largest shadow L3's RSS in KiB
+shadow_app() {
+  local n=$1 i want core kib l3max=0 e p r
+  dev_kill_shell_core
+  dev_wipe_state
+  rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
+  mkdir -p "$MARSPOT_STATE_DIR/logs"
+  python3 - "$MARSPOT_STATE_DIR" <<'PY' || return 1
+import struct, sys, pathlib
+d = pathlib.Path(sys.argv[1])
+def s(x): b = x.encode(); return struct.pack('<H', len(b)) + b
+body  = struct.pack('<II', 0xA5505010, 2) + struct.pack('<HH', 0, 1)
+body += struct.pack('<HHHH', 1, 1, 0, 1) + struct.pack('<Q', 0) + s('') + s('')
+(d / 'shell-state.bin').write_bytes(body)
+frames  = struct.pack('<IIH', 0xA5505011, 2, 1) + struct.pack('<Idddd', 0, 80.0, 80.0, 1200.0, 800.0)
+(d / 'window-state.bin').write_bytes(frames)
+PY
+  env SHELL=/bin/sh MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+    ${n:+MARSPOT_DEV_SHADOWS=$n} nohup "$SHELL_BIN" >/dev/null 2>&1 </dev/null & dev_record_pid $!
+  disown
+  want=$((1 + ${n:-0}))
+  for (( i = 0; i < 600; i++ )); do
+    (( $(dev_pane_shell_pids | grep -c .) >= want )) && break
+    sleep 0.1
+  done
+  (( $(dev_pane_shell_pids | grep -c .) >= want )) || return 1
+  sleep "${SHADOW_SETTLE:-20}"
+  core=$(dev_core_pids | head -1)
+  [[ -n $core ]] || return 1
+  kib=$(python3 -c 'import ctypes, sys
+buf = (ctypes.c_uint64 * 64)()
+ctypes.CDLL("/usr/lib/libSystem.B.dylib").proc_pid_rusage(int(sys.argv[1]), 4, ctypes.byref(buf)) == 0 or sys.exit(1)
+print(buf[8] // 1024)' "$core") || return 1
+  for e in "$MARSPOT_STATE_DIR"/sessions/*/entry.toml; do
+    grep -q '^shadow_of = [1-9]' "$e" || continue
+    p=$(sed -n 's/^pid = \([0-9][0-9]*\)$/\1/p' "$e")
+    r=$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' ')
+    if [[ -n $r ]] && (( r > l3max )); then l3max=$r; fi
+  done
+  echo "$kib $l3max"
+}
+
+echo "==> the core's resident size per shadow pane (0 vs $SHADOW_N shadow panes)"
+BASE=$(shadow_app "") || fail "the sandbox app with no shadow panes did not come up"
+WITH=$(shadow_app "$SHADOW_N") || fail "the sandbox app with $SHADOW_N shadow panes did not come up"
+marked=$(cat "$MARSPOT_STATE_DIR"/sessions/*/entry.toml 2>/dev/null | grep -c '^shadow_of = [1-9]')
+dev_kill_shell_core
+(( marked == SHADOW_N )) || fail "$marked of the sessions were shadow panes, $SHADOW_N asked for"
+C0=${BASE%% *}; C1=${WITH%% *}; L3MAX=${WITH##* }
+PER_SHADOW=$(( (C1 - C0) / SHADOW_N ))
+echo "    core resident: ${C0} KiB with none, ${C1} KiB with $SHADOW_N; ${PER_SHADOW} KiB per shadow pane"
+echo "    largest shadow L3: ${L3MAX} KiB"
+(( L3MAX <= PER_SESSION_CAP_KIB )) || fail "a shadow pane's L3 holds ${L3MAX} KiB > cap ${PER_SESSION_CAP_KIB} KiB"
+if (( SHADOW_CORE_KIB_CAP == 0 )); then
+  echo "MEASURED: ${PER_SHADOW} KiB per shadow pane (no cap set)"
+  exit 0
+fi
+(( PER_SHADOW <= SHADOW_CORE_KIB_CAP )) || \
+  fail "the core grows by ${PER_SHADOW} KiB per shadow pane > cap ${SHADOW_CORE_KIB_CAP} KiB"
+echo "PASS: the core grows by ${PER_SHADOW} KiB per shadow pane ≤ ${SHADOW_CORE_KIB_CAP} KiB; shadow L3s ≤ ${PER_SESSION_CAP_KIB} KiB"

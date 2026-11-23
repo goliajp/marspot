@@ -60,6 +60,8 @@ use super::{ShellInbox, SupervisorState};
 
 /// How long after the last knock the clock may rest.
 const REST_AFTER: Duration = Duration::from_secs(5);
+/// Dev variables that leave the clock free to rest: the sandbox marker, set for every sandbox run, and seams only the core reads.
+const RESTING_SEAMS: [&str; 3] = ["MARSPOT_DEV_SANDBOX", "MARSPOT_DEV_SHADOWS", super::dev_window::VAR];
 
 /// What the clock does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,12 +158,9 @@ impl Pump {
             next_beat: None,
             woke_seen: (0, 0),
             observer_awake: None,
-            // the sandbox marker is set for every sandbox run and arms nothing
             never_rests: !signalled
                 || settings.is_err()
-                || std::env::vars_os().any(|(k, _)| {
-                    k.to_str().is_some_and(|k| k.starts_with("MARSPOT_DEV_") && k != "MARSPOT_DEV_SANDBOX" && k != super::dev_window::VAR)
-                }),
+                || std::env::vars_os().any(|(k, _)| k.to_str().is_some_and(|k| k.starts_with("MARSPOT_DEV_") && !RESTING_SEAMS.contains(&k))),
             _settings: settings.ok(),
         }
     }

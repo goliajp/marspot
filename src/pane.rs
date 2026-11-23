@@ -508,8 +508,6 @@ impl PaneBackend {
         }
     }
 
-
-
     /// Cmd-C on an L3 pane: ask the session process for the selection text
     /// (it owns the grid + scrollback).  `None` for in-process backends —
     /// the container reads their text locally via `ui::selection_text`.
@@ -534,6 +532,13 @@ impl PaneBackend {
             // heartbeat doesn't force a spurious render).
             PaneBackend::L3(c) => usize::from(c.poll()),
             PaneBackend::Vacant(_) => 0,
+        }
+    }
+
+    /// Notice an L3's exit without reading its frame.
+    pub fn observe_exit(&mut self) {
+        if let PaneBackend::L3(c) = self {
+            c.observe_exit();
         }
     }
 
@@ -791,33 +796,13 @@ impl L3Conn {
         self.session_id
     }
 
-
-
-
     /// Re-read the shm mirror if L3 published a new frame.  Returns
     /// `true` when the mirror changed (caller should redraw).  Cheap
     /// no-op (one atomic load) when the seq is unchanged.
     fn poll(&mut self) -> bool {
-        // Promote a staged silent-update replacement the moment it has
-        // replayed + published — kills the old child and repoints us at the
-        // new one. `force_fill` so we re-read the new region even if its
-        // first seq coincides with our last.
-        let force_fill = false;
-        // Observe exit here (the only `&mut` entry point).  An L3 that
-        // crashed leaves the pane frozen at its last frame; one whose
-        // shell ended has removed its dir before exiting, and the
-        // container closes the pane.
-        if !self.exited
-            && let Ok(Some(status)) = self.child.try_wait() {
-                self.exited = true;
-                self.shell_ended = !crate::session_registry::session_dir(self.session_id).exists();
-                eprintln!(
-                    "[core] L3 session pid={} exited ({status}) — pane frozen at last frame, others unaffected",
-                    self.child.id()
-                );
-            }
+        self.observe_exit();
         let seq = self.reader.seq();
-        if seq == self.last_seq && !force_fill {
+        if seq == self.last_seq {
             return false;
         }
         let Some(snap) = self.read_into_mirror() else {
@@ -839,6 +824,17 @@ impl L3Conn {
         // frame.
         self.last_seq = seq;
         true
+    }
+
+    /// An L3 that crashed leaves the pane frozen at its last frame; one
+    /// whose shell ended has removed its dir before exiting, and the
+    /// container closes the pane.
+    fn observe_exit(&mut self) {
+        if !self.exited && let Ok(Some(status)) = self.child.try_wait() {
+            self.exited = true;
+            self.shell_ended = !crate::session_registry::session_dir(self.session_id).exists();
+            eprintln!("[core] L3 session pid={} exited ({status}) — pane frozen at last frame", self.child.id());
+        }
     }
 
     /// Forward a keystroke to the session process, which encodes it with
@@ -1366,6 +1362,10 @@ impl Pane {
     /// `user_event` callback to decide whether to request_redraw.
     pub fn pump(&mut self) -> usize {
         self.session.pump()
+    }
+
+    pub fn observe_exit(&mut self) {
+        self.session.observe_exit()
     }
 
     /// True once the underlying shell has exited and all bytes have

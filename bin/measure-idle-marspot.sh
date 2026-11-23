@@ -33,6 +33,9 @@
 #                           (the shell's own seam; a script cannot)
 #   IDLE_STACKS             sample L1, L2 and one L3 for this many seconds
 #                           and print where each thread sits
+#   IDLE_SHADOWS            also open this many shadow panes (sessions with
+#                           no window) under the first pane, through the
+#                           core's dev seam, and measure them with the rest
 
 #   IDLE_LAYOUTS            "1x1,2x2,4x3": measure each layout in turn, a
 #                           fresh sandbox app for each
@@ -75,6 +78,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 COLS="${IDLE_COLS:-4}"
 ROWS="${IDLE_ROWS:-3}"
 N=$((COLS * ROWS))
+SHADOWS="${IDLE_SHADOWS:-0}"
 SETTLE="${IDLE_SETTLE:-30}"
 WINDOW="${IDLE_WINDOW:-60}"
 IDLE_SHELL="${IDLE_SHELL:-/bin/sh}"
@@ -124,6 +128,7 @@ PY
 : > "$RUNLOG"
 env SHELL="$IDLE_SHELL" MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
   ${IDLE_WINDOW_STATE:+MARSPOT_DEV_WINDOW_STATE="$IDLE_WINDOW_STATE"} \
+  ${IDLE_SHADOWS:+MARSPOT_DEV_SHADOWS="$IDLE_SHADOWS"} \
   nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null & dev_record_pid $!
 disown
 
@@ -131,19 +136,23 @@ disown
 # the sessions' children: a shell launchd started is nobody's child.
 shells() { dev_pane_shell_pids | grep -c .; }
 for (( i = 0; i < 600; i++ )); do
-  (( $(shells) >= N )) && break
+  (( $(shells) >= N + SHADOWS )) && break
   sleep 0.1
 done
-(( $(shells) >= N )) || fail "only $(shells) of $N panes have a shell after 60 s"
+(( $(shells) >= N + SHADOWS )) || fail "only $(shells) of $((N + SHADOWS)) panes have a shell after 60 s"
+if (( SHADOWS > 0 )); then
+  marked=$(cat "$MARSPOT_STATE_DIR"/sessions/*/entry.toml 2>/dev/null | grep -c '^shadow_of = [1-9]')
+  (( marked == SHADOWS )) || fail "$marked of the sessions are shadow panes, $SHADOWS asked for"
+fi
 if [[ -n ${IDLE_WINDOW_STATE:-} ]]; then
   for (( i = 0; i < 200; i++ )); do grep -q $'\tDEV_WINDOW_STATE\t' "$APPLOG" && break; sleep 0.1; done
   grep -q $'\tDEV_WINDOW_STATE\t' "$APPLOG" || fail "the window was not put out of sight ($IDLE_WINDOW_STATE)"
 fi
-echo "==> $N panes up ($(dev_session_pids | wc -l | tr -d ' ') L3), settling ${SETTLE}s"
+echo "==> $N panes and $SHADOWS shadow panes up ($(dev_session_pids | wc -l | tr -d ' ') L3), settling ${SETTLE}s"
 sleep "$SETTLE"
 
 if [[ -n ${IDLE_READINGS:-} ]]; then
-  "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev $N panes${IDLE_WINDOW_STATE:+, window $IDLE_WINDOW_STATE}" --window "$WINDOW" \
+  "$ROOT/bin/_idle_wakeups.py" --label "marspot-dev $N panes${IDLE_SHADOWS:+ + $IDLE_SHADOWS shadow panes}${IDLE_WINDOW_STATE:+, window $IDLE_WINDOW_STATE}" --window "$WINDOW" \
     --readings "$IDLE_READINGS" ${IDLE_WAKEUP_BUDGET:+--budget "$IDLE_WAKEUP_BUDGET"} ${IDLE_JSON:+--json "$IDLE_JSON"} \
     --pattern "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)"
   rc=$?

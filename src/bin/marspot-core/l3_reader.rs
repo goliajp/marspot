@@ -1,6 +1,6 @@
 //! The core's end of one pane's L2↔L3 control socket.
 
-use super::{decode_selection_text, CoreEvent};
+use super::{decode_selection_text, unwatched, CoreEvent};
 use marspot::latency_trace::{self as trace, Stage};
 use marspot::shell_proto::{Frame, MsgType};
 use std::os::unix::net::UnixStream;
@@ -12,7 +12,9 @@ use std::sync::Arc;
 /// `GridReady` whenever it republishes its grid; we turn each into an
 /// `L3Ready` wake so the main loop re-reads the shm mirror promptly.
 /// EOF / error just ends the thread — the pane's own `try_wait` detects
-/// the child's exit.
+/// the child's exit.  A shadow pane (`unwatched`) wakes nobody for a
+/// frame, and its bells and clipboard writes go nowhere: nobody is
+/// looking, and a program nobody watches must not change the clipboard.
 pub(super) fn l3_reader_loop(
     mut stream: UnixStream,
     session_id: u64,
@@ -29,10 +31,11 @@ pub(super) fn l3_reader_loop(
             Ok(Some(f)) => match f.msg_type {
                 MsgType::GridReady => {
                     trace::mark(Stage::GridReady, session_id as u32);
-                    if tx.send(CoreEvent::L3Ready).is_err() {
+                    if !unwatched::is(session_id) && tx.send(CoreEvent::L3Ready).is_err() {
                         return;
                     }
                 }
+                MsgType::PaneBell if unwatched::is(session_id) => {}
                 MsgType::PaneBell => {
                     if !bell_queued.swap(true, Ordering::AcqRel)
                         && tx.send(CoreEvent::PaneBell(session_id, bell_queued.clone())).is_err()
@@ -43,6 +46,10 @@ pub(super) fn l3_reader_loop(
                 // OSC 52: L3 has no AppKit, so a clipboard write lands here and
                 // is written from the reader thread (the pasteboard has its own
                 // lock; the event loop would make a yank wait on a redraw)
+                MsgType::PaneClipboardWrite if unwatched::is(session_id) => {
+                    marspot::lx_event!("SHADOW_CLIPBOARD_DROPPED", "a shadow pane's clipboard write was dropped",
+                        session_id = session_id, len = f.payload.len());
+                }
                 MsgType::PaneClipboardWrite => {
                     if let Ok(text) = std::str::from_utf8(&f.payload) {
                         marspot::input::write_clipboard_text(text);
@@ -63,7 +70,7 @@ pub(super) fn l3_reader_loop(
                     {
                         b.copy_from_slice(&session_id.to_le_bytes());
                     }
-                    let _ = tx.send(CoreEvent::PaneReport(f));
+                    let _ = tx.send(CoreEvent::PaneReport(session_id, f));
                 }
                 // Reply to a Cmd-C `GetSelectionText`, for whoever waits in
                 // `L3Conn::request_selection_text`; its seq lets the waiter

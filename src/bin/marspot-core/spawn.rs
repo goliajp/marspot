@@ -14,11 +14,20 @@ use super::*;
 /// how to show.
 const SESSION_PROCESS_HARD_CAP: usize = 64;
 
+/// What a shadow pane's L3 is told at its start: whose shadow it is
+/// and how long it may sit idle (0: its default).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ShadowEnv {
+    pub(super) parent: u64,
+    pub(super) idle_s: u32,
+}
+
 fn spawn_l3_with_cwd(
     cols: u16,
     rows: u16,
     session_id: u64,
     initial_cwd: &str,
+    shadow: Option<ShadowEnv>,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
     // Population guard.  A readdir + one liveness check per entry, only on
@@ -99,6 +108,12 @@ fn spawn_l3_with_cwd(
     // there instead of $HOME.  Empty = unset (L3 falls back to $HOME).
     if !initial_cwd.is_empty() {
         cmd.env("MARSPOT_INITIAL_CWD", initial_cwd);
+    }
+    // the L3 reads these once and removes them; never inherited from ours
+    cmd.env_remove("MARSPOT_SHADOW_OF").env_remove("MARSPOT_SHADOW_IDLE_S");
+    if let Some(sh) = shadow {
+        cmd.env("MARSPOT_SHADOW_OF", sh.parent.to_string())
+            .env("MARSPOT_SHADOW_IDLE_S", sh.idle_s.to_string());
     }
     // Ensure the child does NOT inherit any control-socket env from
     // the L2 parent — RFC-003 step 3b leaves the inherited-fd path
@@ -218,12 +233,24 @@ pub(super) fn spawn_l3_pane_async(
     cwd: String,
     event_tx: &Sender<CoreEvent>,
 ) -> Pane {
+    spawn_l3_pane_async_as(cols, rows, session_id, cwd, None, event_tx)
+}
+
+/// `spawn_l3_pane_async`, for a shadow pane when `shadow` names its parent.
+pub(super) fn spawn_l3_pane_async_as(
+    cols: u16,
+    rows: u16,
+    session_id: u64,
+    cwd: String,
+    shadow: Option<ShadowEnv>,
+    event_tx: &Sender<CoreEvent>,
+) -> Pane {
     let tx = event_tx.clone();
     std::thread::Builder::new()
         .name(format!("l2-spawn-{session_id}"))
         .spawn(move || {
             let inner_tx = tx.clone();
-            let outcome = spawn_l3_with_cwd(cols, rows, session_id, &cwd, &inner_tx)
+            let outcome = spawn_l3_with_cwd(cols, rows, session_id, &cwd, shadow, &inner_tx)
                 .map_err(|e| format!("{e}"));
             let _ = tx.send(CoreEvent::L3SpawnFinished(
                 session_id,
@@ -281,7 +308,20 @@ pub(super) fn spawn_l3_pane_with_cwd(
     initial_cwd: &str,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<Pane> {
-    let spawn = spawn_l3_with_cwd(cols, rows, session_id, initial_cwd, event_tx)?;
+    let spawn = spawn_l3_with_cwd(cols, rows, session_id, initial_cwd, None, event_tx)?;
+    Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
+}
+
+/// A shadow pane's L3, started inline (tests).
+#[cfg(test)]
+pub(super) fn spawn_l3_shadow_with_cwd(
+    cols: u16,
+    rows: u16,
+    session_id: u64,
+    shadow: ShadowEnv,
+    event_tx: &Sender<CoreEvent>,
+) -> std::io::Result<Pane> {
+    let spawn = spawn_l3_with_cwd(cols, rows, session_id, "", Some(shadow), event_tx)?;
     Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
 }
 

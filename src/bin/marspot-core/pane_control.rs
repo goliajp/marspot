@@ -13,7 +13,7 @@ use super::pane_reports::Reports;
 use super::*;
 use marspot::pane::ControlReach;
 use marspot::shell_proto::{
-    CAP_TYPE_AND_WATCH, DoneCode, PaneDone, decode_pane_type, decode_pane_watch,
+    CAP_SHADOWS, CAP_TYPE_AND_WATCH, DoneCode, PaneDone, decode_pane_type, decode_pane_watch,
     encode_pane_control_caps, encode_pane_done,
 };
 use marspot_term::frame_writer::FrameWriter;
@@ -33,6 +33,7 @@ pub(super) enum Route {
 pub(super) struct PaneControl {
     pub(super) reports: Reports,
     caps_sent: bool,
+    pub(super) shadows: super::shadows::Shadows,
     /// Dev seam only (`MARSPOT_DEV_PANE_CONTROL`): when to play one
     /// `PaneType` and one `PaneWatch` for the first session pane.
     dev_at: Option<Instant>,
@@ -44,6 +45,7 @@ impl PaneControl {
             dev_at: std::env::var("MARSPOT_DEV_PANE_CONTROL")
                 .is_ok()
                 .then(|| Instant::now() + Duration::from_secs(3)),
+            shadows: super::shadows::Shadows::from_env(),
             ..Self::default()
         }
     }
@@ -53,7 +55,7 @@ impl PaneControl {
         if std::mem::replace(&mut self.caps_sent, true) {
             return;
         }
-        let caps = CAP_TYPE_AND_WATCH;
+        let caps = CAP_TYPE_AND_WATCH | CAP_SHADOWS;
         self.reports.push(Frame::new(
             MsgType::PaneControlCaps,
             encode_pane_control_caps(caps),
@@ -71,10 +73,10 @@ impl PaneControl {
             t.saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(250))
         });
-        match (self.reports.retry_after(), dev) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [self.reports.retry_after(), dev, self.shadows.wait()]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub(super) fn flush(&mut self, w: &FrameWriter) {
@@ -105,6 +107,9 @@ impl CoreApp {
             );
             return Route::Unanswerable;
         };
+        if super::shadows::is_shadow_request(f.msg_type) {
+            return self.route_shadow_request(f, req_id);
+        }
         // a request cut short after its id is still answered, as malformed
         let sid = f
             .payload
@@ -160,7 +165,7 @@ impl CoreApp {
         self.answer(msg_type, req_id, sid, code, "")
     }
 
-    fn answer(
+    pub(super) fn answer(
         &mut self,
         msg_type: MsgType,
         req_id: u32,
@@ -195,9 +200,21 @@ impl CoreApp {
         Route::Answered(code)
     }
 
-    /// A session reported on a request L1 sent through: on to L1.
-    pub(super) fn report_to_shell(&mut self, f: Frame) {
+    /// Session `sid` reported on a request L1 sent through: on to L1,
+    /// unless it answers one of the core's own.
+    pub(super) fn report_to_shell(&mut self, sid: u64, f: Frame) {
+        if f.msg_type == MsgType::PaneDone && self.session_done(sid, &f) {
+            return;
+        }
         self.pane_control.reports.push(f);
+    }
+
+    /// Once per loop turn: moves whose session did not answer in time,
+    /// and the dev seams.
+    pub(super) fn pane_control_tick(&mut self) {
+        self.expire_places(Instant::now());
+        self.dev_drive_pane_control();
+        self.dev_drive_shadows();
     }
 
     /// Dev seam (`MARSPOT_DEV_PANE_CONTROL`) — see `PaneControl::dev_at`.

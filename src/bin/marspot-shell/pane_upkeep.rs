@@ -232,7 +232,8 @@ impl ShellApp {
         self.pane_look.retain(&open);
         self.pane_tables.retain(&open);
         self.wake_queue.retain(|sid| open(*sid));
-        control_reader::pane_wakes::retain(&open);
+        let since = Instant::now().checked_sub(crate::observe::INTERVAL * 2).unwrap_or_else(Instant::now);
+        control_reader::pane_wakes::retain(&open, since);
         Self::forget_closed_for_control(&open);
     }
 

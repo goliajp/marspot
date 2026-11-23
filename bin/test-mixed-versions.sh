@@ -27,6 +27,9 @@
 #   shadow    a session started as the pane's shadow goes back to the
 #             old session build: the old build's entry names no
 #             parent, and the session lives on
+#             and a shadow pane the new core opened stays out of the
+#             window when the new core restarts, and an old core shows
+#             it as a pane of its window, the same session
 #   lost      old app whose session's grid region lost its name → new
 #             core with a new session build staged: the session
 #             updates, moves to a new region and lives → and with no
@@ -135,7 +138,8 @@ start_app() { # directory of the build to start
   # session left under those names is not this pane's
   if [[ -n $SID ]]; then dev_forget_regions "/msp-s-$SID" "/msp-c-$SID" "/msp-t-$SID"; fi
   CLI="$1/marspot-shell"
-  launch "$SD" "$1/marspot-shell" MARSPOT_DEV_PANE_CONTROL=1
+  # shellcheck disable=SC2086
+  launch "$SD" "$1/marspot-shell" MARSPOT_DEV_PANE_CONTROL=1 ${START_ENV:-}
   mkdir -p "$SD/work"
   printf '\033]2;TITLE-M\007MARK-M \360\237\207\257\360\237\207\265\n' > "$SD/work/m.txt"
   SID=$(first_pane "$SD") || die "no pane"
@@ -373,6 +377,7 @@ check "this build reads the frame" frame_shows MARK-M
 bells_keep_the_stream "an old session to the new core"
 
 shadow_goes_back_to_the_old_build
+shadow_shows_as_a_pane_under_the_old_core
 
 echo "════ lost: an old session without its region, a new session build staged ════"
 start_app "$OLD"

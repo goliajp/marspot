@@ -1,0 +1,272 @@
+//! Opening, closing and resizing panes for L1, shadow panes above all.
+//!
+//! A shadow pane is a session with no window: its `Pane` lives in
+//! `CoreApp::shadows`, is never laid out or drawn, and wakes nobody
+//! when it publishes a frame (`unwatched`).  Whose shadow it is lives
+//! in the session's registry entry alone, written by the session.
+//!
+//! Every request is answered: `PaneSpawn` with `PaneSpawned` once the
+//! new session's handshake is done or failed, the others with
+//! `PaneDone`.  Moving a pane between a window and the shadows is in
+//! `shadow_place`.
+
+use super::pane_control::Route;
+use super::spawn::{ShadowEnv, spawn_l3_pane_async_as};
+use super::*;
+use marspot::shell_proto::{
+    DoneCode, PaneSpawn, PaneSpawned, RetireMode, decode_pane_retire, decode_pane_size,
+    decode_pane_spawn, encode_pane_spawned,
+};
+use std::collections::HashMap;
+
+/// A shadow pane opened without a size gets this one.
+const DEFAULT_COLS: u16 = 120;
+const DEFAULT_ROWS: u16 = 40;
+/// Larger than any screen holds; a request past it is refused.
+const MAX_DIM: u16 = 1000;
+
+/// What the core keeps about requests still in flight.
+#[derive(Default)]
+pub(super) struct Shadows {
+    /// Session id → (L1's request id, opened as a shadow), until the
+    /// session's spawn lands.  One entry per open L1 asked for, which
+    /// L1 rate-limits; each leaves when its spawn reports back.
+    spawning: HashMap<u64, (u32, bool)>,
+    pub(super) places: super::shadow_place::Places,
+    /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
+    /// to open under the first pane, and when.
+    pub(super) dev: Option<(usize, Instant)>,
+}
+
+impl Shadows {
+    pub(super) fn from_env() -> Self {
+        let dev = std::env::var("MARSPOT_DEV_SHADOWS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .map(|n| (n, Instant::now() + Duration::from_secs(3)));
+        Self { dev, ..Self::default() }
+    }
+
+    /// When the loop has to wake for these.
+    pub(super) fn wait(&self) -> Option<Duration> {
+        let dev = self.dev.map(|(_, t)| {
+            t.saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(250))
+        });
+        match (self.places.wait(), dev) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
+/// The frames this file and `shadow_place` answer.
+pub(super) fn is_shadow_request(t: MsgType) -> bool {
+    matches!(
+        t,
+        MsgType::PaneSpawn | MsgType::PaneRetire | MsgType::PanePlace | MsgType::PaneSize
+    )
+}
+
+fn size_ok(cols: u16, rows: u16) -> bool {
+    (1..=MAX_DIM).contains(&cols) && (1..=MAX_DIM).contains(&rows)
+}
+
+impl CoreApp {
+    /// L1 asked to open, close, place or resize a pane.
+    pub(super) fn route_shadow_request(&mut self, f: Frame, req_id: u32) -> Route {
+        let route = match f.msg_type {
+            MsgType::PaneSpawn => decode_pane_spawn(&f.payload).ok().map(|m| self.spawn_pane(m)),
+            MsgType::PaneRetire => decode_pane_retire(&f.payload)
+                .ok()
+                .map(|m| self.retire_pane(m.req_id, m.sid, m.mode)),
+            MsgType::PanePlace => marspot::shell_proto::decode_pane_place(&f.payload)
+                .ok()
+                .map(|m| self.place_pane(m)),
+            MsgType::PaneSize => decode_pane_size(&f.payload)
+                .ok()
+                .map(|m| self.size_pane(m.req_id, m.sid, m.cols, m.rows)),
+            _ => None,
+        };
+        route.unwrap_or_else(|| self.answer(f.msg_type, req_id, 0, DoneCode::Other, "malformed request"))
+    }
+
+    fn spawned(&mut self, req_id: u32, sid: u64, err: &str) -> Route {
+        let m = PaneSpawned { req_id, ok: err.is_empty(), sid, err: err.to_string() };
+        lx_event!(
+            "PANE_SPAWN_REPLY",
+            "answered L1's request for a new pane",
+            req_id = req_id,
+            session = sid,
+            err = err
+        );
+        if let Ok(p) = encode_pane_spawned(&m) {
+            self.pane_control.reports.push(Frame::new(MsgType::PaneSpawned, p));
+        }
+        if err.is_empty() { Route::Answered(DoneCode::Ok) } else { Route::Answered(DoneCode::Other) }
+    }
+
+    /// `PaneSpawn`: a shadow pane under `parent_sid`, or a pane in the
+    /// window that holds `parent_sid` (the key window when none does),
+    /// which leaves the keyboard focus where it is.
+    fn spawn_pane(&mut self, m: PaneSpawn) -> Route {
+        let (cols, rows) = match (m.cols, m.rows) {
+            (0, 0) => (DEFAULT_COLS, DEFAULT_ROWS),
+            (c, r) => (c, r),
+        };
+        if !size_ok(cols, rows) {
+            return self.spawned(m.req_id, 0, "size out of range");
+        }
+        if !m.shadow {
+            let wi = self
+                .find_window_pane_by_sid(m.parent_sid)
+                .map(|(wi, _)| wi)
+                .unwrap_or(self.key_window)
+                .min(self.windows.len().saturating_sub(1));
+            if self.windows.is_empty() {
+                return self.spawned(m.req_id, 0, "no window is open");
+            }
+            let Some(sid) = self.spawn_session_at(wi, m.cwd) else {
+                return self.spawned(m.req_id, 0, "the window holds no more panes, or no session id was free");
+            };
+            self.rebuild_layout(wi);
+            self.pane_control.shadows.spawning.insert(sid, (m.req_id, false));
+            return Route::Forwarded;
+        }
+        let parent_known = m.parent_sid != 0
+            && self.panes_mut().any(|p| p.shelld_session_id() == Some(m.parent_sid));
+        if !parent_known {
+            return self.spawned(m.req_id, 0, "no such parent pane");
+        }
+        let sid = match allocate_next_session_id() {
+            Ok(id) => id,
+            Err(e) => return self.spawned(m.req_id, 0, &format!("no session id: {e}")),
+        };
+        // before the reader exists: its first frame must not wake the loop
+        unwatched::set(sid, true);
+        let env = ShadowEnv { parent: m.parent_sid, idle_s: m.idle_s };
+        let pane = spawn_l3_pane_async_as(cols, rows, sid, m.cwd, Some(env), &self.event_tx);
+        self.shadows.push(pane);
+        self.pane_control.shadows.spawning.insert(sid, (m.req_id, true));
+        lx_event!(
+            "SHADOW_SPAWN",
+            "starting a shadow pane",
+            session = sid,
+            parent = m.parent_sid,
+            cols = cols,
+            rows = rows
+        );
+        Route::Forwarded
+    }
+
+    /// A spawn finished; answer the request that asked for it, if any.
+    pub(super) fn spawn_landed(&mut self, sid: u64, outcome: Result<(), String>) {
+        let Some((req_id, shadow)) = self.pane_control.shadows.spawning.remove(&sid) else {
+            return;
+        };
+        match outcome {
+            Ok(()) => {
+                self.spawned(req_id, sid, "");
+            }
+            Err(e) => {
+                if shadow && let Some(i) = self.shadow_index(sid) {
+                    let pane = self.shadows.remove(i);
+                    self.retire_pane_session(sid, pane.is_l3());
+                }
+                self.spawned(req_id, 0, &e);
+            }
+        }
+    }
+
+    pub(super) fn shadow_index(&self, sid: u64) -> Option<usize> {
+        self.shadows.iter().position(|p| p.shelld_session_id() == Some(sid))
+    }
+
+    /// `PaneRetire`: the existing close; `Recycle` keeps the session's
+    /// directory in the recycle dir instead of deleting it.
+    fn retire_pane(&mut self, req_id: u32, sid: u64, mode: RetireMode) -> Route {
+        let recycle = mode == RetireMode::Recycle;
+        if let Some((wi, idx)) = self.find_window_pane_by_sid(sid) {
+            if recycle {
+                recycle_session(sid);
+            }
+            self.close_session(wi, idx);
+            if wi < self.windows.len() {
+                self.rebuild_layout(wi);
+            }
+        } else if let Some(i) = self.shadow_index(sid) {
+            if recycle {
+                recycle_session(sid);
+            }
+            let pane = self.shadows.remove(i);
+            self.retire_pane_session(sid, pane.is_l3());
+            lx_event!("SHADOW_RETIRED", "closed a shadow pane", session = sid, recycled = recycle as u32);
+        } else {
+            return self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::NoSuchSession, "");
+        }
+        self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::Ok, "")
+    }
+
+    /// `PaneSize`: a shadow pane takes any size; a pane in a window
+    /// takes its window's layout.
+    fn size_pane(&mut self, req_id: u32, sid: u64, cols: u16, rows: u16) -> Route {
+        if !size_ok(cols, rows) {
+            return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Other, "size out of range");
+        }
+        if let Some(i) = self.shadow_index(sid) {
+            self.shadows[i].resize(cols, rows);
+            return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Ok, "");
+        }
+        if self.find_window_pane_by_sid(sid).is_some() {
+            return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Other, "not_resizable");
+        }
+        self.answer(MsgType::PaneSize, req_id, sid, DoneCode::NoSuchSession, "")
+    }
+
+    /// Dev seam and tests: open one shadow pane under `parent`, through
+    /// the same path as L1's request.  Its answer goes to L1 as any other.
+    pub(super) fn dev_open_shadow(&mut self, req_id: u32, parent: u64) -> Route {
+        let m = PaneSpawn {
+            req_id,
+            shadow: true,
+            no_focus: true,
+            parent_sid: parent,
+            idle_s: 0,
+            cols: 0,
+            rows: 0,
+            cwd: String::new(),
+        };
+        match marspot::shell_proto::encode_pane_spawn(&m) {
+            Ok(p) => self.route_shadow_request(Frame::new(MsgType::PaneSpawn, p), req_id),
+            Err(_) => Route::Unanswerable,
+        }
+    }
+}
+
+/// Stop the session and move its directory to the recycle dir, where
+/// it is kept for the recycle period; the close that follows finds
+/// nothing left to delete.
+fn recycle_session(sid: u64) {
+    let entry = session_registry::read_session_entry(sid).ok();
+    let regions = entry.as_ref().and_then(grid_shm::SessionRegions::of_entry);
+    match session_registry::retire_session_dir(sid) {
+        Ok(dst) => lx_event!(
+            "PANE_RECYCLED",
+            "a closed pane's session dir went to the recycle dir",
+            session = sid,
+            to = dst.display()
+        ),
+        Err(e) => lx_warn!("core.retire.recycle_failed", &format!("{e}"), session = sid),
+    }
+    if let Some(e) = &entry {
+        let _ = marspot::session_signal::signal_entry(e, libc::SIGHUP);
+    }
+    if let Some(r) = regions {
+        r.delete();
+    }
+}
+
+#[cfg(test)]
+#[path = "shadows_tests.rs"]
+pub(crate) mod tests;

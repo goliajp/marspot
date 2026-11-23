@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use marspot_peer::control::{ErrorCode, Reject};
 use marspot_term::session_registry::SessionEntry;
 
 /// One pane as the main loop last saw it.
@@ -23,23 +22,8 @@ pub(crate) struct PaneView {
 pub(crate) type PaneViews = HashMap<u64, PaneView>;
 
 /// The parent of a shadow pane, 0 for a pane that is not one.
-///
-/// The registry entry carries no `shadow_of` in this build, so every
-/// session reads as an ordinary pane.
-pub(super) fn shadow_of(_entry: &SessionEntry) -> u64 {
-    0
-}
-
-/// Whether this build can tell shadow panes apart.  Until it can, it
-/// cannot count them against their limits, so whatever makes, sizes or
-/// moves one is refused here, whatever the core announces.
-const KNOWS_SHADOWS: bool = false;
-
-pub(super) fn shadow_ops() -> Result<(), Reject> {
-    if KNOWS_SHADOWS {
-        return Ok(());
-    }
-    Err(Reject::new(ErrorCode::OldSession, "shadow panes need a newer shell build; they can after the next update"))
+pub(super) fn shadow_of(entry: &SessionEntry) -> u64 {
+    entry.shadow_of
 }
 
 /// `sid → (window, x, y)`, 1-based, from the layout L2 persists, read

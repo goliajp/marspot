@@ -18,34 +18,7 @@ impl CoreApp {
         {
             return;
         }
-        // RFC-006 §3 — a move-out leaves a DORMANT PLACEHOLDER, not a
-        // hole: the user is arranging space, and the arrangement they
-        // left behind holds still.  Nothing shifts, so no index
-        // arithmetic; only state that pointed AT the moved pane is
-        // dropped.  (Close keeps its compacting semantics — close
-        // means "done with this space"; move means "keep my layout".)
-        let (pc, pr) = {
-            let g = win!(self, from_wi).panes[idx].session().grid();
-            (g.cols(), g.rows())
-        };
-        let pane = std::mem::replace(
-            &mut win!(self, from_wi).panes[idx],
-            Pane::new_dormant(pc, pr),
-        );
-        let w = &mut win!(self, from_wi);
-        if w.focused_idx == idx {
-            // Focus the nearest live pane; a placeholder is space,
-            // not a focus target.
-            w.focused_idx = (0..w.panes.len())
-                .filter(|&i| !w.panes[i].is_dormant())
-                .min_by_key(|&i| i.abs_diff(idx))
-                .unwrap_or(idx);
-        }
-        if let Some(sel) = w.selection
-            && sel.session_idx == idx {
-                w.selection = None;
-                w.selection_dragging = false;
-            }
+        let pane = self.take_out_of_window(from_wi, idx);
         // Landing: appended (sidebar overflows if the grid is full),
         // focused, and the target becomes the key window.
         let t = &mut win!(self, to_wi);

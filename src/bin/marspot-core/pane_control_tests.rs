@@ -105,7 +105,7 @@ fn l2_typing_and_watch_caps_go_to_l1_once_after_hello() {
     assert_eq!(caps[0].msg_type, MsgType::PaneControlCaps);
     assert_eq!(
         decode_pane_control_caps(&caps[0].payload).unwrap(),
-        CAP_TYPE_AND_WATCH
+        CAP_TYPE_AND_WATCH | marspot::shell_proto::CAP_SHADOWS
     );
 }
 
@@ -186,8 +186,8 @@ fn l2_forwards_watch_reports_from_a_session_to_l1() {
     let mut app = app_in(sb.dir(), vec![win(1, vec![vacant()])]);
     let fired = Frame::new(MsgType::PaneWatchFired, vec![0; 31]);
     let typed = Frame::new(MsgType::PaneTyped, vec![1; 26]);
-    app.report_to_shell(fired.clone());
-    app.report_to_shell(typed.clone());
+    app.report_to_shell(1, fired.clone());
+    app.report_to_shell(1, typed.clone());
     let held: Vec<_> = app
         .pane_control
         .reports

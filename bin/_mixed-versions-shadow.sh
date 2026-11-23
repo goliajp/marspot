@@ -45,3 +45,39 @@ shadow_goes_back_to_the_old_build() {
   same_pane
   kill -HUP "$shadow_pid" 2>/dev/null
 }
+
+# An event `tag` the core logged for session `sid`.
+logged_for() { # tag, session id
+  grep -qE $'\t'"$1"$'\t.*\tsession='"$2"$'(\t|$)' "$(log_of "$SD")" 2>/dev/null
+}
+not_logged_for() { ! logged_for "$@"; }
+
+# A shadow pane the new core opens (its dev seam, as the shell's
+# PaneSpawn would) is put back in the shadows by a new core that
+# restarts, not into the window.  An old core knows no shadow panes: it
+# takes the session for one whose window record was lost and shows it
+# as a pane of its window, the same session process.
+shadow_shows_as_a_pane_under_the_old_core() {
+  echo "════ rollback: a shadow pane the new core opened, then the old core ════"
+  START_ENV=MARSPOT_DEV_SHADOWS=1 start_app "$NEW"
+  local found="" sh pid i
+  for (( i = 0; i < 100; i++ )); do
+    found=$(grep -l "^shadow_of = $SID\$" "$SD"/sessions/*/entry.toml 2>/dev/null | head -1)
+    [[ -n $found ]] && break
+    sleep 0.2
+  done
+  [[ -n $found ]] || die "the new core opened no shadow pane"
+  sh=$(basename "$(dirname "$found")")
+  pid=$(entry "$SD" "$sh" pid)
+  echo "  shadow session $sh pid $pid"
+  swap_core "$SD" "$NEW/marspot-core"
+  sleep 1
+  check "a restarted new core puts the shadow back in the shadows" logged_for SHADOW_ADOPTED "$sh"
+  check "and not into the window" not_logged_for core.boot.orphan_adopted "$sh"
+  swap_core "$SD" "$OLD/marspot-core"
+  sleep 1
+  check "the old core shows the shadow as a pane of its window" logged_for core.boot.orphan_adopted "$sh"
+  check "the shadow's session is the same process" test "$(entry "$SD" "$sh" pid)" = "$pid"
+  check "the shadow's session is alive" alive "$pid"
+  same_pane
+}

@@ -48,14 +48,16 @@ impl CoreApp {
         }
     }
 
-    /// Every pane's session is gone and none of them ended: the core
-    /// exits so the next one resurrects them.  Placeholders a closed
-    /// pane leaves behind are not sessions, and do not count.
+    /// Every pane's session, drawn or shadow, is gone and none of them
+    /// ended: the core exits so the next one resurrects them.
+    /// Placeholders a closed pane leaves behind are not sessions, and
+    /// do not count.
     pub(super) fn every_session_lost(&self) -> bool {
         let mut sessions = self
             .windows
             .iter()
             .flat_map(|w| w.panes.iter())
+            .chain(self.shadows.iter())
             .filter(|p| !p.is_dormant())
             .peekable();
         sessions.peek().is_some() && sessions.all(Pane::is_exited)

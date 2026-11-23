@@ -17,6 +17,10 @@ pub(super) const ANSWER_WITHIN: Duration = Duration::from_secs(3);
 /// What a session answers a request that reached an image on its way
 /// out (`PaneDone` code `Other` with this text): ask again shortly.
 const RESTARTING_TEXT: &str = "restarting";
+/// What the core answers a move whose session did not answer in time.
+const UNANSWERED_TEXT: &str = "unanswered";
+/// What the core answers a resize of a pane in a window.
+const NOT_RESIZABLE_TEXT: &str = "not_resizable";
 
 pub(super) enum Asked {
     /// Nothing came back in time: it may or may not have been done.
@@ -48,6 +52,10 @@ pub(super) fn done_reject(code: DoneCode, text: &str) -> Reject {
         DoneCode::NoSuchSession => (ErrorCode::NoSuchPane, "the core has no such session"),
         DoneCode::WatchTableFull => (ErrorCode::WatchTableFull, "the pane has as many waits as it holds"),
         DoneCode::OldSession => (ErrorCode::OldSession, "the pane's session or the core is an older build; it can after the next update"),
+        DoneCode::Other if text == UNANSWERED_TEXT => {
+            return Reject::new(ErrorCode::Unknown, "the pane's session did not answer in time; the pane stays where it was, check with pane.list");
+        }
+        DoneCode::Other if text == NOT_RESIZABLE_TEXT => (ErrorCode::NotResizable, "a pane in a window takes its size from the window's layout"),
         DoneCode::Other if text == RESTARTING_TEXT => {
             return Reject::new(ErrorCode::CoreRestarting, "the pane's session is moving to a new build; nothing was done").retry_after(200);
         }

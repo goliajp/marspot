@@ -110,7 +110,12 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .ok()
             .map(|(window, surface)| CoreEvent::FrameShown(window, surface)),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
-        MsgType::PaneType | MsgType::PaneWatch => Some(CoreEvent::ShellPaneControl(f.clone())),
+        MsgType::PaneType
+        | MsgType::PaneWatch
+        | MsgType::PaneSpawn
+        | MsgType::PaneRetire
+        | MsgType::PanePlace
+        | MsgType::PaneSize => Some(CoreEvent::ShellPaneControl(f.clone())),
         MsgType::IconMask => marspot::shell_proto::decode_icon_mask(&f.payload)
             .ok()
             .map(|(symbol, point_px, side, mask)| CoreEvent::IconMask(symbol, point_px, side, mask)),

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bin/test-idle-wakeups.sh — an idle app must not wake on a clock.
 #
-# Opens a sandbox window of four panes at shell prompts, lets it settle,
+# Opens a sandbox window of four panes at shell prompts (and once more
+# with four shadow panes beside them), lets it settle,
 # and counts the timer wake-ups of all its processes over 30 seconds
 # (the kernel's own per-process counter, see bin/_idle_wakeups.py).
 # Exits 1 when they exceed IDLE_WAKEUP_BUDGET per second on a quiet
@@ -58,6 +59,14 @@ for state in hidden minimised; do
   for c in 1 2 3; do
     if [[ $rc == "$c" || $one == "$c" ]]; then rc=$c; break; fi
   done
+done
+# Shadow panes wake nothing either: four more sessions at a prompt, in
+# no window, under the same budget as the window's four.
+echo "════ 4 panes + 4 shadow panes ════"
+IDLE_SHADOWS=4 "$ROOT/bin/measure-idle-marspot.sh"
+one=$?
+for c in 1 2 3; do
+  if [[ $rc == "$c" || $one == "$c" ]]; then rc=$c; break; fi
 done
 # And what drawing costs in memory: nothing in the shell, the graphics
 # driver's pool in the core.
