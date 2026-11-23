@@ -28,6 +28,7 @@ mod idle;
 mod inbox;
 mod kimi_bind;
 mod kimi_config;
+mod leftovers;
 mod lifecycle;
 mod names;
 mod others;

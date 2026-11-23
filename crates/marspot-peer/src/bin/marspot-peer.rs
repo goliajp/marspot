@@ -27,6 +27,7 @@
 use std::io::Read;
 use std::process::ExitCode;
 
+use marspot_peer::bound;
 use marspot_peer::frame::Priority;
 use marspot_peer::peers;
 use marspot_peer::registry::Entry;
@@ -175,6 +176,10 @@ fn send(args: &[String]) -> Result<(), Fail> {
     } else {
         words.join(" ")
     };
+    if std::env::var_os("CODEX_THREAD_ID").is_some() {
+        let found = || me(&peers::live_entries()).is_ok();
+        bound::Waiter::new(bound::LIMIT).until(&marspot_peer::registry::default_dirs(), &Default::default(), found);
+    }
     let entries = peers::live_entries();
     let panes = marspot_peer::panes::live(&entries);
     let me = me(&entries)?;

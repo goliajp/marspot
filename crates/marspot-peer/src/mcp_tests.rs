@@ -1,7 +1,7 @@
 use super::*;
 
 fn server() -> Server {
-    Server::at(std::env::temp_dir().join("mcp-no-such-app.sock"), None)
+    Server::at(std::env::temp_dir().join("mcp-no-such-app.sock"), None).waiting(std::time::Duration::from_millis(50))
 }
 
 fn names(r: &Value) -> Vec<String> {

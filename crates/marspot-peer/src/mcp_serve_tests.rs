@@ -56,7 +56,7 @@ struct Client {
 fn start(path: PathBuf) -> Client {
     let (to, input) = UnixStream::pair().unwrap();
     let (output, from) = UnixStream::pair().unwrap();
-    let serving = std::thread::spawn(move || serve(Server::at(path, None), BufReader::new(input), output));
+    let serving = std::thread::spawn(move || serve(Server::at(path, None).waiting(Duration::from_millis(50)), BufReader::new(input), output));
     let mut c = Client { to, from: BufReader::new(from), serving };
     c.send(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInfo":{"name":"codex-mcp-client"}}}"#);
     assert_eq!(c.recv().get("id").and_then(Value::i64), Some(0));

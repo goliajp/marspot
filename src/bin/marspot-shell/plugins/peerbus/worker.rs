@@ -307,7 +307,7 @@ impl Worker {
     }
 
     /// What other plugins may read of the bindings: see `ThreadView`.
-    fn publish(&self) {
+    pub(super) fn publish(&self) {
         let views = self
             .bindings
             .iter()

@@ -3,15 +3,23 @@
 //! way the Claude Code hooks are kept in its settings.
 //!
 //! One table, `[mcp_servers.marspot]`, ours and nobody else's.  The
-//! file is edited as text: the table is appended when it is missing
-//! and its `command` line is repointed when the helper has moved, and
-//! every other byte stays as Codex and the user left it.  A file whose
+//! file is edited as text: the table is appended when it is missing,
+//! its `command` line is repointed when the helper has moved, its
+//! tools' approval is set where the file says nothing of it, and every
+//! other byte stays as Codex and the user left it.  A file whose
 //! entry is written some way this does not read is left alone and
 //! logged.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const TABLE: &str = "mcp_servers.marspot";
+/// Whether codex asks before a tool of the server runs.  In the file
+/// and not on a helper's command line: codex (0.171) started with a
+/// `-c` like it leaves its home's app-server for one inside the TUI,
+/// whose threads nothing can be delivered into.
+const APPROVAL: &str = "default_tools_approval_mode";
+const APPROVED: &str = "approve";
 /// A file whose end is inside a string, as far as this reads it.
 const OPEN: &str = "a string this cannot follow; left as it is";
 const UNREADABLE: &str = "a marspot MCP entry this cannot read; left as it is";
@@ -89,7 +97,9 @@ fn reconcile_file(path: &Path, bin: &str) -> Option<String> {
 }
 
 /// The codex arguments under which a session in `home` is asked about
-/// no tool of marspot's MCP server, however its config has the server.
+/// no tool of marspot's MCP server, however its config has the server:
+/// none where the config says so itself.  A session given any has no
+/// inbox (see `APPROVAL`).
 pub(crate) fn approved_args(home: &Path) -> Vec<String> {
     let text = match std::fs::read_to_string(home.join("config.toml")) {
         Ok(t) => t,
@@ -103,27 +113,37 @@ pub(crate) fn approved_args(home: &Path) -> Vec<String> {
 /// codex starts with no override that is all it has of a server: where
 /// the file has no server, the override gives a whole one.
 fn approved(text: &str, bin: Option<&str>) -> Vec<String> {
-    let mut sets = vec![format!("{TABLE}.default_tools_approval_mode=\"approve\"")];
-    let found = with_server(text, "");
-    match (&found, bin) {
-        (Err(why), _) if *why == OPEN => return Vec::new(),
+    let mut sets = vec![format!("{TABLE}.{APPROVAL}=\"{APPROVED}\"")];
+    match (scan(text), bin) {
+        (Err(why), _) if why == OPEN => return Vec::new(),
         // there, in a form of its own
         (Err(_), _) => {}
-        (Ok(new), _) if !new.as_ref().is_some_and(|n| n.starts_with(text)) => {}
-        (Ok(_), None) => return Vec::new(),
-        (Ok(_), Some(b)) => sets.extend([format!("{TABLE}.command={}", toml_string(b)), format!("{TABLE}.args=[\"mcp\"]")]),
+        (Ok(Some(t)), _) if t.approval.as_deref().and_then(string_value).as_deref() == Some(APPROVED) => return Vec::new(),
+        (Ok(Some(_)), _) => {}
+        (Ok(None), None) => return Vec::new(),
+        (Ok(None), Some(b)) => sets.extend([format!("{TABLE}.command={}", toml_string(b)), format!("{TABLE}.args=[\"mcp\"]")]),
     }
     sets.into_iter().flat_map(|s| ["-c".to_string(), s]).collect()
 }
 
-/// `text` with the table present and its command `bin`; None when it
-/// already is.  Err when the file defines the entry in a form other
-/// than a `[mcp_servers.marspot]` table with a one-line string
-/// `command`.
-fn with_server(text: &str, bin: &str) -> Result<Option<String>, &'static str> {
+/// The `[mcp_servers.marspot]` table of a config.
+struct Table {
+    /// The `command` value, where it is in the text.
+    command: Range<usize>,
+    /// Where the line of `command` ends, its line break included.
+    command_line_end: usize,
+    /// The approval as written; empty when it is no one-line string.
+    approval: Option<String>,
+}
+
+/// The table in `text`, if there is one.  Err when the file defines the
+/// entry in a form other than a `[mcp_servers.marspot]` table with a
+/// one-line string `command`.
+fn scan(text: &str) -> Result<Option<Table>, &'static str> {
     let mut table = String::new();
     let mut seen = false;
-    let mut command: Option<std::ops::Range<usize>> = None;
+    let mut command: Option<(Range<usize>, usize)> = None;
+    let mut approval: Option<String> = None;
     // the delimiter of a multi-line string the scan is inside of
     let mut open: Option<&str> = None;
     let mut at = 0;
@@ -162,13 +182,20 @@ fn with_server(text: &str, bin: &str) -> Result<Option<String>, &'static str> {
         if dotted {
             return Err(UNREADABLE);
         }
-        if table == TABLE && key == "command" {
+        let token = || {
             let lead = value.len() - value.trim_start().len();
-            let len = string_token(value.trim_start()).ok_or(UNREADABLE)?;
+            let from = start + eq + 1 + lead;
+            string_token(value.trim_start()).map(|len| from..from + len)
+        };
+        if table == TABLE && key == "command" {
+            let range = token().ok_or(UNREADABLE)?;
             if command.is_some() {
                 return Err(UNREADABLE);
             }
-            command = Some(start + eq + 1 + lead..start + eq + 1 + lead + len);
+            command = Some((range, at));
+        }
+        if table == TABLE && key == APPROVAL {
+            approval = Some(token().map_or(String::new(), |r| text[r].to_string()));
         }
         open = ["\"\"\"", "'''"].into_iter().find(|d| value.matches(*d).count() % 2 == 1);
     }
@@ -176,18 +203,38 @@ fn with_server(text: &str, bin: &str) -> Result<Option<String>, &'static str> {
         return Err(OPEN);
     }
     if !seen {
+        return Ok(None);
+    }
+    let (command, command_line_end) = command.ok_or(UNREADABLE)?;
+    Ok(Some(Table { command, command_line_end, approval }))
+}
+
+/// `text` with the table present, its command `bin` and its tools'
+/// approval said; None when it already is.  Err as `scan`.
+fn with_server(text: &str, bin: &str) -> Result<Option<String>, &'static str> {
+    let Some(t) = scan(text)? else {
         let mut out = text.to_string();
         if !out.is_empty() {
             out.push_str(if out.ends_with('\n') { "\n" } else { "\n\n" });
         }
-        out.push_str(&format!("[{TABLE}]\ncommand = {}\nargs = [\"mcp\"]\n", toml_string(bin)));
+        out.push_str(&format!("[{TABLE}]\ncommand = {}\nargs = [\"mcp\"]\n{APPROVAL} = \"{APPROVED}\"\n", toml_string(bin)));
         return Ok(Some(out));
-    }
-    let range = command.ok_or(UNREADABLE)?;
-    if string_value(&text[range.clone()]).as_deref() == Some(bin) {
+    };
+    let same = string_value(&text[t.command.clone()]).as_deref() == Some(bin);
+    // a mode the file has is the user's choice
+    if same && t.approval.is_some() {
         return Ok(None);
     }
-    Ok(Some(format!("{}{}{}", &text[..range.start], toml_string(bin), &text[range.end..])))
+    let command = if same { text[t.command.clone()].to_string() } else { toml_string(bin) };
+    let mut out = format!("{}{command}{}", &text[..t.command.start], &text[t.command.end..t.command_line_end]);
+    if t.approval.is_none() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{APPROVAL} = \"{APPROVED}\"\n"));
+    }
+    out.push_str(&text[t.command_line_end..]);
+    Ok(Some(out))
 }
 
 /// The table a header line names, without spaces and key quotes:
@@ -228,7 +275,7 @@ fn string_token(value: &str) -> Option<usize> {
 /// the two `toml_string` writes: such a value is not one written here,
 /// and it is repointed.
 fn string_value(token: &str) -> Option<String> {
-    let inner = &token[1..token.len() - 1];
+    let inner = token.get(1..token.len().checked_sub(1)?)?;
     if token.starts_with('\'') {
         return Some(inner.to_string());
     }
@@ -248,135 +295,5 @@ fn toml_string(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CONFIG: &str = "model = \"gpt-5\"\n\n[projects.\"/w/x\"]\ntrust_level = \"trusted\"\n";
-
-    fn dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("pb-codex-config-{}", marspot_peer::rand::hex(6)));
-        std::fs::create_dir_all(&d).unwrap();
-        d.canonicalize().unwrap()
-    }
-
-    #[test]
-    fn an_absent_table_is_appended_and_a_present_one_is_not_touched() {
-        let d = dir();
-        let f = d.join("config.toml");
-        std::fs::write(&f, CONFIG).unwrap();
-        assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some("marspot MCP server set"));
-        let text = std::fs::read_to_string(&f).unwrap();
-        assert_eq!(text, format!("{CONFIG}\n[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\n"));
-        assert_eq!(reconcile_file(&f, "/a/marspot-peer"), None);
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), text, "byte for byte");
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn a_missing_file_is_created_and_one_without_a_final_newline_gains_it() {
-        let d = dir();
-        let f = d.join("config.toml");
-        reconcile_file(&f, "/a/marspot-peer");
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\n");
-        let new = with_server("model = \"gpt-5\"", "/a/marspot-peer").unwrap().unwrap();
-        assert_eq!(new, "model = \"gpt-5\"\n\n[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\n");
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn another_path_is_repointed_and_nothing_else_moves() {
-        let old = "a = 1\n[ mcp_servers.\"marspot\" ] # peers\n  command = '/old/marspot-peer'   # where\nargs = [\"mcp\", \"-v\"]\n[mcp_servers.marspot.env]\ncommand = \"not this one\"\n[tui]\nx = 1";
-        let new = with_server(old, "/new dir/marspot-peer").unwrap().unwrap();
-        assert_eq!(new, old.replace("'/old/marspot-peer'", "\"/new dir/marspot-peer\""));
-        assert_eq!(with_server(&new, "/new dir/marspot-peer"), Ok(None));
-        // a literal string naming the same path is the same path
-        assert_eq!(with_server(old, "/old/marspot-peer"), Ok(None));
-        // quotes and backslashes in a path survive the round trip
-        let odd = with_server("", "/a \"b\"\\c/marspot-peer").unwrap().unwrap();
-        assert_eq!(with_server(&odd, "/a \"b\"\\c/marspot-peer"), Ok(None));
-    }
-
-    #[test]
-    fn a_table_header_inside_a_string_is_not_a_table() {
-        let text = "notes = \"\"\"\n[mcp_servers.marspot]\ncommand = \"x\"\n\"\"\"\n";
-        let new = with_server(text, "/a/marspot-peer").unwrap().unwrap();
-        assert!(new.starts_with(text) && new.ends_with("[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\n"));
-    }
-
-    #[test]
-    fn an_entry_in_another_form_is_refused() {
-        for text in [
-            "[mcp_servers]\nmarspot = { command = \"/x\", args = [\"mcp\"] }\n",
-            "mcp_servers.marspot.command = \"/x\"\n",
-            "[mcp_servers.marspot]\nargs = [\"mcp\"]\n",
-            "[mcp_servers.marspot]\ncommand = \"\"\"/x\"\"\"\n",
-            "[mcp_servers.marspot]\ncommand = \"/x\" \"y\"\n",
-            "[mcp_servers.marspot]\ncommand = \"/x\"\n[mcp_servers.marspot]\ncommand = \"/y\"\n",
-        ] {
-            assert_eq!(with_server(text, "/a/marspot-peer"), Err(UNREADABLE), "{text}");
-        }
-        let d = dir();
-        let f = d.join("config.toml");
-        let text = "mcp_servers.marspot.command = \"/x\"\n";
-        std::fs::write(&f, text).unwrap();
-        assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some(UNREADABLE));
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), text);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn a_config_reached_by_several_names_is_edited_once() {
-        let home = dir();
-        let shared = home.join(".codex-shared");
-        std::fs::create_dir_all(&shared).unwrap();
-        std::fs::write(shared.join("config.toml"), CONFIG).unwrap();
-        for n in [1, 2] {
-            let p = home.join(format!(".codex-profile-{n}"));
-            std::fs::create_dir_all(&p).unwrap();
-            std::os::unix::fs::symlink(shared.join("config.toml"), p.join("config.toml")).unwrap();
-        }
-        // the default home is a link to a profile; a third profile has
-        // no config yet; a name that is not a profile is not looked at
-        std::os::unix::fs::symlink(home.join(".codex-profile-1"), home.join(".codex")).unwrap();
-        std::fs::create_dir_all(home.join(".codex-profile-3")).unwrap();
-        std::fs::create_dir_all(home.join(".codex-profile-old")).unwrap();
-        let files = config_files(&home);
-        assert_eq!(files, vec![shared.join("config.toml"), home.join(".codex-profile-3/config.toml")]);
-        for f in &files {
-            reconcile_file(f, "/a/marspot-peer");
-        }
-        let text = std::fs::read_to_string(shared.join("config.toml")).unwrap();
-        assert_eq!(text.matches("[mcp_servers.marspot]").count(), 1);
-        assert!(std::fs::symlink_metadata(home.join(".codex-profile-2/config.toml")).unwrap().file_type().is_symlink());
-        assert!(home.join(".codex-profile-3/config.toml").is_file());
-        assert!(config_files(&home.join("nobody")).is_empty(), "a home that is not there gets nothing");
-        std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    /// Each of these was read by codex 0.171 (`codex mcp get marspot`):
-    /// the mode alone where there is an entry, all three where there is
-    /// none, and never a command over an entry that may have a url.
-    #[test]
-    fn approval_goes_with_whatever_entry_the_config_has() {
-        let mode = ["-c", "mcp_servers.marspot.default_tools_approval_mode=\"approve\""];
-        let whole = [mode[0], mode[1], "-c", "mcp_servers.marspot.command=\"/a b/marspot-peer\"", "-c", "mcp_servers.marspot.args=[\"mcp\"]"];
-        let bin = Some("/a b/marspot-peer");
-        for text in ["", CONFIG, "[mcp_servers.other]\ncommand = \"/o\"\n"] {
-            assert_eq!(approved(text, bin), whole, "{text}");
-            assert!(approved(text, None).is_empty(), "nothing to run: {text}");
-        }
-        for text in [
-            "[mcp_servers.marspot]\ncommand = \"/x/marspot-peer\"\nargs = [\"mcp\", \"-v\"]\n",
-            "[mcp_servers.marspot]\ncommand = \"\"\n",
-            "[mcp_servers]\nmarspot = { command = \"/x\", args = [\"mcp\"] }\n",
-            "[mcp_servers.marspot]\nurl = \"http://127.0.0.1:1/mcp\"\n",
-        ] {
-            assert_eq!(approved(text, bin), mode, "{text}");
-        }
-        assert!(approved("notes = \"\"\"\nno end", bin).is_empty(), "not known what is there");
-        let d = dir();
-        std::fs::write(d.join("config.toml"), with_server(CONFIG, "/x/marspot-peer").unwrap().unwrap()).unwrap();
-        assert_eq!(approved_args(&d), mode);
-        std::fs::remove_dir_all(&d).unwrap();
-    }
-}
+#[path = "codex_config_tests.rs"]
+mod tests;

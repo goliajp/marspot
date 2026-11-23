@@ -24,6 +24,13 @@ Per-layer version numbers live in `version-vector.toml`.
   that running a command there types.
 - A command sent to a pane right after another one waits until a slow
   prompt is drawn, in shells that mark where their prompt ends.
+- Codex no longer asks before it runs one of Marspot's own MCP tools.
+  Marspot sets `default_tools_approval_mode = "approve"` in the
+  `marspot` MCP server entry it keeps in each Codex `config.toml`,
+  which a Codex helper needs to answer the session that started it. A
+  mode already set there is kept; set `"prompt"` to be asked.
+- A message an agent sends in its first seconds waits, up to 20
+  seconds, until Marspot knows which pane it runs in.
 
 ## 0.10.0
 
