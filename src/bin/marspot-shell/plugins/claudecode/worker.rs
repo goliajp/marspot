@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
+use super::with_helpers::turns;
 use super::*;
 
 /// What the scan keeps per process and per file between passes.
@@ -446,6 +447,7 @@ impl WorkerCtx {
         let mut new_mapping: HashMap<u64, String> = HashMap::new();
         let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
         let mut new_activity: HashMap<u64, CcActivity> = HashMap::new();
+        let mut turn_looks: Vec<(u64, turns::Look)> = Vec::new();
         let mut sessions_seen: Vec<u64> = Vec::new();
         let scanned_at = SystemTime::now();
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
@@ -729,19 +731,12 @@ impl WorkerCtx {
             // out appears as a process under claude younger than the
             // record that asked for it, which is what separates "the
             // tool is running" from "claude is parked on the approval
-            // prompt" — long-lived children (MCP servers, started with
-            // the session) are older than the record and don't count.
+            // prompt".
             if let Some(path) = jsonl_path.as_ref() {
-                let record_at = fs::metadata(path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let has_young_child =
-                    obs.table.descendants(f.claude.pid).iter().any(|d| d.start_unix >= record_at);
+                let has_young_child = turns::young_child(path, f.claude.pid, &obs.table);
                 new_activity.insert(f.shelld_sid, activity_of(tail.as_deref(), has_young_child));
             }
+            turn_looks.extend(turns::look_in(bound_by, tail.as_deref()).map(|l| (f.shelld_sid, l)));
             // a read failure is an empty window, which every check below
             // takes as "no evidence"
             let tail = jsonl_path.as_ref().map(|_| tail.unwrap_or_default());
@@ -810,6 +805,7 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
+        turns::publish(turn_looks);
         // Bounded growth: both per-pane maps follow the panes.
         self.last_model_by_pane.retain(|sid, _| sessions_seen.contains(sid));
         self.banner_tried.retain(|sid, _| sessions_seen.contains(sid));

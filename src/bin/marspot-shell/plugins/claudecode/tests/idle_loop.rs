@@ -4,7 +4,7 @@ use super::*;
 
 /// Drain a PTY master (set non-blocking by the caller) into a
 /// string, so the test can see what the shell echoed.
-fn drain_pty(master: std::os::fd::RawFd) -> String {
+pub(super) fn drain_pty(master: std::os::fd::RawFd) -> String {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -477,7 +477,7 @@ fn the_whole_idle_loop_runs_on_a_pty_this_test_owns() {
 
 /// Kills, when dropped, every process group a pane's shell has
 /// started: a stand-in left running would outlive the test.
-struct KillPaneTree(i32);
+pub(super) struct KillPaneTree(pub(super) i32);
 
 impl Drop for KillPaneTree {
     fn drop(&mut self) {

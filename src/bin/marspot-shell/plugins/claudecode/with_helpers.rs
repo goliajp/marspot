@@ -9,6 +9,8 @@
 //! account while it rests, restarts the agent for nothing: nobody comes
 //! back to wake a helper, and the restart throws away the prompt cache.
 
+pub(in crate::plugins) mod turns;
+
 use std::collections::VecDeque;
 use std::sync::Mutex;
 

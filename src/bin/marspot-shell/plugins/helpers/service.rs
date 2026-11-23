@@ -9,7 +9,7 @@ use marspot_peer::control::{AgentKind, ErrorCode, HelperStartArgs, HelperStop, I
 use marspot_peer::json::{Value, obj};
 
 use super::table::{Event, Started};
-use super::{Shared, launch, records, settle, stop_all};
+use super::{Shared, caller_kind, launch, records, settle, stop_all};
 use crate::pane_control::helpers_port::{HelperService, Port};
 
 /// How long a new pane's shell may take to show its prompt.
@@ -19,16 +19,6 @@ pub(super) struct Service(pub Arc<Shared>);
 
 fn internal(e: impl std::fmt::Display) -> Reject {
     Reject::new(ErrorCode::Internal, e.to_string())
-}
-
-/// The agent in the pane called `full` (`base#code`), from the panes
-/// table the sessions are found by.
-fn agent_in(full: &str) -> Option<String> {
-    let entries = marspot_peer::peers::live_entries();
-    marspot_peer::panes::live(&entries)
-        .into_iter()
-        .find(|p| p.base.as_ref().zip(p.code).is_some_and(|(b, c)| format!("{b}#{c}") == full))
-        .and_then(|p| p.agent)
 }
 
 /// Agent sessions already in `cwd`, by full name, but `skip`.
@@ -49,11 +39,13 @@ fn others_in(cwd: &str, skip: &[String]) -> Vec<Value> {
 }
 
 /// How long pane `sid` has printed nothing, by when its byte log was
-/// last written; None when that cannot be read.
-fn quiet_ms(sid: u64, now_ms: u64) -> Option<u64> {
-    let m = std::fs::metadata(marspot_term::session_registry::session_dir(sid).join("bytelog")).ok()?;
-    let at = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
-    Some(now_ms.saturating_sub(at))
+/// last written; None when it has none.
+pub(super) fn quiet_ms(sid: u64, now_ms: u64) -> Option<u64> {
+    let dir = std::fs::read_dir(marspot_term::session_registry::session_dir(sid)).ok()?;
+    let logs = dir.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("bytelog"));
+    // the segments of one log: the one in use was written last
+    let at = logs.filter_map(|e| e.metadata().ok()?.modified().ok()).max()?;
+    Some(now_ms.saturating_sub(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64))
 }
 
 fn first_line(task: &str) -> String {
@@ -106,7 +98,7 @@ impl HelperService for Service {
                 _ => true,
             };
         let parent_name = port.full_name(parent);
-        let caller = port.caller().and_then(|c| agent_in(&port.full_name(c))).unwrap_or_else(|| "shell".into());
+        let caller = caller_kind::of(port).to_string();
         let (sid, name) = port.open_shadow(parent, &cwd)?;
         let started = Started {
             parent,

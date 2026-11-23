@@ -36,6 +36,7 @@ impl Shared {
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         st.closing.clear();
         st.no_agent.clear();
+        st.turn_told.clear();
         let now = records::now_ms();
         st.undelivered.rearm(now);
         let retrying: Vec<u64> = st.close_retry.keys().copied().collect();

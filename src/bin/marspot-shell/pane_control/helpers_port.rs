@@ -7,12 +7,13 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use marspot::pidtree::ProcRow;
 use marspot::shell_proto::{CAP_SHADOWS, MsgType, PaneRetire, PaneType, RetireMode, WatchBody, WatchKind, WatchReason, encode_pane_retire};
 use marspot_peer::control::{ErrorCode, HelperStartArgs, HelperStop, Op, OpenArgs, Reject};
 use marspot_peer::json::Value;
 
 use super::super::observe;
-use super::caller::{CallerKey, Peer};
+use super::caller::{self, CallerKey, Peer};
 use super::conn::Conn;
 use super::dispatch::{Ctx, audit, target};
 use super::{hub, names, ops_input, ops_pane};
@@ -83,6 +84,16 @@ impl Port<'_, '_> {
     /// The pane the caller is in.
     pub fn caller(&self) -> Option<u64> {
         self.ctx.caller.sid()
+    }
+
+    /// The processes from the one that connected up to its pane's
+    /// shell; None when the caller was named by its codex thread, whose
+    /// requests come from a process outside the panes.
+    pub fn caller_processes(&self) -> Option<Vec<ProcRow>> {
+        let (pid, sid) = (self.conn.peer.pid?, self.conn.peer.pane?);
+        let obs = self.ctx.view_now();
+        let shell = obs.session(sid)?.shell?;
+        (self.caller() == Some(sid)).then(|| caller::chain(pid, |p| caller::row_of(p, &obs), shell.pid))
     }
 
     pub fn target(&self, t: &str) -> Result<u64, Reject> {

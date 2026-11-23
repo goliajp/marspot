@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
+use marspot::pidtree::ProcRow;
+
 use super::super::observe::Observation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -83,6 +85,24 @@ pub(super) fn by_ancestry(
     None
 }
 
+/// `pid` as it is now, or as `obs` last saw it.
+pub(super) fn row_of(pid: i32, obs: &Observation) -> Option<ProcRow> {
+    marspot::pidtree::proc_row(pid).or_else(|| obs.table.get(pid).cloned())
+}
+
+/// `pid` and its ancestors up to `shell`, which is the last of them.
+pub(crate) fn chain(pid: i32, row_of: impl Fn(i32) -> Option<ProcRow>, shell: i32) -> Vec<ProcRow> {
+    let mut out = Vec::new();
+    let mut at = pid;
+    // bounded as `by_ancestry` is
+    while at > 1 && out.len() < 64 {
+        let Some(r) = row_of(at) else { break };
+        at = if r.pid == shell { 0 } else { r.ppid };
+        out.push(r);
+    }
+    out
+}
+
 /// Each live session's shell: pid → (start time, session).
 pub(super) fn shells_of(obs: &Observation) -> HashMap<i32, (u64, u64)> {
     obs.live().filter_map(|s| s.shell.map(|id| (id.pid, (id.start_us, s.entry.id)))).collect()
@@ -92,11 +112,7 @@ impl Peer {
     pub fn of(conn: &UnixStream, obs: &Observation) -> Peer {
         let Some(pid) = peer_pid(conn) else { return Peer::default() };
         let shells = shells_of(obs);
-        let parent_of = |p: i32| {
-            marspot::pidtree::proc_row(p)
-                .or_else(|| obs.table.get(p).cloned())
-                .map(|r| (r.ppid, r.start_us))
-        };
+        let parent_of = |p: i32| row_of(p, obs).map(|r| (r.ppid, r.start_us));
         Peer { pid: Some(pid), exe: exe_of(pid), pane: by_ancestry(pid, parent_of, &shells) }
     }
 }

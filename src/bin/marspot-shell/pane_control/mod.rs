@@ -24,7 +24,7 @@ use marspot_peer::control::Reject;
 
 mod audit;
 mod audit_log;
-mod caller;
+pub(crate) mod caller;
 mod config;
 mod conn;
 mod dispatch;
