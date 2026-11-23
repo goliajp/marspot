@@ -203,8 +203,10 @@ impl CoreApp {
         }
         let moved = match p.to {
             PlaceWhere::Window => self.shadow_index(p.sid).map(|i| {
-                let pane = self.shadows.remove(i);
+                let mut pane = self.shadows.remove(i);
                 unwatched::set(p.sid, false);
+                // a shadow's frames were not read while it was one
+                pane.pump();
                 let wi = self
                     .find_window_pane_by_sid(p.was)
                     .map(|(wi, _)| wi)

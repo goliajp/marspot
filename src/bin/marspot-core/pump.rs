@@ -85,7 +85,7 @@ impl CoreApp {
                 self.sync_selection_tape(wi);
             }
         }
-        self.pump_shadows(&frozen);
+        self.observe_shadow_exits();
         self.close_ended_panes();
         if self.every_session_lost() {
             self.panes_mut().for_each(|p| _ = p.pump());
@@ -94,12 +94,12 @@ impl CoreApp {
         total
     }
 
-    /// A shadow is read only to notice its session end: nothing is drawn.
-    fn pump_shadows(&mut self, frozen: &std::collections::HashSet<u64>) {
+    /// A shadow's frames are not read: nobody draws them, and the pane
+    /// reads its newest one when it is placed into a window.  Only its
+    /// session's end is noticed.
+    fn observe_shadow_exits(&mut self) {
         for p in self.shadows.iter_mut() {
-            if !p.shelld_session_id().is_some_and(|sid| frozen.contains(&sid)) {
-                p.pump();
-            }
+            p.observe_exit();
         }
     }
 }
