@@ -12,6 +12,7 @@
 use marspot::cc_usage::CcUsage;
 use marspot::kimi_usage::account_name;
 
+use crate::plugins::claudecode::quota::roomiest::Accounts;
 use crate::plugins::claudecode::quota::{Room, Window};
 use crate::plugins::claudecode::rooms::room_of;
 use crate::plugins::claudecode::seen::{Resets, Seen};
@@ -61,6 +62,24 @@ pub(super) fn rooms(numbers: &[u8], usage: Option<&CcUsage>, seen: &Seen, now: i
             (n, room)
         })
         .collect()
+}
+
+/// The kimi accounts `numbers` as the plugin's own sweep sees them: the
+/// feed, with the refusals its panes have met.  Reads files.
+pub(in crate::plugins) fn accounts_now(numbers: &[u8], now: i64) -> Accounts {
+    let usage = marspot::kimi_usage::read();
+    let refused = marspot::paths::state_root().join("plugins/kimi/refused.tsv");
+    let seen = std::fs::read_to_string(refused).map(|t| Seen::decode(&t)).unwrap_or_default();
+    let resets = numbers
+        .iter()
+        .map(|&n| {
+            let r = row(usage.as_ref(), n)
+                .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d.unwrap_or(0), models: Vec::new() })
+                .unwrap_or_default();
+            (n, r)
+        })
+        .collect();
+    Accounts { rooms: rooms(numbers, usage.as_ref(), &seen, now), resets, feed_at: usage.map_or(0, |u| u.generated_at) }
 }
 
 /// Which window a refusal on account `n` was about.  kimi's error does

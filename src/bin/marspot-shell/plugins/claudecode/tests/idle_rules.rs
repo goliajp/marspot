@@ -25,6 +25,7 @@ fn idle_for(secs: u64) -> IdleEvidence {
         user_here: false,
         work_in_flight: false,
         own_timer: false,
+        helper_bound: false,
     }
 }
 
@@ -141,6 +142,7 @@ fn a_dormant_pane_is_not_a_reclamation_candidate() {
         user_here: false,
         work_in_flight: false,
         own_timer: false,
+        helper_bound: false,
     };
     assert!(!should_hibernate(e, HOUR));
 }

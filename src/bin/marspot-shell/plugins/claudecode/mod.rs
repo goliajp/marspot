@@ -19,10 +19,12 @@
 //! it's needed.
 
 mod idle;
+mod idle_rule;
 pub(in crate::plugins) mod quota;
 pub(in crate::plugins) mod rooms;
 mod rebalance;
 mod switching;
+mod heads_up_due;
 pub(in crate::plugins) mod heads_up;
 mod refusal;
 mod fable_need;
@@ -51,6 +53,7 @@ mod cycle;
 mod cycle_op;
 mod plugin;
 mod bind_meta;
+pub(in crate::plugins) mod with_helpers;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
 #[cfg(test)]
@@ -64,6 +67,7 @@ pub use statusline::statusline_ingest;
 // the settings-file plumbing the peerbus hooks share with the status line
 pub(crate) use settings_hook::{cc_settings_files, sh_quote, write_through_symlink};
 use idle::*;
+use idle_rule::*;
 use model::*;
 use statusline::*;
 use settings_hook::*;
@@ -223,15 +227,6 @@ pub struct ClaudecodePlugin {
     quiet: due::Quiet,
 }
 
-
-
-
-
-
-
-
-
-
 impl ClaudecodePlugin {
     pub fn new() -> Self {
         Self {
@@ -375,6 +370,7 @@ mod tests {
     mod profile_list;
     mod cycle_script;
     mod moves;
+    mod helpers_switch;
     mod cycle_clicks;
     mod fable_refused;
     mod support;

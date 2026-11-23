@@ -24,7 +24,8 @@ use marspot_peer::registry::{Agent, Status};
 
 use super::{accounts, quota, KimiPlugin, PaneKimi};
 use crate::plugins::claudecode::heads_up;
-use crate::plugins::claudecode::quota::{next_move, Move, Refusal, Situation};
+use crate::plugins::claudecode::quota::{next_move, roomiest, Move, Refusal, Situation};
+use crate::plugins::claudecode::with_helpers::{account_changed, AccountChanged, HelperRoles};
 use crate::plugins::claudecode::rooms::unix_now;
 use crate::plugins::claudecode::seen::Seen;
 use crate::plugins::{handoff, LogLevel, PluginHost};
@@ -120,8 +121,10 @@ impl KimiPlugin {
             self.balance.read(news);
         }
         let panes: Vec<(u64, PaneKimi)> = self.panes.iter().map(|(sid, p)| (*sid, p.clone())).collect();
+        // an idle plugin does not walk the process table
+        let roles = if self.panes.is_empty() { HelperRoles::default() } else { HelperRoles::of_observation(&crate::observe::shared().latest()) };
         for (sid, pane) in panes {
-            self.judge(host, sid, &pane, now);
+            self.judge(host, sid, &pane, now, roles.is_helper(sid));
         }
         let b = &mut self.balance;
         b.tallies.retain(|sid, t| self.panes.contains_key(sid) || t.moved.is_some_and(|(at, _)| at.elapsed() < LANDING));
@@ -129,7 +132,7 @@ impl KimiPlugin {
         b.persist(host);
     }
 
-    fn judge(&mut self, host: &dyn PluginHost, sid: u64, pane: &PaneKimi, now: i64) {
+    fn judge(&mut self, host: &dyn PluginHost, sid: u64, pane: &PaneKimi, now: i64, helper: bool) {
         let b = &mut self.balance;
         let current = pane.profile.unwrap_or(0);
         let mut numbers: Vec<u8> = b.targets.iter().map(|(n, _)| *n).collect();
@@ -181,6 +184,9 @@ impl KimiPlugin {
             warned: false,
             background_refused: None,
         });
+        // a helper goes where the most is left, as when it was started
+        let feed_at = b.usage.as_ref().map_or(0, |u| u.generated_at);
+        let decision = if helper { roomiest::helper_move(roomiest::Pool::Kimi, feed_at, decision, &rooms, current, None) } else { decision };
         match decision {
             Move::Hold(why) => {
                 if tally.hold_said != Some(why) {
@@ -195,6 +201,9 @@ impl KimiPlugin {
                 let why = if failed { "the account's quota is used up" } else { "the usage feed shows a window spent" };
                 host.log(LogLevel::Info, "quota.move", &format!("sid={sid}: account {current} is out ({why}); moving to profile {n}"));
                 self.hand_off(host, sid, pane, handoff::Agent::Kimi, n);
+                if helper {
+                    account_changed(AccountChanged { sid, agent: "kimi", from: current, to: n, at: now });
+                }
             }
         }
     }

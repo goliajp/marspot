@@ -18,6 +18,7 @@ mod feed;
 mod http;
 mod kimi;
 mod sha256;
+pub(in crate::plugins) mod for_helpers;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};

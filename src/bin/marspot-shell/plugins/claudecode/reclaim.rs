@@ -65,6 +65,7 @@ impl ClaudecodePlugin {
                 work_in_flight,
                 own_timer,
                 user_here: self.focused_sid == Some(*sid),
+                helper_bound: result.helpers.sits_out(*sid),
                 quiescent: view.quiescent,
                 awaiting_user: matches!(
                     view.status,

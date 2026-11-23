@@ -171,6 +171,7 @@ fn empty_scan() -> ScanResult {
         new_vetoes: HashMap::new(),
         agent_refused: HashMap::new(),
         fable_refused: HashMap::new(),
+        helpers: Default::default(),
         scanned_at: SystemTime::now(),
         sessions_seen: Vec::new(),
         log_lines: Vec::new(),
@@ -373,4 +374,42 @@ fn idle_policy_refuses_to_signal_a_pid_that_is_no_longer_claude() {
         "nothing may be armed against a pid that isn't claude"
     );
     assert!(plugin.dormant.is_empty());
+}
+
+/// A helper, and a pane whose helpers are still working, are left
+/// running however long they rest; once the helpers are gone the pane
+/// is reclaimed as before.
+#[test]
+fn idle_policy_leaves_a_helper_and_a_pane_with_live_helpers() {
+    use super::super::with_helpers::HelperRoles;
+    for roles in [HelperRoles::of([(7, 3)]), HelperRoles::of([(7, 0), (9, 7)])] {
+        let sandbox = sandbox_state_dir();
+        let dir = sandbox.path().to_path_buf();
+        let mut child = spawn_fake_claude(&dir);
+        let pid = child.id() as i32;
+        let host = FakeHost::new(dir.clone());
+        host.set_status(7, idle_view(Duration::from_secs(7200)));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        let uuid = "eeee-ffff";
+        let mut scan = scan_with(7, pid, uuid);
+        scan.helpers = roles.clone();
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+        let mut scan = scan_with(7, pid, uuid);
+        scan.helpers = roles;
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+        host.pump_ops();
+        assert!(plugin.dormant.is_empty(), "not reclaimed while bound to helpers");
+        assert_eq!(plugin.blocked_reason.get(&7).map(String::as_str), Some("helper_bound"));
+
+        // the blocked pass rolled the CPU baseline forward to now
+        let mut scan = scan_with(7, pid, uuid);
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() + Duration::from_secs(120)));
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+        host.pump_ops();
+        assert_eq!(plugin.dormant.len(), 1, "reclaimed once no helper is bound to it");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

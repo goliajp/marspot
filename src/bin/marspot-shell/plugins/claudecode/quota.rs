@@ -24,7 +24,8 @@
 use std::time::Duration;
 
 pub(in crate::plugins) use super::refusal::{Refusal, Window};
-
+#[path = "roomiest.rs"]
+pub(in crate::plugins) mod roomiest;
 
 /// What is known about a profile when choosing.
 #[derive(Debug, Clone, PartialEq)]
@@ -269,7 +270,6 @@ pub(super) fn same_model(want: &str, label: &str) -> bool {
 }
 
 pub(super) use super::profiles::profile_email;
-
 pub(super) use super::rooms::rooms_for;
 
 /// The profile to move a pane to, or `None` when there is nowhere
@@ -344,7 +344,6 @@ pub(in crate::plugins) fn best_profile(rooms: &[(u8, Room)], current: u8, model:
     });
     ranked.first().map(|(p, _)| *p)
 }
-
 
 /// Everything the decision depends on.
 ///
