@@ -25,6 +25,10 @@ impl ShellApp {
         if let Err(e) = cli_socket::serve(cli_tx, wake_for_cli) {
             lx_warn!("shell.cli.bind_failed", &format!("{e}"));
         }
+        let pane_control = {
+            let p = proxy.clone();
+            pane_control::MainSide::start(std::sync::Arc::new(move || p.wake()))
+        };
         let wake_for_front = proxy.clone();
         instance::serve_front(move || wake_for_front.wake());
         // Best-effort like the command socket above: a shell that
@@ -135,6 +139,7 @@ impl ShellApp {
             pane_session_begin_rx,
             pty_op_rx,
             cli_rx,
+            pane_control,
             autorun_panes: cli_socket::load_autorun(),
             autorun_last_look: None,
             op_host: SupervisorOpHost { begin_tx: pane_session_begin_tx_for_ops },

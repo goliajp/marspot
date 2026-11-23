@@ -17,6 +17,8 @@ impl ShellApp {
     ///      deadline — unchanged, but scoped to `active` only.
     ///   6. SIGUSR1 manual trigger; 7. banner refresh.
     pub(super) fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
+        // first: a control socket connection is asleep on each of these
+        self.drain_pane_control();
         // Plugin tick — runs at the supervisor cadence (1 s pump plus
         // knocks, see `user_event`), each plugin further gates by its own
         // tick_interval_ms.  Cheap when no plugin needs to tick.
@@ -53,6 +55,9 @@ impl ShellApp {
         // live: edit it by hand or from the panel and the next sweep
         // is already using the new values, with nothing restarted.
         if marspot::settings::reload_if_changed() {
+            if let Some(h) = pane_control::hub() {
+                h.reload_config();
+            }
             let s = marspot::settings::get();
             lx_event!(
                 "SETTINGS_RELOADED",

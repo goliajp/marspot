@@ -25,7 +25,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
@@ -53,6 +52,7 @@ mod instance;
 mod observe;
 mod orphans;
 mod ownership;
+mod pane_control;
 mod pane_decls;
 mod pane_status;
 mod pane_tables;

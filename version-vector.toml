@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.589"  # marspot-term Terminal keeps the latest eight command ends by number
+shell   = "0.7.590"  # pane control socket: control.sock, pane.* ops, limits, audit, waits; names shared with --send, --read, --panes
 core    = "0.12.621"  # marspot-term Terminal keeps the latest eight command ends by number
 session = "0.11.411"  # a restart answers input already written as written; mode changes count as cursor moves for text watches

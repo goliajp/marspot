@@ -130,6 +130,9 @@ impl MarspotApp for ShellApp {
             self.open_new_window();
             return;
         }
+        if let Some(h) = pane_control::hub() {
+            h.key_pressed();
+        }
         let wire = event_to_wire(&event, mods);
         let w = Self::event_window(ctx);
         self.send(MsgType::KeyEvent, encode_key_event(&wire, w));

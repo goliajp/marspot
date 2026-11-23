@@ -183,6 +183,8 @@ pub(crate) struct ShellApp {
     pub(crate) pty_op_rx: std::sync::mpsc::Receiver<plugins::host::PtyOpRequest>,
     /// Requests from the command socket (`marspot-shell --send`).
     pub(crate) cli_rx: std::sync::mpsc::Receiver<cli_socket::CliRequest>,
+    /// Frames the pane control socket's connections want sent.
+    pub(crate) pane_control: pane_control::MainSide,
     /// Panes the autorun policy is switched on for, by working
     /// directory — the one identity that survives a restart, a rename
     /// (there are none) and a move between windows.
