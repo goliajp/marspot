@@ -468,5 +468,13 @@
     "cold_gated": true,
     "warm_ms_max": 246,
     "warm_gated": true
+  },
+  "pane_control": {
+    "_comment": "P95 in ms of the pane control socket's latencies, each from the request leaving the probe to its answer arriving, on connections kept open and paced under the per-caller rate (bin/measure-pane-control.sh + bin/_pane_control_probe.py, run by bin/bench.sh --full in the console session; one window, a pane reading its input silently and a pane at a /bin/sh prompt).  send: one byte without Enter, answered once written to the PTY.  send_enter: the same with Enter, including the 50 ms the session leaves for the echo.  fired: a `change` wait, from the answer to the send that makes the shell echo to the answer to the wait.  run_true: pane.run true, to the answer with its exit status, including the wait for the shell to be back at its prompt (150 ms quiet).  read: pane.read without history, including the session's answer for the output position.  Mini 2026-11-23, two runs at load1 about 3 (the second after the prompt wait was fixed, so run_true is from it alone): send 0.722 / 1.404, send_enter 60.714 / 61.355, fired 1.25 / 1.677, run_true 164.443, read 1.375 / 2.175.  Ceiling = the worse run's P95 x 3.  open_shadow has no ceiling yet: the core does not open shadow panes until PaneControlCaps bit 1, and the probe skips it until then.",
+    "send_p95_ms_max": 4.2,
+    "send_enter_p95_ms_max": 184.1,
+    "fired_p95_ms_max": 5.0,
+    "run_true_p95_ms_max": 493.3,
+    "read_p95_ms_max": 6.5
   }
 }

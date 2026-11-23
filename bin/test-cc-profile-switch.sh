@@ -346,4 +346,42 @@ OUTCOME_AT="$(grep -nE "profile_cycle\.outcome.*pane $SID" "$APPLOG" | tail -1 |
   || fail "the run ended before it waited for the frame (frame@${FIRST_FRAME_AT:-?} outcome@${OUTCOME_AT:-?})"
 ok "it waited for the frame before letting the pane go"
 
+# ── the same switch on an agent in a shadow pane ──────────────────
+#
+# Only once the core opens shadow panes (PaneControlCaps bit 1): the
+# switch's input has to reach a pane that is in no window, and the pane
+# has to stay a shadow pane afterwards.
+PEER="$ROOT/target/release/marspot-peer"
+CAPS="$(grep -a $'\tPANE_CONTROL_CAPS_SEEN\t' "$APPLOG" | tail -1 | grep -o $'\tcaps=[0-9]*' | cut -d= -f2)"
+if (( (${CAPS:-0} & 2) == 0 )); then
+  echo "  - shadow pane phase not applicable: the core announced pane control caps=${CAPS:-none}, without bit 1"
+else
+  echo "==> the stand-in in a shadow pane under pane $SID"
+  [[ -x "$PEER" ]] || fail "$PEER is not built"
+  SHADOW="$("$PEER" pane open --parent "$SID" --cwd "$SB/elsewhere" --json \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])')" \
+    || fail "pane open made no shadow pane"
+  "$PEER" pane run "$SHADOW" --timeout 30 true >/dev/null || fail "the shadow pane's shell never ran a command"
+  BEFORE="$(starts)"
+  "$PEER" pane send "$SHADOW" "CLAUDE_CONFIG_DIR=$HOME/.claude-profile-1 claude" >/dev/null \
+    || fail "could not type into the shadow pane"
+  for (( i = 0; i < 100; i++ )); do (( $(starts) > BEFORE )) && break; sleep 0.2; done
+  (( $(starts) > BEFORE )) || fail "the stand-in did not start in the shadow pane"
+  settle
+  wait_for "badge.changed.*sid=$SHADOW badge=\"P1@" 60 || fail "the plugin never badged the shadow pane's agent"
+  BEFORE="$(starts)"
+  echo "$SHADOW $(( 0x4F480000 | 1 << 12 | 2 ))" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
+  for (( i = 0; i < 300; i++ )); do (( $(starts) > BEFORE )) && break; sleep 0.2; done
+  (( $(starts) > BEFORE )) || fail "the switch's resume line never ran in the shadow pane"
+  grep '^start ' "$CLAUDE_LOG" | tail -1 | grep -q "CLAUDE_CONFIG_DIR=$HOME/.claude-profile-2" \
+    || fail "the shadow pane's claude did not come back under profile 2"
+  ok "the switch's input reached the agent in the shadow pane"
+  "$PEER" pane list --json | python3 -c "
+import json,sys
+ps = json.load(sys.stdin)['result']['panes']
+sys.exit(0 if any(p['id'] == $SHADOW and p['shadow'] for p in ps) else 1)" \
+    || fail "pane $SHADOW is no longer a shadow pane after the switch"
+  ok "and it is still a shadow pane"
+fi
+
 echo "PASS — a badge-menu pick moves a live claudecode pane to another profile"
