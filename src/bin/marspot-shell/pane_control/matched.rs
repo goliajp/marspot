@@ -18,7 +18,7 @@ const MAX_WRAPPED_ROWS: u64 = 256;
 /// and the history a read asks for.
 pub(super) struct Replay {
     pub term: Terminal,
-    live_scroll: u64,
+    pub(super) live_scroll: u64,
 }
 
 pub(super) fn replay(sid: u64) -> Option<Replay> {
