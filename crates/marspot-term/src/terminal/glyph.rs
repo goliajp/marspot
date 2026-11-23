@@ -228,7 +228,7 @@ impl<'a> Handler<'a> {
         if row == *self.scroll_top {
             self.region_scroll_down(1);
         } else if row > 0 {
-            self.grid.set_cursor(col, row - 1);
+            self.grid.move_cursor(col, row - 1);
         }
     }
 

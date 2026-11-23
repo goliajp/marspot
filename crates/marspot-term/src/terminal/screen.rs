@@ -122,7 +122,7 @@ impl<'a> Handler<'a> {
 
     pub(super) fn cursor_to_origin(&mut self) {
         let (top, _) = self.row_origin();
-        self.grid.set_cursor(0, top);
+        self.grid.move_cursor(0, top);
         *self.pending_wrap = false;
     }
 
@@ -150,7 +150,7 @@ impl<'a> Handler<'a> {
     /// no-op when nothing was ever saved.
     pub(super) fn restore_cursor(&mut self) {
         if let Some(s) = *self.saved_cursor {
-            self.grid.set_cursor(s.col, s.row);
+            self.grid.move_cursor(s.col, s.row);
             *self.attrs = s.attrs;
             *self.pending_wrap = s.pending_wrap;
             *self.g0_graphics = s.g0_graphics;
@@ -171,7 +171,7 @@ impl<'a> Handler<'a> {
         self.grid.clear_all_wrapped();
         *self.scroll_top = 0;
         *self.scroll_bot = rows.saturating_sub(1);
-        self.grid.set_cursor(0, 0);
+        self.grid.move_cursor(0, 0);
         *self.pending_wrap = false;
     }
 
@@ -192,7 +192,7 @@ impl<'a> Handler<'a> {
         self.grid.clear_all_wrapped();
         *self.scroll_top = 0;
         *self.scroll_bot = rows.saturating_sub(1);
-        self.grid.set_cursor(0, 0);
+        self.grid.move_cursor(0, 0);
         *self.pending_wrap = false;
     }
 
@@ -239,7 +239,7 @@ impl<'a> Handler<'a> {
         fill_range(self.grid, 0, cols as u32 * rows as u32, CellAttrs::default());
         self.grid.clear_all_wrapped();
         self.grid.clear_scrollback();
-        self.grid.set_cursor(0, 0);
+        self.grid.move_cursor(0, 0);
         *self.tabs = crate::tabs::TabStops::new(cols);
         *self.g0_graphics = false;
         // the palette keeps its generation moving, so a frame writer
@@ -256,7 +256,7 @@ impl<'a> Handler<'a> {
             std::mem::swap(self.saved_cursor, self.parked_saved_cursor);
             *self.grid = saved.grid;
             self.grid.share_if_few();
-            self.grid.set_cursor(saved.cursor.0, saved.cursor.1);
+            self.grid.move_cursor(saved.cursor.0, saved.cursor.1);
             *self.kitty_keyboard = saved.kitty_keyboard;
             self.relink();
         }

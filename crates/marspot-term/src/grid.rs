@@ -67,6 +67,7 @@ pub struct Grid {
     /// Cursor as (col, row).  Always bounded to [0, cols-1] x [0, rows-1].
     cursor_col: u16,
     cursor_row: u16,
+    reach: Option<Reach>,
     /// Physical row index of logical row 0 (`0..rows`).  Bumped by
     /// `scroll_up`; reset to 0 by `resize`.
     top_row: u16,
@@ -163,6 +164,8 @@ const MAX_FILED_BLANK_RUN: u16 = 3;
 
 mod cluster_mirror;
 mod clusters;
+mod cursor;
+pub use cursor::Reach;
 mod history;
 mod links;
 mod reflow;
@@ -207,6 +210,7 @@ impl Grid {
             clusters: Vec::new(),
             cursor_col: 0,
             cursor_row: 0,
+            reach: None,
             top_row: 0,
             scrollback,
             scroll_push_count: 0,
@@ -231,10 +235,6 @@ impl Grid {
     pub fn rows(&self) -> u16 {
         self.rows
     }
-    pub fn cursor(&self) -> (u16, u16) {
-        (self.cursor_col, self.cursor_row)
-    }
-
     /// Translate a logical row to its physical index in `cells`.
     #[inline]
     fn phys_row(&self, logical: u16) -> usize {
@@ -259,13 +259,6 @@ impl Grid {
         cell.expand(&self.styles)
     }
 
-
-    /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
-    /// valid position; the cursor is always within `[0, cols) x [0, rows)`.
-    pub fn set_cursor(&mut self, col: u16, row: u16) {
-        self.cursor_col = col.min(self.cols - 1);
-        self.cursor_row = row.min(self.rows - 1);
-    }
 
     /// Mark / unmark logical `row` as a soft continuation of the row
     /// above (DECAWM autowrap flowed a logical line across them).
