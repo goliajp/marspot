@@ -95,8 +95,14 @@ fn unquote(raw: &str) -> Option<String> {
 /// fsync of the directory.  On any failure the previous entry (or no
 /// entry) is what stays on disk.
 pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
+    std::fs::create_dir_all(session_dir(entry.id))?;
+    rewrite_session_entry(entry)
+}
+
+/// [`write_session_entry`] for a session that has its directory: one
+/// that was taken away meanwhile is not made again.
+pub fn rewrite_session_entry(entry: &SessionEntry) -> io::Result<()> {
     let dir = session_dir(entry.id);
-    std::fs::create_dir_all(&dir)?;
     let path = session_entry_path(entry.id);
     let tmp = path.with_extension("toml.tmp");
     let mut s = String::new();

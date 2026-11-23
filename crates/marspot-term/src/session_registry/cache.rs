@@ -56,6 +56,7 @@ pub struct RegistryCache {
     slots: BTreeMap<u64, Slot>,
     entries: Vec<SessionEntry>,
     problems: Vec<(u64, String)>,
+    list_failed: bool,
     parses: u64,
 }
 
@@ -72,6 +73,12 @@ impl RegistryCache {
         &self.problems
     }
 
+    /// Whether the last `list` saw every entry there is: the directory
+    /// was read to its end, and every entry in it parses.
+    pub fn complete(&self) -> bool {
+        !self.list_failed && self.problems.is_empty()
+    }
+
     /// The mtime of the entry file last parsed for `id`, microseconds.
     pub fn written_us(&self, id: u64) -> Option<u64> {
         match self.slots.get(&id)? {
@@ -83,9 +90,14 @@ impl RegistryCache {
     fn refresh(&mut self, root: &Path) {
         let mut changed = false;
         let mut seen: Vec<u64> = Vec::with_capacity(self.slots.len());
+        self.list_failed = false;
         match std::fs::read_dir(root) {
             Ok(dir) => {
-                for de in dir.flatten() {
+                for de in dir {
+                    let Ok(de) = de else {
+                        self.list_failed = true;
+                        continue;
+                    };
                     if !de.file_type().is_ok_and(|t| t.is_dir()) {
                         continue;
                     }
@@ -101,8 +113,9 @@ impl RegistryCache {
                     }
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.list_failed = true,
             Err(e) => {
+                self.list_failed = true;
                 crate::lx_warn!("session_registry.list_failed", &format!("{e}"));
             }
         }

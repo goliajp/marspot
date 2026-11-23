@@ -222,6 +222,10 @@ impl CoreApp {
             return;
         }
         let n = panes.len();
+        // a slot closed while this ran is here again, so it is not closed
+        for sid in panes.iter().filter_map(Pane::shelld_session_id) {
+            self.pane_control.shadows.closed.take(sid);
+        }
         win!(self, wi).panes = panes;
         let asked = marspot::session_signal::ask_all_to_update(win!(self, wi).panes.iter_mut());
         win!(self, wi).focused_idx = win!(self, wi).focused_idx.min(n - 1);

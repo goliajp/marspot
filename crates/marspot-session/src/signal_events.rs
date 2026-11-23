@@ -1,7 +1,8 @@
 //! The signals an L3 takes, turned into events for its main loop.
 //!
-//! - SIGHUP: the app retired this session.  Exit, whatever is staged.
-//!   An L3 has no controlling terminal, so nothing else sends it.
+//! - SIGHUP: exit, whatever is staged.  With the mark of a close in the
+//!   session's directory its history goes with it; without, the sender
+//!   may be anyone and the history stays.
 //! - SIGTERM: an update from a sender that predates `SessionUpdate`
 //!   when `current/` holds another build, otherwise nothing.  It is not
 //!   a close: every process started from a pane shares the app's

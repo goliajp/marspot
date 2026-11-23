@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use marspot_term::{lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::session_registry::{
     cleanup_stale_socket, session_dir, session_socket_path,
-    write_session_entry, SessionEntry, PROTO_VERSION,
+    rewrite_session_entry, write_session_entry, SessionEntry, PROTO_VERSION,
 };
 use marspot_term::shell_proto::{
     decode_hello, encode_hello_ack, Frame, MsgType,
@@ -57,7 +57,7 @@ pub struct SessionListener {
     /// `prepare_for_execv` clears its CLOEXEC + mem::forgets via the
     /// suppress_drop path so ownership carries across the swap.
     dir_lock: Option<std::fs::File>,
-    /// Set by `end_with_shell`: the directory is already gone, and
+    /// Set by `take_dir`: the directory is already gone, and
     /// Drop has nothing to report.
     ended: bool,
 }
@@ -99,6 +99,9 @@ impl SessionListener {
                 ));
             }
         };
+        // a close marks only a session whose entry is there, and the
+        // entry is written below: this mark is an earlier session's
+        marspot_term::session_registry::clear_closed(id)?;
         cleanup_stale_socket(id);
 
         let socket_path = session_socket_path(id);
@@ -139,9 +142,8 @@ impl SessionListener {
             // entry: unlink the sock + entry.toml only.  This bind
             // may be a RESURRECTION into a dir that already holds
             // scrollback.bin / bytelog — nuking the whole dir here
-            // (the old delete_session rollback) would destroy the
-            // very history the resurrect exists to restore
-            // (RFC-004 invariant 4).
+            // would destroy the very history the resurrect exists to
+            // restore.
             cleanup_stale_socket(id);
             let _ = std::fs::remove_file(
                 marspot_term::session_registry::session_entry_path(id),
@@ -186,6 +188,7 @@ impl SessionListener {
         // inherited across execv (CLOEXEC was cleared by the pre-execv
         // image's `prepare_for_execv`).
         let listener = unsafe { UnixListener::from_raw_fd(raw_fd) };
+        let close_tx = ev_tx.clone();
         let listener_for_thread = listener.try_clone()?;
         let accept_thread = thread::Builder::new()
             .name(format!("l3-uds-accept-{id}"))
@@ -215,7 +218,12 @@ impl SessionListener {
             stamps_regions: true,
             shadow_of,
         };
-        let _ = write_session_entry(&entry);
+        if marspot_term::session_registry::is_closed(id) {
+            // closed between the two images
+            let _ = close_tx.send(crate::SessionEvent::CloseRequested);
+        } else {
+            let _ = rewrite_session_entry(&entry);
+        }
         Ok(Self {
             id,
             accept_thread: Some(accept_thread),
@@ -277,18 +285,14 @@ impl SessionListener {
         Ok(fd)
     }
 
-    /// The pane's shell ended on its own: the session is over and its
-    /// directory goes, as on any clean end.  Kept, it would let the
-    /// next core resurrect the session, which starts the same shell
-    /// (the same command) again.
-    pub fn end_with_shell(mut self) {
-        let _ = marspot_term::session_registry::delete_session(self.id);
-        lx_event!(
-            "SESSION_DIR_REMOVED",
-            "the shell ended; the session's directory is removed",
-            session_id = self.id
-        );
+    /// The session is over for good (its shell ended, or it was
+    /// closed): take its directory out of the registry, so that no core
+    /// attaches to or resurrects the session, and return where it is
+    /// now, for the caller to delete.  `None` when the directory is not
+    /// this session's (any more).
+    pub fn take_dir(mut self) -> Option<std::path::PathBuf> {
         self.ended = true;
+        crate::session_end::take_own_dir(self.id)
     }
 }
 
@@ -317,10 +321,9 @@ impl Drop for SessionListener {
             return;
         }
         // Reached on an abnormal unwind (a panic in the main loop): a
-        // shell that ended goes through `end_with_shell`, a close
-        // through L2's `delete_session`.  The user needs the on-disk
-        // state to survive, so only the socket goes; the next core
-        // resurrects or retires the dir.
+        // shell that ended and a close go through `take_dir`.  The
+        // on-disk state has to survive, so only the socket goes; the
+        // next core resurrects or retires the dir.
         cleanup_stale_socket(self.id);
         lx_warn!(
             "session.listener.abnormal_drop",
@@ -449,3 +452,6 @@ fn handshake_and_handoff(
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "handoff_listener_tests.rs"]
+mod handoff_listener_tests;

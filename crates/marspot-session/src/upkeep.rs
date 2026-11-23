@@ -169,7 +169,10 @@ impl Upkeep {
             return None;
         }
         self.entry_looked = Instant::now();
-        self.owner.look(self.watcher.as_ref());
+        // one that is closing starts no shell to answer for it
+        if !session_registry::is_closed(self.sid) {
+            self.owner.look(self.watcher.as_ref());
+        }
         self.unreachable().map(Leave::Unreachable)
     }
 

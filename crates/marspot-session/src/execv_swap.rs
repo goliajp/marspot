@@ -11,7 +11,7 @@ use crate::control_writer::ControlWriter;
 use crate::handoff::{ENV_HANDOFF_MANIFEST, L3Handoff, handoff_manifest_path, write_handoff_manifest};
 use crate::pane_ctl::{PaneCtl, local_mut};
 use crate::snapshot_writer::SnapshotWriter;
-use crate::{SessionEvent, SessionImpl, local_session, session_state_bin_path, uds_server};
+use crate::{SessionEvent, SessionImpl, local_session, session_end, session_state_bin_path, uds_server};
 
 pub(crate) fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
     unsafe {
@@ -41,12 +41,14 @@ pub(crate) fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
 /// image).  Input they queued is written; requests are answered as
 /// restarting; the PTY's last output is parsed and counted, so that
 /// the position the handoff carries is the one the bytelog has.
+/// True when a close was among the events: it wins over the handover.
 pub(crate) fn settle(
     session: &mut SessionImpl,
     events: &Receiver<SessionEvent>,
     pane_ctl: &mut PaneCtl,
     mut poke: Option<&mut ControlWriter>,
-) {
+) -> bool {
+    let mut closing = false;
     while let Ok(ev) = events.try_recv() {
         match ev {
             SessionEvent::Key(e, m) => {
@@ -57,11 +59,13 @@ pub(crate) fn settle(
                 let _ = local_mut(session).write(&bytes);
             }
             SessionEvent::PaneControl(r) => pane_ctl.refuse_restarting(r, poke.as_deref_mut()),
+            SessionEvent::CloseRequested => closing = true,
             _ => {}
         }
     }
     local_mut(session).quiesce_for_handoff();
     pane_ctl.restarting(session, poke);
+    closing
 }
 
 /// Stage the execv handoff and replace this process's image with
@@ -124,6 +128,13 @@ pub(crate) fn do_l3_execv_swap(
 
     unsafe { std::env::set_var(ENV_HANDOFF_MANIFEST, &manifest_path); }
 
+    // a close that came after `settle` has no loop left to act on it
+    session_end::end_if_over(id, child_pid, || {
+        let _ = std::fs::remove_file(&manifest_path);
+        drop(terminal);
+        snapshots.settle();
+    });
+
     lx_event!(
         "L3_EXECV_INVOKE",
         "execv into new marspot-session image",
@@ -153,4 +164,27 @@ pub(crate) fn do_l3_execv_swap(
     unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
     let _ = std::fs::remove_file(&manifest_path);
     Err(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn a_close_among_the_last_events_wins_over_the_handover() {
+        for close in [true, false] {
+            let (local, _pty) = local_session::LocalSession::parsing_only(80, 24);
+            let mut session = SessionImpl::Local(local);
+            let (tx, rx) = channel();
+            let mut ctl = PaneCtl::new(&session, Default::default(), channel().0);
+            tx.send(SessionEvent::UpdateRequested).unwrap();
+            if close {
+                tx.send(SessionEvent::CloseRequested).unwrap();
+            }
+            tx.send(SessionEvent::Wake).unwrap();
+            assert_eq!(settle(&mut session, &rx, &mut ctl, None), close);
+            assert!(rx.try_recv().is_err(), "every event was taken");
+        }
+    }
 }

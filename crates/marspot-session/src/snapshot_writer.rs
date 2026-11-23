@@ -114,6 +114,17 @@ impl SnapshotWriter {
         }
     }
 
+    /// Return once everything queued before has been done.
+    pub fn settle(&self) {
+        let (done, wait) = sync_channel(1);
+        let job = Job::Run(Box::new(move || {
+            let _ = done.send(());
+        }));
+        if self.tx.send(job).is_ok() {
+            let _ = wait.recv();
+        }
+    }
+
     /// What runs a job on the thread `tx` leads to.  With that thread
     /// gone the job runs where the caller stands.
     fn runner(tx: Sender<Job>) -> impl Fn(marspot_term::async_writer::Job) + Send + Sync + 'static {

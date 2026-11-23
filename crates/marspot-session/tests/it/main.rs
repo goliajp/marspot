@@ -4,6 +4,7 @@
 mod support;
 
 mod clusters_across_update;
+mod close_dir;
 mod flood_frames;
 mod flood_interrupt;
 mod focus_reporting;

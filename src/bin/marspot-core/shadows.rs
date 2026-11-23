@@ -32,6 +32,7 @@ pub(super) struct Shadows {
     /// session's spawn lands.  One entry per open L1 asked for, which
     /// L1 rate-limits; each leaves when its spawn reports back.
     spawning: HashMap<u64, (u32, bool)>,
+    pub(super) closed: ClosedSlots,
     pub(super) places: super::shadow_place::Places,
     pub(super) family: super::helper_panel::Family,
     /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
@@ -59,6 +60,32 @@ impl Shadows {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
+    }
+}
+
+/// Slots with no L3 that were closed, whose spawn may yet land: the
+/// session is closed then.  The oldest is forgotten past the cap, which
+/// leaves its session running.
+#[derive(Default)]
+pub(super) struct ClosedSlots(std::collections::VecDeque<u64>);
+
+impl ClosedSlots {
+    const CAP: usize = 64;
+
+    pub(super) fn note(&mut self, sid: u64) {
+        if sid == 0 || self.0.contains(&sid) {
+            return;
+        }
+        if self.0.len() == Self::CAP {
+            self.0.pop_front();
+        }
+        self.0.push_back(sid);
+    }
+
+    /// Whether the slot of `sid` was closed; asked once.
+    pub(super) fn take(&mut self, sid: u64) -> bool {
+        let at = self.0.iter().position(|s| *s == sid);
+        at.and_then(|i| self.0.remove(i)).is_some()
     }
 }
 
@@ -177,6 +204,9 @@ impl CoreApp {
                     let pane = self.shadows.remove(i);
                     self.retire_pane_session(sid, pane.is_l3());
                     self.shadows_changed();
+                    if !pane.is_l3() {
+                        marspot::session_close::close_dead_session(sid);
+                    }
                 }
                 self.spawned(req_id, 0, &e);
             }
@@ -204,6 +234,9 @@ impl CoreApp {
                 recycle_session(sid);
             }
             let pane = self.shadows.remove(i);
+            if !pane.is_l3() {
+                self.pane_control.shadows.closed.note(sid);
+            }
             self.retire_pane_session(sid, pane.is_l3());
             self.shadows_changed();
             lx_event!("SHADOW_RETIRED", "closed a shadow pane", session = sid, recycled = recycle as u32);
@@ -271,6 +304,10 @@ fn recycle_session(sid: u64) {
         r.delete();
     }
 }
+
+#[cfg(test)]
+#[path = "close_dir_tests.rs"]
+mod close_dir_tests;
 
 #[cfg(test)]
 #[path = "shadows_tests.rs"]

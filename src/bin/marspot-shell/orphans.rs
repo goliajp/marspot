@@ -16,6 +16,7 @@ use marspot::lx_warn;
 use marspot::pidtree::{self, ProcId, ProcRow};
 use crate::supervisor::BinaryTree;
 use marspot_term::paths;
+use marspot_term::session_registry::{RegistryCache, is_closed};
 
 const L3: &str = "marspot-session";
 
@@ -101,12 +102,22 @@ pub fn orphans<'a>(
 }
 
 /// SIGHUP every orphaned L3 of `install`: a close, which ends it even
-/// with another build staged, where SIGTERM would re-exec it.  Returns
-/// how many sessions the registry keeps and how many orphans were
-/// signalled.
+/// with another build staged, where SIGTERM would re-exec it.  Nothing
+/// when the registry could not be read whole: an L3 whose entry was not
+/// seen is no orphan.  Returns how many sessions the registry keeps,
+/// closed ones not counted, and how many orphans were signalled.
 pub fn stop(install: &Install) -> (usize, usize) {
     let obs = crate::observe::shared().fresh(crate::observe::NOW);
-    let registered: HashSet<i32> = obs.sessions.iter().map(|s| s.entry.pid).collect();
+    // listed after the processes were: every L3 among them that is
+    // registered by now is found registered
+    let mut registry = RegistryCache::default();
+    let entries = registry.list();
+    let registered: HashSet<i32> = entries.iter().map(|e| e.pid).collect();
+    let kept = entries.iter().filter(|e| !is_closed(e.id)).count();
+    if !registry.complete() {
+        lx_warn!("shell.quit.registry_unreadable", "no orphan is looked for", problems = registry.problems().len());
+        return (kept, 0);
+    }
     let found = orphans(
         obs.table.rows(),
         &registered,
@@ -124,7 +135,7 @@ pub fn stop(install: &Install) -> (usize, usize) {
             }
         })
         .count();
-    (obs.sessions.len(), signalled)
+    (kept, signalled)
 }
 
 #[cfg(test)]
@@ -246,6 +257,57 @@ mod tests {
             orphans(&rows, &registered, &sandbox, exe, state).is_empty(),
             "a sandbox does not own L3s that have no MARSPOT_STATE_DIR"
         );
+    }
+
+    /// What a quit does about an L3 no entry names: it is hung up, unless
+    /// the registry cannot be read whole.  The entries of closed
+    /// sessions are not kept ones.
+    #[test]
+    fn a_registry_that_cannot_be_read_whole_stops_nothing() {
+        use marspot_term::session_registry as reg;
+        let sandbox = marspot_term::test_env::sandbox_state_dir();
+        let dir = sandbox.path().join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let l3 = dir.join(L3);
+        std::fs::copy(std::env::current_exe().unwrap(), &l3).unwrap();
+        let install = Install::new(vec![l3.clone()], sandbox.path());
+        let mut orphan = run_helper(&l3, Some(sandbox.path()));
+        table_when(orphan.id() as i32, L3);
+        // past what an observation may be old
+        std::thread::sleep(crate::observe::NOW * 2);
+
+        assert_eq!(stop(&install).1, 0, "no sessions directory to list");
+        std::fs::create_dir_all(reg::session_dir(3)).unwrap();
+        std::fs::write(reg::session_entry_path(3), "not an entry").unwrap();
+        assert_eq!(stop(&install).1, 0, "an entry that does not parse");
+        assert!(orphan.try_wait().unwrap().is_none(), "still running");
+
+        for id in [3, 4] {
+            let entry = reg::SessionEntry {
+                id,
+                pid: 3_999_999,
+                socket: reg::session_socket_path(id),
+                cols: 80,
+                rows: 24,
+                title: String::new(),
+                cwd: String::new(),
+                proto_version: reg::PROTO_VERSION,
+                created_at_unix: 1,
+                shm_name: String::new(),
+                shell_child_pid: 0,
+                build: String::new(),
+                stamps_regions: false,
+                shadow_of: 0,
+            };
+            reg::write_session_entry(&entry).unwrap();
+        }
+        reg::mark_closed(4).unwrap();
+        assert_eq!(stop(&install), (1, 1), "session 4 was closed; the orphan is signalled");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while orphan.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the hangup ended the orphan");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// What `--trigger` relies on before sending SIGUSR1, which ends a

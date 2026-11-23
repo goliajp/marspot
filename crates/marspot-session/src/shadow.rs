@@ -183,7 +183,7 @@ impl Shadow {
 fn write_entry(sid: u64, parent: u64) -> std::io::Result<()> {
     let mut entry = session_registry::read_session_entry(sid)?;
     entry.shadow_of = parent;
-    session_registry::write_session_entry(&entry)
+    session_registry::rewrite_session_entry(&entry)
 }
 
 /// The live L3 of session `sid`: its pid and start time.
