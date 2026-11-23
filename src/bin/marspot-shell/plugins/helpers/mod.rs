@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION, TickDue};
 
+mod caller_kind;
 mod close;
 mod dialogs;
 mod first_screens;
@@ -44,6 +45,7 @@ mod stop_all;
 mod table;
 mod tick;
 mod timers;
+mod turn;
 mod work;
 #[cfg(test)]
 mod tests;
@@ -59,6 +61,8 @@ mod tests_away;
 mod tests_trust;
 #[cfg(test)]
 mod tests_passing;
+#[cfg(test)]
+mod tests_smoke;
 
 use table::{Event, Table};
 
@@ -99,6 +103,11 @@ struct State {
     close_retry: HashMap<u64, (u64, u32)>,
     /// Parent panes seen with no agent, since when (ms after the epoch).
     no_agent: HashMap<u64, u64>,
+    /// The last turn's end that was told of each claude helper
+    /// (`Shared::turn_told`).
+    turn_told: HashMap<u64, turn::Told>,
+    /// When the last helper of each helper went (ms after the epoch).
+    child_gone: HashMap<u64, u64>,
     /// Notices that could not be delivered, to try again on an event.
     undelivered: pending::Undelivered,
     /// Claude and kimi helpers whose plugin has reported a turn.
@@ -143,12 +152,18 @@ impl Shared {
         let now = records::now_ms();
         records::append(&self.log, records::ROTATE_AT, &self.table(), sid, now, &ev);
         let mut st = self.lock();
+        let parent = st.table.map.get(&sid).map(|h| h.started.parent);
         st.table.apply(sid, now, &ev);
         if matches!(ev, Event::Stopped) {
             st.watchers.remove(&sid);
             st.turned.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
+            st.turn_told.remove(&sid);
+            st.child_gone.remove(&sid);
+            if let Some(p) = parent.filter(|p| st.table.map.contains_key(p)) {
+                st.child_gone.insert(p, now);
+            }
         }
         *self.published.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(st.table.clone());
         drop(st);
@@ -222,7 +237,7 @@ fn begin(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> std::io::Resul
 
 pub struct HelpersPlugin {
     /// Claude and kimi helpers: where their turn is, since their last stop.
-    in_turn: HashMap<u64, tick::Turn>,
+    in_turn: HashMap<u64, turn::Turn>,
     /// Parents no tick watches, as none would close their helpers.
     parked_parents: tick::Parked,
 }
@@ -250,7 +265,7 @@ impl Plugin for HelpersPlugin {
         let w = Arc::clone(&s);
         super::claudecode::with_helpers::on_account_changed(Arc::new(move || w.wake()));
         let n = begin(&s, rebuild::live_shadows).map_err(|e| PluginError::Other(format!("helpers worker: {e}")))?;
-        self.in_turn = tick::turns_at_start(&s.table());
+        self.in_turn = turn::turns_at_start(&s.table());
         // after the table: a rebuild closes what it finds half started
         crate::pane_control::helpers_port::register(Box::new(service::Service(Arc::clone(&s))));
         host.log(LogLevel::Info, "start", &format!("{n} helpers carried over"));

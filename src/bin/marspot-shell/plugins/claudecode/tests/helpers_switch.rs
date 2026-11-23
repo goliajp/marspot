@@ -71,3 +71,103 @@ fn helpers_refused_on_their_account_move_to_the_roomiest_one() {
     assert_eq!(got, [(77, "claude", 1), (78, "claude", 1)], "only the helpers' moves are reported");
     assert!(changes.iter().all(|c| c.to == 2 || c.to == 3));
 }
+
+/// The next scan after claude writes that its turn is over says so.
+#[test]
+fn helpers_a_scan_reads_the_end_of_a_turn_claude_recorded() {
+    use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
+    use super::super::with_helpers::turns;
+    use super::idle_loop::{KillPaneTree, drain_pty};
+
+    // as the whole idle loop's test: it needs a real pty and process tree
+    if std::env::var_os("MARSPOT_PTY_INTEGRATION").is_none() {
+        eprintln!("SKIPPED: set MARSPOT_PTY_INTEGRATION=1 (bin/test.sh does)");
+        return;
+    }
+    let root = TestHome::new("turn-end");
+    let (proj, profile) = (root.join("proj"), root.join(".claude"));
+    fs::create_dir_all(&proj).unwrap();
+    fs::create_dir_all(profile.join("sessions")).unwrap();
+    std::os::unix::fs::symlink("/bin/sleep", root.join("claude")).unwrap();
+    let proj = fs::canonicalize(&proj).unwrap();
+    let transcripts = profile.join("projects").join(encode_project_dir(&proj));
+    fs::create_dir_all(&transcripts).unwrap();
+
+    let pty = Pty::spawn(PtyConfig {
+        program: "/bin/zsh".into(),
+        args: vec!["-f".into()],
+        size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+        argv0: None,
+        cwd: Some(proj.to_string_lossy().into_owned()),
+        env_remove_prefixes: marspot_term::pty::SESSION_ENV_PREFIXES.iter().map(|s| (*s).to_string()).collect(),
+        env_set: Vec::new(),
+    })
+    .expect("spawn zsh");
+    let shell = pty.child_pid();
+    let _tree = KillPaneTree(shell);
+    let master = pty.raw_master();
+    // SAFETY: flags of a descriptor this test owns
+    unsafe { libc::fcntl(master, libc::F_SETFL, libc::fcntl(master, libc::F_GETFL) | libc::O_NONBLOCK) };
+    let start = format!("'{}' 600\r", root.join("claude").display());
+    // SAFETY: the buffer outlives the call
+    unsafe { libc::write(master, start.as_ptr().cast(), start.len()) };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let claude = loop {
+        // a shell setting up its terminal waits for what it wrote to be read
+        drain_pty(master);
+        let found = pidtree::descendants_of(shell, &pidtree::list_all_procs()).into_iter().find(looks_like_claudecode);
+        if let Some(c) = found {
+            break c;
+        }
+        assert!(Instant::now() < deadline, "the stand-in claude never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let uuid = "bbbbbbbb-1111-2222-3333-444444444444";
+    let record = format!(r#"{{"pid":{},"sessionId":"{uuid}","kind":"interactive"}}"#, claude.pid);
+    fs::write(profile.join(format!("sessions/{}.json", claude.pid)), record).unwrap();
+    let entry = marspot_term::session_registry::SessionEntry {
+        id: 1,
+        pid: std::process::id() as i32,
+        socket: root.join("s.sock"),
+        cols: 80,
+        rows: 24,
+        title: "t".into(),
+        cwd: proj.to_string_lossy().into_owned(),
+        proto_version: marspot_term::shell_proto::PROTO_VERSION,
+        created_at_unix: 0,
+        shm_name: String::new(),
+        shell_child_pid: shell,
+        build: String::new(),
+        stamps_regions: false,
+        shadow_of: 7,
+    };
+    let mut worker = WorkerCtx {
+        projects_root: root.join(".claude").join("projects"),
+        caches: Default::default(),
+        statusline_state: None,
+        seen: HashMap::new(),
+        model_cutoff: HashMap::new(),
+        banner_tried: HashMap::new(),
+        last_refusal: HashMap::new(),
+        last_model: HashMap::new(),
+        last_model_by_pane: HashMap::new(),
+    };
+    let mut transcript = format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"go\"}},\"timestamp\":\"2026-11-23T15:14:52.000Z\",\"sessionId\":\"{uuid}\"}}\n\
+         {{\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"done\"}}],\"stop_reason\":\"end_turn\"}},\"type\":\"assistant\"}}\n"
+    );
+    let mut scan = |text: &str| {
+        fs::write(transcripts.join(format!("{uuid}.jsonl")), text).unwrap();
+        let mut argv = crate::observe::ArgvCache::default();
+        let table = pidtree::ProcTable::take();
+        let obs = crate::observe::Observation::from_parts(Instant::now(), table, vec![(entry.clone(), true)], |r| argv.get(r));
+        let r = worker.scan_once(&obs);
+        assert_eq!(r.new_meta.get(&1).map(|m| m.bound_by), Some("record"));
+        turns::look(1)
+    };
+    assert_eq!(scan(&transcript), Some(turns::Look::NotOver), "its Stop hooks have not run");
+    transcript.push_str("{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":5,\"timestamp\":\"2026-11-23T15:14:57.635Z\"}\n");
+    assert_eq!(scan(&transcript), Some(turns::Look::Over { began: Some(1_795_446_892_000), at: 1_795_446_897_635 }));
+    transcript.push_str("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"more\"}}\n");
+    assert_eq!(scan(&transcript), Some(turns::Look::NotOver), "the next turn");
+}

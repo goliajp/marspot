@@ -9,10 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use marspot::pane_state::{BusyKind, PaneStatus};
-use marspot_peer::control::AgentKind;
 
-use super::notify::Stop;
-use super::table::{Helper, Table};
+use super::table::Table;
+use super::turn::{self, Turn, turn_reported};
 use super::work::Job;
 use super::{Shared, records};
 use crate::observe::Observation;
@@ -20,9 +19,7 @@ use crate::plugins::{PluginHost, TickDue};
 
 /// A helper whose pane is back at its shell this long after its task
 /// went in has exited, not yet started.
-const START_GRACE_MS: u64 = 60_000;
-/// Waiting on an approval this long is a stop at a prompt.
-const BLOCKED_AFTER: Duration = Duration::from_secs(3);
+pub(super) const START_GRACE_MS: u64 = 60_000;
 /// How long a parent's shell may be in front before a state that is
 /// not `Empty` counts as kept: the sampled state lags the terminal by a
 /// pass or two after an agent leaves (its plugin still reports it).
@@ -90,32 +87,6 @@ fn jobs_of(obs: &Observation, parent: u64) -> u64 {
     jobs.fold(0, |sum, p| sum.wrapping_add(one(p.row.pid, p.row.start_us)))
 }
 
-/// Where a claude or kimi helper's turn is, since its last stop.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Turn {
-    /// No turn seen since the last stop was told.
-    #[default]
-    Idle,
-    Working,
-    /// Stopped at an approval prompt, and that was told.
-    BlockedTold,
-}
-
-/// The turns a start begins with.  A helper whose task went in and
-/// whose last stop was not told may have ended its turn while no plugin
-/// ran, or had its stop lost with the queue: it counts as working, so
-/// that its wait for input is told.  One with a stop held back by the
-/// rate is told of that one.
-pub(super) fn turns_at_start(t: &Table) -> HashMap<u64, Turn> {
-    let untold = t.map.values().filter(|h| turn_reported(h) && h.delivered_ms.is_some() && !h.noticed && h.suppressed == 0);
-    untold.map(|h| (h.sid, Turn::Working)).collect()
-}
-
-/// Agents whose plugin reports turns: their stops come from the tick.
-fn turn_reported(h: &Helper) -> bool {
-    matches!(h.started.agent, AgentKind::Claude | AgentKind::Kimi)
-}
-
 pub(super) fn tick(s: &Arc<Shared>, host: &dyn PluginHost, in_turn: &mut HashMap<u64, Turn>, parked: &mut Parked) {
     let t = s.table();
     let now_ms = records::now_ms();
@@ -126,7 +97,7 @@ pub(super) fn tick(s: &Arc<Shared>, host: &dyn PluginHost, in_turn: &mut HashMap
             // the worker looks again from a fresh walk before closing
             s.queue_closing(h.sid, Job::Gone { sid: h.sid });
         } else if turn_reported(h) && h.delivered_ms.is_some() {
-            turn(s, host, h, now_ms, in_turn);
+            turn::turn(s, host, &t, h, now_ms, in_turn);
         }
     }
     reclaim(s, host, &t, now_ms, &obs, parked);
@@ -137,40 +108,6 @@ pub(super) fn tick(s: &Arc<Shared>, host: &dyn PluginHost, in_turn: &mut HashMap
             s.lock().undelivered.rollback(sid, was);
             marspot::lx_warn!("helpers.queue_full", &format!("sid={sid}: redelivery not queued"));
         }
-    }
-}
-
-/// A claude or kimi helper's turn ended (it waits for input), it waits
-/// on an approval, or its program left the pane.
-fn turn(s: &Shared, host: &dyn PluginHost, h: &Helper, now_ms: u64, in_turn: &mut HashMap<u64, Turn>) {
-    let Ok(Some(v)) = host.pane_status(h.sid) else { return };
-    if matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval)) {
-        s.lock().turned.insert(h.sid);
-    }
-    let seen = in_turn.entry(h.sid).or_default();
-    match v.status {
-        PaneStatus::Busy(BusyKind::ToolAwaitingApproval) if v.held >= BLOCKED_AFTER && *seen != Turn::BlockedTold => {
-            queue_stop(s, h.sid, seen, Turn::BlockedTold, Stop::Blocked);
-        }
-        PaneStatus::Busy(BusyKind::ToolAwaitingApproval) => {}
-        PaneStatus::Busy(_) => *seen = Turn::Working,
-        PaneStatus::AwaitingUser if v.quiescent && *seen != Turn::Idle => {
-            queue_stop(s, h.sid, seen, Turn::Idle, Stop::Idle);
-        }
-        PaneStatus::Empty if v.quiescent && h.delivered_ms.is_some_and(|d| now_ms.saturating_sub(d) > START_GRACE_MS) => {
-            s.queue_closing(h.sid, Job::Stopped { sid: h.sid, stop: Stop::Exited, by_screen: false });
-        }
-        _ => {}
-    }
-}
-
-/// Note the turn as `now` and queue its stop; a stop that did not go
-/// leaves the turn as it was, for the next tick.
-fn queue_stop(s: &Shared, sid: u64, seen: &mut Turn, now: Turn, stop: Stop) {
-    let was = std::mem::replace(seen, now);
-    if !s.queue(Job::Stopped { sid, stop, by_screen: false }) {
-        *seen = was;
-        marspot::lx_warn!("helpers.queue_full", &format!("sid={sid}: {stop:?} not queued"));
     }
 }
 

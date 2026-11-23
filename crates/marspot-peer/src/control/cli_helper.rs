@@ -78,8 +78,8 @@ fn s<'a>(v: &'a Value, k: &str) -> &'a str {
     v.str_at(k).unwrap_or("-")
 }
 
-fn mins(v: &Value, k: &str) -> String {
-    v.get(k).and_then(Value::i64).map_or_else(|| "-".into(), |s| format!("{}m", (s + 59) / 60))
+fn span(v: &Value, k: &str) -> String {
+    v.get(k).and_then(Value::i64).map_or_else(|| "-".into(), |s| if s < 60 { format!("{s}s") } else { format!("{}m", s / 60) })
 }
 
 pub(super) fn print(op: &Op, v: &Value) {
@@ -112,9 +112,9 @@ pub(super) fn print(op: &Op, v: &Value) {
                     s(h, "agent"),
                     s(h, "state"),
                     s(h, "account"),
-                    mins(h, "running_s"),
-                    mins(h, "budget_left_s"),
-                    mins(h, "quiet_s"),
+                    span(h, "running_s"),
+                    span(h, "budget_left_s"),
+                    span(h, "quiet_s"),
                     s(h, "task")
                 );
             }
@@ -139,6 +139,12 @@ mod helpers_cli_tests {
 
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn helpers_cli_shows_seconds_under_a_minute() {
+        let v = crate::json::parse(r#"{"a":0,"b":59,"c":60,"d":1799,"e":null}"#).unwrap();
+        assert_eq!(["a", "b", "c", "d", "e", "f"].map(|k| span(&v, k)), ["0s", "59s", "1m", "29m", "-", "-"]);
     }
 
     #[test]

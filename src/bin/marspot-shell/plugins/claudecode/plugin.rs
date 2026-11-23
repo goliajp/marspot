@@ -380,5 +380,7 @@ impl Plugin for ClaudecodePlugin {
         }
         self.scan_res_rx = None;
         self.scan_inflight = false;
+        // after the join: the worker's last scan published too
+        with_helpers::turns::publish(Vec::new());
     }
 }
