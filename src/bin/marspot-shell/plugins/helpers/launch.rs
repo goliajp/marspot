@@ -101,6 +101,16 @@ pub(super) fn mode_flags(agent: AgentKind, mode: &str, dir: &Path) -> Result<Vec
     Ok(f)
 }
 
+/// The arguments, for `mode`, that let `agent` under `home` use marspot's
+/// own tools: codex's `-a never` refuses an MCP call that would be asked
+/// about.  Reads the account's config.
+pub(super) fn tool_flags(agent: AgentKind, mode: &str, home: &Path) -> Vec<String> {
+    match (agent, mode) {
+        (AgentKind::Codex, "auto") => crate::plugins::peerbus::codex_config::approved_args(home),
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `mode` asked for claude's bypass of permissions.
 pub(super) fn asks_bypass(mode: &str) -> bool {
     let words: Vec<&str> = mode.split_whitespace().collect();

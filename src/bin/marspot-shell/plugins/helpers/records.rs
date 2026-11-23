@@ -67,6 +67,7 @@ fn started_kv(s: &Started) -> Vec<(&'static str, String)> {
 fn kv(ev: &Event) -> Vec<(&'static str, String)> {
     match ev {
         Event::Started(s) => started_kv(s),
+        Event::ResultDelivered { sha } if !sha.is_empty() => vec![("sha256", sha.clone())],
         Event::AccountChanged(a) => vec![("account", a.clone())],
         Event::NoticeSuppressed { blocked: true } => vec![("stop", "blocked".into())],
         Event::Carried(h) => {
@@ -78,6 +79,7 @@ fn kv(ev: &Event) -> Vec<(&'static str, String)> {
                 ("delivered_ms", h.delivered_ms.map_or(String::new(), |d| d.to_string())),
                 ("now_account", h.account.clone()),
                 ("results", h.results_delivered.to_string()),
+                ("result_sha", h.result_sha.clone()),
                 ("result_new", h.result_new.to_string()),
                 ("noticed", h.noticed.to_string()),
                 ("notices", list(&h.notices)),
@@ -126,6 +128,7 @@ fn carried_of(sid: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<Helper> 
     h.delivered_ms = get("delivered_ms").and_then(|d| d.parse().ok());
     h.account = get("now_account").unwrap_or_else(|| h.account.clone());
     h.results_delivered = get("results").and_then(|r| r.parse().ok()).unwrap_or(0);
+    h.result_sha = get("result_sha").unwrap_or_default();
     h.result_new = flag("result_new");
     h.noticed = flag("noticed");
     h.notices = get("notices").unwrap_or_default().split(',').filter_map(|t| t.parse().ok()).collect();
@@ -149,7 +152,7 @@ pub(super) fn parse(l: &str) -> Option<(u64, u64, Event)> {
         "preparing" => Event::Preparing,
         "task_delivered" => Event::TaskDelivered,
         "result_changed" => Event::ResultChanged,
-        "result_delivered" => Event::ResultDelivered,
+        "result_delivered" => Event::ResultDelivered { sha: get("sha256").unwrap_or_default() },
         "input_seen" => Event::InputSeen,
         "idle_noticed" => Event::IdleNoticed,
         "blocked_noticed" => Event::BlockedNoticed,

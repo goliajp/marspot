@@ -10,9 +10,10 @@
 
 use std::path::Path;
 
-use marspot_peer::control::screen;
+use marspot_peer::control::{screen, sha256};
 
 use super::table::Helper;
+use crate::plugins::claudecode::with_helpers::NOTICE_HEAD;
 
 /// The most of a result file a notice carries.
 pub(super) const MAX_RESULT: usize = 256 * 1024;
@@ -80,6 +81,11 @@ pub(super) fn read_result(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// What tells one result text from another.
+pub(super) fn sha(text: &str) -> String {
+    sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A helper's full name as a notice may say it: its directory's name is
 /// part of it, and may hold any character.
 pub(super) fn shown(name: &str) -> String {
@@ -98,7 +104,7 @@ pub(super) fn text(name: &str, h: &Helper, stop: Stop, result_path: &Path, resul
         Stop::Exited => "exited back to its shell (not installed, not logged in, a bad argument, or a crash); its pane was closed.".to_string(),
         Stop::Budget => format!("ran out of its {}-minute budget; its pane was closed.", h.started.budget_min),
     };
-    let mut out = format!("[marspot helper notice] {who} {what}");
+    let mut out = format!("{NOTICE_HEAD} {who} {what}");
     if h.suppressed > 0 {
         out.push_str(&format!(" It also stopped {} more time(s) that were not told one by one.", h.suppressed));
     }
@@ -108,6 +114,10 @@ pub(super) fn text(name: &str, h: &Helper, stop: Stop, result_path: &Path, resul
     }
     out.push('\n');
     match result {
+        // a last stop takes the file with it, so the text is carried again
+        Some(r) if h.result_sha == sha(r) && !stop.is_last() => {
+            out.push_str(&format!("Its result is unchanged since the last notice; it is in {}.\n", result_path.display()));
+        }
         Some(r) => {
             out.push_str(&screen::wrap_result(name, r));
             out.push('\n');

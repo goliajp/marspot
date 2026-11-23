@@ -63,6 +63,10 @@ mod tests_trust;
 mod tests_passing;
 #[cfg(test)]
 mod tests_smoke;
+#[cfg(test)]
+mod tests_repeat;
+#[cfg(test)]
+mod tests_keys;
 
 use table::{Event, Table};
 

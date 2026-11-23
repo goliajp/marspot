@@ -9,10 +9,14 @@
 //! account while it rests, restarts the agent for nothing: nobody comes
 //! back to wake a helper, and the restart throws away the prompt cache.
 
+pub(in crate::plugins) mod notice_turn;
 pub(in crate::plugins) mod turns;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+
+/// How a notice to a helper's parent begins.
+pub(in crate::plugins) const NOTICE_HEAD: &str = "[marspot helper notice]";
 
 /// The live sessions that are helpers, and those with live helpers.
 /// Rebuilt from the registry on every scan, so it holds no more than

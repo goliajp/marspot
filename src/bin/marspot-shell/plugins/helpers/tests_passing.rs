@@ -13,13 +13,13 @@ use super::table::Event;
 use super::tests::{feed, shared_at, started, temp};
 use super::work::Job;
 
-fn dialog(ask: Ask, cursor: usize, dir: &str) -> Dialog {
+pub(super) fn dialog(ask: Ask, cursor: usize, dir: &str) -> Dialog {
     let dirs = if ask == Ask::Trust { vec![vec![dir.to_string()]] } else { Vec::new() };
     Dialog { ask, options: ["No, exit", "maybe", "Yes, I accept"].map(String::from).to_vec(), cursor, yes: 2, dirs }
 }
 
 /// A helper on disk as `mode` started it, in `dir`.
-fn helper(tag: &str, agent: AgentKind, mode: &str) -> (PathBuf, Arc<Shared>, First) {
+pub(super) fn helper(tag: &str, agent: AgentKind, mode: &str) -> (PathBuf, Arc<Shared>, First) {
     let dir = temp(tag);
     let (s, _rx) = shared_at(&dir);
     let mut st = started(10, "shell", agent);

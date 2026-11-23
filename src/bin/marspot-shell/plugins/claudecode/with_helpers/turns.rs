@@ -31,8 +31,10 @@ const STALE: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::plugins) enum Look {
     /// Over, by claude's own record, at `at`; `began`: its last `user`
-    /// record, when that is in reach (both ms after the epoch).
-    Over { began: Option<u64>, at: u64 },
+    /// record, when that is in reach; `quiet_after`: when the turn before
+    /// ended, if this one did no more than read a notice about a helper
+    /// (`notice_turn`); all ms after the epoch.
+    Over { began: Option<u64>, at: u64, quiet_after: Option<u64> },
     /// Under way, or over in a way left to the pane's state.
     NotOver,
 }
@@ -59,7 +61,7 @@ pub(in crate::plugins) fn publish(found: Vec<(u64, Look)>) {
 /// bound to.  Only a binding claude itself named says which transcript
 /// is the pane's; one guessed from the files there are may be a
 /// neighbour's.
-pub(in crate::plugins::claudecode) fn look_in(bound_by: &str, tail: Option<&str>) -> Option<Look> {
+pub(in crate::plugins) fn look_in(bound_by: &str, tail: Option<&str>) -> Option<Look> {
     matches!(bound_by, "record" | "statusline_hook").then_some(tail).flatten().and_then(look_of)
 }
 
@@ -71,9 +73,10 @@ fn look_of(tail: &str) -> Option<Look> {
         if !is_bookkeeping_record(line) {
             let by_choice = record_type(line) == Some("assistant") && line.contains(r#""stop_reason":"end_turn""#);
             let Some(at) = at.filter(|_| by_choice) else { return Some(Look::NotOver) };
-            let user = lines.find(|l| record_type(l) == Some("user"));
+            let before: Vec<&str> = lines.collect();
+            let user = before.iter().find(|l| record_type(l) == Some("user"));
             let began = user.and_then(|l| top_level_str(l, "timestamp")).and_then(ms_of);
-            return Some(Look::Over { began, at });
+            return Some(Look::Over { began, at, quiet_after: super::notice_turn::quiet_after(line, &before) });
         }
         if at.is_none() && top_level_str(line, "subtype") == Some("turn_duration") {
             if agents_out(line) {
@@ -87,13 +90,13 @@ fn look_of(tail: &str) -> Option<Look> {
 
 /// Whether the turn ended with background agents still at work: they
 /// start the next one when they report.
-fn agents_out(line: &str) -> bool {
+pub(super) fn agents_out(line: &str) -> bool {
     const KEY: &str = r#""pendingBackgroundAgentCount":"#;
     line.split_once(KEY).is_some_and(|(_, n)| !n.trim_start().starts_with('0'))
 }
 
 /// `2026-11-23T15:14:57.635Z` to milliseconds.
-fn ms_of(iso: &str) -> Option<u64> {
+pub(super) fn ms_of(iso: &str) -> Option<u64> {
     let secs = u64::try_from(marspot::cc_usage::parse_iso_utc(iso.to_string())?).ok()?;
     let frac: String = iso.get(19..)?.strip_prefix('.').unwrap_or("").chars().take_while(char::is_ascii_digit).take(3).collect();
     Some(secs * 1000 + format!("{frac:0<3}").parse::<u64>().ok()?)
@@ -123,7 +126,7 @@ mod tests {
     const AT: u64 = 1_795_446_897_635;
 
     const NOT_OVER: Option<Look> = Some(Look::NotOver);
-    const ENDED: Option<Look> = Some(Look::Over { began: Some(AT - 5_635), at: AT });
+    const ENDED: Option<Look> = Some(Look::Over { began: Some(AT - 5_635), at: AT, quiet_after: None });
 
     fn of(lines: &[&str]) -> Option<Look> {
         look_in("record", Some(&lines.join("\n")))
@@ -132,7 +135,7 @@ mod tests {
     #[test]
     fn helpers_a_claude_turn_is_over_at_its_own_record_of_it() {
         assert_eq!(of(&[ASKED, TOOL, SAID, HOOKS, OVER, AFTER, AFTER]), ENDED);
-        assert_eq!(of(&[SAID, OVER]), Some(Look::Over { began: None, at: AT }), "its start is out of reach");
+        assert_eq!(of(&[SAID, OVER]), Some(Look::Over { began: None, at: AT, quiet_after: None }), "its start is out of reach");
         assert_eq!(of(&[AFTER, OVER, AFTER]), None, "so is its end");
         // none of these is the end of a turn
         assert_eq!(of(&[ASKED, TOOL]), NOT_OVER);
@@ -158,7 +161,7 @@ mod tests {
 
     #[test]
     fn helpers_a_scan_replaces_what_the_last_one_found() {
-        let over = |at| Look::Over { began: None, at };
+        let over = |at| Look::Over { began: None, at, quiet_after: None };
         publish(vec![(1, over(10)), (2, over(20))]);
         assert_eq!((look(1), look(2)), (Some(over(10)), Some(over(20))));
         publish(vec![(2, Look::NotOver)]);
