@@ -16,18 +16,6 @@ impl Terminal {
         self.generation
     }
 
-    /// How many `OSC 133 ; D` the terminal has parsed, and what the
-    /// latest one said the exit status was.
-    pub fn command_end(&self) -> (u64, Option<u8>) {
-        self.command_end.latest()
-    }
-
-    /// The status of the `n`-th `OSC 133 ; D` (from 1), while it is one
-    /// of the latest eight.
-    pub fn command_end_status(&self, n: u64) -> Option<Option<u8>> {
-        self.command_end.status(n)
-    }
-
     /// Is the terminal inside the alternate screen (`?1049h`)?
     ///
     /// `saved_main` holds the main grid exactly while alt mode is

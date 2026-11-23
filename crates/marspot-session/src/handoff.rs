@@ -81,6 +81,9 @@ pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> s
         let status = status.map_or("-".to_string(), |s| s.to_string());
         body.push_str(&format!("command_end={pos}:{status}\n"));
     }
+    if let Some(pos) = h.marks.input_start {
+        body.push_str(&format!("input_start={pos}\n"));
+    }
     if h.shadow.parent != 0 {
         body.push_str(&format!("shadow_of={}\nshadow_idle_s={}\n", h.shadow.parent, h.shadow.idle_s));
     }
@@ -93,26 +96,11 @@ pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> s
 pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
     let body = std::fs::read_to_string(path)?;
     let mut fields = std::collections::HashMap::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            fields.insert(k.trim().to_string(), v.trim().to_string());
-        }
+    for (k, v) in body.lines().filter_map(|l| l.trim().split_once('=')) {
+        fields.insert(k.trim().to_string(), v.trim().to_string());
     }
-    let inv = |k: &str| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("manifest bad/missing {k}"),
-        )
-    };
-    let version: u32 = fields
-        .get("version")
-        .ok_or_else(|| inv("version"))?
-        .parse()
-        .map_err(|_| inv("version"))?;
+    let inv = |k: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("manifest bad/missing {k}"));
+    let version: u32 = fields.get("version").ok_or_else(|| inv("version"))?.parse().map_err(|_| inv("version"))?;
     if !(HANDOFF_MANIFEST_MIN_COMPAT..=HANDOFF_MANIFEST_VERSION).contains(&version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -132,6 +120,7 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
             let (pos, status) = s.split_once(':')?;
             Some((pos.parse().ok()?, status.parse().ok()))
         }),
+        input_start: fields.get("input_start").and_then(|s| s.parse().ok()),
     };
     let shadow = crate::shadow::ShadowCfg::new(
         fields.get("shadow_of").and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -230,7 +219,7 @@ mod tests {
             cols: 132,
             rows: 43,
             control_stream_fd: 11,
-            marks: crate::pane_ctl::Marks { pos: 123_456, command_end: Some((120_000, Some(1))) },
+            marks: crate::pane_ctl::Marks { pos: 123_456, command_end: Some((120_000, Some(1))), input_start: Some(119_000) },
             shadow: crate::shadow::ShadowCfg::default(),
         }
     }
@@ -241,7 +230,7 @@ mod tests {
         read_handoff_manifest(&path)
     }
 
-    const V2: &str = "version=2\nmaster_fd=7\nchild_pid=4242\nlisten_fd=9\ncols=132\nrows=43\ncontrol_stream_fd=11\npos=123456\ncommand_end=120000:1\n";
+    const V2: &str = "version=2\nmaster_fd=7\nchild_pid=4242\nlisten_fd=9\ncols=132\nrows=43\ncontrol_stream_fd=11\npos=123456\ncommand_end=120000:1\ninput_start=119000\n";
 
     /// What one image writes, the next reads back field for field, and
     /// the write leaves no temp file for a later boot to trip over.
@@ -263,7 +252,7 @@ mod tests {
         );
         let no_stream = L3Handoff {
             control_stream_fd: -1,
-            marks: crate::pane_ctl::Marks { pos: 9, command_end: Some((5, None)) },
+            marks: crate::pane_ctl::Marks { pos: 9, command_end: Some((5, None)), input_start: None },
             ..sample()
         };
         write_handoff_manifest(&no_stream, &path).unwrap();
@@ -310,7 +299,7 @@ mod tests {
     #[test]
     fn a_manifest_without_marks_reads_as_zero_and_none() {
         let dir = TempDir::new("handoff");
-        let old: String = V2.lines().filter(|l| !l.starts_with("pos=") && !l.starts_with("command_end=")).map(|l| format!("{l}\n")).collect();
+        let old: String = V2.lines().filter(|l| !l.starts_with("pos=") && !l.starts_with("command_end=") && !l.starts_with("input_start=")).map(|l| format!("{l}\n")).collect();
         assert_eq!(read_body(&dir, &old).unwrap(), L3Handoff { marks: Default::default(), ..sample() });
     }
 

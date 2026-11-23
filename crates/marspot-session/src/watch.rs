@@ -32,6 +32,11 @@ const MAX_TEXT: usize = 256;
 const QUIET_MS: std::ops::RangeInclusive<u32> = 100..=600_000;
 /// How long the shell's prompt must be quiet before `prompt` holds.
 const PROMPT_QUIET: Duration = Duration::from_millis(150);
+/// How long it must be quiet instead while the input start mark the
+/// shell set before has not come: a shell that stopped setting it
+/// (`exec bash`) is waited for this long once, not until the caller's
+/// deadline.
+const PROMPT_UNMARKED_QUIET: Duration = Duration::from_secs(1);
 /// When to try again a report the writer refused.
 const RETRY: Duration = Duration::from_millis(10);
 /// Least time between two logs of batches checked short.
@@ -209,13 +214,14 @@ impl Watches {
         self.log_cut(session.id());
     }
 
-    fn look(&mut self, at: usize, session: &mut SessionImpl, track: &Track, scan: Scan) {
+    fn look(&mut self, at: usize, session: &mut SessionImpl, track: &mut Track, scan: Scan) {
         let Some(slot) = self.slots[at].as_mut() else { return };
         let State::Waiting { parked } = &mut slot.state else { return };
         let b = &slot.body;
         let now = Instant::now();
         let after = track.pos() > b.since_pos;
-        let quiet_for = |d: Duration| after && now >= track.last_output() + d;
+        let last_output = track.last_output();
+        let quiet_for = |d: Duration| after && now >= last_output + d;
         let met = match b.kind {
             WatchKind::Change => after.then_some((track.pos(), None, None)),
             WatchKind::CommandEnd => match track.command_end() {
@@ -223,8 +229,11 @@ impl Watches {
                 _ => None,
             },
             WatchKind::Quiet => quiet_for(Duration::from_millis(b.quiet_ms.into())).then_some((track.pos(), None, None)),
-            WatchKind::Prompt if !*parked && quiet_for(PROMPT_QUIET) => {
+            WatchKind::Prompt if !*parked && quiet_for(prompt_quiet(track, b.since_pos)) => {
                 *parked = !shell_in_front(session);
+                if !*parked && !track.prompt_drawn(b.since_pos) {
+                    track.forget_input_start();
+                }
                 (!*parked).then_some((track.pos(), None, None))
             }
             WatchKind::Text if after => {
@@ -286,7 +295,7 @@ impl Watches {
             let State::Waiting { parked } = slot.state else { continue };
             let wait = match slot.body.kind {
                 WatchKind::Quiet => Duration::from_millis(slot.body.quiet_ms.into()),
-                WatchKind::Prompt if !parked => PROMPT_QUIET,
+                WatchKind::Prompt if !parked => prompt_quiet(track, slot.body.since_pos),
                 _ => continue,
             };
             if track.pos() > slot.body.since_pos {
@@ -337,6 +346,12 @@ impl Watches {
             *sent = true;
         }
     }
+}
+
+/// How long the output after `since` must be quiet before a `prompt`
+/// watch holds.
+fn prompt_quiet(track: &Track, since: u64) -> Duration {
+    if track.prompt_drawn(since) { PROMPT_QUIET } else { PROMPT_UNMARKED_QUIET }
 }
 
 /// The line a text watch's text is on, for the rows `scan` reads.

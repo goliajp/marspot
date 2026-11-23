@@ -516,7 +516,7 @@ fn main() {
     let mut resumed_poke: Option<ControlWriter> = None;
     let mut resumed_client_generation: u64 = 0;
     let mut resumed = false;
-    let mut resumed_command_end = None;
+    let mut resumed_marks = pane_ctl::Marks::default();
     let mut session: SessionImpl = {
         let wake_tx = ev_tx.clone();
         let wake = move || {
@@ -545,7 +545,7 @@ fn main() {
         //   * Cold:   plain fresh forkpty + shell + bind UDS listener.
         let local = if let Some(h) = try_resume_handoff() {
             resumed = true;
-            resumed_command_end = h.marks.command_end;
+            resumed_marks = h.marks;
             shadow_cfg = h.shadow;
             // Adopt inherited PTY + listener — see do_l3_execv_swap.
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
@@ -753,15 +753,7 @@ fn main() {
     let SessionImpl::Local(local) = &session;
     let mut awake = awake::Awake::new(session.id(), local.raw_master(), session.child_pid(), ev_tx.clone());
     awake.new_core(poke.as_mut());
-    let mut pane_ctl = pane_ctl::PaneCtl::new(&session, resumed_command_end, ev_tx.clone());
-
-    // RFC-002 §4 (architectural correction over earlier step 6):
-    // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
-    // snapshots — the daemon parses every PTY byte itself, so on
-    // every ATTACH it ships a freshly serialized state direct from
-    // the master copy.  This eliminates the push throttle, the
-    // generation-vector chase, and the "stale snapshot at the
-    // server" failure mode entirely.
+    let mut pane_ctl = pane_ctl::PaneCtl::new(&session, resumed_marks, ev_tx.clone());
 
     // RFC-002 §8 (step 8b — fetch side): on attach, prefetch up to
     // HISTORY_PREFETCH_LINES rows of historic scrollback from L4 so

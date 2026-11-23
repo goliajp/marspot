@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.616"  # helpers get the roomiest account and sit out idle reclaim and rest-time moves
-core    = "0.12.631"  # the terminal counts how many times bracketed paste was turned off
-session = "0.11.416"  # a held paste waits for bracketed paste to turn off, a second at most, and lets position probes past
+shell   = "0.7.617"  # the terminal counts input start marks (OSC 133 ; B)
+core    = "0.12.632"  # the terminal counts input start marks (OSC 133 ; B)
+session = "0.11.417"  # a prompt watch in a shell that marks input starts waits for one after its position, a second at most

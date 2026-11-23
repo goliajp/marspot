@@ -32,11 +32,13 @@ pub(crate) enum Request {
 }
 
 /// What one image hands the next so that positions never go back: the
-/// output position and the latest command end (its position, status).
+/// output position, the latest command end (its position, status) and
+/// the position of the latest input start, if the shell marks them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Marks {
     pub(crate) pos: u64,
     pub(crate) command_end: Option<(u64, Option<u8>)>,
+    pub(crate) input_start: Option<u64>,
 }
 
 pub(crate) struct PaneCtl {
@@ -48,14 +50,14 @@ pub(crate) struct PaneCtl {
 
 impl PaneCtl {
     /// `wake` is the loop's: input leaving the PTY's queue wakes it.
-    pub(crate) fn new(session: &SessionImpl, command_end: Option<(u64, Option<u8>)>, wake: Sender<SessionEvent>) -> Self {
+    pub(crate) fn new(session: &SessionImpl, resumed: Marks, wake: Sender<SessionEvent>) -> Self {
         Self {
             sid: session.id(),
             typing: Typing::new(std::sync::Arc::new(move || {
                 let _ = wake.send(SessionEvent::Wake);
             })),
             watches: Watches::new(session.id()),
-            track: Track::new(session, command_end),
+            track: Track::new(session, resumed),
         }
     }
 
@@ -66,7 +68,7 @@ impl PaneCtl {
     }
 
     pub(crate) fn marks(&self, session: &SessionImpl) -> Marks {
-        Marks { pos: local(session).output_pos(), command_end: self.track.command_end() }
+        Marks { pos: local(session).output_pos(), command_end: self.track.command_end(), input_start: self.track.input_start() }
     }
 
     pub(crate) fn request(&mut self, r: Request, session: &mut SessionImpl, mut poke: Option<&mut ControlWriter>) {
