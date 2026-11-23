@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.599"  # shadow panes are told apart by the registry entry and may be opened, moved and closed
+shell   = "0.7.600"  # a pane's first report survives a sweep that does not list the pane yet
 core    = "0.12.625"  # shadow panes: opened, closed, moved, resized for the shell; back in the shadows at boot; wake nothing
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

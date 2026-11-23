@@ -82,6 +82,10 @@ impl Wakes {
         self.panes.iter().find(|(s, _)| *s == sid).map(|(_, w)| *w)
     }
 
+    fn retain(&mut self, open: impl Fn(u64) -> bool, since: Instant) {
+        self.panes.retain(|(sid, w)| open(*sid) || w.heard_at >= since);
+    }
+
     fn arm(&mut self, sid: u64, on: bool) {
         if let Some((_, w)) = self.panes.iter_mut().find(|(s, _)| *s == sid) {
             w.armed = on;
@@ -131,9 +135,12 @@ pub(crate) fn arm(sid: u64, on: bool) {
     wakes().arm(sid, on);
 }
 
-/// Forget the panes `open` says are gone.
-pub(crate) fn retain(open: impl Fn(u64) -> bool) {
-    wakes().panes.retain(|(sid, _)| open(*sid));
+/// Forget the panes `open` says are gone, except those heard from at
+/// or after `since`: a session reports as soon as its core connects,
+/// which can be before the registry view the sweeps read lists it, and
+/// a report dropped then is the only one a quiet pane ever sends.
+pub(crate) fn retain(open: impl Fn(u64) -> bool, since: Instant) {
+    wakes().retain(open, since);
 }
 
 #[cfg(test)]
@@ -155,6 +162,21 @@ mod tests {
         let got = w.latest(1).unwrap();
         assert_eq!((got.output_at, got.foreground_at, got.fg_pgid), (Some(t1), Some(t0), 50));
         assert!(w.latest(2).is_none());
+    }
+
+    /// A pane heard from before the sweeps list it keeps its report
+    /// through a sweep that does not list it yet; one long gone does not.
+    #[test]
+    fn a_report_from_a_pane_not_yet_listed_survives_a_sweep() {
+        let mut w = Wakes::default();
+        let t0 = Instant::now();
+        w.record(&awake(1, false, true, 50), t0);
+        w.record(&awake(2, false, true, 60), t0 + Duration::from_secs(10));
+        w.retain(|_| false, t0 + Duration::from_secs(5));
+        assert!(w.latest(1).is_none(), "heard before `since` and not listed");
+        assert!(w.latest(2).is_some(), "heard since, not listed yet");
+        w.retain(|sid| sid == 2, t0 + Duration::from_secs(60));
+        assert!(w.latest(2).is_some(), "listed");
     }
 
     /// Only the first output after the supervisor armed a pane asks for
