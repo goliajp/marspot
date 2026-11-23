@@ -46,7 +46,30 @@ pane_control_new_core_old_session() {
   check "the new core told the old shell what it does with pane control" \
     wait_count "$SD" PANE_CONTROL_CAPS 0 15
   check "the old shell still drives the pane after that" frames_keep_coming 1
-  check "typing into the old session is answered old_session by the core" core_answered PaneType old_session
-  check "watching the old session is answered old_session by the core" core_answered PaneWatch old_session
-  check "the old session was sent no pane-control frame" test "$(count "$SD" PANE_CONTROL_FORWARDED)" -eq 0
+  local what=(
+    "typing into the old session is answered old_session by the core"
+    "watching the old session is answered old_session by the core"
+    "the old session was sent no pane-control frame"
+  )
+  # an old session build from after pane control says it reads the
+  # frames, and the core forwards both requests to it instead of
+  # answering them; decided from the old build itself, never from what
+  # the core did, which is what these checks are about
+  if old_session_reads_pane_control; then
+    local w
+    for w in "${what[@]}"; do not_applicable "$w" "the old session build reads pane control"; done
+    return
+  fi
+  check "${what[0]}" core_answered PaneType old_session
+  check "${what[1]}" core_answered PaneWatch old_session
+  check "${what[2]}" test "$(count "$SD" PANE_CONTROL_FORWARDED)" -eq 0
+}
+
+# The old session build sends SessionReadsPaneControl: session 0.11.410
+# is the first that does.
+old_session_reads_pane_control() {
+  local v
+  v=$(MARSPOT_NO_REDIRECT=1 "$OLD/marspot-session" --version 2>/dev/null) || return 1
+  [[ $v == *.*.* ]] || return 1
+  [[ $(printf '%s\n%s\n' 0.11.410 "$v" | sort -V | head -1) == 0.11.410 ]]
 }
