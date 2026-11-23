@@ -15,7 +15,7 @@ use marspot_peer::control::ErrorCode;
 
 use super::super::caller::{CallerKey, Peer};
 use super::super::conn::{Conn, done_reject};
-use super::super::{Hub, MainCmd, Reply, hangup};
+use super::super::{Hub, MainCmd, Reply, hangup, ops_input};
 use super::{hub_at, temp};
 
 fn done(hub: &Hub, req_id: u32, code: DoneCode, text: &str) {
@@ -230,4 +230,53 @@ fn pane_control_resync_skips_waits_not_yet_counting() {
     let bodies = hub.links.watch_bodies();
     assert_eq!(bodies.len(), 1);
     assert_eq!((bodies[0].0, bodies[0].1.since_pos, bodies[0].1.watch_id), (7, 42, id));
+}
+
+#[test]
+fn pane_control_input_after_a_run_waits_for_the_prompt() {
+    let (hub, rx) = hub_at(&temp("prompt"));
+    let regs = AtomicU32::new(0);
+    let core = |hub: &Hub, msg: MsgType, p: &[u8]| {
+        let Some(w) = registration(msg, p) else { return };
+        regs.fetch_add(1, Ordering::AcqRel);
+        assert_eq!((w.watch.kind, w.watch.since_pos), (WatchKind::Prompt, 9), "from just before the end");
+        done(hub, w.req_id, DoneCode::Ok, "");
+        // a prompt slower than the 150 ms of quiet it is held to
+        std::thread::sleep(Duration::from_millis(400));
+        fire(hub, w.sid, w.watch.watch_id, WatchReason::Met, 30);
+    };
+    with_core(&hub, rx, core, || {
+        let mut conn = Conn::new(&hub, Peer::default(), None);
+        hub.links.command_ended(7, Instant::now(), 10);
+        let t = Instant::now();
+        ops_input::prompt_first(&mut conn, CallerKey::Pane(1), 7, ops_input::PROMPT_WITHIN).unwrap();
+        assert!(t.elapsed() >= Duration::from_millis(400), "{:?}", t.elapsed());
+        // the input after that one goes straight in
+        let t = Instant::now();
+        ops_input::prompt_first(&mut conn, CallerKey::Pane(1), 7, ops_input::PROMPT_WITHIN).unwrap();
+        assert!(t.elapsed() < Duration::from_millis(50));
+        // so does input long after a run's end
+        hub.links.command_ended(7, Instant::now().checked_sub(Duration::from_secs(3)).unwrap(), 10);
+        ops_input::prompt_first(&mut conn, CallerKey::Pane(1), 7, ops_input::PROMPT_WITHIN).unwrap();
+    });
+    assert_eq!(regs.load(Ordering::Acquire), 1);
+    assert_eq!(hub.links.sizes(), (0, 0, 0));
+}
+
+#[test]
+fn pane_control_prompt_wait_before_input_is_capped() {
+    let (hub, rx) = hub_at(&temp("promptcap"));
+    let core = |hub: &Hub, msg: MsgType, p: &[u8]| {
+        if let Some(w) = registration(msg, p) {
+            done(hub, w.req_id, DoneCode::Ok, "");
+        }
+    };
+    with_core(&hub, rx, core, || {
+        let mut conn = Conn::new(&hub, Peer::default(), None);
+        hub.links.command_ended(7, Instant::now(), 10);
+        let t = Instant::now();
+        ops_input::prompt_first(&mut conn, CallerKey::Pane(1), 7, Duration::from_millis(300)).unwrap();
+        let took = t.elapsed();
+        assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(2), "{took:?}");
+    });
 }

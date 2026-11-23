@@ -10,6 +10,7 @@ use marspot_peer::control::{ErrorCode, Input, Reject, RunArgs, SendArgs, keys};
 use marspot_peer::json::{Value, obj};
 
 use super::Reply;
+use super::caller::CallerKey;
 use super::conn::{ANSWER_WITHIN, Asked, Conn, done_reject};
 use super::dispatch::{Ctx, audit, target, typing_reject, user_typing};
 use super::ops_read::screen_of;
@@ -37,26 +38,32 @@ fn typed_reject(t: &PaneTyped) -> Option<Reject> {
     Some(r)
 }
 
-/// How long after a run's command end its shell may still be drawing
-/// the prompt and turning paste mode back on.
-pub(super) const PROMPT_SETTLE: Duration = Duration::from_millis(150);
+/// How long after a run's command end the next input to that pane
+/// first waits for the shell's prompt, and how long it waits at most.
+pub(super) const PROMPT_WITHIN: Duration = Duration::from_secs(2);
 
-/// The rest of the moment after a run's command end on `sid`, if any:
-/// input that lands while the shell redraws its prompt is read as lines
-/// typed ahead and comes out mangled.  Only input that follows a run
-/// that closely waits at all.
-pub(super) fn settle_left(conn: &Conn, sid: u64) -> Duration {
-    conn.hub.links.last_end(sid).map_or(Duration::ZERO, |at| PROMPT_SETTLE.saturating_sub(at.elapsed()))
+/// Before input to `sid` that follows a run's command end there within
+/// `within`: wait, at most `within`, until the shell is in front and has
+/// been quiet for 150 ms.  Input that lands while the shell still draws
+/// its prompt (a slow precmd, a git prompt, a loaded machine) is read as
+/// lines typed ahead and comes out mangled.  A prompt already drawn
+/// answers at once, one round trip.  Past `within` the input goes
+/// straight in.
+pub(super) fn prompt_first(conn: &mut Conn, caller: CallerKey, sid: u64, within: Duration) -> Result<(), Reject> {
+    let Some((at, pos)) = conn.hub.links.take_end(sid) else { return Ok(()) };
+    if at.elapsed() >= within {
+        return Ok(());
+    }
+    let body = WatchBody { watch_id: 0, kind: WatchKind::Prompt, since_pos: 0, quiet_ms: 0, text: String::new() };
+    // counted from just before the end: the batch that held the end may
+    // have drawn the whole prompt, and then no output follows it
+    conn.wait(sid, caller, body, Some(pos.saturating_sub(1)), Instant::now() + within).map(|_| ())
 }
 
 /// Send `t` and wait for what became of it, counted as in flight.
 fn type_into(conn: &mut Conn, sid: u64, t: PaneType) -> Result<PaneTyped, Reject> {
     if !conn.hub.links.begin_input(sid, MAX_IN_FLIGHT) {
         return Err(Reject::new(ErrorCode::PaneBusy, "8 inputs are already on their way to this pane"));
-    }
-    let left = settle_left(conn, sid);
-    if !left.is_zero() {
-        std::thread::sleep(left);
     }
     let asked = conn.ask(sid, MsgType::PaneType, |req_id| encode_pane_type(&PaneType { req_id, ..t.clone() }), true, ANSWER_WITHIN);
     conn.hub.links.end_input(sid);
@@ -85,7 +92,7 @@ pub(super) fn send(conn: &mut Conn, ctx: &Ctx, a: &SendArgs) -> Result<Value, Re
     };
     admit_bytes(conn, ctx, sid, bytes.len())?;
     let t = PaneType { req_id: 0, sid, paste, enter, only_at_shell: false, bytes: bytes.clone(), watch: None };
-    let out = type_into(conn, sid, t);
+    let out = prompt_first(conn, ctx.caller, sid, PROMPT_WITHIN).and_then(|()| type_into(conn, sid, t));
     let (echo_off, result) = match &out {
         Ok(t) => (t.echo_off, "written".to_string()),
         Err(r) => (false, r.code.as_str().to_string()),
@@ -119,6 +126,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, a: &RunArgs) -> Result<Value, Reje
     conn.need_caps(CAP_TYPE_AND_WATCH)?;
     let text = run_text(&a.command, runs_fish(ctx, sid));
     admit_bytes(conn, ctx, sid, text.len())?;
+    prompt_first(conn, ctx.caller, sid, PROMPT_WITHIN)?;
     let body = WatchBody { watch_id: 0, kind: WatchKind::CommandEnd, since_pos: 0, quiet_ms: 0, text: String::new() };
     let body = conn.add_watch(sid, ctx.caller, body)?;
     let t = PaneType { req_id: 0, sid, paste: true, enter: true, only_at_shell: true, bytes: text.clone().into_bytes(), watch: Some(body.clone()) };
@@ -131,7 +139,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, a: &RunArgs) -> Result<Value, Reje
     if let Ok((_, Some(f))) = &out
         && f.reason == WatchReason::Met
     {
-        conn.hub.links.command_ended(sid);
+        conn.hub.links.command_ended(sid, Instant::now(), f.pos);
     }
     let (echo_off, result) = match &out {
         Ok((t, Some(f))) => (t.echo_off, f.status.map_or("ended".into(), |s| format!("exit {s}"))),

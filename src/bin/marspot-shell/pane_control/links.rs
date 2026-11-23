@@ -41,9 +41,10 @@ pub(super) struct Links {
     pending: Mutex<HashMap<u32, Sender<Reply>>>,
     watches: Mutex<HashMap<u32, WatchEntry>>,
     inflight: Mutex<HashMap<u64, u8>>,
-    /// When a `pane.run` last saw its command end, per pane: the shell
-    /// is still redrawing its prompt for a moment after.
-    ends: Mutex<HashMap<u64, Instant>>,
+    /// When and at which output position a `pane.run` last saw its
+    /// command end, per pane: the shell is still drawing its prompt for
+    /// a while after.
+    ends: Mutex<HashMap<u64, (Instant, u64)>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -146,14 +147,15 @@ impl Links {
             .collect()
     }
 
-    /// A run on `sid` saw its command end now.
-    pub fn command_ended(&self, sid: u64) {
-        lock(&self.ends).insert(sid, Instant::now());
+    /// A run on `sid` saw its command end at output position `pos`, at `at`.
+    pub fn command_ended(&self, sid: u64, at: Instant, pos: u64) {
+        lock(&self.ends).insert(sid, (at, pos));
     }
 
-    /// When the last run on `sid` saw its command end.
-    pub fn last_end(&self, sid: u64) -> Option<Instant> {
-        lock(&self.ends).get(&sid).copied()
+    /// When and where the last run on `sid` saw its command end, taken:
+    /// only the input that follows it waits for the prompt.
+    pub fn take_end(&self, sid: u64) -> Option<(Instant, u64)> {
+        lock(&self.ends).remove(&sid)
     }
 
     /// Count an input in flight to `sid`, unless `max` already are.

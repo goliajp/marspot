@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The six latencies of the pane control socket, against a running
+"""The latencies of the pane control socket, against a running
 sandbox app (bin/measure-pane-control.sh starts it).
 
     _pane_control_probe.py SOCKET RAW_PANE SHELL_PANE OUT.json
@@ -15,9 +15,11 @@ kept open, paced under the socket's per-caller rate (20 a second).
   fired         a `change` wait, from the answer to the send that makes
                 the pane print to the answer to the wait
   run_true      pane.run true, to the answer carrying the exit status;
-                paced past the 150 ms a run's shell gets to redraw its
-                prompt, which only input that follows a run that closely
-                waits out
+                runs 200 ms apart, so each one's prompt wait (input within
+                2 s of a run's end first waits for the shell to be quiet
+                for 150 ms) finds the prompt already drawn
+  run_after_run the same, each run sent as soon as the one before
+                answered: includes waiting for the shell's prompt
   read          pane.read without history (asks the session nothing)
   open_shadow   pane.open of a shadow pane to its shell running a
                 command; null when the core does not open shadow panes
@@ -126,6 +128,8 @@ def main():
     rows["fired"] = fired(path, sh, ROUNDS // 2)
     loads.append(load1())
     rows["run_true"] = timed(c, ROUNDS // 2, "pane.run", pace=0.2, target=sh, command="true", timeout_s=10)
+    loads.append(load1())
+    rows["run_after_run"] = timed(c, ROUNDS // 2, "pane.run", pace=0.0, target=sh, command="true", timeout_s=10)
     loads.append(load1())
     rows["read"] = timed(c, ROUNDS, "pane.read", target=sh)
     loads.append(load1())

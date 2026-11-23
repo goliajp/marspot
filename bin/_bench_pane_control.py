@@ -11,7 +11,7 @@ import os
 
 import _bench_record
 
-NAMES = ("send", "send_enter", "fired", "run_true", "read", "open_shadow")
+NAMES = ("send", "send_enter", "fired", "run_true", "run_after_run", "read", "open_shadow")
 
 
 def add_rows(baseline, cur_dir, mode, row):

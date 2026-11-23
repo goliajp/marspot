@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.594"  # pane control hang-ups: per-watch token, half-closed callers not treated as gone
+shell   = "0.7.595"  # input within 2 s of a run's end waits for the prompt watch, not a fixed 150 ms
 core    = "0.12.622"  # marspot-term published frames carry their scroll count
 session = "0.11.411"  # a restart answers input already written as written; mode changes count as cursor moves for text watches
