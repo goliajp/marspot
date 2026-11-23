@@ -746,7 +746,7 @@ mod tests {
                 cells.push(cell);
             }
         }
-        marspot_term::grid_shm::Frame { cols, rows, cursor_col, cursor_row, view_offset: 0, cells, clusters }
+        marspot_term::grid_shm::Frame { cols, rows, cursor_col, cursor_row, view_offset: 0, scroll_push_count: 0, cells, clusters }
     }
 
     #[test]

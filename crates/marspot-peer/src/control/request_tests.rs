@@ -40,6 +40,11 @@ fn pane_control_send_over_32k_is_limit_bytes() {
     let big = "x".repeat(32 * 1024 + 1);
     let line = format!(r#"{{"op":"pane.send","args":{{"target":"a","text":"{big}"}}}}"#);
     assert_eq!(code_of(&line), ErrorCode::LimitBytes);
+    let run = format!(r#"{{"op":"pane.run","args":{{"target":"a","command":"{big}"}}}}"#);
+    assert_eq!(code_of(&run), ErrorCode::LimitBytes);
+    let fits = "x".repeat(32 * 1024);
+    let run = format!(r#"{{"op":"pane.run","args":{{"target":"a","command":"{fits}"}}}}"#);
+    assert!(parse(&run).is_ok());
 }
 
 #[test]

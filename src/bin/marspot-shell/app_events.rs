@@ -130,9 +130,7 @@ impl MarspotApp for ShellApp {
             self.open_new_window();
             return;
         }
-        if let Some(h) = pane_control::hub() {
-            h.key_pressed();
-        }
+        pane_control::key_pressed();
         let wire = event_to_wire(&event, mods);
         let w = Self::event_window(ctx);
         self.send(MsgType::KeyEvent, encode_key_event(&wire, w));
@@ -141,24 +139,12 @@ impl MarspotApp for ShellApp {
 
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {
         let w = Self::event_window(ctx);
-        self.send(
-            MsgType::MouseDown,
-            encode_mouse(x, y, struct_to_mods_byte(mods), w),
-        );
+        self.send(MsgType::MouseDown, encode_mouse(x, y, struct_to_mods_byte(mods), w));
     }
 
-    fn mouse_right_down(
-        &mut self,
-        ctx: &MarspotAppCtx,
-        x: f64,
-        y: f64,
-        mods: Modifiers,
-    ) {
+    fn mouse_right_down(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {
         let w = Self::event_window(ctx);
-        self.send(
-            MsgType::MouseRightDown,
-            encode_mouse(x, y, struct_to_mods_byte(mods), w),
-        );
+        self.send(MsgType::MouseRightDown, encode_mouse(x, y, struct_to_mods_byte(mods), w));
     }
 
     fn mouse_drag(

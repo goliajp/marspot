@@ -164,10 +164,43 @@ pub(super) fn utc_text(ms: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{:03}Z", rem / 3600, rem / 60 % 60, rem % 60, ms % 1000)
 }
 
-/// The last `n` lines of the log and the file before it.
+/// The last `n` lines of the log, reaching into the file before it
+/// when the log has fewer.
 pub(super) fn tail(path: &Path, n: usize) -> Vec<String> {
-    let older = std::fs::read_to_string(format!("{}.1", path.display())).unwrap_or_default();
-    let cur = std::fs::read_to_string(path).unwrap_or_default();
-    let all: Vec<String> = older.lines().chain(cur.lines()).map(String::from).collect();
-    all[all.len().saturating_sub(n)..].to_vec()
+    let mut out = last_lines(path, n);
+    if out.len() < n {
+        let mut older = last_lines(&PathBuf::from(format!("{}.1", path.display())), n - out.len());
+        older.append(&mut out);
+        out = older;
+    }
+    out
+}
+
+/// The last `n` lines of one file, read backwards from its end a block
+/// at a time until they are all in.
+pub(super) fn last_lines(path: &Path, n: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const BLOCK: u64 = 16 * 1024;
+    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
+    let Ok(len) = f.seek(SeekFrom::End(0)) else { return Vec::new() };
+    let (mut buf, mut at, mut newlines) = (Vec::new(), len, 0usize);
+    // n whole lines need n + 1 newlines unless the file's start is in
+    while at > 0 && newlines <= n {
+        let step = BLOCK.min(at);
+        at -= step;
+        let mut block = vec![0; step as usize];
+        if f.seek(SeekFrom::Start(at)).is_err() || f.read_exact(&mut block).is_err() {
+            return Vec::new();
+        }
+        newlines += block.iter().filter(|b| **b == b'\n').count();
+        block.append(&mut buf);
+        buf = block;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if at > 0 && !lines.is_empty() {
+        // cut mid-line
+        lines.remove(0);
+    }
+    lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect()
 }

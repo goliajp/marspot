@@ -14,8 +14,11 @@ kept open, paced under the socket's per-caller rate (20 a second).
                 the session leaves for the echo)
   fired         a `change` wait, from the answer to the send that makes
                 the pane print to the answer to the wait
-  run_true      pane.run true, to the answer carrying the exit status
-  read          pane.read without history
+  run_true      pane.run true, to the answer carrying the exit status;
+                paced past the 150 ms a run's shell gets to redraw its
+                prompt, which only input that follows a run that closely
+                waits out
+  read          pane.read without history (asks the session nothing)
   open_shadow   pane.open of a shadow pane to its shell running a
                 command; null when the core does not open shadow panes
 """
@@ -55,13 +58,13 @@ def need(ans, what):
     return ans["result"]
 
 
-def timed(conn, n, op, **args):
+def timed(conn, n, op, pace=PACE, **args):
     xs = []
     for _ in range(n):
         ms, ans = conn.ask(op, **args)
         need(ans, op)
         xs.append(ms)
-        time.sleep(PACE)
+        time.sleep(pace)
     return xs
 
 
@@ -70,10 +73,8 @@ def fired(path, pane, n):
     waiter, sender, xs = Conn(path), Conn(path), []
     for i in range(n):
         box = {}
-        pos = need(sender.ask("pane.read", target=pane)[1], "read")["pos"]
-
         def wait():
-            _, ans = waiter.ask("pane.read", target=pane, wait={"change": True}, since=pos, timeout_s=10)
+            _, ans = waiter.ask("pane.read", target=pane, wait={"change": True}, timeout_s=10)
             box["at"] = time.perf_counter()
             box["ans"] = ans
 
@@ -124,7 +125,7 @@ def main():
     loads.append(load1())
     rows["fired"] = fired(path, sh, ROUNDS // 2)
     loads.append(load1())
-    rows["run_true"] = timed(c, ROUNDS // 2, "pane.run", target=sh, command="true", timeout_s=10)
+    rows["run_true"] = timed(c, ROUNDS // 2, "pane.run", pace=0.2, target=sh, command="true", timeout_s=10)
     loads.append(load1())
     rows["read"] = timed(c, ROUNDS, "pane.read", target=sh)
     loads.append(load1())

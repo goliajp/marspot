@@ -23,12 +23,23 @@ const SPAWN_WITHIN: Duration = Duration::from_secs(10);
 /// A shadow pane nobody types into or reads output from ends after this.
 const SHADOW_IDLE_S: u32 = 6 * 3600;
 
+/// How a request may be asked again when nothing came back.
+#[derive(Clone, Copy, PartialEq)]
+enum Again {
+    No,
+    Yes,
+    /// Yes, and a session gone by the second asking is what the first did.
+    Gone,
+}
+
 /// Ask, and for the requests that can be repeated, ask once more when
 /// nothing came back.
-fn ask_done(conn: &mut Conn, sid: u64, msg: MsgType, build: impl Fn(u32) -> std::io::Result<Vec<u8>>, repeatable: bool) -> Result<(), Reject> {
+fn ask_done(conn: &mut Conn, sid: u64, msg: MsgType, build: impl Fn(u32) -> std::io::Result<Vec<u8>>, again: Again) -> Result<(), Reject> {
+    let repeatable = again != Again::No;
     for attempt in 0..2 {
         match conn.ask(sid, msg, &build, false, ANSWER_WITHIN) {
             Ok(Reply::Done(d)) if d.code == DoneCode::Ok => return Ok(()),
+            Ok(Reply::Done(d)) if attempt == 1 && again == Again::Gone && d.code == DoneCode::NoSuchSession => return Ok(()),
             Ok(Reply::Done(d)) => return Err(done_reject(d.code, &d.text)),
             Ok(_) => return Err(Reject::new(ErrorCode::Internal, "an answer of the wrong kind")),
             Err(Asked::Refused(r)) => return Err(r),
@@ -73,6 +84,9 @@ pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Re
         }
         (None, CallerKey::External) => 0,
     };
+    if a.shadow {
+        panes::shadow_ops()?;
+    }
     conn.need_caps(CAP_SHADOWS)?;
     let now = conn.hub.now_ms();
     {
@@ -84,7 +98,7 @@ pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Re
         let root = if parent != 0 { root_and_depth(ctx, parent).0 } else { 0 };
         limits.admit_spawn(&ctx.cfg, root, now)?;
     }
-    let cwd = a.cwd.clone().or_else(|| names::live_panes(&ctx.obs).into_iter().find(|p| p.0 == parent).map(|p| p.1)).unwrap_or_default();
+    let cwd = a.cwd.clone().or_else(|| names::cwd_of(parent, &ctx.obs)).unwrap_or_default();
     let spawn = PaneSpawn {
         req_id: 0,
         shadow: a.shadow,
@@ -129,20 +143,24 @@ pub(super) fn close(conn: &mut Conn, ctx: &Ctx, t: &str) -> Result<Value, Reject
     let sid = target(ctx, t)?;
     conn.need_caps(CAP_SHADOWS)?;
     let shadow = ctx.obs.session(sid).is_some_and(|s| panes::shadow_of(&s.entry) != 0);
+    if shadow {
+        panes::shadow_ops()?;
+    }
     let mine = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened_by(sid) == Some(ctx.caller);
     let mode = if shadow && mine { RetireMode::Delete } else { RetireMode::Recycle };
-    let out = ask_done(conn, sid, MsgType::PaneRetire, |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode })), true);
+    let out = ask_done(conn, sid, MsgType::PaneRetire, |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode })), Again::Gone);
     audit(conn, ctx, "pane.close", sid, None, false, out.as_ref().map_or_else(|r| r.code.as_str(), |_| "closed"));
     out.map(|_| obj([("id", (sid as i64).into()), ("recycled", (mode == RetireMode::Recycle).into())]))
 }
 
 pub(super) fn resize(conn: &mut Conn, ctx: &Ctx, t: &str, cols: u16, rows: u16) -> Result<Value, Reject> {
     let sid = target(ctx, t)?;
+    panes::shadow_ops()?;
     conn.need_caps(CAP_SHADOWS)?;
     if !ctx.obs.session(sid).is_some_and(|s| panes::shadow_of(&s.entry) != 0) {
         return Err(Reject::new(ErrorCode::NotResizable, "a pane in a window takes its size from the window's layout"));
     }
-    let out = ask_done(conn, sid, MsgType::PaneSize, |req_id| Ok(encode_pane_size(&PaneSize { req_id, sid, cols, rows })), true);
+    let out = ask_done(conn, sid, MsgType::PaneSize, |req_id| Ok(encode_pane_size(&PaneSize { req_id, sid, cols, rows })), Again::Yes);
     audit(conn, ctx, "pane.resize", sid, None, false, out.as_ref().map_or_else(|r| r.code.as_str(), |_| "resized"));
     out.map(|_| obj([("id", (sid as i64).into())]))
 }
@@ -155,9 +173,11 @@ pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Val
         Where::Peek => PlaceWhere::Peek,
         Where::Unpeek => PlaceWhere::Unpeek,
     };
+    // every place is to or from being a shadow pane, or peeking at one
+    panes::shadow_ops()?;
     conn.need_caps(if matches!(w, Where::Peek | Where::Unpeek) { CAP_PEEK } else { CAP_SHADOWS })?;
     let host_sid = ctx.obs.session(sid).map_or(0, |s| panes::shadow_of(&s.entry));
-    let out = ask_done(conn, sid, MsgType::PanePlace, |req_id| Ok(encode_pane_place(&PanePlace { req_id, sid, to, host_sid })), false);
+    let out = ask_done(conn, sid, MsgType::PanePlace, |req_id| Ok(encode_pane_place(&PanePlace { req_id, sid, to, host_sid })), Again::No);
     audit(conn, ctx, "pane.place", sid, None, false, out.as_ref().map_or_else(|r| r.code.as_str(), |_| w.as_str()));
     out.map(|_| obj([("id", (sid as i64).into()), ("where", w.as_str().into())]))
 }

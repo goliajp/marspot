@@ -78,6 +78,9 @@ pub struct Frame {
     /// How far the viewport is scrolled back. Non-zero means the cells
     /// are history the person is looking at, not the live screen.
     pub view_offset: u16,
+    /// Rows the grid has scrolled up since it started: the screen's top
+    /// row is this, counted absolutely.
+    pub scroll_push_count: u64,
     /// `cols * rows`, row-major. A cluster cell holds an index into
     /// the writer's pool; its text is in `clusters`.
     pub cells: Vec<Cell>,
@@ -128,8 +131,8 @@ unsafe fn read_frame(
             std::hint::spin_loop();
             continue;
         }
-        let (cursor_col, cursor_row, view_offset) = unsafe {
-            ((*h).cursor_col as u16, (*h).cursor_row as u16, (*h).view_offset as u16)
+        let (cursor_col, cursor_row, view_offset, scroll_push_count) = unsafe {
+            ((*h).cursor_col as u16, (*h).cursor_row as u16, (*h).view_offset as u16, (*h).scroll_push_count)
         };
         // either layout, frame by frame: see `cells`
         let cell_size = unsafe { std::ptr::read_volatile(&(*h).cell_size) };
@@ -145,7 +148,7 @@ unsafe fn read_frame(
             buf.settle();
             let cells = if buf.is_packed { buf.expanded() } else { std::mem::take(&mut buf.wide) };
             let clusters = table.iter().map(|(c, r, t)| (c, r, t.to_string())).collect();
-            return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, cells, clusters }));
+            return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, scroll_push_count, cells, clusters }));
         }
     }
     Ok(None)
@@ -188,6 +191,7 @@ mod tests {
         let f = peek_frame(&regions).unwrap().unwrap();
         regions.delete();
         assert_eq!((f.cols, f.rows, f.cursor_col, f.cursor_row, f.view_offset), (12, 3, 2, 1, 0));
+        assert_eq!(f.scroll_push_count, grid.scroll_push_count());
         let row = |r: usize| -> String {
             f.cells[r * 12..(r + 1) * 12].iter().map(|c| c.ch).filter(|&c| c != '\0').collect()
         };

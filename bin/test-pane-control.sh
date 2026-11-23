@@ -224,15 +224,19 @@ else
 fi
 
 echo "════ 7. shadow panes ════"
-if (( (CAPS & 2) == 0 )); then
-  before=$(pc list --json | ids_json)
-  check "pane open answers old_session" bash -c "$(printf '%q' "$PEER") pane open --parent $P1 2>&1 | grep -q old_session"
-  check "pane close answers old_session" bash -c "$(printf '%q' "$PEER") pane close $P2 2>&1 | grep -q old_session"
+# the shell refuses shadow panes until it can tell them apart, whatever the core announces
+before=$(pc list --json | ids_json)
+OPENED=$(pc open --parent "$P1" --json 2>&1)
+if (( (CAPS & 2) == 0 )) || [[ $OPENED == *old_session* ]]; then
+  check "pane open answers old_session" grep -q old_session <<<"$OPENED"
+  # a window pane is closed for real once the core does bit 1
+  (( (CAPS & 2) == 0 )) && check "pane close answers old_session" bash -c "$(printf '%q' "$PEER") pane close $P2 2>&1 | grep -q old_session"
   check "pane resize answers old_session" bash -c "$(printf '%q' "$PEER") pane resize $P2 100x30 2>&1 | grep -q old_session"
+  check "pane place answers old_session" bash -c "$(printf '%q' "$PEER") pane place $P2 shadow 2>&1 | grep -q old_session"
   check "nothing was opened or closed" test "$(pc list --json | ids_json)" = "$before"
-  not_applicable "shadow pane open → run → read → close" "the core does not announce PaneControlCaps bit 1 yet"
+  not_applicable "shadow pane open → run → read → close" "the core or the shell does not do shadow panes yet"
 else
-  S=$(pc open --parent "$P1" --json | field id)
+  S=$(field id <<<"$OPENED")
   check "pane open made a shadow pane" bash -c "[[ -n '$S' ]] && $(printf '%q' "$PEER") pane list --json | python3 -c 'import json,sys; ps=json.load(sys.stdin)[\"result\"][\"panes\"]; sys.exit(0 if any(str(p[\"id\"])==\"$S\" and p[\"shadow\"] and p[\"parent\"]==$P1 for p in ps) else 1)'"
   at_shell "$S" || check "the shadow pane's shell answered" false
   check "shadow: run → 4" runs "$S" 4 '(exit 4)'

@@ -58,11 +58,15 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
     if !ctx.cfg.enabled {
         return Err(Reject::new(ErrorCode::Disabled, "pane control is switched off (control_enabled in settings.toml)"));
     }
-    if let Some(sid) = ctx.caller.sid()
-        && let Some(cwd) = names::live_panes(&ctx.obs).into_iter().find(|p| p.0 == sid).map(|p| p.1)
-        && conn.hub.deny.lock().unwrap_or_else(|p| p.into_inner()).denies(&cwd)
-    {
-        return Err(Reject::new(ErrorCode::Disabled, format!("panes in {cwd} may not control panes (control-deny.tsv)")));
+    // the claimed thread's pane and the one the process descends from:
+    // naming another pane's thread must not get a denied pane through
+    let panes = [ctx.caller.sid(), conn.peer.pane];
+    for sid in panes.iter().enumerate().filter_map(|(i, p)| p.filter(|s| !panes[..i].contains(&Some(*s)))) {
+        if let Some(cwd) = names::cwd_of(sid, &ctx.obs)
+            && conn.hub.deny.lock().unwrap_or_else(|p| p.into_inner()).denies(&cwd)
+        {
+            return Err(Reject::new(ErrorCode::Disabled, format!("panes in {cwd} may not control panes (control-deny.tsv)")));
+        }
     }
     let kind = match op {
         Op::Send(_) | Op::Run(_) => Kind::Input,
@@ -132,7 +136,7 @@ pub(super) fn target(ctx: &Ctx, t: &str) -> Result<u64, Reject> {
     Ok(sid)
 }
 
-fn alive(sid: u64) -> bool {
+pub(super) fn alive(sid: u64) -> bool {
     marspot_term::session_registry::read_session_entry(sid).is_ok_and(|e| e.pid > 1 && marspot::pidtree::pid_is_alive(e.pid))
 }
 

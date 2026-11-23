@@ -3,8 +3,10 @@
 //! long as the caller asked, and must not hold anyone else up.
 
 use std::io::{BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use marspot_peer::control::{ErrorCode, LineRead, Reject, Response, read_line};
 
@@ -31,16 +33,32 @@ pub(super) fn serve(hub: &'static Hub) -> std::io::Result<()> {
     Ok(())
 }
 
-fn accept_loop(hub: &'static Hub, listener: UnixListener) {
+/// How long the listener rests after running out of descriptors: the
+/// pending connection stays queued, and accepting again at once would
+/// fail the same way.
+const OUT_OF_FDS_PAUSE: Duration = Duration::from_millis(100);
+
+/// What to do after `accept` failed with `e`: carry on, after a pause
+/// when the process or the system is out of descriptors.
+pub(super) fn after_accept_error(e: &std::io::Error) -> Option<Duration> {
+    matches!(e.raw_os_error(), Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)).then_some(OUT_OF_FDS_PAUSE)
+}
+
+pub(super) fn accept_loop(hub: &'static Hub, listener: UnixListener) {
     for conn in listener.incoming() {
         let mut stream = match conn {
             Ok(s) => s,
             Err(e) => {
                 marspot::lx_warn!("shell.control.accept_failed", &format!("{e}"));
-                return;
+                if let Some(pause) = after_accept_error(&e) {
+                    std::thread::sleep(pause);
+                }
+                continue;
             }
         };
-        if !admit(hub) {
+        if admit(hub) {
+            hub.connected();
+        } else {
             let r = Response::Err(Reject::new(ErrorCode::TooManyConnections, "too many connections are open"));
             let _ = stream.write_all(format!("{}\n", r.to_json()).as_bytes());
             continue;
@@ -66,7 +84,7 @@ fn serve_conn(hub: &'static Hub, stream: UnixStream) {
     let Ok(read_half) = stream.try_clone() else { return };
     let mut reader = BufReader::new(read_half);
     let mut writer = stream;
-    let mut conn = Conn::new(hub, peer);
+    let mut conn = Conn::new(hub, peer, Some(writer.as_raw_fd()));
     loop {
         let line = match read_line(&mut reader) {
             Ok(LineRead::Line(l)) => l,

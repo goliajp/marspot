@@ -1,7 +1,9 @@
 //! `pane.list`, `pane.read` and `pane.audit`: answered on the
 //! connection's thread.  A read with a wait sleeps on the session's
 //! report first; the screen itself is read from what the session
-//! publishes, never asked of it.
+//! publishes, never asked of it.  A plain read asks the session nothing
+//! at all, so it answers no `pos`: a caller that needs one to wait
+//! from gets it from its send, run or wait.
 
 use std::time::{Duration, Instant};
 
@@ -19,7 +21,7 @@ pub(super) const MAX_TEXT: usize = 1024 * 1024;
 const POS_WITHIN: Duration = Duration::from_millis(250);
 
 pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
-    let views = conn.hub.pane_views();
+    let views = conn.hub.fresh_pane_views(Duration::from_millis(250));
     let cells = panes::cells();
     let open = conn.hub.open_windows();
     let table = marspot_peer::panes::live(&marspot_peer::peers::live_entries());
@@ -66,44 +68,51 @@ pub(super) fn watch_body(w: &Wait) -> WatchBody {
     WatchBody { watch_id: 0, kind, since_pos: 0, quiet_ms, text }
 }
 
+/// The `reason` a report is answered with.
+pub(super) fn reason_word(r: WatchReason, waited_for_exit: bool) -> &'static str {
+    match r {
+        WatchReason::SessionEnded if !waited_for_exit => "session_ended",
+        WatchReason::Restarting => "restarting",
+        _ => "met",
+    }
+}
+
 pub(super) fn read(conn: &mut Conn, ctx: &Ctx, a: &ReadArgs) -> Result<Value, Reject> {
     let sid = target(ctx, &a.target)?;
-    let mut extra: Vec<(&str, Value)> = Vec::new();
-    let pos = match &a.wait {
-        None => conn.probe_pos(sid, POS_WITHIN),
-        Some(w) => {
-            let deadline = Instant::now() + Duration::from_secs(a.timeout_s.into());
-            match conn.wait(sid, ctx.caller, watch_body(w), a.since, deadline)? {
-                Some(f) => {
-                    let ended = f.reason == WatchReason::SessionEnded;
-                    let reason = if ended && *w != Wait::Exit { "session_ended" } else { "met" };
-                    extra.push(("reason", reason.into()));
-                    if let Some(st) = f.status {
-                        extra.push(("exit_status", i64::from(st).into()));
-                    }
-                    if let (Wait::Text(t), Some(_)) = (w, f.line) {
-                        extra.push(("needle", t.as_str().into()));
-                    }
-                    Some(f.pos)
-                }
-                None => {
-                    extra.push(("reason", "timeout".into()));
-                    conn.probe_pos(sid, POS_WITHIN)
-                }
-            }
-        }
+    let Some(w) = &a.wait else { return Ok(screen_of(sid, a.history_lines, None, &ctx.obs)) };
+    let deadline = Instant::now() + Duration::from_secs(a.timeout_s.into());
+    let Some(f) = conn.wait(sid, ctx.caller, watch_body(w), a.since, deadline)? else {
+        let mut v = screen_of(sid, a.history_lines, conn.probe_pos(sid, POS_WITHIN), &ctx.obs);
+        v.set("reason", "timeout".into());
+        return Ok(v);
     };
-    let mut v = screen_of(sid, a.history_lines, pos, &ctx.obs);
-    if let Some((_, Value::Str(needle))) = extra.iter().find(|(k, _)| *k == "needle") {
-        let text = v.str_at("text").unwrap_or("").to_string();
-        if let Some(line) = text.lines().rev().find(|l| l.contains(needle.as_str())) {
-            v.set("matched_line", line.into());
-        }
+    let mut v = screen_of(sid, a.history_lines, Some(f.pos), &ctx.obs);
+    v.set("reason", reason_word(f.reason, *w == Wait::Exit).into());
+    if let Some(st) = f.status {
+        v.set("exit_status", i64::from(st).into());
     }
-    for (k, val) in extra.into_iter().filter(|(k, _)| *k != "needle") {
-        v.set(k, val);
+    if let (Wait::Text(needle), Some(line)) = (w, f.line) {
+        matched_line(&mut v, sid, line, needle);
     }
     Ok(v)
+}
+
+/// The text of the line a text wait matched, read by its row; when the
+/// record no longer holds that row as the session numbered it, the
+/// newest screen line holding the text, and `matched_line_from` says
+/// which of the two it is.
+fn matched_line(v: &mut Value, sid: u64, line: u64, needle: &str) {
+    let squeezed: String = needle.split_whitespace().collect();
+    let by_row = super::matched::line_at(sid, line)
+        .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed));
+    let (text, from) = match by_row {
+        Some(l) => (Some(l), "row"),
+        None => (v.str_at("text").unwrap_or("").lines().rev().find(|l| l.contains(needle)).map(String::from), "screen"),
+    };
+    if let Some(t) = text {
+        v.set("matched_line", screen::filter(&t).into());
+        v.set("matched_line_from", from.into());
+    }
 }
 
 /// What pane `sid` shows, with its size and cursor.

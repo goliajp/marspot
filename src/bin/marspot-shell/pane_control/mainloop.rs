@@ -11,6 +11,8 @@ use marspot_peer::control::{ErrorCode, Reject};
 use super::{MainCmd, PaneView, Reply, hub};
 use crate::ShellApp;
 
+type Snapshot = HashMap<u64, (marspot::pane_state::PaneStatus, std::time::Duration, bool)>;
+
 pub(crate) struct MainSide {
     rx: Receiver<MainCmd>,
 }
@@ -44,6 +46,10 @@ impl ShellApp {
                     }
                 }
                 MainCmd::Resync => self.resync_watches(),
+                MainCmd::PublishViews => {
+                    let snapshot = self.pane_status.snapshot(std::time::Instant::now());
+                    self.publish_views_now(&snapshot);
+                }
             }
         }
     }
@@ -81,8 +87,15 @@ impl ShellApp {
         marspot::lx_event!("PANE_CONTROL_RESYNC", "cleared the sessions' waits and registered ours again", waits = n);
     }
 
-    /// Publish each pane's state for the connection threads.
-    pub(crate) fn publish_pane_views(&self, snapshot: &HashMap<u64, (marspot::pane_state::PaneStatus, std::time::Duration, bool)>) {
+    /// Publish each pane's state for the connection threads, while any
+    /// is connected.
+    pub(crate) fn publish_pane_views(&self, snapshot: &Snapshot) {
+        if hub().is_some_and(|h| h.wants_views()) {
+            self.publish_views_now(snapshot);
+        }
+    }
+
+    fn publish_views_now(&self, snapshot: &Snapshot) {
         let Some(h) = hub() else { return };
         let views = snapshot
             .iter()
@@ -91,8 +104,8 @@ impl ShellApp {
                 (*sid, PaneView { state: status.label(), busy: self.pty_ops.running(*sid), dormant })
             })
             .collect();
-        h.publish_panes(views);
         h.publish_open_windows(self.windows.iter().map(|w| w.frame_index).collect());
+        h.publish_panes(views);
     }
 
     pub(crate) fn forget_closed_for_control(open: &dyn Fn(u64) -> bool) {

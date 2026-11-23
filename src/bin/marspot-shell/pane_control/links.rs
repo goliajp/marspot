@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use marspot::shell_proto::{
     MsgType, WatchBody, decode_pane_done, decode_pane_spawned, decode_pane_typed, decode_pane_watch_fired,
@@ -27,6 +28,10 @@ pub(super) struct WatchEntry {
     pub sid: u64,
     pub caller: CallerKey,
     pub body: WatchBody,
+    /// The position it counts from, once known: a watch counting "from
+    /// now" learns it from the session's answer, and until then only its
+    /// own connection may register it.
+    pub since: Option<u64>,
     pub tx: Sender<Reply>,
 }
 
@@ -36,6 +41,9 @@ pub(super) struct Links {
     pending: Mutex<HashMap<u32, Sender<Reply>>>,
     watches: Mutex<HashMap<u32, WatchEntry>>,
     inflight: Mutex<HashMap<u64, u8>>,
+    /// When a `pane.run` last saw its command end, per pane: the shell
+    /// is still redrawing its prompt for a moment after.
+    ends: Mutex<HashMap<u64, Instant>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -58,6 +66,7 @@ impl Links {
             pending: Mutex::new(HashMap::new()),
             watches: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
+            ends: Mutex::new(HashMap::new()),
         }
     }
 
@@ -107,24 +116,44 @@ impl Links {
         }
         body.watch_id = self.watch_id();
         let id = body.watch_id;
-        w.insert(id, WatchEntry { sid, caller, body, tx });
+        w.insert(id, WatchEntry { sid, caller, body, since: None, tx });
         Ok(id)
     }
 
-    /// The position watch `id` counts from, once the session said.
+    /// The position watch `id` counts from, once known.
     pub fn set_since(&self, id: u32, pos: u64) {
         if let Some(e) = lock(&self.watches).get_mut(&id) {
             e.body.since_pos = pos;
+            e.since = Some(pos);
         }
+    }
+
+    pub fn has_watch(&self, id: u32) -> bool {
+        lock(&self.watches).contains_key(&id)
     }
 
     pub fn drop_watch(&self, id: u32) {
         lock(&self.watches).remove(&id);
     }
 
-    /// Every watch, for registering again with a new core.
+    /// Every watch whose start is known, for registering again with a
+    /// new core.  One still counting "from now" is its connection's to
+    /// register: sent from 0 it would fire on what was there before.
     pub fn watch_bodies(&self) -> Vec<(u64, WatchBody)> {
-        lock(&self.watches).values().map(|e| (e.sid, e.body.clone())).collect()
+        lock(&self.watches)
+            .values()
+            .filter_map(|e| e.since.map(|s| (e.sid, WatchBody { since_pos: s, ..e.body.clone() })))
+            .collect()
+    }
+
+    /// A run on `sid` saw its command end now.
+    pub fn command_ended(&self, sid: u64) {
+        lock(&self.ends).insert(sid, Instant::now());
+    }
+
+    /// When the last run on `sid` saw its command end.
+    pub fn last_end(&self, sid: u64) -> Option<Instant> {
+        lock(&self.ends).get(&sid).copied()
     }
 
     /// Count an input in flight to `sid`, unless `max` already are.
@@ -150,11 +179,12 @@ impl Links {
 
     pub fn retain_panes(&self, open: &dyn Fn(u64) -> bool) {
         lock(&self.inflight).retain(|sid, _| open(*sid));
+        lock(&self.ends).retain(|sid, _| open(*sid));
     }
 
     #[cfg(test)]
     pub fn sizes(&self) -> (usize, usize, usize) {
-        (lock(&self.pending).len(), lock(&self.watches).len(), lock(&self.inflight).len())
+        (lock(&self.pending).len(), lock(&self.watches).len(), lock(&self.inflight).len() + lock(&self.ends).len())
     }
 
     /// Hand a frame from the core to whoever waits for it; false when it

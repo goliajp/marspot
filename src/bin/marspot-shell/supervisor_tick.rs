@@ -51,22 +51,7 @@ impl ShellApp {
             self.pane_status.report_activity(sid, activity);
         }
         lap!(0);
-        // One `stat` a tick.  This is what makes the settings file
-        // live: edit it by hand or from the panel and the next sweep
-        // is already using the new values, with nothing restarted.
-        if marspot::settings::reload_if_changed() {
-            if let Some(h) = pane_control::hub() {
-                h.reload_config();
-            }
-            let s = marspot::settings::get();
-            lx_event!(
-                "SETTINGS_RELOADED",
-                "settings.toml changed on disk",
-                reclaim = s.reclaim_enabled as u32,
-                idle_min = s.reclaim_idle_minutes as u64,
-                prefetch = s.reclaim_prefetch as u32
-            );
-        }
+        super::theme_follow::follow_settings();
         self.follow_theme();
         lap!(1);
         self.sweep_pane_status();

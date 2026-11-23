@@ -13,6 +13,8 @@ use super::limits::{Kind, Limits, SpawnCounts, check_spawn};
 use super::*;
 
 mod audit_tests;
+mod conn_tests;
+mod server_tests;
 
 fn temp(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("pc-{tag}-{}-{}", std::process::id(), marspot_peer::rand::hex(4)));
@@ -35,6 +37,8 @@ fn hub_at(dir: &std::path::Path) -> (Hub, std::sync::mpsc::Receiver<MainCmd>) {
         config: RwLock::new(Arc::new(Config::default())),
         deny: Mutex::new(DenyList::at(dir.join("control-deny.tsv"))),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),
+        views_stale: std::sync::atomic::AtomicBool::new(false),
+        views_owed: (Mutex::new(false), std::sync::Condvar::new()),
         open_windows: RwLock::new(Arc::new(Vec::new())),
         audit: audit_log::Audit::at(dir.join("audit.log"), audit_log::ROTATE_BYTES),
         main_tx,
@@ -182,7 +186,7 @@ fn caller_found_by_ancestry_or_external() {
 fn an_external_shadow_pane_needs_a_parent() {
     let dir = temp("ext");
     let (hub, _rx) = hub_at(&dir);
-    let mut conn = Conn::new(&hub, Peer::default());
+    let mut conn = Conn::new(&hub, Peer::default(), None);
     let c = ctx(CallerKey::External, Vec::new(), Config::default());
     let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
     assert_eq!(ops_pane::open(&mut conn, &c, &open).unwrap_err().code, ErrorCode::BadRequest);
@@ -191,7 +195,7 @@ fn an_external_shadow_pane_needs_a_parent() {
     assert_eq!(ops_pane::open(&mut conn, &c, &visible).unwrap_err().code, ErrorCode::CoreRestarting);
     let late = Hub { epoch: Instant::now() - std::time::Duration::from_secs(10), ..hub_at(&dir).0 };
     late.hello_ms.store(1, std::sync::atomic::Ordering::Release);
-    let mut conn = Conn::new(&late, Peer::default());
+    let mut conn = Conn::new(&late, Peer::default(), None);
     assert_eq!(ops_pane::open(&mut conn, &c, &visible).unwrap_err().code, ErrorCode::OldSession);
 }
 
@@ -199,7 +203,7 @@ fn an_external_shadow_pane_needs_a_parent() {
 fn switched_off_and_denied_and_typing() {
     let dir = temp("off");
     let (hub, _rx) = hub_at(&dir);
-    let mut conn = Conn::new(&hub, Peer::default());
+    let mut conn = Conn::new(&hub, Peer::default(), None);
     let off = ctx(CallerKey::External, Vec::new(), Config { enabled: false, ..Config::default() });
     for op in [marspot_peer::control::Op::List, marspot_peer::control::Op::Close { target: "1".into() }] {
         assert_eq!(dispatch::run(&mut conn, &off, &op).unwrap_err().code, ErrorCode::Disabled);
@@ -221,7 +225,7 @@ fn switched_off_and_denied_and_typing() {
     let later = Hub { epoch: Instant::now() - std::time::Duration::from_secs(5), ..hub_at(&dir).0 };
     later.focused(4);
     later.last_key_ms.store(1, std::sync::atomic::Ordering::Relaxed);
-    assert!(ops_input::gate_typing(&Conn::new(&later, Peer::default()), 4, false).is_ok());
+    assert!(ops_input::gate_typing(&Conn::new(&later, Peer::default(), None), 4, false).is_ok());
 }
 
 #[test]
@@ -276,4 +280,16 @@ fn reads_are_cut_from_the_oldest_end() {
     let (t, cut) = ops_read::cap_text(format!("{long}newest"));
     assert!(cut && t.len() <= ops_read::MAX_TEXT && t.ends_with("newest") && t.starts_with("old line"));
     assert_eq!(ops_read::cap_text("short".into()), ("short".into(), false));
+}
+
+#[test]
+fn pane_control_matched_line_by_absolute_row_across_history_and_wraps() {
+    let mut t = marspot_term::terminal::Terminal::new(10, 3);
+    t.feed(b"0123456789abcdef\r\nx\r\ny\r\nz");
+    let g = t.grid();
+    assert_eq!(g.scroll_push_count(), 2);
+    // rows 0 and 1 scrolled off; the line wraps from row 0 into row 1
+    assert_eq!(matched::logical_line(g, 0).as_deref(), Some("0123456789abcdef"));
+    assert_eq!(matched::logical_line(g, 3).as_deref(), Some("y"));
+    assert_eq!(matched::logical_line(g, 9), None);
 }

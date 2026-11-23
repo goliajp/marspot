@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use marspot::shell_proto::{CAP_TYPE_AND_WATCH, MsgType, PaneType, PaneTyped, TypedResult, WatchBody, WatchKind, encode_pane_type};
+use marspot::shell_proto::{CAP_TYPE_AND_WATCH, MsgType, PaneType, PaneTyped, TypedResult, WatchBody, WatchKind, WatchReason, encode_pane_type};
 use marspot_peer::control::{ErrorCode, Input, Reject, RunArgs, SendArgs, keys};
 use marspot_peer::json::{Value, obj};
 
@@ -37,10 +37,26 @@ fn typed_reject(t: &PaneTyped) -> Option<Reject> {
     Some(r)
 }
 
+/// How long after a run's command end its shell may still be drawing
+/// the prompt and turning paste mode back on.
+pub(super) const PROMPT_SETTLE: Duration = Duration::from_millis(150);
+
+/// The rest of the moment after a run's command end on `sid`, if any:
+/// input that lands while the shell redraws its prompt is read as lines
+/// typed ahead and comes out mangled.  Only input that follows a run
+/// that closely waits at all.
+pub(super) fn settle_left(conn: &Conn, sid: u64) -> Duration {
+    conn.hub.links.last_end(sid).map_or(Duration::ZERO, |at| PROMPT_SETTLE.saturating_sub(at.elapsed()))
+}
+
 /// Send `t` and wait for what became of it, counted as in flight.
 fn type_into(conn: &mut Conn, sid: u64, t: PaneType) -> Result<PaneTyped, Reject> {
     if !conn.hub.links.begin_input(sid, MAX_IN_FLIGHT) {
         return Err(Reject::new(ErrorCode::PaneBusy, "8 inputs are already on their way to this pane"));
+    }
+    let left = settle_left(conn, sid);
+    if !left.is_zero() {
+        std::thread::sleep(left);
     }
     let asked = conn.ask(sid, MsgType::PaneType, |req_id| encode_pane_type(&PaneType { req_id, ..t.clone() }), true, ANSWER_WITHIN);
     conn.hub.links.end_input(sid);
@@ -97,19 +113,6 @@ fn runs_fish(ctx: &Ctx, sid: u64) -> bool {
     ctx.obs.table.get(id.pid).is_some_and(|r| r.comm.trim_start_matches('-') == "fish")
 }
 
-/// How long after the status line a run waits for the prompt.
-const PROMPT_WITHIN: Duration = Duration::from_secs(2);
-
-/// Wait until the shell is back at its prompt after the command's end.
-/// Its status line is printed before the shell has redrawn the prompt
-/// and turned paste mode back on; a run sent in that moment is read as
-/// typed-ahead lines and comes out mangled.
-fn back_at_prompt(conn: &mut Conn, ctx: &Ctx, sid: u64, since: u64, deadline: Instant) {
-    let body = WatchBody { watch_id: 0, kind: WatchKind::Prompt, since_pos: 0, quiet_ms: 0, text: String::new() };
-    let until = deadline.min(Instant::now() + PROMPT_WITHIN);
-    let _ = conn.wait(sid, ctx.caller, body, Some(since), until);
-}
-
 pub(super) fn run(conn: &mut Conn, ctx: &Ctx, a: &RunArgs) -> Result<Value, Reject> {
     let sid = target(ctx, &a.target)?;
     gate_typing(conn, sid, a.force)?;
@@ -125,9 +128,10 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, a: &RunArgs) -> Result<Value, Reje
         Ok((typed, fired))
     });
     conn.end_watch(sid, body.watch_id);
-    // from the Enter, not the end mark: the prompt can arrive in the same batch as the mark
-    if let Ok((typed, Some(_))) = &out {
-        back_at_prompt(conn, ctx, sid, typed.pos, deadline);
+    if let Ok((_, Some(f))) = &out
+        && f.reason == WatchReason::Met
+    {
+        conn.hub.links.command_ended(sid);
     }
     let (echo_off, result) = match &out {
         Ok((t, Some(f))) => (t.echo_off, f.status.map_or("ended".into(), |s| format!("exit {s}"))),
@@ -139,8 +143,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, a: &RunArgs) -> Result<Value, Reje
     let mut v = screen_of(sid, 0, Some(fired.map_or(typed.pos, |f| f.pos)), &ctx.obs);
     match fired {
         Some(f) => {
-            let ended = f.reason == marspot::shell_proto::WatchReason::SessionEnded;
-            v.set("reason", if ended { "session_ended" } else { "met" }.into());
+            v.set("reason", super::ops_read::reason_word(f.reason, false).into());
             if let Some(st) = f.status {
                 v.set("exit_status", i64::from(st).into());
             }

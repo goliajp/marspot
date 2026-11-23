@@ -92,6 +92,7 @@ impl Config {
 }
 
 /// The deny list, read again when its file's modification time moves.
+/// A directory listed denies the panes in it and below it.
 pub(super) struct DenyList {
     path: std::path::PathBuf,
     stamp: Option<SystemTime>,
@@ -125,6 +126,15 @@ impl DenyList {
                 .map(String::from)
                 .collect();
         }
-        self.dirs.contains(norm(cwd))
+        let cwd = norm(cwd);
+        self.dirs.iter().any(|d| within(cwd, d))
+    }
+}
+
+/// `path` is `dir` or below it, component by component.
+pub(super) fn within(path: &str, dir: &str) -> bool {
+    match path.strip_prefix(dir) {
+        Some(rest) => rest.is_empty() || rest.starts_with('/') || dir.ends_with('/'),
+        None => false,
     }
 }

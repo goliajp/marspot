@@ -14,9 +14,9 @@
 //! Who asks decides nothing about what may be done; it sets the limits,
 //! the parent of a new pane and the audit line (`caller`).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use marspot::shell_proto::MsgType;
@@ -28,7 +28,9 @@ mod caller;
 mod config;
 mod conn;
 mod dispatch;
+mod hangup;
 mod links;
+mod matched;
 mod limits;
 mod mainloop;
 pub(crate) mod names;
@@ -37,6 +39,7 @@ mod ops_pane;
 mod ops_read;
 mod panes;
 mod server;
+mod wait;
 
 pub(crate) use mainloop::MainSide;
 pub(crate) use panes::PaneView;
@@ -55,6 +58,8 @@ pub(crate) enum MainCmd {
     /// A core announced what it does: clear every session's watches,
     /// then register the table's again.
     Resync,
+    /// A connection came while the per-pane state was not being kept.
+    PublishViews,
 }
 
 /// What came back for one request.
@@ -66,6 +71,8 @@ pub(crate) enum Reply {
     Fired(marspot::shell_proto::PaneWatchFired),
     /// The main loop did not send request `.0`.
     Refused(u32, Reject),
+    /// The caller's end of the connection closed during a wait.
+    HungUp,
 }
 
 /// Everything the connection threads, the core's reader and the main
@@ -83,6 +90,11 @@ pub(crate) struct Hub {
     config: RwLock<Arc<config::Config>>,
     deny: Mutex<config::DenyList>,
     panes: RwLock<Arc<panes::PaneViews>>,
+    /// Nobody was connected, so the main loop stopped publishing `panes`.
+    views_stale: AtomicBool,
+    /// A connection asked for `panes` again and the main loop has not
+    /// published yet.
+    views_owed: (Mutex<bool>, Condvar),
     /// Which entries of the saved layout are windows open now.
     open_windows: RwLock<Arc<Vec<usize>>>,
     audit: audit_log::Audit,
@@ -91,6 +103,14 @@ pub(crate) struct Hub {
 }
 
 static HUB: OnceLock<Hub> = OnceLock::new();
+
+/// A key went to the core: the user is typing in the focused pane.  A
+/// relaxed store of a clock reading, the one thing the key path pays.
+pub(crate) fn key_pressed() {
+    if let Some(h) = HUB.get() {
+        h.key_pressed();
+    }
+}
 
 /// The hub, once [`start`] ran.
 pub(crate) fn hub() -> Option<&'static Hub> {
@@ -112,6 +132,8 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         config: RwLock::new(Arc::new(config::Config::load())),
         deny: Mutex::new(config::DenyList::at(config::deny_path())),
         panes: RwLock::new(Arc::new(panes::PaneViews::default())),
+        views_stale: AtomicBool::new(true),
+        views_owed: (Mutex::new(false), Condvar::new()),
         open_windows: RwLock::new(Arc::new(Vec::new())),
         audit: audit_log::Audit::start(),
         main_tx,
@@ -188,6 +210,38 @@ impl Hub {
         if **cur != views {
             *cur = Arc::new(views);
         }
+        drop(cur);
+        let (owed, cv) = &self.views_owed;
+        *owed.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        cv.notify_all();
+    }
+
+    /// Whether the main loop should publish per-pane state: only while
+    /// someone is connected to read it.
+    pub(crate) fn wants_views(&self) -> bool {
+        if self.conns.load(Ordering::Acquire) > 0 {
+            return true;
+        }
+        self.views_stale.store(true, Ordering::Release);
+        false
+    }
+
+    /// A connection was let in: per-pane state not kept while nobody was
+    /// connected is asked for again.
+    fn connected(&self) {
+        if self.views_stale.swap(false, Ordering::AcqRel) {
+            *self.views_owed.0.lock().unwrap_or_else(|p| p.into_inner()) = true;
+            self.queue(MainCmd::PublishViews);
+        }
+    }
+
+    /// Per-pane state as published, once the main loop caught up with
+    /// a request for it (or `within` passed).
+    fn fresh_pane_views(&self, within: std::time::Duration) -> Arc<panes::PaneViews> {
+        let (owed, cv) = &self.views_owed;
+        let g = owed.lock().unwrap_or_else(|p| p.into_inner());
+        drop(cv.wait_timeout_while(g, within, |o| *o).unwrap_or_else(|p| p.into_inner()));
+        self.pane_views()
     }
 
     /// Panes that closed leave every per-pane table.

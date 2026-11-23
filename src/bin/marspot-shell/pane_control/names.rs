@@ -66,6 +66,14 @@ pub fn live_panes(obs: &Observation) -> Vec<(u64, String, String)> {
         .collect()
 }
 
+/// The working directory of pane `sid`: its shell's, else the one the
+/// registry has.  One process looked at, not every pane's.
+pub fn cwd_of(sid: u64, obs: &Observation) -> Option<String> {
+    let s = obs.session(sid)?;
+    let cwd = s.shell.and_then(|id| marspot::pidtree::pane_cwd(id.pid));
+    Some(cwd.map_or_else(|| s.entry.cwd.clone(), |p| p.to_string_lossy().into_owned()))
+}
+
 /// Every pane with what naming needs.  May read the code file, so not
 /// for the main thread's hot paths.
 pub fn pane_refs_in(obs: &Observation) -> Vec<marspot::pane_name::PaneRef> {
@@ -151,10 +159,7 @@ pub fn resolve_coded(target: &str, obs: &Observation) -> Result<u64, Reject> {
 
 /// The full name (`dir#code`) of pane `sid` in `obs`.
 pub fn full_name(sid: u64, obs: &Observation) -> String {
-    live_panes(obs)
-        .into_iter()
-        .find(|(s, _, _)| *s == sid)
-        .map_or_else(|| sid.to_string(), |(sid, cwd, _)| marspot::pane_name::PaneRef::new(sid, cwd).full_name())
+    cwd_of(sid, obs).map_or_else(|| sid.to_string(), |cwd| marspot::pane_name::PaneRef::new(sid, cwd).full_name())
 }
 
 #[cfg(test)]
