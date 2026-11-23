@@ -20,7 +20,13 @@
 #      is over 32 KiB and is pasted in two sends;
 #   3. `helper stop` closes the one left and removes its directory;
 #   4. a helper past its budget is told and closed;
-#   5. after the shell restarts, a helper recorded as started whose task
+#   5. claude's first-run dialogs: the trust dialog for the helper's own
+#      directory, then the bypass one, are answered (moved off "No, exit",
+#      never Enter on it) and written to the audit log, however late the
+#      agent draws them; one that stays up gets one Enter and the parent is
+#      told; a trust dialog for another directory is left alone and the
+#      parent told once;
+#   6. after the shell restarts, a helper recorded as started whose task
 #      never went in is closed and its parent told, and a running one is
 #      still listed.
 #
@@ -118,10 +124,10 @@ pane_gone() { # sid, seconds
   done
   return 1
 }
-start_helper() { # agent, budget, task… → the answer's JSON
+start_helper() { # agent, budget, task… → the answer's JSON; in $HELPER_CWD when set
   local agent=$1 budget=$2
   shift 2
-  hc start --json --agent "$agent" --parent "$P1" --cwd "$SB/proj" --budget "$budget" "$@"
+  hc start --json --agent "$agent" --parent "$P1" --cwd "${HELPER_CWD:-$SB/proj}" --budget "$budget" "$@"
 }
 
 launch_app() {
@@ -204,7 +210,43 @@ for (( i = 0; i < 120; i++ )); do grep -F "$N_BUDGET" "$INBOX" 2>/dev/null | gre
 check "the parent was told the budget ran out" bash -c "grep -F '$N_BUDGET' '$INBOX' | grep -q '1-minute budget'"
 check "and the helper's pane was closed" pane_gone "$S_BUDGET" 30
 
-echo "════ 5. a restart of the shell ════"
+echo "════ 5. first-run dialogs ════"
+DEEP="$SB/$(printf 'deep-%.0s' {1..30})/proj"
+mkdir -p "$DEEP"
+A_TRUST=$(HELPER_CWD="$DEEP" start_helper claude 30 "Look around. FAKE-TRUST FAKE-BYPASS FAKE-LATE FAKE-EXIT")
+A_OTHER=$(start_helper claude 30 "Look elsewhere. FAKE-TRUST-OTHER FAKE-EXIT")
+N_TRUST=$(field name <<<"$A_TRUST"); S_TRUST=$(field id <<<"$A_TRUST")
+N_OTHER=$(field name <<<"$A_OTHER"); S_OTHER=$(field id <<<"$A_OTHER")
+[[ -n $N_TRUST && -n $N_OTHER ]] || die "a dialog helper did not start: $A_TRUST $A_OTHER"
+wait_notices "$N_OTHER" 1 60 || echo "    no message for $N_OTHER after 60 s"
+wait_notices "$N_TRUST" 1 120 || echo "    no message for $N_TRUST after 120 s"
+check "past both dialogs: the parent got its result" bash -c "grep -F '$N_TRUST' '$INBOX' | grep -q RESULT-claude-OK"
+check "each dialog was moved to yes and entered there" bash -c "[[ \$(grep -a '^key' '$FAKE_HELPER_LOG' | cut -f2 | paste -sd, -) == 'arrow to Yes, I trust this folder,enter on Yes, I trust this folder,arrow to Yes, I accept,enter on Yes, I accept' ]]"
+check "a screen with nothing drawn was not told as a stop" bash -c "! grep -F '$N_TRUST' '$INBOX' | grep -q 'prompt that needs an answer'"
+A_STUCK=$(start_helper claude 30 "Look around. FAKE-TRUST FAKE-TRUST-STUCK FAKE-EXIT")
+N_STUCK=$(field name <<<"$A_STUCK"); S_STUCK=$(field id <<<"$A_STUCK")
+[[ -n $N_STUCK ]] || die "the stuck-dialog helper did not start: $A_STUCK"
+wait_notices "$N_STUCK" 1 90 || echo "    no message for $N_STUCK after 90 s"
+# past another round of looking at it
+sleep 15
+audited() { # sid, result → how many helper.trust lines of it
+  grep -a '"op":"helper.trust"' "$SD/control-audit.log" | grep -F "\"sid\":$1," | grep -cF "\"result\":\"$2"
+}
+sleep 2
+check "the trust is in the audit log with its directory" test "$(audited "$S_TRUST" "answered: /private$DEEP")" = 1
+check "so is the bypass" test "$(audited "$S_TRUST" 'answered"')" = 1
+check "a dialog that stays up got one Enter" test "$(grep -ac 'enter kept on Yes, I trust' "$FAKE_HELPER_LOG")" = 1
+check "and one move" test "$(grep -ac 'arrow to Yes, I trust' "$FAKE_HELPER_LOG")" = 2
+check "it is in the audit log as not answered" test "$(audited "$S_STUCK" 'not answered')" = 1
+check "its parent was told once, of a prompt" bash -c "[[ \$(grep -F '$N_STUCK' '$INBOX' | grep -c 'prompt that needs an answer') == 1 ]]"
+hc stop "$N_STUCK" >/dev/null 2>&1
+check "another directory: left alone, and audited once" test "$(audited "$S_OTHER" 'left, not the helper')" = 1
+check "another directory: the parent was told, with the screen" bash -c "grep -F '$N_OTHER' '$INBOX' | grep 'prompt that needs an answer' | grep -q 'Accessing workspace'"
+check "told once" test "$(notices_of "$N_OTHER")" = 1
+check "it is listed as stopped" bash -c "$(printf '%q' "$PEER") helper list --all --json | grep -F '$N_OTHER' | grep -q '\"state\":\"stopped\"'"
+hc stop "$N_OTHER" >/dev/null 2>&1
+
+echo "════ 6. a restart of the shell ════"
 A_KEEP=$(start_helper codex 30 "Keep going. FAKE-STAY")
 N_KEEP=$(field name <<<"$A_KEEP")
 wait_notices "$N_KEEP" 1 60 || echo "    no message for $N_KEEP"

@@ -28,8 +28,11 @@ use std::time::Duration;
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION, TickDue};
 
 mod close;
+mod dialogs;
+mod first_screens;
 mod launch;
 mod notify;
+mod passing;
 mod pending;
 mod queue;
 mod rebuild;
@@ -52,6 +55,10 @@ mod tests_retry;
 mod tests_restart;
 #[cfg(test)]
 mod tests_away;
+#[cfg(test)]
+mod tests_trust;
+#[cfg(test)]
+mod tests_passing;
 
 use table::{Event, Table};
 
@@ -94,6 +101,8 @@ struct State {
     no_agent: HashMap<u64, u64>,
     /// Notices that could not be delivered, to try again on an event.
     undelivered: pending::Undelivered,
+    /// Claude and kimi helpers whose plugin has reported a turn.
+    turned: HashSet<u64>,
 }
 
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
@@ -137,6 +146,7 @@ impl Shared {
         st.table.apply(sid, now, &ev);
         if matches!(ev, Event::Stopped) {
             st.watchers.remove(&sid);
+            st.turned.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
         }

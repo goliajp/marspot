@@ -97,11 +97,8 @@ fn helpers_a_carried_helper_past_its_deadline_is_closed_at_the_start() {
     let sid = u64::MAX - 5;
     let h = Helper { delivered_ms: Some(1_000), ..Helper::new(sid, started(10, "shell", AgentKind::Claude), 500) };
     records::append(&s.log, records::ROTATE_AT, &s.table(), sid, 1, &Event::Carried(Box::new(h)));
-    let n = super::begin(&s, || {
-        // long enough for the worker to be asleep on an empty table
-        std::thread::sleep(Duration::from_millis(300));
-        HashSet::from([sid])
-    });
+    // the worker may close it before `begin` returns, or once woken by it
+    let n = super::begin(&s, || HashSet::from([sid]));
     assert_eq!(n.unwrap(), 1, "carried over");
     assert!(within(|| s.table().map.is_empty()), "its budget ran out long ago");
     assert!(records::replay(&s.log).map.is_empty());

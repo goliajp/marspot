@@ -3,13 +3,9 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-
-use marspot_peer::control::AgentKind;
 
 use super::Shared;
 use super::table::Event;
-use super::screen::watch_screen;
 use super::work::Job;
 
 /// The shadow panes running now.
@@ -22,7 +18,8 @@ pub(super) fn live_shadows() -> HashSet<u64> {
 /// helpers whose task never went in; drop directories of helpers that
 /// are gone.  How many carried over.  `live`: the shadow panes running,
 /// looked up once the log is read, so that a helper in it that is not
-/// among them is gone.
+/// among them is gone.  The worker may close one before this is done:
+/// it counts as carried over all the same.
 pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> usize {
     let sids: Vec<u64> = {
         // a fact written between the read and the swap would be lost
@@ -35,6 +32,7 @@ pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> u
         sids
     };
     let live = live();
+    let carried = sids.iter().filter(|sid| live.contains(sid)).count();
     for sid in sids.into_iter().filter(|sid| !live.contains(sid)) {
         s.record(sid, Event::Stopped);
     }
@@ -54,10 +52,7 @@ pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> u
             continue;
         }
         s.watch_result(h.sid);
-        if matches!(h.started.agent, AgentKind::Codex | AgentKind::Gemini) {
-            let (s2, sid, agent, epoch) = (Arc::clone(s), h.sid, h.started.agent, s.epoch.load(Ordering::Acquire));
-            let _ = std::thread::Builder::new().name("helpers-watch".into()).spawn(move || watch_screen(&s2, sid, agent, Some(0), epoch));
-        }
+        super::settle::resume(s, h.sid, h.started.agent);
     }
-    t.map.len()
+    carried
 }

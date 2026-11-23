@@ -1,89 +1,67 @@
-//! The first moments of a new helper, on a thread of its own: answer
-//! the screens a new agent puts up first, hand kimi its task, then watch
-//! the screen of the agents no plugin reports turns for.
+//! The first moments of a new helper, on a thread of its own: hand
+//! kimi its task, see the agent past its first screens, then watch the
+//! screen of the agents no plugin reports turns for.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use marspot_peer::control::{AgentKind, MAX_SEND_BYTES};
 
 use super::Shared;
+use super::first_screens::First;
 use super::notify::Stop;
 use super::table::Event;
 use super::screen::watch_screen;
 use super::work::Job;
 use crate::pane_control::helpers_port::{Waited, with_port};
 
-const CLAUDE_TRUST: &str = "Is this a project you created or one you trust";
-const CLAUDE_BYPASS: &str = "Bypass Permissions mode";
-const CODEX_TRUST: &str = "Trust this folder?";
-/// gemini asks about the directories `--include-directories` adds even
-/// with `--skip-trust`; "Yes" is the default.
-const GEMINI_DIRS: &str = "Do you trust the following folders being added";
-
-/// After the start line went in: answer the screens a new agent puts
-/// up first, hand kimi its task, then watch the screen of the agents no
+/// After the start line went in at `pos`: hand kimi its task, get the
+/// agent past its first screens, then watch the screen of the agents no
 /// plugin reports turns for.
 pub(super) fn settle(s: Arc<Shared>, sid: u64, agent: AgentKind, pos: u64) {
-    let epoch = s.epoch.load(Ordering::Acquire);
-    let spawned = std::thread::Builder::new().name("helpers-settle".into()).spawn(move || {
-        let first = with_port(None, |p| p.wait_quiet(sid, if agent == AgentKind::Kimi { 1_500 } else { 2_000 }, Some(pos), Instant::now() + Duration::from_secs(60)));
-        let up = matches!(first, Some(Ok(Waited::Met { .. })));
-        match agent {
-            AgentKind::Claude | AgentKind::Codex | AgentKind::Gemini if up => confirm(sid, agent),
-            AgentKind::Kimi => {
-                // the task file, header and all: it says where the result goes
-                let task = std::fs::read_to_string(s.dir_of(sid).join("task.md")).ok();
-                let delivered = up && task.as_deref().is_some_and(|t| paste_task(sid, t));
-                if !delivered {
-                    s.queue_wait(Job::Stopped { sid, stop: Stop::Exited, by_screen: true });
-                    return;
-                }
-                s.record(sid, Event::TaskDelivered);
-            }
-            _ => {}
+    let f = First { epoch: s.epoch(), s, sid, agent };
+    spawn(sid, move || {
+        if agent == AgentKind::Kimi && !deliver_to_kimi(&f, pos) {
+            f.s.queue_wait(Job::Stopped { sid, stop: Stop::Exited, by_screen: true });
+            return;
         }
-        if matches!(agent, AgentKind::Codex | AgentKind::Gemini) {
-            // from where the agent started: it may have printed all it will already
-            watch_screen(&s, sid, agent, Some(pos), epoch);
-        }
+        follow(&f, pos);
     });
-    if let Err(e) = spawned {
+}
+
+/// A helper carried over from before the shell started: it may still be
+/// at its first screens.
+pub(super) fn resume(s: &Arc<Shared>, sid: u64, agent: AgentKind) {
+    let f = First { epoch: s.epoch(), s: Arc::clone(s), sid, agent };
+    spawn(sid, move || follow(&f, 0));
+}
+
+fn spawn(sid: u64, f: impl FnOnce() + Send + 'static) {
+    if let Err(e) = std::thread::Builder::new().name("helpers-settle".into()).spawn(f) {
         marspot::lx_warn!("helpers.settle_spawn_failed", &format!("sid={sid}: {e}"));
     }
 }
 
-/// Say yes to the folder-trust screen (claude's defaults to "No, exit",
-/// so it is Down then Enter; codex's to "Trust", so Enter).
-fn confirm(sid: u64, agent: AgentKind) {
-    for _ in 0..2 {
-        let screen = marspot::pane_read::screen(sid, 0).unwrap_or_default();
-        let keys: &[&[u8]] = match agent {
-            AgentKind::Claude if claude_dialog(&screen, matches!(marspot::pane_read::composer_box(sid), Ok(Some(_)))) => &[b"\x1b[B", b"\r"],
-            AgentKind::Codex if screen.contains(CODEX_TRUST) => &[b"\r"],
-            AgentKind::Gemini if screen.contains(GEMINI_DIRS) => &[b"\r"],
-            _ => return,
-        };
-        let mut pos = 0;
-        for k in keys {
-            pos = with_port(None, |p| p.send_keys(sid, k)).and_then(Result::ok).unwrap_or(pos);
-        }
-        marspot::lx_info!("helpers.trust_confirmed", &format!("sid={sid} {}", agent.as_str()));
-        let _ = with_port(None, |p| p.wait_quiet(sid, 2_000, Some(pos), Instant::now() + Duration::from_secs(30)));
+/// From `pos`, where the agent started: it may have printed all it will
+/// already.
+fn follow(f: &First, pos: u64) {
+    f.pass(pos);
+    if matches!(f.agent, AgentKind::Codex | AgentKind::Gemini) {
+        watch_screen(&f.s, f.sid, f.agent, Some(pos), f.epoch);
     }
 }
 
-/// claude's trust or bypass dialog is up: its question, its own "No,
-/// exit" choice on a line of its own, and no input box.  The task, once
-/// it runs, is shown above the input box, so text in it that reads like
-/// the dialog does not count.
-pub(super) fn claude_dialog(screen: &str, composer: bool) -> bool {
-    let choice = screen.lines().any(|l| {
-        let l = l.trim().trim_start_matches(['❯', '>', ' ']);
-        l.split_once(". ").is_some_and(|(n, rest)| n.len() == 1 && n.chars().all(|c| c.is_ascii_digit()) && rest.trim() == "No, exit")
-    });
-    !composer && choice && (screen.contains(CLAUDE_TRUST) || screen.contains(CLAUDE_BYPASS))
+/// Once kimi's screen is up, its task: the task file, header and all, as
+/// it says where the result goes.
+fn deliver_to_kimi(f: &First, pos: u64) -> bool {
+    let first = with_port(None, |p| p.wait_quiet(f.sid, 1_500, Some(pos), Instant::now() + Duration::from_secs(60)));
+    let up = matches!(first, Some(Ok(Waited::Met { .. })));
+    let task = std::fs::read_to_string(f.s.dir_of(f.sid).join("task.md")).ok();
+    let delivered = up && task.as_deref().is_some_and(|t| paste_task(f.sid, t));
+    if delivered {
+        f.s.record(f.sid, Event::TaskDelivered);
+    }
+    delivered
 }
 
 /// kimi's task, pasted one send's worth at a time, Enter after the last.
