@@ -7,6 +7,12 @@
 //! loop then.  A return that follows the input waits for the input's
 //! echo, or 50 ms, so that it lands after the redraw the input caused,
 //! as the submit step of a scripted input always has.
+//!
+//! Whether a paste gets markers is the program's bracketed paste mode,
+//! and a return typed before it may change that mode: zsh turns it off
+//! as it takes the line, and a line that was `exec bash` leaves a shell
+//! that never turns it on.  Until the program has answered that return,
+//! the mode in hand is the one from before it, so a paste waits.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +40,13 @@ enum Stage {
     Echo { written: Instant, pos: u64 },
 }
 
+/// A return typed then, at that output position.
+#[derive(Clone, Copy)]
+struct Returned {
+    at: Instant,
+    pos: u64,
+}
+
 /// A watch slot a request has reserved: (slot, watch id).
 pub(crate) type Reserved = (usize, u32);
 
@@ -47,6 +60,9 @@ struct InFlight {
     /// The output position when the input was queued.
     pos: u64,
     echo_off: bool,
+    /// The input itself has a return the program will act on: one
+    /// outside paste markers.
+    has_return: bool,
     stage: Stage,
     /// Set by the PTY's writer thread once the input left its queue.
     written: Arc<AtomicBool>,
@@ -65,6 +81,8 @@ pub(crate) struct Typing {
     head: usize,
     len: usize,
     cur: Option<InFlight>,
+    /// The latest return typed, until the next input starts.
+    returned: Option<Returned>,
     /// Wakes the loop; the writer thread calls it when input is written.
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -75,7 +93,7 @@ fn typed(req_id: u32, result: TypedResult, pos: u64, written: usize, echo_off: b
 
 impl Typing {
     pub(crate) fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { queue: Default::default(), head: 0, len: 0, cur: None, wake }
+        Self { queue: Default::default(), head: 0, len: 0, cur: None, returned: None, wake }
     }
 
     pub(crate) fn idle(&self) -> bool {
@@ -121,10 +139,11 @@ impl Typing {
     /// decided, if anything.
     pub(crate) fn step(&mut self, session: &mut SessionImpl, watches: &mut Watches) -> Option<Step> {
         if self.cur.is_none() {
-            if self.len == 0 {
+            if self.len == 0 || self.paste_waits(session) {
                 return None;
             }
             let t = self.queue[self.head].take()?;
+            self.returned = None;
             self.head = (self.head + 1) % QUEUE;
             self.len -= 1;
             if let Some(step) = self.start(t, session, watches) {
@@ -134,6 +153,21 @@ impl Typing {
         let step = self.advance(session)?;
         self.cur = None;
         Some(step)
+    }
+
+    /// The next request is a paste into a program in bracketed paste
+    /// mode that has not answered the return typed before it: answered
+    /// is the mode turned off, or output past the return once the echo
+    /// wait is over.  A program that reads nothing is not waited for
+    /// past the time input is given to be read.
+    fn paste_waits(&self, session: &SessionImpl) -> bool {
+        let (Some(r), Some(t)) = (self.returned, self.queue[self.head].as_ref()) else { return false };
+        if !t.paste || !session.terminal().bracketed_paste_mode() {
+            return false;
+        }
+        let since = r.at.elapsed();
+        let answered = local(session).output_pos() > r.pos && since >= ECHO_WAIT;
+        !answered && since < NOT_READ_AFTER
     }
 
     fn start(&mut self, t: PaneType, session: &mut SessionImpl, watches: &mut Watches) -> Option<Step> {
@@ -149,12 +183,14 @@ impl Typing {
             return Some(Step::Typed(typed(t.req_id, TypedResult::NotAtShell, pos, 0, false), watch));
         }
         let mut wrapped = Vec::new();
-        let bytes = if t.paste && session.terminal().bracketed_paste_mode() {
+        let marked = t.paste && session.terminal().bracketed_paste_mode();
+        let bytes = if marked {
             marspot_term::paste::bracketed_paste(&t.bytes, &mut wrapped);
             &wrapped
         } else {
             &t.bytes
         };
+        let has_return = !marked && bytes.iter().any(|&b| b == b'\r' || b == b'\n');
         let echo_off = echo_off(local(session).raw_master());
         let flag = Arc::new(AtomicBool::new(false));
         let (set, wake) = (Arc::clone(&flag), Arc::clone(&self.wake));
@@ -173,6 +209,7 @@ impl Typing {
             queued_at: Instant::now(),
             pos,
             echo_off,
+            has_return,
             stage: Stage::Writing,
             written: flag,
         });
@@ -191,6 +228,9 @@ impl Typing {
             }
             let pos = local(session).output_pos();
             if !cur.enter {
+                if cur.has_return {
+                    self.returned = Some(Returned { at: now, pos });
+                }
                 let r = typed(cur.req_id, TypedResult::Written, pos, cur.len, cur.echo_off);
                 return Some(Step::Typed(r, cur.watch.take()));
             }
@@ -206,13 +246,23 @@ impl Typing {
             return Some(Step::Typed(r, cur.watch.take()));
         }
         let r = typed(cur.req_id, TypedResult::Written, pos, cur.len + 1, cur.echo_off);
-        Some(Step::Typed(r, cur.watch.take()))
+        let watch = cur.watch.take();
+        self.returned = Some(Returned { at: now, pos });
+        Some(Step::Typed(r, watch))
     }
 
     /// When the request in flight has to be looked at again: its
     /// deadline.  Its input being written wakes the loop sooner.
+    /// A paste held for a return's answer is looked at again when the
+    /// echo wait is over and when it stops waiting; output past the
+    /// return wakes the loop anyway.
     pub(crate) fn due_in(&self, now: Instant) -> Option<Duration> {
-        let cur = self.cur.as_ref()?;
+        let Some(cur) = self.cur.as_ref() else {
+            let r = self.returned.filter(|_| self.len > 0)?;
+            let echo = r.at + ECHO_WAIT;
+            let at = if now < echo { echo } else { r.at + NOT_READ_AFTER };
+            return Some(at.saturating_duration_since(now));
+        };
         Some(match cur.stage {
             Stage::Writing => (cur.queued_at + NOT_READ_AFTER).saturating_duration_since(now),
             Stage::Echo { written, .. } => (written + ECHO_WAIT).saturating_duration_since(now),

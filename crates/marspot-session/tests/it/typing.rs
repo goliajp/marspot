@@ -173,3 +173,33 @@ fn typing_only_at_the_shell_is_refused_while_a_command_runs() {
     });
     assert_eq!(last.unwrap().written, 0);
 }
+
+/// A program that keeps bracketed paste on across a return still gets
+/// the paste typed after it in markers, once it has answered the
+/// return.
+#[test]
+fn typing_a_paste_after_a_return_keeps_its_markers_when_the_mode_stays_on() {
+    let mut sandbox = sandbox_state_dir();
+    let log = sandbox.dir.join("log");
+    let pl = sandbox.dir.join("log.pl");
+    // like LOGGER, and it answers every read with a dot
+    let script = r#"use Time::HiRes qw(time);
+system("stty raw -echo"); $| = 1; print "\e[?2004hREADY";
+open(my $f, ">", $ARGV[0]) or die; select((select($f), $| = 1)[0]);
+while (sysread(STDIN, my $b, 65536)) { print "."; printf $f "%.6f %s\n", time, unpack("H*", $b); }"#;
+    std::fs::write(&pl, script).unwrap();
+    let s = with_script(&mut sandbox, &format!("exec /usr/bin/perl {} {}", pl.display(), log.display()));
+    let mut l = Link::new(&s);
+    let first = l.type_in(b"a", true, true, false, None);
+    let second = l.type_in(b"b", true, false, false, None);
+    assert_eq!(l.typed(first, 5.0).result, TypedResult::Written);
+    assert_eq!(l.typed(second, 5.0).result, TypedResult::Written);
+    wait(5.0, "the program to read the second paste", || reads(&log).iter().any(|(_, b)| b.ends_with(b"b\x1b[201~")));
+    let got = reads(&log);
+    let all: Vec<u8> = got.iter().flat_map(|(_, b)| b.clone()).collect();
+    assert_eq!(all, b"\x1b[200~a\x1b[201~\r\x1b[200~b\x1b[201~", "both pastes in markers");
+    let returned = got.iter().find(|(_, b)| b.ends_with(b"\r")).unwrap().0;
+    let gap = got.last().unwrap().0 - returned;
+    // the echo wait, and well short of the two seconds a silent program gets
+    assert!((0.045..1.5).contains(&gap), "the second paste came {:.1} ms after the return", gap * 1e3);
+}

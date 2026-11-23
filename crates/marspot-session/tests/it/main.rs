@@ -18,6 +18,7 @@ mod shadow_session;
 mod signals_in_the_pane;
 mod stray_pointer;
 mod typing;
+mod typing_after_exec;
 mod watch;
 mod watch_swap;
 mod watch_text;
