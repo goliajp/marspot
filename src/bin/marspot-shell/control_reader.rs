@@ -69,6 +69,10 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
             // the core is gone: a pass finds that out now
             Ok(None) => return proxy.wake(),
             Ok(Some(frame)) => {
+                // answers to the control socket go straight to who waits
+                if crate::pane_control::hub().is_some_and(|h| h.take_core_frame(frame.msg_type, &frame.payload)) {
+                    continue;
+                }
                 let msg = match frame.msg_type {
                     MsgType::SurfaceReady => {
                         trace::mark(Stage::ShellSurfaceRead, 0);

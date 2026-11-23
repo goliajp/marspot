@@ -148,6 +148,9 @@ impl ShellApp {
                 self.dispatch_pane_session_key(sid, ev);
             }
             ShellInbox::PaneFocused(sid) => {
+                if let Some(h) = pane_control::hub() {
+                    h.focused(sid);
+                }
                 // Straight to the pane's own session, if it has one:
                 // a reclaimed pane starts restoring the moment the
                 // user looks at it, instead of after they type.

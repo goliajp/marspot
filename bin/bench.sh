@@ -442,14 +442,15 @@ if [[ $MODE == "full" ]]; then
   # launchctl asuser, as bin/_remote-measure-others-mini.sh does.
   GUI=()
   [[ -z ${SSH_CONNECTION:-} ]] || GUI=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
-  for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT; do
+  for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT \
+      panectl:measure-pane-control.sh:PANECTL_OUT; do
     IFS=: read -r name script outvar <<<"$gauge"
     sd="/tmp/msp-gauge-$$-$name"
     echo "==> $script (a sandbox window)"
     rm -rf "${sd:?}" && mkdir -p "$sd"
     ${GUI[@]+"${GUI[@]}"} env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
       /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
-    grep -E '^(footprint12|startup) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
+    grep -E '^(footprint12|startup|pane-control) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
     "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true
     rm -rf "${sd:?}"
   done

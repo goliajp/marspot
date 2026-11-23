@@ -1,0 +1,88 @@
+use super::*;
+
+fn code_of(line: &str) -> ErrorCode {
+    parse(line).unwrap_err().code
+}
+
+#[test]
+fn pane_control_unknown_keys_are_ignored() {
+    let r = parse(r#"{"v":7,"op":"pane.read","later":{"x":1},"caller":{"thread":"t1","who":2},"args":{"target":"spg","new_arg":true}}"#)
+        .unwrap();
+    assert_eq!(r.caller_thread.as_deref(), Some("t1"));
+    let Op::Read(a) = r.op else { panic!() };
+    assert_eq!((a.target.as_str(), a.history_lines, a.timeout_s, a.wait, a.since), ("spg", 0, 60, None, None));
+}
+
+#[test]
+fn pane_control_missing_required_is_bad_request() {
+    for line in [
+        r#"{}"#,
+        r#"[1]"#,
+        r#"not json"#,
+        r#"{"op":"pane.send","args":{"text":"x"}}"#,
+        r#"{"op":"pane.send","args":{"target":"a"}}"#,
+        r#"{"op":"pane.send","args":{"target":"a","text":"x","keys":["enter"]}}"#,
+        r#"{"op":"pane.run","args":{"target":"a"}}"#,
+        r#"{"op":"pane.resize","args":{"target":"a","cols":80}}"#,
+        r#"{"op":"pane.place","args":{"target":"a","where":"moon"}}"#,
+        r#"{"op":"pane.read","args":{"target":"a","wait":{"quiet_ms":5}}}"#,
+        r#"{"op":"pane.read","args":{"target":"a","wait":{"nothing":true}}}"#,
+        r#"{"op":"pane.send","args":{"target":"a","keys":["hyper"]}}"#,
+        r#"{"op":"pane.send","args":{"target":"a","bytes_b64":"!!"}}"#,
+        r#"{"op":"pane.fly"}"#,
+    ] {
+        assert_eq!(code_of(line), ErrorCode::BadRequest, "{line}");
+    }
+}
+
+#[test]
+fn pane_control_send_over_32k_is_limit_bytes() {
+    let big = "x".repeat(32 * 1024 + 1);
+    let line = format!(r#"{{"op":"pane.send","args":{{"target":"a","text":"{big}"}}}}"#);
+    assert_eq!(code_of(&line), ErrorCode::LimitBytes);
+    let run = format!(r#"{{"op":"pane.run","args":{{"target":"a","command":"{big}"}}}}"#);
+    assert_eq!(code_of(&run), ErrorCode::LimitBytes);
+    let fits = "x".repeat(32 * 1024);
+    let run = format!(r#"{{"op":"pane.run","args":{{"target":"a","command":"{fits}"}}}}"#);
+    assert!(parse(&run).is_ok());
+}
+
+#[test]
+fn pane_control_limits_are_clamped() {
+    let r = parse(r#"{"op":"pane.read","args":{"target":5,"history_lines":99999,"timeout_s":99999}}"#).unwrap();
+    let Op::Read(a) = r.op else { panic!() };
+    assert_eq!((a.target.as_str(), a.history_lines, a.timeout_s), ("5", 2000, 3600));
+}
+
+#[test]
+fn pane_control_every_request_round_trips() {
+    let reqs = [
+        Op::List,
+        Op::Open(OpenArgs { cwd: Some("/w".into()), shadow: false, parent: Some("self".into()), cols: 90, rows: 30, command: Some("ls".into()) }),
+        Op::Send(SendArgs { target: "spg#1".into(), input: Input::Text { text: "a\nb".into(), enter: false }, force: true }),
+        Op::Send(SendArgs { target: "1".into(), input: Input::Keys(vec!["ctrl-c".into(), "up".into()]), force: false }),
+        Op::Send(SendArgs { target: "1".into(), input: Input::Bytes(vec![0, 27, 255]), force: false }),
+        Op::Run(RunArgs { target: "w(1,1,1)".into(), command: "true".into(), timeout_s: 9, force: false }),
+        Op::Read(ReadArgs { target: "x".into(), history_lines: 3, wait: Some(Wait::Text("ok".into())), since: Some(77), timeout_s: 5 }),
+        Op::Read(ReadArgs { target: "x".into(), history_lines: 0, wait: Some(Wait::Quiet(500)), since: None, timeout_s: 60 }),
+        Op::Read(ReadArgs { target: "x".into(), history_lines: 0, wait: Some(Wait::CommandEnd), since: None, timeout_s: 60 }),
+        Op::Resize { target: "x".into(), cols: 100, rows: 20 },
+        Op::Place { target: "x".into(), place: Where::Peek },
+        Op::Close { target: "x".into() },
+        Op::Audit { limit: 7 },
+        Op::Helper("helper.list".into()),
+    ];
+    for op in reqs {
+        let r = Request { op, caller_thread: Some("th".into()) };
+        assert_eq!(parse(&r.to_json()).unwrap(), r);
+    }
+}
+
+#[test]
+fn pane_control_only_reads_are_retried() {
+    assert!(Op::List.is_read_only());
+    assert!(Op::Audit { limit: 1 }.is_read_only());
+    assert!(Op::Helper("helper.list".into()).is_read_only());
+    assert!(!Op::Close { target: "x".into() }.is_read_only());
+    assert!(!Op::Helper("helper.start".into()).is_read_only());
+}

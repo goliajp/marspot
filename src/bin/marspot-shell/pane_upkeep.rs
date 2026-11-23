@@ -215,6 +215,7 @@ impl ShellApp {
         // same map the plugin host drops its memo by: a repeat the host
         // swallows must be one these tables still hold.
         self.forget_closed_panes(|sid| snapshot.contains_key(&sid));
+        self.publish_pane_views(&snapshot);
         self.plugin_host.publish_pane_status(snapshot);
         self.flush_pane_decls();
     }
@@ -232,6 +233,7 @@ impl ShellApp {
         self.pane_tables.retain(&open);
         self.wake_queue.retain(|sid| open(*sid));
         control_reader::pane_wakes::retain(&open);
+        Self::forget_closed_for_control(&open);
     }
 
     /// Send the current core every badge, title and recede level it

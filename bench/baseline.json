@@ -468,5 +468,14 @@
     "cold_gated": true,
     "warm_ms_max": 246,
     "warm_gated": true
+  },
+  "pane_control": {
+    "_comment": "P95 in ms of the pane control socket's latencies, each from the request leaving the probe to its answer arriving, on connections kept open and paced under the per-caller rate (bin/measure-pane-control.sh + bin/_pane_control_probe.py, run by bin/bench.sh --full in the console session; one window, a pane reading its input silently and a pane at a /bin/sh prompt).  send: one byte without Enter, answered once written to the PTY.  send_enter: the same with Enter, including the 50 ms the session leaves for the echo.  fired: a `change` wait, from the answer to the send that makes the shell echo to the answer to the wait.  run_true: pane.run true, to the answer with its exit status; runs paced 200 ms apart: input to a pane within 2 s of a run's end there first waits for a prompt watch (shell in front, 150 ms quiet), which a prompt drawn by then answers at once.  run_after_run: the same with each run sent as soon as the one before answered, so it includes that prompt wait.  read: pane.read without history (asks the session nothing, answers no pos).  Mini 2026-11-23, two runs at load1 about 3 (the second after the prompt wait was fixed, so run_true is from it alone): send 0.722 / 1.404, send_enter 60.714 / 61.355, fired 1.25 / 1.677, run_true 164.443, read 1.375 / 2.175.  run_true and read again on mini 2026-11-23 at load1 2.1, one run, after the prompt wait moved to the next input and the plain read stopped asking the session: send 1.27, send_enter 61.401, fired 1.823, run_true 5.257, read 1.611 (a second run waited behind another session's heavy lock on mini and was stopped).  Mini 2026-11-23 after the next input after a run started waiting for the prompt watch instead of a fixed 150 ms, one run at load1 8 (over the reading limit, so the numbers are high if anything): send 1.011, send_enter 60.996, fired 1.575, run_true 5.666, run_after_run 162.624, read 1.131; the earlier ceilings hold, run_after_run gets its first.  Ceiling = the worse run's P95 x 3.  open_shadow has no ceiling yet: the core does not open shadow panes until PaneControlCaps bit 1, and the probe skips it until then.",
+    "send_p95_ms_max": 4.2,
+    "send_enter_p95_ms_max": 184.1,
+    "fired_p95_ms_max": 5.5,
+    "run_true_p95_ms_max": 15.8,
+    "run_after_run_p95_ms_max": 487.9,
+    "read_p95_ms_max": 6.5
   }
 }

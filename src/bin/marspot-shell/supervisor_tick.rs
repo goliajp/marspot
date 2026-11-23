@@ -17,6 +17,8 @@ impl ShellApp {
     ///      deadline — unchanged, but scoped to `active` only.
     ///   6. SIGUSR1 manual trigger; 7. banner refresh.
     pub(super) fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
+        // first: a control socket connection is asleep on each of these
+        self.drain_pane_control();
         // Plugin tick — runs at the supervisor cadence (1 s pump plus
         // knocks, see `user_event`), each plugin further gates by its own
         // tick_interval_ms.  Cheap when no plugin needs to tick.
@@ -49,19 +51,7 @@ impl ShellApp {
             self.pane_status.report_activity(sid, activity);
         }
         lap!(0);
-        // One `stat` a tick.  This is what makes the settings file
-        // live: edit it by hand or from the panel and the next sweep
-        // is already using the new values, with nothing restarted.
-        if marspot::settings::reload_if_changed() {
-            let s = marspot::settings::get();
-            lx_event!(
-                "SETTINGS_RELOADED",
-                "settings.toml changed on disk",
-                reclaim = s.reclaim_enabled as u32,
-                idle_min = s.reclaim_idle_minutes as u64,
-                prefetch = s.reclaim_prefetch as u32
-            );
-        }
+        super::theme_follow::follow_settings();
         self.follow_theme();
         lap!(1);
         self.sweep_pane_status();

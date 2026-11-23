@@ -79,6 +79,26 @@ pub(crate) fn at_launch() -> (f64, f64, f64) {
     marspot::system_theme::startup_palette().bg
 }
 
+/// One `stat` a tick.  This is what makes the settings file live: edit
+/// it by hand or from the panel and the next sweep is already using the
+/// new values, with nothing restarted.
+pub(super) fn follow_settings() {
+    if !marspot::settings::reload_if_changed() {
+        return;
+    }
+    if let Some(h) = super::pane_control::hub() {
+        h.reload_config();
+    }
+    let s = marspot::settings::get();
+    marspot::lx_event!(
+        "SETTINGS_RELOADED",
+        "settings.toml changed on disk",
+        reclaim = s.reclaim_enabled as u32,
+        idle_min = s.reclaim_idle_minutes as u64,
+        prefetch = s.reclaim_prefetch as u32
+    );
+}
+
 impl super::ShellApp {
     /// Publish the system's theme if it changed, then bring the
     /// shell's own surfaces to the theme in force if that changed.

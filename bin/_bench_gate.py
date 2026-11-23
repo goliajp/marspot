@@ -38,6 +38,7 @@ sys.dont_write_bytecode = True  # no __pycache__ next to the scripts
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bench_record  # noqa: E402
 import _bench_latency  # noqa: E402
+import _bench_pane_control  # noqa: E402
 
 STALE_DAYS = 14
 
@@ -346,6 +347,8 @@ if mode == "full":
             host["invalid"] = f"load1 reached {e['load1_max']} (over {_bench_record.LOAD_MAX}) during the trials"
         row(f"startup {kind}", e["ms"] if e else None, "ms", cfg.get(f"{kind}_ms_max"), True,
             gating=cfg.get(f"{kind}_gated", False), trials=(e or {}).get("ms_samples"), host=host)
+
+_bench_pane_control.add_rows(baseline, cur_dir, mode, row)
 
 # ---- print ----------------------------------------------------------------
 VERDICT = {

@@ -17,8 +17,11 @@
 //! - `spool`, `gemini_hook`, `kimi_hook`: the file a Gemini or Kimi
 //!   session's mail waits in, and the hooks that hand it over at a
 //!   turn boundary.
+//! - `control`: the pane control socket's requests and answers, its
+//!   client and the `pane` command line.
 
 pub mod claude_hook;
+pub mod control;
 pub mod envelope;
 pub mod frame;
 pub mod gemini_hook;
