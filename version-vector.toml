@@ -30,4 +30,4 @@
 
 shell   = "0.7.619"  # a run tags its status line, and reads leave that line out
 core    = "0.12.633"  # the shared run status line carries a marspot=run option
-session = "0.11.418"  # the shared run status line carries a marspot=run option
+session = "0.11.419"  # a prompt watch measures its quiet from the shell back in front
