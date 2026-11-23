@@ -218,8 +218,13 @@ impl CoreApp {
             }),
             // the other panes may have gone while the session answered
             _ if self.find_window_pane_by_sid(p.sid).is_some() && self.last_drawn_pane(p.sid) => {
-                if let Some(pane) = self.pane_by_sid_mut(p.sid) {
-                    pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, 0));
+                let sent = self
+                    .pane_by_sid_mut(p.sid)
+                    .is_some_and(|pane| pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, 0)));
+                if !sent {
+                    // the session keeps its parent until the next boot puts it back by the layout
+                    lx_warn!("core.shadow.unshadow_unsent", "SessionShadow(0) for the pane that stays was not sent",
+                        session = p.sid);
                 }
                 lx_warn!("core.shadow.place_last_pane", "the pane became the last one in the windows while it moved; it stays",
                     session = p.sid);

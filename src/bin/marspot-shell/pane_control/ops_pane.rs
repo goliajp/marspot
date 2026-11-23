@@ -178,9 +178,9 @@ pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Val
     };
     conn.need_caps(if matches!(w, Where::Peek | Where::Unpeek) { CAP_PEEK } else { CAP_SHADOWS })?;
     let host_sid = match (w, ctx.caller) {
-        // a pane taken out of its window becomes the shadow of the caller's
-        // already a shadow: the core answers that it is one, and nothing moves
-        (Where::Shadow, CallerKey::Pane(c)) if c != sid && parent_of(ctx)(sid) != 0 => c,
+        // a pane taken out of its window becomes the shadow of the caller's;
+        // checked even when the registry already names it a shadow, which
+        // can run ahead of where the core holds it
         (Where::Shadow, CallerKey::Pane(c)) if c != sid => {
             shadow_tree::check_adopt(&ctx.cfg, &parent_of(ctx), &shadow_sids(ctx), c, sid)?;
             c
