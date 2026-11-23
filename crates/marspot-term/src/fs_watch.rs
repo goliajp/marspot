@@ -30,8 +30,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// leads to, and when and how much was last written to it.
 type Stamp = Option<(u64, i64, i64, u64)>;
 
-fn stamp(path: &Path) -> Stamp {
-    let m = std::fs::metadata(path).ok()?;
+fn stamp(path: &Path, links: Links) -> Stamp {
+    let m = match links {
+        Links::Follow => std::fs::metadata(path),
+        Links::Refuse => std::fs::symlink_metadata(path),
+    };
+    let m = m.ok()?;
     Some((m.ino(), m.mtime(), m.mtime_nsec(), m.size()))
 }
 
@@ -43,10 +47,21 @@ const FILE_BIT: usize = 1 << 31;
 /// `ident` of the user event that ends the thread.
 const STOP: libc::uintptr_t = 1;
 
-fn open_evtonly(path: &Path) -> io::Result<OwnedFd> {
+/// What a link in a watched file's place is.
+#[derive(Clone, Copy)]
+enum Links {
+    Follow,
+    /// Not opened: the directory reports it coming and going.
+    Refuse,
+}
+
+fn open_evtonly(path: &Path, links: Links) -> io::Result<OwnedFd> {
     let c = CString::new(path.as_os_str().as_bytes())?;
+    let no_follow = if matches!(links, Links::Refuse) { libc::O_NOFOLLOW } else { 0 };
+    // a pipe nobody writes to would hold the open up for good
+    let flags = libc::O_EVTONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | no_follow;
     // SAFETY: `c` is a NUL-terminated path that outlives the call.
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_EVTONLY | libc::O_CLOEXEC) };
+    let fd = unsafe { libc::open(c.as_ptr(), flags) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -79,6 +94,7 @@ struct Dir {
 struct File {
     path: PathBuf,
     dir: usize,
+    links: Links,
     /// `None` while the file does not exist, and for one that cannot be
     /// opened (a socket): the directory still reports it coming and
     /// going.
@@ -91,8 +107,8 @@ impl File {
     /// that differs from what was last seen.  Armed before the look, so
     /// a change after the look is an event.
     fn rearm(&mut self, kq: &OwnedFd, index: usize) -> bool {
-        self.fd = open_evtonly(&self.path).ok().filter(|fd| arm(kq, fd, FILE_BIT | index).is_ok());
-        let now = stamp(&self.path);
+        self.fd = open_evtonly(&self.path, self.links).ok().filter(|fd| arm(kq, fd, FILE_BIT | index).is_ok());
+        let now = stamp(&self.path, self.links);
         std::mem::replace(&mut self.seen, now) != now
     }
 }
@@ -107,7 +123,17 @@ impl Watcher {
     /// Call `on_change` from a thread of its own each time one of
     /// `files` is created, replaced, written or removed.  Each file's
     /// directory has to exist; the file need not.
-    pub fn spawn(files: &[PathBuf], mut on_change: impl FnMut() + Send + 'static) -> io::Result<Watcher> {
+    pub fn spawn(files: &[PathBuf], on_change: impl FnMut() + Send + 'static) -> io::Result<Watcher> {
+        Watcher::start(files, Links::Follow, on_change)
+    }
+
+    /// [`Watcher::spawn`] for files someone else may have put a link in
+    /// the place of: what a link leads to is never opened.
+    pub fn spawn_no_follow(files: &[PathBuf], on_change: impl FnMut() + Send + 'static) -> io::Result<Watcher> {
+        Watcher::start(files, Links::Refuse, on_change)
+    }
+
+    fn start(files: &[PathBuf], links: Links, mut on_change: impl FnMut() + Send + 'static) -> io::Result<Watcher> {
         // SAFETY: kqueue returns a new descriptor or -1.
         let kq = unsafe { libc::kqueue() };
         if kq < 0 {
@@ -126,13 +152,13 @@ impl Watcher {
             let dir = match dirs.iter().position(|d| d.path == parent) {
                 Some(i) => i,
                 None => {
-                    let fd = open_evtonly(parent)?;
+                    let fd = open_evtonly(parent, Links::Follow)?;
                     arm(&kq, &fd, dirs.len())?;
                     dirs.push(Dir { path: parent.to_path_buf(), fd });
                     dirs.len() - 1
                 }
             };
-            let mut f = File { path: path.clone(), dir, fd: None, seen: None };
+            let mut f = File { path: path.clone(), dir, links, fd: None, seen: None };
             f.rearm(&kq, watched.len());
             watched.push(f);
         }
@@ -170,14 +196,14 @@ impl Watcher {
                         if ev.fflags & GONE != 0 {
                             watched[i].rearm(&kq, i);
                         } else {
-                            watched[i].seen = stamp(&watched[i].path);
+                            watched[i].seen = stamp(&watched[i].path, links);
                         }
                         fire = true;
                         continue;
                     }
                     if ev.fflags & GONE != 0 {
                         // the directory itself was moved or removed
-                        match open_evtonly(&dirs[udata].path) {
+                        match open_evtonly(&dirs[udata].path, Links::Follow) {
                             Ok(fd) if arm(&kq, &fd, udata).is_ok() => dirs[udata].fd = fd,
                             _ => break 'wait,
                         }
@@ -317,6 +343,53 @@ mod tests {
         assert!(quiet(&rx));
         std::fs::remove_file(&s).unwrap();
         assert!(reported(&rx));
+    }
+
+    /// Nobody has the other end of the pipe open: opening it must not wait.
+    #[test]
+    fn a_pipe_in_a_files_place_is_watched_like_any_other() {
+        let d = dir("pipe");
+        let f = d.join("result.md");
+        assert!(std::process::Command::new("/usr/bin/mkfifo").arg(&f).status().unwrap().success());
+        let (tx, ready) = channel();
+        let file = f.clone();
+        std::thread::spawn(move || tx.send(watch(&[file])));
+        let (w, rx) = ready.recv_timeout(Duration::from_secs(5)).expect("the watch started");
+        assert!(quiet(&rx));
+        std::fs::remove_file(&f).unwrap();
+        assert!(reported(&rx), "the pipe going");
+        assert!(std::process::Command::new("/usr/bin/mkfifo").arg(&f).status().unwrap().success());
+        assert!(reported(&rx), "a pipe coming");
+        std::fs::write(d.join("new"), "x").unwrap();
+        std::fs::rename(d.join("new"), &f).unwrap();
+        assert!(reported(&rx), "a file in its place");
+        let alive = Arc::downgrade(&w.alive);
+        drop(w);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while alive.strong_count() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(alive.strong_count(), 0, "its thread ended");
+    }
+
+    #[test]
+    fn a_link_is_followed_only_where_it_may_be() {
+        let (d, away) = (dir("link"), dir("link-away"));
+        let (f, to) = (d.join("result.md"), away.join("other"));
+        std::fs::write(&to, "1").unwrap();
+        std::os::unix::fs::symlink(&to, &f).unwrap();
+        let (_w, followed) = watch(std::slice::from_ref(&f));
+        let (tx, refused) = channel();
+        let _w2 = Watcher::spawn_no_follow(std::slice::from_ref(&f), move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        std::fs::write(&to, "22").unwrap();
+        assert!(reported(&followed));
+        assert!(quiet(&refused), "a change behind the link");
+        std::fs::remove_file(&f).unwrap();
+        std::fs::write(&f, "a file").unwrap();
+        assert!(reported(&refused), "a file in the link's place");
     }
 
     #[test]
