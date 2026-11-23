@@ -16,7 +16,7 @@ use super::caller::CallerKey;
 use super::conn::{ANSWER_WITHIN, Asked, Conn, done_reject};
 use super::dispatch::{Ctx, audit, target};
 use super::limits::{SpawnCounts, check_spawn, session_cap};
-use super::{Reply, names, panes};
+use super::{Reply, names, panes, shadow_tree};
 
 /// How long a new pane may take to be answered for.
 const SPAWN_WITHIN: Duration = Duration::from_secs(10);
@@ -61,22 +61,20 @@ fn ask_done_within(
     Err(Reject::new(ErrorCode::Unknown, "the core did not answer; check with pane.list"))
 }
 
-/// The pane at the top of `sid`'s chain of shadow parents, and how many
-/// shadow levels down `sid` is.
+fn parent_of(ctx: &Ctx) -> impl Fn(u64) -> u64 + '_ {
+    |sid| ctx.obs.session(sid).map_or(0, |s| panes::shadow_of(&s.entry))
+}
+
 fn root_and_depth(ctx: &Ctx, sid: u64) -> (u64, usize) {
-    let (mut at, mut depth) = (sid, 0);
-    while let Some(parent) = ctx.obs.session(at).map(|s| panes::shadow_of(&s.entry)).filter(|p| *p != 0) {
-        at = parent;
-        depth += 1;
-        if depth > 16 {
-            break;
-        }
-    }
-    (at, depth)
+    shadow_tree::root_and_depth(&parent_of(ctx), sid)
+}
+
+fn shadow_sids(ctx: &Ctx) -> Vec<u64> {
+    ctx.obs.live().filter(|s| panes::shadow_of(&s.entry) != 0).map(|s| s.entry.id).collect()
 }
 
 fn counts(ctx: &Ctx, parent: u64) -> SpawnCounts {
-    let shadows: Vec<u64> = ctx.obs.live().filter(|s| panes::shadow_of(&s.entry) != 0).map(|s| s.entry.id).collect();
+    let shadows = shadow_sids(ctx);
     let (root, parent_depth) = root_and_depth(ctx, parent);
     SpawnCounts {
         live_sessions: ctx.obs.live().count(),
@@ -181,8 +179,10 @@ pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Val
     conn.need_caps(if matches!(w, Where::Peek | Where::Unpeek) { CAP_PEEK } else { CAP_SHADOWS })?;
     let host_sid = match (w, ctx.caller) {
         // a pane taken out of its window becomes the shadow of the caller's
+        // already a shadow: the core answers that it is one, and nothing moves
+        (Where::Shadow, CallerKey::Pane(c)) if c != sid && parent_of(ctx)(sid) != 0 => c,
         (Where::Shadow, CallerKey::Pane(c)) if c != sid => {
-            check_spawn(&ctx.cfg, &SpawnCounts { live_sessions: 0, ..counts(ctx, c) }, true, session_cap())?;
+            shadow_tree::check_adopt(&ctx.cfg, &parent_of(ctx), &shadow_sids(ctx), c, sid)?;
             c
         }
         (Where::Shadow, _) => return Err(Reject::new(ErrorCode::BadRequest, "a shadow pane needs a parent: call from another pane")),

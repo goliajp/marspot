@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.601"  # the shadow-pane dev seam leaves the clock free to rest
+shell   = "0.7.602"  # pane.place shadow refuses a loop and counts the moved tree; an existing shadow is not checked again
 core    = "0.12.625"  # shadow panes: opened, closed, moved, resized for the shell; back in the shadows at boot; wake nothing
 session = "0.11.414"  # shadow panes: shadow_of from the first entry, parent watch, idle timeout, SessionShadow

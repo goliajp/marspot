@@ -39,6 +39,7 @@ mod ops_pane;
 mod ops_read;
 mod panes;
 mod server;
+mod shadow_tree;
 mod wait;
 
 pub(crate) use mainloop::MainSide;
