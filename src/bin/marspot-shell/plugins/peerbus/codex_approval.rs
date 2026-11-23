@@ -5,7 +5,7 @@ use std::path::Path;
 
 use marspot_term::lx_info;
 
-use super::codex_config::{APPROVAL, APPROVED, OPEN, TABLE, header, scan, string_token, string_value, toml_string};
+use super::codex_config::{APPROVAL, APPROVED, OPEN, TABLE, closes, header, opened_by, scan, string_token, string_value, toml_string};
 
 /// The codex arguments under which a session in `home` is asked about
 /// no tool of marspot's MCP server, however its config has the server:
@@ -48,7 +48,18 @@ pub(super) fn approved(text: &str, bin: Option<&str>) -> Vec<String> {
 /// form the entry is.
 pub(super) fn mode_said(text: &str) -> Option<String> {
     let mut table = String::new();
-    for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
+    // the delimiter of a multi-line string the scan is inside of
+    let mut open: Option<&str> = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(delim) = open {
+            if closes(line, delim) {
+                open = None;
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
         if line.starts_with('[') {
             table = header(line);
             continue;
@@ -68,6 +79,7 @@ pub(super) fn mode_said(text: &str) -> Option<String> {
             let end = said.find(['"', '\'', ',', '}']).unwrap_or(said.len());
             return Some(toml_string(said[..end].trim()));
         }
+        open = opened_by(value);
     }
     None
 }

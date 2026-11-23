@@ -130,7 +130,7 @@ pub(super) fn scan(text: &str) -> Result<Option<Table>, &'static str> {
         let start = at;
         at += line.len();
         if let Some(delim) = open {
-            if line.matches(delim).count() % 2 == 1 {
+            if closes(line, delim) {
                 open = None;
             }
             continue;
@@ -176,7 +176,7 @@ pub(super) fn scan(text: &str) -> Result<Option<Table>, &'static str> {
         if table == TABLE && key == APPROVAL {
             approval = Some(token().map_or(String::new(), |r| text[r].to_string()));
         }
-        open = ["\"\"\"", "'''"].into_iter().find(|d| value.matches(*d).count() % 2 == 1);
+        open = opened_by(value);
     }
     if open.is_some() {
         return Err(OPEN);
@@ -186,6 +186,18 @@ pub(super) fn scan(text: &str) -> Result<Option<Table>, &'static str> {
     }
     let (command, command_line_end) = command.ok_or(UNREADABLE)?;
     Ok(Some(Table { command, command_line_end, approval }))
+}
+
+/// The delimiter of the multi-line string `value` opens and does not
+/// close.
+pub(super) fn opened_by(value: &str) -> Option<&'static str> {
+    ["\"\"\"", "'''"].into_iter().find(|d| closes(value, d))
+}
+
+/// Whether `line` ends on the other side of a `delim` string than it
+/// starts on.
+pub(super) fn closes(line: &str, delim: &str) -> bool {
+    line.matches(delim).count() % 2 == 1
 }
 
 /// `text` with the table present, its command `bin` and its tools'
