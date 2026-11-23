@@ -32,6 +32,7 @@ pub(super) struct Shadows {
     /// session's spawn lands.  One entry per open L1 asked for, which
     /// L1 rate-limits; each leaves when its spawn reports back.
     spawning: HashMap<u64, (u32, bool)>,
+    pub(super) unsaid: super::spawn_said::SpawnsUnsaid,
     pub(super) closed: ClosedSlots,
     pub(super) places: super::shadow_place::Places,
     pub(super) family: super::helper_panel::Family,
@@ -56,10 +57,7 @@ impl Shadows {
             t.saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(250))
         });
-        match (self.places.wait(), dev) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [self.places.wait(), self.unsaid.wait(), dev].into_iter().flatten().min()
     }
 }
 
@@ -120,7 +118,7 @@ impl CoreApp {
         route.unwrap_or_else(|| self.answer(f.msg_type, req_id, 0, DoneCode::Other, "malformed request"))
     }
 
-    fn spawned(&mut self, req_id: u32, sid: u64, err: &str) -> Route {
+    pub(super) fn spawned(&mut self, req_id: u32, sid: u64, err: &str) -> Route {
         let m = PaneSpawned { req_id, ok: err.is_empty(), sid, err: err.to_string() };
         lx_event!(
             "PANE_SPAWN_REPLY",
@@ -196,9 +194,7 @@ impl CoreApp {
             return;
         };
         match outcome {
-            Ok(()) => {
-                self.spawned(req_id, sid, "");
-            }
+            Ok(()) => self.answer_spawn_when_said(req_id, sid),
             Err(e) => {
                 if shadow && let Some(i) = self.shadow_index(sid) {
                     let pane = self.shadows.remove(i);

@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.641"  # a closed session removes its own directory once it writes no more
-core    = "0.12.638"  # a closed session removes its own directory once it writes no more
+core    = "0.12.639"  # a new pane is answered when its session takes requests
 session = "0.11.424"  # a closed session removes its own directory once it writes no more
