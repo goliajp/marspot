@@ -8,20 +8,35 @@
 //! counts, and the replay holds the history the frame does not.
 
 use marspot_term::grid::Grid;
+use marspot_term::terminal::Terminal;
 
 /// The most screen rows one logical line is read across.
 const MAX_WRAPPED_ROWS: u64 = 256;
 
-/// The logical line (soft-wrapped rows joined) that starts at absolute
-/// row `top` of pane `sid`; `None` when the record no longer reaches it.
-pub(super) fn line_at(sid: u64, top: u64) -> Option<String> {
+/// Pane `sid`'s record tail replayed at the size of its live frame,
+/// with that frame's scroll count; read once for both the matched line
+/// and the history a read asks for.
+pub(super) struct Replay {
+    pub term: Terminal,
+    live_scroll: u64,
+}
+
+pub(super) fn replay(sid: u64) -> Option<Replay> {
     let entry = marspot_term::session_registry::read_session_entry(sid).ok()?;
     let regions = marspot_term::grid_shm::SessionRegions::of_entry(&entry)?;
     let live = marspot_term::grid_shm::peek_frame(&regions).ok().flatten()?;
     let term = marspot::pane_read::replayed(sid, live.cols, live.rows).ok()?;
-    let grid = term.grid();
-    let shift = live.scroll_push_count.checked_sub(grid.scroll_push_count())?;
-    logical_line(grid, top.checked_sub(shift)?)
+    Some(Replay { term, live_scroll: live.scroll_push_count })
+}
+
+impl Replay {
+    /// The logical line (soft-wrapped rows joined) that starts at
+    /// absolute row `top`; `None` when the record no longer reaches it.
+    pub fn line_at(&self, top: u64) -> Option<String> {
+        let grid = self.term.grid();
+        let shift = self.live_scroll.checked_sub(grid.scroll_push_count())?;
+        logical_line(grid, top.checked_sub(shift)?)
+    }
 }
 
 /// Where absolute row `abs` of `grid` is, as `(view_offset, row)`.

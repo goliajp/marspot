@@ -232,6 +232,13 @@ pub fn replayed(sid: u64, cols: u16, rows: u16) -> std::io::Result<Terminal> {
 /// What pane `sid` shows: `extra_lines` lines of history, then the
 /// screen, trailing blank lines dropped.
 pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
+    screen_with(sid, extra_lines, None)
+}
+
+/// [`screen`], taking the history from `replay` (the tail of the
+/// pane's record replayed, as [`replayed`] gives it) when the caller
+/// has one already, so the record is not replayed a second time.
+pub fn screen_with(sid: u64, extra_lines: u16, replay: Option<&Terminal>) -> std::io::Result<String> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
     let Some(frame) = live_frame(&entry)? else {
         return screen_text(&session_dir_of(sid), entry.cols, entry.rows, extra_lines);
@@ -240,9 +247,14 @@ pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
     let mut out: Vec<String> = Vec::new();
     if extra_lines > 0 {
         // history is only in the record
-        let bytes = marspot_term::bytelog::tail(&session_dir_of(sid), REPLAY_TAIL)?;
-        let mut term = Terminal::new(entry.cols.max(1), entry.rows.max(1));
-        term.feed(&bytes);
+        let owned;
+        let term = match replay {
+            Some(t) => t,
+            None => {
+                owned = replayed(sid, entry.cols, entry.rows)?;
+                &owned
+            }
+        };
         let g = term.grid();
         for i in (0..g.scrollback_len().min(extra_lines as usize)).rev() {
             out.push(scrollback_line(g, i));

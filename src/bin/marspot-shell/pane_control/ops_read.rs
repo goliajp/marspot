@@ -11,6 +11,9 @@ use marspot::shell_proto::{WatchBody, WatchKind, WatchReason};
 use marspot_peer::control::{ReadArgs, Reject, Wait, screen};
 use marspot_peer::json::{Value, obj};
 
+use marspot_term::terminal::Terminal;
+
+use super::super::observe::Observation;
 use super::conn::Conn;
 use super::dispatch::{Ctx, target};
 use super::{names, panes};
@@ -86,13 +89,18 @@ pub(super) fn read(conn: &mut Conn, ctx: &Ctx, a: &ReadArgs) -> Result<Value, Re
         v.set("reason", "timeout".into());
         return Ok(v);
     };
-    let mut v = screen_of(sid, a.history_lines, Some(f.pos), &ctx.obs);
+    // the matched line and the history come from one replay of the record
+    let replay = match (w, f.line) {
+        (Wait::Text(_), Some(_)) => super::matched::replay(sid),
+        _ => None,
+    };
+    let mut v = screen_from(sid, a.history_lines, Some(f.pos), &ctx.obs, replay.as_ref().map(|r| &r.term));
     v.set("reason", reason_word(f.reason, *w == Wait::Exit).into());
     if let Some(st) = f.status {
         v.set("exit_status", i64::from(st).into());
     }
     if let (Wait::Text(needle), Some(line)) = (w, f.line) {
-        matched_line(&mut v, sid, line, needle);
+        matched_line(&mut v, replay.as_ref(), line, needle);
     }
     Ok(v)
 }
@@ -101,9 +109,10 @@ pub(super) fn read(conn: &mut Conn, ctx: &Ctx, a: &ReadArgs) -> Result<Value, Re
 /// record no longer holds that row as the session numbered it, the
 /// newest screen line holding the text, and `matched_line_from` says
 /// which of the two it is.
-fn matched_line(v: &mut Value, sid: u64, line: u64, needle: &str) {
+fn matched_line(v: &mut Value, replay: Option<&super::matched::Replay>, line: u64, needle: &str) {
     let squeezed: String = needle.split_whitespace().collect();
-    let by_row = super::matched::line_at(sid, line)
+    let by_row = replay
+        .and_then(|r| r.line_at(line))
         .filter(|l| l.contains(needle) || l.split_whitespace().collect::<String>().contains(&squeezed));
     let (text, from) = match by_row {
         Some(l) => (Some(l), "row"),
@@ -116,8 +125,13 @@ fn matched_line(v: &mut Value, sid: u64, line: u64, needle: &str) {
 }
 
 /// What pane `sid` shows, with its size and cursor.
-pub(super) fn screen_of(sid: u64, history_lines: u32, pos: Option<u64>, obs: &super::super::observe::Observation) -> Value {
-    let raw = marspot::pane_read::screen(sid, history_lines.min(u16::MAX as u32) as u16).unwrap_or_default();
+pub(super) fn screen_of(sid: u64, history_lines: u32, pos: Option<u64>, obs: &Observation) -> Value {
+    screen_from(sid, history_lines, pos, obs, None)
+}
+
+/// [`screen_of`], with the history from `replay` when one is at hand.
+fn screen_from(sid: u64, history_lines: u32, pos: Option<u64>, obs: &Observation, replay: Option<&Terminal>) -> Value {
+    let raw = marspot::pane_read::screen_with(sid, history_lines.min(u16::MAX as u32) as u16, replay).unwrap_or_default();
     let (text, truncated) = cap_text(screen::filter(&raw));
     let (cols, rows, cursor) = shape(sid);
     let mut v = obj([
