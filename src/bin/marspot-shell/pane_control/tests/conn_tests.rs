@@ -15,7 +15,7 @@ use marspot_peer::control::ErrorCode;
 
 use super::super::caller::{CallerKey, Peer};
 use super::super::conn::{Conn, done_reject};
-use super::super::{Hub, MainCmd, Reply};
+use super::super::{Hub, MainCmd, Reply, hangup};
 use super::{hub_at, temp};
 
 fn done(hub: &Hub, req_id: u32, code: DoneCode, text: &str) {
@@ -166,6 +166,34 @@ fn pane_control_caller_hanging_up_ends_its_wait() {
     assert!(out.is_err(), "{out:?}");
     assert!(t.elapsed() < Duration::from_secs(3));
     assert_eq!(hub.links.sizes().1, 0, "the wait's slot is given back");
+}
+
+#[test]
+fn pane_control_half_closed_caller_is_not_hung_up() {
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _armed = hangup::watch(ours.as_raw_fd(), tx).unwrap();
+    theirs.shutdown(std::net::Shutdown::Write).unwrap();
+    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "a caller still reading is not gone");
+    drop(theirs);
+    assert!(matches!(rx.recv_timeout(Duration::from_secs(2)), Ok(Reply::HungUp)));
+}
+
+#[test]
+fn pane_control_hangup_of_an_ended_watch_does_not_reach_the_fd_s_next_owner() {
+    let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    let fd = ours.as_raw_fd();
+    let (old_tx, _old_rx) = std::sync::mpsc::channel();
+    let old = hangup::watch(fd, old_tx).unwrap();
+    let stale = old.token();
+    drop(old);
+    // the same fd number, watched again for another connection
+    let (tx, rx) = std::sync::mpsc::channel();
+    let now = hangup::watch(fd, tx).unwrap();
+    assert!(!hangup::deliver_for_test(fd, stale));
+    assert!(rx.try_recv().is_err());
+    assert!(hangup::deliver_for_test(fd, now.token()));
+    assert!(matches!(rx.try_recv(), Ok(Reply::HungUp)));
 }
 
 #[test]
