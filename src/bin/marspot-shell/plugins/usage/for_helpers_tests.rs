@@ -58,7 +58,7 @@ fn helpers_a_batch_of_five_is_spread_and_a_new_feed_starts_over() {
     let batch: Vec<u8> = (0..5).map(|_| number(&choose(Agent::Claude, &homes(6), &a, None, &mut placed, NOW))).collect();
     assert_eq!(batch, [1, 2, 3, 4, 5]);
     let newer = Accounts { feed_at: NOW + 60, ..a };
-    assert_eq!(number(&choose(Agent::Claude, &homes(6), &newer, None, &mut placed, NOW)), 1, "the new feed counts them");
+    assert_eq!(number(&choose(Agent::Claude, &homes(6), &newer, None, &mut placed, NOW + 60)), 1, "the new feed counts them");
 }
 
 #[test]

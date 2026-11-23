@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.620"  # only the text of a run's status line is cut from what a caller reads
+shell   = "0.7.621"  # an older or misdated usage feed does not disturb the helpers placed since
 core    = "0.12.633"  # the shared run status line carries a marspot=run option
 session = "0.11.419"  # a prompt watch measures its quiet from the shell back in front
