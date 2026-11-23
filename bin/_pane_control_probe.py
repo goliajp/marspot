@@ -96,18 +96,23 @@ def fired(path, pane, n):
 
 
 def open_shadow(conn, parent, n):
+    # paced at the per-parent rate of new panes (6 a minute)
     xs = []
-    for _ in range(n):
+    for i in range(n):
+        if i:
+            time.sleep(10.5)
         t0 = time.perf_counter()
         sid = need(conn.ask("pane.open", parent=str(parent), shadow=True)[1], "open")["id"]
+        until = time.monotonic() + 10
         while True:
             _, ans = conn.ask("pane.run", target=str(sid), command="true", timeout_s=5)
             if ans.get("ok") and ans["result"].get("exit_status") == 0:
                 break
+            if time.monotonic() > until:
+                raise SystemExit(f"open: the shadow pane never ran a command: {ans}")
             time.sleep(0.02)
         xs.append((time.perf_counter() - t0) * 1000.0)
         need(conn.ask("pane.close", target=str(sid))[1], "close")
-        time.sleep(1.0)
     return xs
 
 
@@ -133,7 +138,7 @@ def main():
     loads.append(load1())
     rows["read"] = timed(c, ROUNDS, "pane.read", target=sh)
     loads.append(load1())
-    rows["open_shadow"] = open_shadow(c, sh, 10) if caps & 2 else None
+    rows["open_shadow"] = open_shadow(c, sh, 6) if caps & 2 else None
     loads.append(load1())
     doc = {k: (None if v is None else {"p95_ms": round(p95(v), 3), "samples_ms": [round(x, 3) for x in v]}) for k, v in rows.items()}
     doc.update({"caps": caps, "load1_start": loads[0], "load1_max": max(loads), "load1_end": loads[-1]})
