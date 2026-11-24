@@ -37,3 +37,9 @@ fn figures_cut_too_short_to_read_end_at_the_edge() {
     assert_eq!(columns(35, &[&format!("  ◯ {name} 1…"), &format!("  ◯ {name} …")]), Some((28, 35)));
     assert_eq!(columns(40, &[&format!("  ◯ {name} 17s · …")]), Some((28, 40)));
 }
+
+#[test]
+fn a_task_cut_short_in_its_column_is_not_figures() {
+    let row = "  ◯ general-purpose  waiting on 1 shell · Wait 30s · s…";
+    assert_eq!(columns(136, &[row]), Some((15, 134)));
+}

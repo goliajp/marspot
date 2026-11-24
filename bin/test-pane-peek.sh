@@ -237,7 +237,7 @@ for (( i = 0; i < 40; i++ )); do
   [[ -n $LONE && $LONE != "$HOST_SIZE" ]] && break
   sleep 0.5
 done
-check "the parent took the title strip's row ($HOST_SIZE -> $LONE)" test "$LONE" != "$HOST_SIZE"
+check "the parent took the title strip's row ($HOST_SIZE -> $LONE)" test -n "$LONE" -a "$LONE" != "$HOST_SIZE"
 sleep 1
 # the counts below prove nothing unless the shells' SIGWINCH records exist
 check "the parent was told its new size, so its SIGWINCHes are counted" test "$(tail -1 "$SD/winch-host" 2>/dev/null)" = "$LONE"

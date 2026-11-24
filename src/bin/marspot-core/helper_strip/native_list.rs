@@ -138,9 +138,10 @@ fn figures_to_end(g: &Grid, col: u16, row: u16) -> bool {
     let mut at = col;
     while let Some(start) = (at..g.cols()).find(|&c| !blank(g, c, row)) {
         let end = (start..g.cols()).find(|&c| blank(g, c, row)).unwrap_or(g.cols());
-        // only the last word may be cut short
+        // only the last word may be cut short, and only by the pane's edge:
+        // a task cut short in its own column is followed by blanks
         if g.cell(end - 1, row).ch == '…' {
-            return (end..g.cols()).all(|c| blank(g, c, row));
+            return end == g.cols();
         }
         if !figure_word(g, start, end, row) {
             return false;
@@ -156,9 +157,9 @@ fn columns(g: &Grid, from: u16, to: u16) -> Option<Columns> {
     for row in from..=to {
         let (start, end) = piece(g, row, 4)?;
         // a row without figures (one waiting on its own work) ends where
-        // its task does, not at the column where figures end
-        // and figures cut at the pane's edge can be too short to read
-        // (`4…`), so a row cut there ends at the edge
+        // its task does, not at the column where figures end; figures cut
+        // at the pane's edge can be too short to read (`4…`), so a row cut
+        // there ends at the edge
         let cut = !blank(g, g.cols() - 1, row);
         if cut || (start + 1..g.cols()).any(|c| blank(g, c - 1, row) && figures_to_end(g, c, row)) {
             let ink = (start..g.cols()).rev().find(|&c| !blank(g, c, row)).map_or(0, |c| c + 1);
