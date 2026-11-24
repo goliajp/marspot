@@ -20,6 +20,7 @@ pub(crate) mod choose;
 pub(crate) mod notice;
 pub(crate) mod plan;
 pub(crate) mod replay;
+pub(crate) mod rescue;
 pub(crate) mod rest;
 pub(crate) mod speed;
 
@@ -35,6 +36,10 @@ mod sim_tests;
 mod snapshot_tests;
 #[cfg(test)]
 mod core_tests;
+#[cfg(test)]
+mod rest_tests;
+#[cfg(test)]
+mod rescue_tests;
 
 /// The share of a Claude week a full Fable window is worth.
 ///
@@ -153,6 +158,14 @@ pub(crate) fn lasts(q: &Quant, load: &Load, class: Class, extra: f64) -> f64 {
         t = t.min(q.f / restricted);
     }
     t
+}
+
+/// Hours the plain panes on an account last on `u`, what the
+/// restricted model will not take there, with `extra` more an hour:
+/// the one measure of how long `U` lasts.
+pub(crate) fn plain_lasts(u: f64, load: &Load, extra: f64) -> f64 {
+    let plain = load.plain + extra;
+    if plain > 0.0 { u / plain } else { 1e9 }
 }
 
 /// Demand is more than the accounts can give before they renew: the

@@ -17,24 +17,25 @@ pub(super) const STEP: f64 = 0.25;
 pub(super) const WEEK_H: f64 = 168.0;
 pub(super) const NOW: i64 = 1_795_530_644;
 
-/// `(account, week used, Fable used, week renews at)`, 2026-11-24 14:30:44Z.
-pub(super) const FEED: [(u8, f64, f64, i64); 8] = [
-    (1, 1.00, 0.95, 1_795_748_400),
-    (2, 0.74, 1.00, 1_795_985_999),
-    (3, 0.50, 0.00, 1_795_928_399),
-    (4, 0.00, 0.00, 1_795_791_600),
-    (5, 1.00, 1.00, 1_795_658_399),
-    (6, 0.05, 0.09, 1_795_755_600),
-    (7, 0.56, 1.00, 1_796_097_600),
-    (8, 1.00, 1.00, 1_795_582_799),
+/// `(account, week used, Fable used, week renews at, Fable renews at)`,
+/// 2026-11-24 14:30:44Z.
+pub(super) const FEED: [(u8, f64, f64, i64, i64); 8] = [
+    (1, 1.00, 0.95, 1_795_748_400, 1_795_748_400),
+    (2, 0.74, 1.00, 1_795_985_999, 1_795_985_999),
+    (3, 0.50, 0.00, 1_795_928_399, 1_795_928_400),
+    (4, 0.00, 0.00, 1_795_791_600, 1_795_791_600),
+    (5, 1.00, 1.00, 1_795_658_399, 1_795_658_399),
+    (6, 0.05, 0.09, 1_795_755_600, 1_795_755_600),
+    (7, 0.56, 1.00, 1_796_097_600, 1_796_097_600),
+    (8, 1.00, 1.00, 1_795_582_799, 1_795_582_799),
 ];
 
 /// The accounts at those readings, a Fable window worth `kappa` of a week.
 pub(super) fn world_at(kappa: f64) -> Vec<Quant> {
     FEED.iter()
-        .map(|&(id, w, f, reset)| {
-            let t = (reset - NOW) as f64 / 3600.0;
-            Quant { id, r: 1.0 - w, f: kappa * (1.0 - f), t, tf: t, open: true, stale: false }
+        .map(|&(id, w, f, reset, reset_f)| {
+            let h = |at: i64| (at - NOW) as f64 / 3600.0;
+            Quant { id, r: 1.0 - w, f: kappa * (1.0 - f), t: h(reset), tf: h(reset_f), open: true, stale: false }
         })
         .collect()
 }
@@ -104,11 +105,13 @@ pub(super) struct Case {
     pub batches: Vec<Batch>,
     /// What a Fable window is worth, for the world and the planners.
     pub kappa: f64,
+    /// Hours added to an account's Fable renewal, the week's staying put.
+    pub tf_shift: Vec<(u8, f64)>,
 }
 
 impl Case {
     pub(super) fn base(n_f: usize, n_n: usize, demand: f64) -> Self {
-        Case { n_f, n_n, demand, fable_share: 0.5, bias: 1.0, sigma: 0.0, p_rest: 0.4, move_cost: 0.0, leave: None, batches: Vec::new(), kappa: KAPPA_FABLE }
+        Case { n_f, n_n, demand, fable_share: 0.5, bias: 1.0, sigma: 0.0, p_rest: 0.4, move_cost: 0.0, leave: None, batches: Vec::new(), kappa: KAPPA_FABLE, tf_shift: Vec::new() }
     }
 }
 
@@ -125,6 +128,11 @@ pub(super) struct Outcome {
     pub waste: f64,
     /// The most resting moves of any one pane.
     pub most_rest_per_pane: u32,
+    /// What plain panes took of what the restricted model could also
+    /// use, points.
+    pub restricted_eaten: f64,
+    /// What the restricted model could still use at renewals, points.
+    pub restricted_lapsed: f64,
 }
 
 fn panes_of(c: &Case, rng: &mut Rng) -> Vec<SimPane> {
@@ -161,36 +169,54 @@ fn charge(a: &mut [Quant], to: u8, class: Class, cost: f64) {
 }
 
 pub(super) fn run(policy: Policy, c: &Case, seed: u64) -> Outcome {
-    let mut rng = Rng::new(seed);
     let mut a = world_at(c.kappa);
+    for (id, h) in &c.tf_shift {
+        a.iter_mut().filter(|q| q.id == *id).for_each(|q| q.tf += h);
+    }
+    run_from(policy, c, seed, a)
+}
+
+/// `run` from accounts `a` in place of the 11-24 readings.
+pub(super) fn run_from(policy: Policy, c: &Case, seed: u64, mut a: Vec<Quant>) -> Outcome {
+    let mut rng = Rng::new(seed);
     let mut panes = panes_of(c, &mut rng);
     let mut o = Outcome::default();
     let mut hour: Vec<f64> = Vec::new();
     let mut t = 0.0;
     while t < WEEK_H {
-        for q in &mut a {
-            if q.t <= STEP / 2.0 {
-                o.waste += q.r.max(0.0);
-                q.r = 1.0;
-                q.f = c.kappa;
-                q.t += 168.0;
-                q.tf = q.t;
-            }
-        }
+        a.iter_mut().for_each(|q| renew(q, c.kappa, &mut o));
         place_and_force(policy, c, &mut a, &mut panes, t, &mut o);
         hour.retain(|x| t - x < 1.0);
         rest_pass(policy, c, &mut a, &mut panes, t, &mut rng, &mut hour, &mut o);
         use_step(&mut a, &panes, t, &mut o);
         for q in &mut a {
             q.t -= STEP;
-            q.tf = q.t;
+            q.tf -= STEP;
         }
         t += STEP;
     }
-    o.unmet = (o.unmet * 100.0 * 10.0).round() / 10.0;
-    o.unmet_restricted = (o.unmet_restricted * 100.0 * 10.0).round() / 10.0;
+    let points = |x: f64| (x * 100.0 * 10.0).round() / 10.0;
+    o.unmet = points(o.unmet);
+    o.unmet_restricted = points(o.unmet_restricted);
+    o.restricted_eaten = points(o.restricted_eaten);
+    o.restricted_lapsed = points(o.restricted_lapsed);
     o.most_rest_per_pane = panes.iter().map(|p| p.rest_moves).max().unwrap_or(0);
     o
+}
+
+/// The week and the Fable window each renew at their own time; what
+/// Fable could still use lapses at the Fable renewal only.
+fn renew(q: &mut Quant, kappa: f64, o: &mut Outcome) {
+    if q.tf <= STEP / 2.0 {
+        o.restricted_lapsed += q.phi();
+        q.f = kappa;
+        q.tf += 168.0;
+    }
+    if q.t <= STEP / 2.0 {
+        o.waste += q.r.max(0.0);
+        q.r = 1.0;
+        q.t += 168.0;
+    }
 }
 
 fn place_and_force(policy: Policy, c: &Case, a: &mut [Quant], panes: &mut [SimPane], t: f64, o: &mut Outcome) {
@@ -210,6 +236,10 @@ fn place_and_force(policy: Policy, c: &Case, a: &mut [Quant], panes: &mut [SimPa
         }
         let Some(to) = pick(policy, a, panes, i, was, t, c.kappa) else {
             panes[i].on = None;
+            // a pane that waited from the start pays the move once placed
+            if starting {
+                panes[i].last = Some(f64::NEG_INFINITY);
+            }
             continue;
         };
         if starting {
@@ -234,7 +264,7 @@ fn rest_pass(policy: Policy, c: &Case, a: &mut [Quant], panes: &mut [SimPane], t
         if panes[i].on.is_none() || !panes[i].live(t) || rng.next() > c.p_rest {
             continue;
         }
-        let Some((to, urgent)) = rest(policy, a, panes, i, t, targets.as_ref(), hour.len()) else { continue };
+        let Some((to, urgent)) = rest(policy, a, panes, i, t, targets.as_ref(), hour.len(), c.kappa) else { continue };
         let from = panes[i].on.unwrap_or(to);
         panes[i].left.push((from, t));
         panes[i].on = Some(to);
@@ -263,6 +293,9 @@ fn use_step(a: &mut [Quant], panes: &[SimPane], t: f64, o: &mut Outcome) {
             continue;
         };
         let mut u = want.min(q.r.max(0.0));
+        if !restricted {
+            o.restricted_eaten += (u - q.n()).max(0.0);
+        }
         if p.class == Class::Restricted {
             u = u.min(q.f.max(0.0));
             q.f -= u;

@@ -10,16 +10,51 @@
 //! model cannot use goes first); among those, accounts short of their
 //! target by at least half this pane, earliest renewal first; then the
 //! one that lasts longest; then the number.  Stale readings come after
-//! every fresh one.
+//! every fresh one.  While the restricted demand is more than the
+//! accounts can carry, a plain pane being placed goes only where what
+//! only the other models can use (`N`) lasts it six hours, and waits
+//! otherwise; a pane leaving early avoids only accounts where `U` lasts
+//! it under an hour.
 
 use super::plan::Plan;
-use super::{Class, Load, Quant, lasts};
+use super::{Class, EPS, Load, Quant, lasts, plain_lasts};
 
 /// How long a must-move target has to last with the pane on it.
 pub(crate) const MUST_LAST_H: f64 = 6.0;
 
 /// The same for a new helper.
 pub(crate) const HELPER_LAST_H: f64 = 2.0;
+
+/// While the restricted model is short, a plain pane leaving early is
+/// placed only where `U` gives it at least this many hours.
+pub(crate) const RESERVED_H: f64 = 1.0;
+
+/// What a plain pane may not take while the restricted model is short.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reserve {
+    /// Nothing held back.
+    None,
+    /// An account where `U` lasts it under `RESERVED_H`.
+    U,
+    /// An account where `N`, what only the other models can use, lasts
+    /// it under `MUST_LAST_H`: the rule for a pane being placed, (a) and
+    /// (c), which waits rather than take what the restricted panes are
+    /// short of.
+    N,
+}
+
+impl Reserve {
+    fn holds(self, q: &Quant, plan: &Plan, i: usize, load: &Load, m: Mover) -> bool {
+        if m.class != Class::Plain || plan.unassigned_f <= EPS {
+            return false;
+        }
+        match self {
+            Reserve::None => false,
+            Reserve::U => plain_lasts(plan.u[i], load, m.rate) < RESERVED_H,
+            Reserve::N => plain_lasts(q.n(), load, m.rate) < MUST_LAST_H,
+        }
+    }
+}
 
 /// The pane being placed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,19 +64,31 @@ pub(crate) struct Mover {
     pub rate: f64,
 }
 
-/// Where the pane goes, or `None` when no account takes it.
+/// Where a pane that has to move goes, or `None` when no account takes
+/// it or a plain pane waits for the restricted panes (`Reserve::N`).
 ///
 /// `loads` are the other panes' speeds per account, in `accounts`'
 /// order, without this pane; `from` is the account it leaves.
 pub(crate) fn pick(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
-    pick_where(accounts, plan, loads, m, from, horizon_h, |_| true)
+    pick_where(accounts, plan, loads, m, from, horizon_h, Reserve::N, |_| true)
 }
 
-/// `pick` among the accounts that pass `allow` only.
-pub(crate) fn pick_where(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
+/// Where `pick` would have sent a plain pane it holds back for the
+/// restricted panes, when that is why it has nowhere to go.
+pub(crate) fn held_back(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
+    if pick(accounts, plan, loads, m, from, horizon_h).is_some() {
+        return None;
+    }
+    pick_where(accounts, plan, loads, m, from, horizon_h, Reserve::None, |_| true)
+}
+
+/// `pick` among the accounts that pass `allow` only, holding back what
+/// `reserve` says.
+#[allow(clippy::too_many_arguments)] // one decision's inputs, each a separate piece
+pub(crate) fn pick_where(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64, reserve: Reserve, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
     let mut best: Option<(Key, u8)> = None;
     for (i, q) in accounts.iter().enumerate() {
-        if Some(q.id) == from || !q.accepts(m.class) || !allow(q) {
+        if Some(q.id) == from || !q.accepts(m.class) || !allow(q) || reserve.holds(q, plan, i, &loads[i], m) {
             continue;
         }
         let k = key(q, plan, i, &loads[i], m, horizon_h);
@@ -80,7 +127,7 @@ fn key(q: &Quant, plan: &Plan, i: usize, load: &Load, m: Mover, horizon_h: f64) 
             if lasts(q, load, m.class, m.rate) >= horizon_h { 0 } else { 2 }
         }
         Class::Plain => {
-            if plan.u[i] / total >= horizon_h {
+            if plain_lasts(plan.u[i], load, m.rate) >= horizon_h {
                 0
             } else if q.r / total >= horizon_h {
                 1

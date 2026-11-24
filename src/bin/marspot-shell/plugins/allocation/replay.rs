@@ -23,8 +23,13 @@ pub(crate) enum Why {
     Out,
     /// Its account will not last two hours.
     LeaveEarly,
+    /// A plain pane: what only it may use on its account will not last
+    /// two hours.
+    UOut,
     /// Supply exceeds demand and the plan wants it elsewhere.
     Plan,
+    /// Demand exceeds supply and a restricted window would lapse unused.
+    Rescue,
 }
 
 impl Why {
@@ -32,8 +37,19 @@ impl Why {
         match self {
             Why::Out => "out",
             Why::LeaveEarly => "leave_early",
+            Why::UOut => "u_out",
             Why::Plan => "plan",
+            Why::Rescue => "rescue",
         }
+    }
+
+    pub(crate) fn from_word(w: &str) -> Option<Why> {
+        [Why::Out, Why::LeaveEarly, Why::UOut, Why::Plan, Why::Rescue].into_iter().find(|y| y.word() == w)
+    }
+
+    /// A move of a resting pane, which the weekly limit counts.
+    pub(crate) fn resting(self) -> bool {
+        self != Why::Out
     }
 }
 
@@ -52,6 +68,7 @@ pub(crate) enum Kind {
         stale_feed: bool,
         speed_known: bool,
         keeps_restricted: bool,
+        moves_week: usize,
     },
 }
 
@@ -77,7 +94,7 @@ impl Inputs {
     pub(crate) fn decide(&self, plan: &Plan) -> Option<(u8, Why)> {
         match &self.kind {
             Kind::Out { horizon_h } => pick(&self.accounts, plan, &self.loads, self.mover, Some(self.here), *horizon_h).map(|t| (t, Why::Out)),
-            Kind::Rest { keeper, since_move_h, left, band_last_hour, demand, stale_feed, speed_known, keeps_restricted } => {
+            Kind::Rest { keeper, since_move_h, left, band_last_hour, demand, stale_feed, speed_known, keeps_restricted, moves_week } => {
                 let r = Resting {
                     here: self.here,
                     mover: self.mover,
@@ -90,10 +107,13 @@ impl Inputs {
                     stale_feed: *stale_feed,
                     speed_known: *speed_known,
                     keeps_restricted: *keeps_restricted,
+                    moves_week: *moves_week,
                 };
                 match rest_move(&self.accounts, plan, &r)? {
                     RestMove::LeaveEarly(t) => Some((t, Why::LeaveEarly)),
+                    RestMove::UOut(t) => Some((t, Why::UOut)),
                     RestMove::Band(t) => Some((t, Why::Plan)),
+                    RestMove::Rescue(t) => Some((t, Why::Rescue)),
                 }
             }
         }
@@ -116,11 +136,11 @@ impl Inputs {
         );
         match &self.kind {
             Kind::Out { horizon_h } => s.push_str(&format!(" kind=out horizon={horizon_h}")),
-            Kind::Rest { keeper, since_move_h, left, band_last_hour, demand, stale_feed, speed_known, keeps_restricted } => {
+            Kind::Rest { keeper, since_move_h, left, band_last_hour, demand, stale_feed, speed_known, keeps_restricted, moves_week } => {
                 let since = since_move_h.map_or_else(|| "-".to_string(), |h| h.to_string());
                 let left: Vec<String> = left.iter().map(|(id, h)| format!("{id}:{h}")).collect();
                 s.push_str(&format!(
-                    " kind=rest keeper={} since={since} left={} band={band_last_hour} demand={demand} stale_feed={} known={} keeps={}",
+                    " kind=rest keeper={} since={since} left={} band={band_last_hour} demand={demand} stale_feed={} known={} keeps={} week={moves_week}",
                     b(*keeper),
                     left.join(";"),
                     b(*stale_feed),
@@ -162,6 +182,8 @@ impl Inputs {
                 stale_feed: flag("stale_feed")?,
                 speed_known: flag("known")?,
                 keeps_restricted: flag("keeps")?,
+                // lines written before the weekly count read as none
+                moves_week: get("week").map_or(Some(0), |w| w.parse().ok())?,
             },
         };
         Some(Inputs { accounts, b_f: num("bf")?, b_n: num("bn")?, kappa, loads, mover: Mover { class, rate: num("rate")? }, here: get("here")?.parse().ok()?, kind })

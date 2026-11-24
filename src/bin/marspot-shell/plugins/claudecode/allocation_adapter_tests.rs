@@ -199,3 +199,65 @@ fn allocation_all_out_notice_once_per_pane() {
     assert_eq!(notices(a.observe(&s)), 0);
     fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn allocation_held_back_notice_once_per_pane() {
+    // P1 is out; all of P2's week is Fable's, and the Fable pane there
+    // wants more than P2 can give it an hour
+    let d = dir("held");
+    let mut a = Allocation::new(d.clone());
+    let mut s = snap(NOW, vec![], vec![1, 2]);
+    s.accounts[0].week_used = 1.0;
+    let mut p = pane(1, 1, false);
+    p.out = true;
+    let f = PaneIn { class: Class::Restricted, ..pane(2, 2, false) };
+    s.panes = vec![p, f];
+    let notices = |log: Vec<(&'static str, String)>| log.into_iter().filter(|(t, _)| *t == "alloc.notice").map(|(_, l)| l).collect::<Vec<_>>();
+    assert_eq!(notices(a.observe(&s)), ["sid=1: waits rather than take what the Fable panes are short of on P2"]);
+    s.now += 2;
+    assert!(notices(a.observe(&s)).is_empty());
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn allocation_restart_counts_the_week_s_resting_would_moves() {
+    let d = dir("week");
+    let mut log = EventLog::new(d.clone());
+    let would = |at, why: &str| Event { at, sid: 4, kind: "would_move".into(), profile: Some(2), class: "plain".into(), detail: format!("to=P3 why={why} here=2") };
+    log.append(&would(NOW - 8 * DAY, "u_out")).unwrap();
+    log.append(&would(NOW - 2 * DAY, "out")).unwrap();
+    log.append(&would(NOW - DAY, "u_out")).unwrap();
+    log.append(&would(NOW - 60, "leave_early")).unwrap();
+    let mut a = Allocation::new(d.clone());
+    a.rebuild(NOW);
+    let l = a.last.get(&4).unwrap();
+    let week: Vec<i64> = l.rest_moves.iter().filter(|at| NOW - **at < WEEK_S).copied().collect();
+    assert_eq!(week, [NOW - DAY, NOW - 60], "forced moves and those over a week old do not count");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn allocation_same_target_after_busy_is_one_would_move() {
+    // P1 runs out within the hour; pane 3, not the slowest plain pane
+    // there, would leave early for P2 each time it rests
+    let d = dir("again");
+    let mut a = Allocation::new(d.clone());
+    let at = |now: i64, rest3: bool| {
+        let mut s = snap(now, vec![pane(1, 1, true), pane(3, 1, rest3)], vec![1, 3]);
+        s.accounts[0].week_used = 0.995;
+        for acc in &mut s.accounts {
+            acc.fable_used = Some(1.0);
+        }
+        s
+    };
+    let would = |kinds: Vec<String>| kinds.iter().filter(|k| *k == "would_move").count();
+    assert_eq!(would(step(&mut a, &d, &at(NOW, true))), 1);
+    assert_eq!(would(step(&mut a, &d, &at(NOW + 60, false))), 0);
+    assert_eq!(would(step(&mut a, &d, &at(NOW + 120, true))), 0, "the same target is not a second move");
+    assert_eq!(a.last.get(&3).map(|l| l.rest_moves.len()), Some(1));
+    // a restarted shell reads the target back and it still stands
+    let mut again = Allocation::new(d.clone());
+    assert_eq!(would(step(&mut again, &d, &at(NOW + 180, true))), 0);
+    assert_eq!(again.last.get(&3).map(|l| l.rest_moves.len()), Some(1));
+    fs::remove_dir_all(&d).unwrap();
+}
