@@ -4,8 +4,8 @@
 //! panel shows it and has the shell change it; a person may edit it.
 
 use std::collections::HashSet;
-use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::io::{self, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -171,9 +171,12 @@ fn set_before(path: &Path, cwd: &str, deny: Option<bool>, mut ready: impl FnMut(
 fn replace(file: &Path, body: &str, was: Stamp, ready: &mut impl FnMut()) -> io::Result<bool> {
     let tmp = file.with_extension("tsv.tmp");
     let put = (|| {
-        std::fs::write(&tmp, body)?;
-        if let Ok(m) = std::fs::metadata(file) {
-            std::fs::set_permissions(&tmp, m.permissions())?;
+        let mode = std::fs::metadata(file).ok().map(|m| m.permissions().mode() & 0o7777);
+        let mut f = create_tmp(&tmp, mode)?;
+        f.write_all(body.as_bytes())?;
+        if let Some(m) = mode {
+            // bits the umask took off; it never adds any
+            f.set_permissions(std::fs::Permissions::from_mode(m))?;
         }
         ready();
         // what a person wrote meanwhile is read and changed instead
@@ -187,6 +190,17 @@ fn replace(file: &Path, body: &str, was: Stamp, ready: &mut impl FnMut()) -> io:
         let _ = std::fs::remove_file(&tmp);
     }
     put
+}
+
+/// A new, empty `tmp`, created no more open than `mode` (the list's own,
+/// when it has one): never readable by more than the list is, even for
+/// a moment.  One left by a write that did not finish is replaced.
+fn create_tmp(tmp: &Path, mode: Option<u32>) -> io::Result<std::fs::File> {
+    match std::fs::remove_file(tmp) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(mode.unwrap_or(0o666)).open(tmp)
 }
 
 /// `body` with `cwd`'s own line dropped, or added.
@@ -310,6 +324,23 @@ mod tests {
         });
         assert!(out.is_err());
         assert!(!tmp.exists(), "nothing left beside the list");
+        done(&p);
+    }
+
+    /// The new list is born with the old one's mode, not the umask's,
+    /// so it is never open wider than the list, not even before a chmod.
+    #[test]
+    fn helper_panel_deny_new_file_is_created_with_the_lists_mode() {
+        let p = file("born", None);
+        let tmp = p.with_extension("tsv.tmp");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        drop(create_tmp(&tmp, Some(0o600)).unwrap());
+        assert_eq!(mode(&tmp), 0o600, "as created");
+        // left there by a write that did not finish
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(create_tmp(&tmp, Some(0o640)).unwrap());
+        assert_eq!(mode(&tmp), 0o640);
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"");
         done(&p);
     }
 

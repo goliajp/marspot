@@ -14,7 +14,7 @@ use super::pane_control::Route;
 use super::spawn::{ShadowEnv, spawn_l3_pane_async_as};
 use super::*;
 use marspot::shell_proto::{
-    DoneCode, PaneSpawn, PaneSpawned, RetireMode, decode_pane_retire, decode_pane_size,
+    DoneCode, IN_A_WINDOW_TEXT, PaneRetire, PaneSpawn, PaneSpawned, RetireMode, decode_pane_retire, decode_pane_size,
     decode_pane_spawn, encode_pane_spawned,
 };
 use std::collections::HashMap;
@@ -107,7 +107,7 @@ impl CoreApp {
             MsgType::PaneSpawn => decode_pane_spawn(&f.payload).ok().map(|m| self.spawn_pane(m)),
             MsgType::PaneRetire => decode_pane_retire(&f.payload)
                 .ok()
-                .map(|m| self.retire_pane(m.req_id, m.sid, m.mode)),
+                .map(|m| self.retire_pane(m)),
             MsgType::PanePlace => marspot::shell_proto::decode_pane_place(&f.payload)
                 .ok()
                 .map(|m| self.place_pane(m)),
@@ -212,10 +212,18 @@ impl CoreApp {
     }
 
     /// `PaneRetire`: the existing close; `Recycle` keeps the session's
-    /// directory in the recycle dir instead of deleting it.
-    fn retire_pane(&mut self, req_id: u32, sid: u64, mode: RetireMode) -> Route {
+    /// directory in the recycle dir instead of deleting it.  One asked
+    /// only of a shadow pane is refused once the pane is in a window: the
+    /// move may have come in after it was asked.
+    fn retire_pane(&mut self, m: PaneRetire) -> Route {
+        let PaneRetire { req_id, sid, mode, shadow_only } = m;
         let recycle = mode == RetireMode::Recycle;
-        if let Some((wi, idx)) = self.find_window_pane_by_sid(sid) {
+        let in_window = self.find_window_pane_by_sid(sid);
+        if shadow_only && in_window.is_some() {
+            lx_event!("SHADOW_RETIRE_REFUSED", "a close asked of a shadow pane found it in a window", session = sid);
+            return self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::Other, IN_A_WINDOW_TEXT);
+        }
+        if let Some((wi, idx)) = in_window {
             if recycle {
                 recycle_session(sid);
             }
@@ -255,26 +263,6 @@ impl CoreApp {
             return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Other, "not_resizable");
         }
         self.answer(MsgType::PaneSize, req_id, sid, DoneCode::NoSuchSession, "")
-    }
-
-    /// Dev seam and tests: open one shadow pane under `parent`, through
-    /// the same path as L1's request.  Its answer goes to L1 as any other.
-    pub(super) fn dev_open_shadow(&mut self, req_id: u32, parent: u64) -> Route {
-        let m = PaneSpawn {
-            req_id,
-            shadow: true,
-            no_focus: true,
-            helper: false,
-            parent_sid: parent,
-            idle_s: 0,
-            cols: 0,
-            rows: 0,
-            cwd: String::new(),
-        };
-        match marspot::shell_proto::encode_pane_spawn(&m) {
-            Ok(p) => self.route_shadow_request(Frame::new(MsgType::PaneSpawn, p), req_id),
-            Err(_) => Route::Unanswerable,
-        }
     }
 }
 

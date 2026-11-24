@@ -31,7 +31,7 @@ fn writes(sid: u64, least: u64) -> bool {
 }
 
 fn retire(app: &mut CoreApp, req_id: u32, sid: u64, mode: RetireMode) {
-    let f = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id, sid, mode }));
+    let f = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id, sid, mode, shadow_only: false }));
     assert_eq!(app.route_pane_control(f), Route::Answered(DoneCode::Ok));
 }
 

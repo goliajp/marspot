@@ -13,10 +13,12 @@
 use std::io;
 
 mod input;
+mod retire;
 mod run_trailer;
 mod wire;
 
 pub use input::*;
+pub use retire::*;
 pub use run_trailer::{RUN_END_MARK, run_trailer};
 use wire::{Rd, finish, put_text};
 
@@ -142,31 +144,6 @@ pub fn decode_pane_spawned(p: &[u8]) -> io::Result<PaneSpawned> {
         ok: r.u8()? != 0,
         sid: r.u64()?,
         err: r.text()?,
-    })
-}
-
-/// L1 → L2: end a pane; answered by `PaneDone`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PaneRetire {
-    pub req_id: u32,
-    pub sid: u64,
-    pub mode: RetireMode,
-}
-
-pub fn encode_pane_retire(m: &PaneRetire) -> Vec<u8> {
-    let mut v = Vec::with_capacity(13);
-    v.extend_from_slice(&m.req_id.to_le_bytes());
-    v.extend_from_slice(&m.sid.to_le_bytes());
-    v.push(m.mode.to_u8());
-    v
-}
-
-pub fn decode_pane_retire(p: &[u8]) -> io::Result<PaneRetire> {
-    let mut r = Rd::new(p, "pane_retire");
-    Ok(PaneRetire {
-        req_id: r.u32()?,
-        sid: r.u64()?,
-        mode: RetireMode::from_u8(r.u8()?),
     })
 }
 

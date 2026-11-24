@@ -40,14 +40,14 @@ pub(crate) fn register(s: Box<dyn HelperService>) {
 
 /// [`HelperService::stop_sid`] as `ctx` asks it.
 pub(super) fn stop_sid(conn: &mut Conn, ctx: &Ctx, sid: u64) -> Option<Result<(), Reject>> {
-    SERVICE.get()?.stop_sid(&mut Port { conn, ctx }, sid)
+    SERVICE.get()?.stop_sid(&mut Port { conn, ctx, shadow_only: true }, sid)
 }
 
 pub(super) fn serve(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> {
     let Some(s) = SERVICE.get() else {
         return Err(Reject::new(ErrorCode::NotSupported, format!("{} is not served by this build", op.name())));
     };
-    let mut port = Port { conn, ctx };
+    let mut port = Port { conn, ctx, shadow_only: false };
     match op {
         Op::HelperStart(a) => s.start(&mut port, a),
         Op::HelperList { all } => Ok(s.list(ctx.caller.sid(), *all)),
@@ -73,6 +73,8 @@ pub(crate) enum Waited {
 pub(crate) struct Port<'a, 'h> {
     conn: &'a mut Conn<'h>,
     ctx: &'a Ctx,
+    /// Asked on the helper panel, of a pane it listed as a shadow pane.
+    shadow_only: bool,
 }
 
 /// What a helper's pane opens at.  A core that shows helpers in place
@@ -93,7 +95,7 @@ pub(crate) fn with_port<R>(caller: Option<u64>, f: impl FnOnce(&mut Port) -> R) 
         cfg: h.config(),
         view: |_| observe::shared().fresh(observe::INTERVAL),
     };
-    Some(f(&mut Port { conn: &mut conn, ctx: &ctx }))
+    Some(f(&mut Port { conn: &mut conn, ctx: &ctx, shadow_only: false }))
 }
 
 impl Port<'_, '_> {
@@ -172,7 +174,8 @@ impl Port<'_, '_> {
     /// Close shadow pane `sid` for good: its directory goes too.
     pub fn close(&mut self, sid: u64) -> Result<(), Reject> {
         self.conn.need_caps(CAP_SHADOWS)?;
-        let build = |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode: RetireMode::Delete }));
+        let shadow_only = self.shadow_only;
+        let build = |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode: RetireMode::Delete, shadow_only }));
         let out = ops_pane::ask_done(self.conn, sid, MsgType::PaneRetire, build, ops_pane::Again::Gone);
         if out.is_ok() {
             self.conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).closed(sid, Instant::now());

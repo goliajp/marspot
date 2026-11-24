@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use marspot::shell_proto::{
-    CAP_SHADOWS, CwdControl, DoneCode, HelperPanelAct, MsgType, PaneDone, PanelAct, RetireMode, decode_pane_retire, encode_pane_done,
+    CAP_SHADOWS, CwdControl, DoneCode, HelperPanelAct, IN_A_WINDOW_TEXT, MsgType, PaneDone, PanelAct, RetireMode, decode_pane_retire, encode_pane_done,
 };
 
 use super::super::MainCmd;
@@ -28,13 +28,19 @@ fn control(sid: u64, want: CwdControl) -> HelperPanelAct {
 
 /// The panes each closed, in order, with how, and what `run` answered.
 fn closes(what: HelperPanelAct) -> (Vec<(u64, RetireMode)>, (u32, u32)) {
-    let (closed, counts, _) = closes_seeing(what, |c| c.obs.clone(), "");
+    let (closed, counts, _) = closes_seeing(what, |c| c.obs.clone(), "", &[]);
     (closed, counts)
 }
 
 /// [`closes`] with the view taken before each close, and the audit log
-/// once `says` is in it.
-fn closes_seeing(what: HelperPanelAct, view: fn(&Ctx) -> Arc<Observation>, says: &str) -> (Vec<(u64, RetireMode)>, (u32, u32), String) {
+/// once `says` is in it; the core finds the panes in `windowed` in a
+/// window by the time it reads the close.
+fn closes_seeing(
+    what: HelperPanelAct,
+    view: fn(&Ctx) -> Arc<Observation>,
+    says: &str,
+    windowed: &[u64],
+) -> (Vec<(u64, RetireMode)>, (u32, u32), String) {
     let dir = temp("panel");
     let (hub, rx) = hub_at(&dir);
     hub.caps.store(CAP_SHADOWS, Ordering::Release);
@@ -54,6 +60,12 @@ fn closes_seeing(what: HelperPanelAct, view: fn(&Ctx) -> Arc<Observation>, says:
                 if let Ok(MainCmd::Send { msg, payload, .. }) = rx.recv_timeout(Duration::from_millis(20)) {
                     assert_eq!(msg, MsgType::PaneRetire);
                     let m = decode_pane_retire(&payload).unwrap();
+                    assert!(m.shadow_only, "the panel closes only what is still a shadow pane");
+                    if windowed.contains(&m.sid) {
+                        let done = PaneDone { req_id: m.req_id, code: DoneCode::Other, text: IN_A_WINDOW_TEXT.into() };
+                        hub.links.route(MsgType::PaneDone, &encode_pane_done(&done).unwrap());
+                        continue;
+                    }
                     seen.push((m.sid, m.mode));
                     let done = PaneDone { req_id: m.req_id, code: DoneCode::Ok, text: String::new() };
                     hub.links.route(MsgType::PaneDone, &encode_pane_done(&done).unwrap());
@@ -129,7 +141,7 @@ fn helper_panel_a_pane_in_a_window_is_not_closed() {
     // a shadow when the panel asked, in a window by now
     let entry_2 = marspot_term::session_registry::read_session_entry(2).unwrap();
     marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 0, ..entry_2 }).unwrap();
-    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| moved(c, &[(2, 0)]), "refused: in a window");
+    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| moved(c, &[(2, 0)]), "refused: in a window", &[]);
     assert_eq!((closed.len(), counts), (0, (0, 1)));
     assert!(log.contains("pane.close"), "{log}");
 }
@@ -143,12 +155,38 @@ fn helper_panel_a_pane_just_moved_to_a_window_is_not_closed() {
     let entry_2 = marspot_term::session_registry::read_session_entry(2).unwrap();
     marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 0, ..entry_2 }).unwrap();
     // every view still has 2 for a shadow of 1
-    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| c.obs.clone(), "refused: in a window");
+    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| c.obs.clone(), "refused: in a window", &[]);
     assert_eq!((closed.len(), counts), (0, (0, 1)));
     assert!(log.contains("pane.close"), "{log}");
     let (closed, counts) = closes(act(1, PanelAct::CloseAllOfParent));
     assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3], "all but the one in a window");
     assert_eq!(counts, (2, 1));
+}
+
+/// A pane just moved below another pane is no longer below `top`, by
+/// its registry entry, while every view still has it there.
+#[test]
+fn helper_panel_close_all_leaves_a_pane_just_moved_below_another() {
+    let sandbox = marspot_term::test_env::sandbox_state_dir();
+    live_entries(&sandbox, &[2, 3, 4]);
+    let entry_4 = marspot_term::session_registry::read_session_entry(4).unwrap();
+    marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 8, ..entry_4 }).unwrap();
+    let (closed, counts, log) = closes_seeing(act(1, PanelAct::CloseAllOfParent), |c| c.obs.clone(), "refused: no longer below", &[]);
+    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(counts, (2, 1));
+    assert!(log.contains("pane.close"), "{log}");
+}
+
+/// The core read the close after the pane went to a window, which
+/// nothing the shell reads had shown yet.
+#[test]
+fn helper_panel_a_pane_the_core_finds_in_a_window_is_not_closed() {
+    let sandbox = marspot_term::test_env::sandbox_state_dir();
+    live_entries(&sandbox, &[2, 3, 4]);
+    let (closed, counts, log) = closes_seeing(act(1, PanelAct::CloseAllOfParent), |c| c.obs.clone(), r#""sid":2,"count":1,"bytes":0,"result":"bad_request""#, &[2]);
+    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3]);
+    assert_eq!(counts, (2, 1));
+    assert!(log.contains("pane.close"), "{log}");
 }
 
 #[test]
@@ -157,7 +195,7 @@ fn helper_panel_close_all_leaves_what_went_elsewhere_meanwhile() {
     live_entries(&sandbox, &[2, 3, 4]);
     // 2 to a window, 4 below another pane
     let see = |c: &Ctx| moved(c, &[(2, 0), (4, 8)]);
-    let (closed, counts, _) = closes_seeing(act(1, PanelAct::CloseAllOfParent), see, "refused: no longer below");
+    let (closed, counts, _) = closes_seeing(act(1, PanelAct::CloseAllOfParent), see, "refused: no longer below", &[]);
     assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [3]);
     assert_eq!(counts, (1, 2));
 }

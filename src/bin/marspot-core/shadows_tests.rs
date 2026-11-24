@@ -133,13 +133,13 @@ fn shadow_open_resize_and_close_through_the_dev_hook() {
     assert_eq!(app.shadows.len(), before);
 
     let pid = reg::read_session_entry(sid).unwrap().pid;
-    let retire = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id: 11, sid, mode: RetireMode::Delete }));
+    let retire = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id: 11, sid, mode: RetireMode::Delete, shadow_only: false }));
     assert_eq!(app.route_pane_control(retire), Route::Answered(DoneCode::Ok));
     assert!(app.shadows.is_empty());
     assert!(!unwatched::is(sid));
     wait_for("the session's process ended", || reaped(pid));
     assert!(!reg::session_dir(sid).exists(), "its dir went before it did");
-    let again = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id: 12, sid, mode: RetireMode::Delete }));
+    let again = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id: 12, sid, mode: RetireMode::Delete, shadow_only: false }));
     assert_eq!(app.route_pane_control(again), Route::Answered(DoneCode::NoSuchSession));
 }
 
