@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.652"  # a setting for listing helpers under their pane
-core    = "0.12.655"  # the list of helpers has a window test
+shell   = "0.7.653"  # a helper is opened at the size its strip leaves it
+core    = "0.12.656"  # a helper is opened at the size its strip leaves it
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it

@@ -114,6 +114,7 @@ pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Dura
         req_id: 0,
         shadow: a.shadow,
         no_focus: true,
+        helper: false,
         // a pane for a window opens in the window holding this one
         parent_sid: parent,
         idle_s: SHADOW_IDLE_S,

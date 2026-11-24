@@ -74,6 +74,9 @@ pub struct PaneSpawn {
     pub shadow: bool,
     /// Leave the keyboard focus where it is.
     pub no_focus: bool,
+    /// A helper's pane: its size, when none is given, is the core's to
+    /// choose.
+    pub helper: bool,
     pub parent_sid: u64,
     pub idle_s: u32,
     pub cols: u16,
@@ -83,11 +86,12 @@ pub struct PaneSpawn {
 
 const SPAWN_SHADOW: u8 = 1;
 const SPAWN_NO_FOCUS: u8 = 1 << 1;
+const SPAWN_HELPER: u8 = 1 << 2;
 
 pub fn encode_pane_spawn(m: &PaneSpawn) -> io::Result<Vec<u8>> {
     let mut v = Vec::with_capacity(23 + m.cwd.len());
     v.extend_from_slice(&m.req_id.to_le_bytes());
-    v.push((m.shadow as u8 * SPAWN_SHADOW) | (m.no_focus as u8 * SPAWN_NO_FOCUS));
+    v.push((m.shadow as u8 * SPAWN_SHADOW) | (m.no_focus as u8 * SPAWN_NO_FOCUS) | (m.helper as u8 * SPAWN_HELPER));
     v.extend_from_slice(&m.parent_sid.to_le_bytes());
     v.extend_from_slice(&m.idle_s.to_le_bytes());
     v.extend_from_slice(&m.cols.to_le_bytes());
@@ -104,6 +108,7 @@ pub fn decode_pane_spawn(p: &[u8]) -> io::Result<PaneSpawn> {
         req_id,
         shadow: flags & SPAWN_SHADOW != 0,
         no_focus: flags & SPAWN_NO_FOCUS != 0,
+        helper: flags & SPAWN_HELPER != 0,
         parent_sid: r.u64()?,
         idle_s: r.u32()?,
         cols: r.u16()?,

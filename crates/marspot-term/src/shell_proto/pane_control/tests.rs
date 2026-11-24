@@ -19,6 +19,7 @@ pub(super) fn spawn() -> PaneSpawn {
         req_id: 7,
         shadow: true,
         no_focus: true,
+        helper: false,
         parent_sid: 0xAB_CDEF,
         idle_s: 21600,
         cols: 120,
@@ -227,6 +228,9 @@ fn pane_control_each_frame_round_trips() {
         decode_pane_spawn(&encode_pane_spawn(&s).unwrap()).unwrap(),
         s
     );
+    let h = PaneSpawn { helper: true, cols: 0, rows: 0, ..spawn() };
+    assert_eq!(decode_pane_spawn(&encode_pane_spawn(&h).unwrap()).unwrap(), h);
+    assert_eq!(encode_pane_spawn(&h).unwrap()[4], 0b111, "a core from before reads the bits it knows");
     let m = PaneSpawned {
         req_id: 1,
         ok: true,

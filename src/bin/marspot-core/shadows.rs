@@ -20,8 +20,8 @@ use marspot::shell_proto::{
 use std::collections::HashMap;
 
 /// A shadow pane opened without a size gets this one.
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 40;
+pub(super) const DEFAULT_COLS: u16 = 120;
+pub(super) const DEFAULT_ROWS: u16 = 40;
 /// Larger than any screen holds; a request past it is refused.
 const MAX_DIM: u16 = 1000;
 
@@ -138,10 +138,7 @@ impl CoreApp {
     /// window that holds `parent_sid` (the key window when none does),
     /// which leaves the keyboard focus where it is.
     fn spawn_pane(&mut self, m: PaneSpawn) -> Route {
-        let (cols, rows) = match (m.cols, m.rows) {
-            (0, 0) => self.helper_size(m.parent_sid).unwrap_or((DEFAULT_COLS, DEFAULT_ROWS)),
-            (c, r) => (c, r),
-        };
+        let (cols, rows) = self.spawn_size(&m);
         if !size_ok(cols, rows) {
             return self.spawned(m.req_id, 0, "size out of range");
         }
@@ -267,6 +264,7 @@ impl CoreApp {
             req_id,
             shadow: true,
             no_focus: true,
+            helper: false,
             parent_sid: parent,
             idle_s: 0,
             cols: 0,

@@ -20,6 +20,7 @@ mod figures;
 mod height;
 mod host;
 mod native_list;
+mod sizes;
 mod strip;
 mod theme;
 mod tick;
@@ -43,9 +44,9 @@ pub(super) struct Strips {
     /// Which records are taken in.
     heard: u64,
     /// Whether the shell has told of every pane there is to tell of,
-    /// and since when that is waited for.
+    /// and whether a pane it found waits for that.
     told: bool,
-    asked: Option<Instant>,
+    waiting: bool,
     /// When this core started: sessions are found for a while only.
     born: Option<Instant>,
     /// Sessions that had their first look at a layout.
@@ -280,3 +281,5 @@ mod row_tests;
 mod moving_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod sizes_tests;

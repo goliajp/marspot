@@ -7,8 +7,8 @@ use super::host::Host;
 use super::*;
 use marspot::shell_proto::{HelperStrip, StripAgent};
 
-/// How long a core waits to be told of helpers: a shell from before the
-/// message that there are no more says nothing.
+/// How long after its start a core waits to be told of helpers: a shell
+/// from before the message that there are no more says nothing.
 const TOLD_WITHIN: Duration = Duration::from_secs(5);
 /// How long after a core's start a pane can be one it found.
 const FOUND_WITHIN: Duration = Duration::from_secs(30);
@@ -37,7 +37,7 @@ impl Strips {
 
     /// Whether what was not told of has no helpers.
     fn all_told(&mut self, records: &Records, now: Instant) -> bool {
-        self.told |= records.all_told() || self.asked.is_some_and(|t| now >= t + TOLD_WITHIN);
+        self.told |= records.all_told() || self.born.is_some_and(|t| now >= t + TOLD_WITHIN);
         self.told
     }
 
@@ -113,14 +113,19 @@ impl CoreApp {
         }
     }
 
-    fn strip_sight(&self, sid: u64, pane: Option<&Pane>, record: Option<&HelperStrip>, said: Said, now: Instant) -> Sight {
+    /// Whether the pane of `sid` has Claude drawing on its main screen.
+    pub(super) fn strip_inline(&self, sid: u64, pane: Option<&Pane>, record: Option<&HelperStrip>) -> bool {
         let claude = match record.filter(|r| !r.is_empty()) {
             Some(r) => r.parent_agent == StripAgent::Claude,
             None => self.pane_agent_tui.get(&sid) == Some(&true),
         };
+        claude && pane.is_some_and(|p| !p.session().l3_alt_screen_active())
+    }
+
+    fn strip_sight(&self, sid: u64, pane: Option<&Pane>, record: Option<&HelperStrip>, said: Said, now: Instant) -> Sight {
         Sight {
             said,
-            inline: claude && pane.is_some_and(|p| !p.session().l3_alt_screen_active()),
+            inline: self.strip_inline(sid, pane, record),
             held: self.pane_sessions.contains_key(&sid),
             typed: self.strips.typed.get(&sid).copied(),
             now,
@@ -131,7 +136,8 @@ impl CoreApp {
     fn strip_heights(&mut self, now: Instant) {
         let mut strips = std::mem::take(&mut self.strips.hosts);
         let told = self.strips.all_told(&self.pane_control.strips, now);
-        let mut due = self.strips.asked.filter(|_| !told).map(|t| t + TOLD_WITHIN);
+        let waits = self.strips.waiting && !told;
+        let mut due = self.strips.born.filter(|_| waits).map(|t| t + TOLD_WITHIN);
         let mut resized = Vec::new();
         strips.retain(|&sid, host| {
             let record = self.pane_control.strips.of(sid);
@@ -165,12 +171,10 @@ impl CoreApp {
     /// once it has settled.  One whose size was asked for keeps that.
     fn follow_hosts(&mut self, now: Instant) {
         let mut due = self.strips.due;
-        for (sid, host) in &mut self.strips.hosts {
-            let cell = self.windows.iter().find_map(|w| {
-                let i = w.panes.iter().position(|p| p.shelld_session_id() == Some(*sid))?;
-                w.layout.cells.get(i)
-            });
-            let Some(size) = cell.map(|c| (c.cols, c.rows)) else {
+        let blocks: Vec<_> = self.strips.hosts.keys().map(|&sid| (sid, self.helper_block(sid, 0))).collect();
+        for (sid, block) in blocks {
+            let Some(host) = self.strips.hosts.get_mut(&sid) else { continue };
+            let Some(size) = block else {
                 host.block = None;
                 continue;
             };
@@ -183,7 +187,7 @@ impl CoreApp {
                 earlier(&mut due, Some(since + SETTLED));
                 continue;
             }
-            let Some(record) = self.pane_control.strips.of(*sid) else { continue };
+            let Some(record) = self.pane_control.strips.of(sid) else { continue };
             for r in record.rows.iter().filter(|r| !self.strips.sized.contains(&r.sid)) {
                 if let Some(p) = self.shadows.iter_mut().find(|p| p.is_l3() && p.shelld_session_id() == Some(r.sid)) {
                     p.resize(size.0, size.1);
@@ -191,17 +195,6 @@ impl CoreApp {
             }
         }
         self.strips.due = due;
-    }
-
-    /// The size a shadow opened without one gets: that of the terminal
-    /// of the pane it is under.
-    pub(in super::super) fn helper_size(&self, parent: u64) -> Option<(u16, u16)> {
-        if !self.strips.on {
-            return None;
-        }
-        let root = self.pane_control.shadows.family.root(parent);
-        let (wi, i) = self.find_window_pane_by_sid(root)?;
-        self.windows[wi].layout.cells.get(i).map(|c| (c.cols, c.rows))
     }
 
     /// Whether a strip drawn in window `wi` has figures that change by
@@ -273,7 +266,7 @@ impl CoreApp {
                     }
                     self.strips.hosts.insert(sid, host);
                     self.strips.set_rows(sid, short);
-                    self.strips.asked.get_or_insert_with(Instant::now);
+                    self.strips.waiting = true;
                 }
             }
             let Some(host) = self.strips.hosts.get_mut(&sid) else { continue };

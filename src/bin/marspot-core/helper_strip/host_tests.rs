@@ -12,7 +12,7 @@ use marspot_term::session_registry as reg;
 use marspot_term::terminal::Terminal;
 use std::os::unix::net::UnixStream;
 
-fn row(sid: u64, works: bool) -> StripRow {
+pub(super) fn row(sid: u64, works: bool) -> StripRow {
     let now = now_ms();
     StripRow {
         sid,
@@ -34,19 +34,19 @@ fn row(sid: u64, works: bool) -> StripRow {
 }
 
 /// A helper whose pane is gone: it needs no shadow to be ready.
-fn gone(sid: u64, works: bool) -> StripRow {
+pub(super) fn gone(sid: u64, works: bool) -> StripRow {
     StripRow { gone: true, ..row(sid, works) }
 }
 
 /// A session a core can be attached to, and its end of the connection.
-struct Session {
-    sid: u64,
+pub(super) struct Session {
+    pub sid: u64,
     writer: GridShmWriter,
     control: UnixStream,
 }
 
 impl Session {
-    fn of(cols: u16, rows: u16) -> (Pane, Self) {
+    pub(super) fn of(cols: u16, rows: u16) -> (Pane, Self) {
         let sid = reg::allocate_next_session_id().unwrap() + 0xF5_0000_0000 + std::process::id() as u64;
         let mut writer = GridShmWriter::create(cols, rows).expect("shm region");
         writer.publish(&Grid::new(cols, rows), 0, 0);
@@ -61,14 +61,14 @@ impl Session {
         (Pane::new_l3(conn), Session { sid, writer, control })
     }
 
-    fn shows(&mut self, cols: u16, rows: u16, bytes: &[u8]) {
+    pub(super) fn shows(&mut self, cols: u16, rows: u16, bytes: &[u8]) {
         let mut t = Terminal::new(cols, rows);
         t.feed(bytes);
         self.writer.publish(t.grid(), 0, 0);
     }
 
     /// The sizes the core asked for since the last look.
-    fn resizes(&mut self, pane: &Pane) -> Vec<(u16, u16)> {
+    pub(super) fn resizes(&mut self, pane: &Pane) -> Vec<(u16, u16)> {
         pane.session().send_pane_control(Frame::new(MsgType::Ping, encode_ping(0)));
         self.control.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut got = Vec::new();
@@ -84,12 +84,12 @@ impl Session {
     }
 }
 
-fn turned_on(on: bool) {
+pub(super) fn turned_on(on: bool) {
     marspot::settings::set_for_test(marspot::settings::Settings { helper_strip: on, ..Default::default() });
 }
 
 /// A window of one attached pane, its size that of the window's cell.
-fn app(sb: &Sandbox) -> (CoreApp, Session) {
+pub(super) fn app(sb: &Sandbox) -> (CoreApp, Session) {
     turned_on(true);
     let mut probe = app_in(sb.dir(), vec![win(1, vec![Pane::new_vacant(1, 60, 16)])]);
     probe.rebuild_layout(0);
@@ -101,23 +101,23 @@ fn app(sb: &Sandbox) -> (CoreApp, Session) {
     (app, session)
 }
 
-fn say(app: &mut CoreApp, root: u64, rows: Vec<StripRow>) {
+pub(super) fn say(app: &mut CoreApp, root: u64, rows: Vec<StripRow>) {
     let batch = rows.len().min(1) as u64;
     app.pane_control.strips.take(HelperStrip { batch, rows, parent_agent: StripAgent::Codex, ..HelperStrip::empty(root) });
     app.strips_tick();
 }
 
-fn given(app: &CoreApp) -> u16 {
+pub(super) fn given(app: &CoreApp) -> u16 {
     app.windows[0].layout.cells[0].strip_rows
 }
 
-fn lines(app: &CoreApp, sid: u64) -> Vec<String> {
+pub(super) fn lines(app: &CoreApp, sid: u64) -> Vec<String> {
     let v = app.strips.view(Some(sid)).expect("a strip on screen");
     (0..v.grid.rows()).map(|r| text(v.grid, r).trim_end().to_string()).collect()
 }
 
 /// Draw as a frame would, the session having taken its new size.
-fn frame(app: &mut CoreApp, s: &mut Session, bytes: &[u8]) {
+pub(super) fn frame(app: &mut CoreApp, s: &mut Session, bytes: &[u8]) {
     let c = app.windows[0].layout.cells[0];
     s.shows(c.cols, c.rows, bytes);
     app.windows[0].panes[0].pump();
@@ -240,17 +240,24 @@ fn a_session_left_short_by_an_earlier_core_is_not_resized() {
 }
 
 #[test]
-fn a_shell_that_never_says_all_is_told_is_waited_for_five_seconds() {
+fn a_shell_that_never_says_all_is_told_is_waited_for_five_seconds_from_the_cores_start() {
     let sb = Sandbox::new();
-    let (mut app, s) = app(&sb);
-    app.strips.hosts.insert(s.sid, host::Host::found(4));
-    app.strips.asked = Some(Instant::now());
-    app.strips.set_rows(s.sid, 4);
+    let (probe, first) = app(&sb);
+    let c = probe.windows[0].layout.cells[0];
+    drop((probe, first));
+    let (pane, s) = Session::of(c.cols, c.rows - 4);
+    let mut app = app_in(sb.dir(), vec![win(1, vec![pane])]);
+    app.strips.on = true;
+    app.strips.born = Some(Instant::now() - Duration::from_secs(4));
+    let helper = reg::allocate_next_session_id().unwrap();
+    app.shadows.push(Pane::new_vacant(helper, 80, 24));
+    app.pane_control.shadows.family.adopted(helper, s.sid);
+    app.rebuild_layout(0);
     app.strips_tick();
-    std::thread::sleep(Duration::from_millis(510));
-    app.strips_tick();
-    assert!(app.strips_wait(Instant::now()).is_some_and(|w| w > Duration::from_secs(4)));
-    app.strips.asked = Some(Instant::now() - Duration::from_secs(5));
+    assert_eq!(given(&app), 4, "found");
+    let wait = app.strips_wait(Instant::now()).unwrap();
+    assert!(wait <= Duration::from_secs(1), "a second is left of the five: {wait:?}");
+    std::thread::sleep(Duration::from_millis(1_010));
     app.strips_tick();
     let wait = app.strips_wait(Instant::now()).unwrap();
     assert!(wait <= Duration::from_secs(3) && wait > Duration::from_secs(2), "then as if it had none: {wait:?}");
@@ -322,7 +329,7 @@ fn a_shadow_has_its_panes_size_and_one_given_a_size_keeps_it() {
     let sb = Sandbox::new();
     let (mut app, s) = app(&sb);
     let c = app.windows[0].layout.cells[0];
-    assert_eq!(app.helper_size(s.sid), Some((c.cols, c.rows)));
+    assert_eq!(app.helper_size(s.sid), Some((c.cols, c.rows - 3)), "with the row it will be listed in");
     let (a, mut sa) = Session::of(80, 24);
     let (b, mut sb2) = Session::of(80, 24);
     app.shadows.extend([a, b]);
