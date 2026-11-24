@@ -19,11 +19,30 @@ pub(super) struct Config {
     pub pane_bytes_per_s: u32,
 }
 
+/// The idle footprint of the largest helper measured: a claude on the
+/// host with its tool servers, about 440 MiB resident.  A codex or kimi
+/// helper, or one in a container, measured less.
+const HELPER_IDLE_BYTES: u64 = 448 << 20;
+
+/// The most shadow panes at once on a machine of `mem_bytes`: as many
+/// idle helpers as fit in a quarter of its memory, at least 4, at most 24.
+pub(super) fn shadows_for_memory(mem_bytes: u64) -> usize {
+    usize::try_from(mem_bytes / 4 / HELPER_IDLE_BYTES).unwrap_or(usize::MAX).clamp(4, 24)
+}
+
+fn physical_memory() -> u64 {
+    let mut bytes: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: hw.memsize is a u64 and `len` says how big the buffer is
+    let rc = unsafe { libc::sysctlbyname(c"hw.memsize".as_ptr(), (&raw mut bytes).cast(), &mut len, std::ptr::null_mut(), 0) };
+    if rc == 0 { bytes } else { 0 }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: true,
-            shadows_total: 24,
+            shadows_total: shadows_for_memory(physical_memory()),
             shadows_per_parent: 8,
             shadow_depth: 2,
             window_panes_per_caller: 8,
@@ -83,5 +102,25 @@ impl Config {
             }
         }
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadows_total_follows_the_machine_memory() {
+        let gib = |n: u64| n << 30;
+        assert_eq!(shadows_for_memory(gib(8)), 4);
+        assert_eq!(shadows_for_memory(gib(16)), 9);
+        assert_eq!(shadows_for_memory(gib(32)), 18);
+        assert_eq!(shadows_for_memory(gib(64)), 24);
+        assert_eq!(shadows_for_memory(gib(512)), 24);
+        assert_eq!(shadows_for_memory(0), 4, "memory not read");
+        assert!(physical_memory() > gib(1));
+        let cfg = Config::default();
+        assert!((4..=24).contains(&cfg.shadows_total));
+        assert_eq!(Config::parse("control_shadows_total = 40\n").shadows_total, 40, "settings still decide");
     }
 }

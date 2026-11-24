@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn shadow_adopt_counts_the_total() {
         let cfg = Config::default();
-        let edges: Vec<(u64, u64)> = (0..24).map(|i| (200 + i, 300 + i)).collect();
+        let edges: Vec<(u64, u64)> = (0..cfg.shadows_total as u64).map(|i| (200 + i, 300 + i)).collect();
         let (p, s) = tree(&edges);
         assert_eq!(check_adopt(&cfg, &p, &s, 100, 1).unwrap_err().code, ErrorCode::LimitCount);
     }
