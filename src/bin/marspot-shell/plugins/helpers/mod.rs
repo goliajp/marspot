@@ -34,6 +34,7 @@ mod dialogs;
 mod dirs;
 mod first_screens;
 mod launch;
+mod names;
 mod notify;
 mod pair;
 mod passing;
@@ -82,6 +83,7 @@ mod tests_follow;
 
 pub(in crate::plugins) use strip::used;
 pub(in crate::plugins) use pair::{Moved, is_pair, leaving, moved};
+pub(in crate::plugins) use names::record_written;
 use table::{Event, Table};
 
 /// A parent pane with no agent this long loses the helpers an agent
@@ -148,6 +150,13 @@ struct State {
     turned: HashSet<u64>,
     /// Those of them whose plugin reports one now.
     at_work: HashSet<u64>,
+    /// Helpers at a prompt whose screen could not be read: when it is
+    /// read again (ms after the epoch).
+    prompt_unread: HashMap<u64, u64>,
+    /// Parent panes handed to another agent, not yet written down.
+    moves: pair::Moves,
+    /// Parent panes whose helpers wait for the name of a conversation.
+    names: names::Names,
     /// What the records of the helpers' agents say of their context.
     used: HashMap<u64, strip::used::Known>,
     /// When the table was taken from the log (ms after the epoch).
@@ -226,6 +235,7 @@ impl Shared {
             st.turned.remove(&sid);
             st.at_work.remove(&sid);
             st.poked.remove(&sid);
+            st.prompt_unread.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
             st.turn_told.remove(&sid);
@@ -265,19 +275,10 @@ impl Shared {
         self.parked.store(true, Ordering::Release);
         self.epoch.fetch_add(1, Ordering::AcqRel);
         st.watchers.clear();
+        st.names.clear();
         drop(st);
         self.wake();
     }
-}
-
-/// Start the worker and rebuild the table; how many helpers carried
-/// over.
-fn begin(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> std::io::Result<usize> {
-    work::start(Arc::clone(s))?;
-    let n = rebuild::rebuild(s, live);
-    // the worker worked out its sleep before there was a table
-    s.wake();
-    Ok(n)
 }
 
 pub struct HelpersPlugin {
@@ -309,7 +310,7 @@ impl Plugin for HelpersPlugin {
         self.parked_parents = tick::Parked::default();
         let w = Arc::clone(&s);
         super::claudecode::with_helpers::on_account_changed(Arc::new(move || w.wake()));
-        let n = begin(&s, rebuild::live_shadows).map_err(|e| PluginError::Other(format!("helpers worker: {e}")))?;
+        let n = rebuild::begin(&s, rebuild::live_shadows).map_err(|e| PluginError::Other(format!("helpers worker: {e}")))?;
         self.in_turn = turn::turns_at_start(&s.table());
         s.publish_turns(&self.in_turn);
         // after the table: a rebuild closes what it finds half started
@@ -330,11 +331,14 @@ impl Plugin for HelpersPlugin {
         let no_agent = st.no_agent.keys().copied().collect();
         let over = st.batches.next_ms(&st.table);
         let (retry, closing) = (st.undelivered.waiting_on(&obs), st.closing.clone());
+        // u64::MAX: the read again is queued, nothing to wait for
+        let reread = st.prompt_unread.values().copied().filter(|at| *at != u64::MAX).min();
         drop(st);
         let (t, now) = (shared().table(), records::now_ms());
         let due = tick::due(&t, &no_agent, &self.parked_parents, &obs, retry, now);
-        let strips = over.map_or(TickDue::Event, |at| tick::at(at, now));
-        tick::sooner(tick::sooner(due, strips), tick::gone_due(&t, &closing, &obs, now))
+        let at = |ms: Option<u64>| ms.map_or(TickDue::Event, |at| tick::at(at, now));
+        let timed = tick::sooner(at(over), at(reread));
+        tick::sooner(tick::sooner(due, timed), tick::gone_due(&t, &closing, &obs, now))
     }
 
     fn stop(&mut self, _host: &dyn PluginHost) {

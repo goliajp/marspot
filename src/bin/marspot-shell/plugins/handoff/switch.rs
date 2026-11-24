@@ -1,5 +1,5 @@
-//! Moving a pane from one agent to another: the menu rows, and the
-//! script that does it.
+// CARVE-OUT: pre-existing file over 500 lines with its tests; shrinks on every touch
+//! Moving a pane from one agent to another: the script that does it.
 //!
 //! The order is the design (RFC-009): the document is written BEFORE
 //! anything is killed, on a thread, so a history that cannot be read
@@ -15,49 +15,10 @@ use std::time::Duration;
 use super::ledger::{self, Ledger, Side};
 use super::transcript::{self, Agent};
 use super::note::switch_note;
-use super::tags::handoff_tag;
+use super::menu::target_name;
 use super::{carried, claude, codex as codex_history, gemini as gemini_history, history, kimi as kimi_history, launch_line};
 use crate::plugins::pty_op::{self, PtyOp, Step};
 use crate::plugins::{claudecode, codex, gemini, helpers, kimi, pidtree};
-use marspot::ui::strings::{self, Arg};
-
-/// An agent's account profiles: number and directory.  gemini or kimi
-/// with no numbered profile has its default home, as number 0.
-pub fn profiles(a: Agent) -> Vec<(u8, PathBuf)> {
-    match a {
-        Agent::Claude => {
-            let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
-            claudecode::discover_profiles()
-                .into_iter()
-                .map(|n| (n, home.join(format!(".claude-profile-{n}"))))
-                .collect()
-        }
-        Agent::Codex => codex::profile_dirs(),
-        Agent::Gemini => gemini::handoff_homes(),
-        Agent::Kimi => kimi::handoff_homes(),
-    }
-}
-
-/// How a target reads in a menu row and on the badge: `codex P2`, or
-/// the bare name for gemini's default home.
-fn target_name(to: Agent, profile: u8) -> String {
-    match (to, profile) {
-        (Agent::Gemini | Agent::Kimi, 0) => to.key().to_string(),
-        _ => format!("{} P{profile}", to.key()),
-    }
-}
-
-/// The rows a pane running `from` offers: one per profile of each other
-/// agent.
-pub fn menu_rows(from: Agent) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
-    let rows = |to: Agent| {
-        profiles(to).into_iter().map(move |(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
-            tag: handoff_tag(from, to, n),
-            label: strings::text(Arg::HandOffTo(&target_name(to, n))),
-        })
-    };
-    from.others().into_iter().flat_map(rows).collect()
-}
 
 /// The agent a pane is leaving.
 #[derive(Debug, Clone)]
@@ -224,20 +185,20 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
             job.finish(Err(format!("spawn: {e}")));
         }
     }
-    let commit: pty_op::CallFn = Arc::new(move || match pending.lock().unwrap().take() {
-        Some((l, moved)) => {
-            // the new agent is up, whatever becomes of the ledger
-            helpers::moved(moved);
-            l.save(&dir, sid).map_err(|e| format!("ledger: {e}"))
-        }
-        None => Ok(()),
-    });
     let predicate = match to {
         Agent::Claude => claudecode::looks_like_claudecode,
         Agent::Codex => codex::looks_like_codex,
         Agent::Gemini => gemini::looks_like_gemini,
         Agent::Kimi => kimi::looks_like_kimi,
     };
+    let commit: pty_op::CallFn = Arc::new(move || match pending.lock().unwrap().take() {
+        Some((l, moved)) => {
+            // the new agent is up, whatever becomes of the ledger
+            helpers::moved(moved, leaving.shell_pid, predicate);
+            l.save(&dir, sid).map_err(|e| format!("ledger: {e}"))
+        }
+        None => Ok(()),
+    });
     Some(
         PtyOp::new("handoff.switch")
             .hold_screen(true)

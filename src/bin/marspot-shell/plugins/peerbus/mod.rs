@@ -75,7 +75,7 @@ pub(super) fn publish_threads(views: HashMap<u64, ThreadView>) {
 }
 
 pub(crate) use kimi_bind::mail_waiting as kimi_mail_waiting;
-pub(in crate::plugins) use pair::{Conversation, conversation_of};
+pub(in crate::plugins) use pair::{Conversation, conversation_of, conversation_of_agent, record_files};
 
 #[derive(Default)]
 pub struct PeerbusPlugin {

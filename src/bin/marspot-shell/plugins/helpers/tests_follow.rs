@@ -144,7 +144,96 @@ fn helpers_another_approval_prompt_after_a_start_is_told() {
     };
     assert!(!told(1, Some("Run make?\n  1. Yes\n❯ 2. No")), "the cursor moved");
     assert!(!told(1, None), "not seen");
-    assert!(!told(2, Some("Run make?")), "what was told is not known");
+    assert!(told(2, Some("Run make?")), "what was told is not known: it may be another");
     assert!(told(1, Some("Run make clean?\n❯ 1. Yes\n  2. No")));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_an_approval_prompt_is_the_same_whatever_changes_around_it() {
+    let dir = temp("promptonly");
+    let (s, _rx) = shared_at(&dir);
+    let screen = |around: &str, question: &str| {
+        format!("● Ran the tests {around}\n\n────────────────────\n Bash command\n\n   make {question}\n\n Do you want to proceed?\n❯ 1. Yes\n  2. No\n\n Esc to cancel · {around}\n")
+    };
+    let told_of = screen("12s", "clean");
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha(&told_of) }]].concat());
+    let told = |text: String| {
+        work::still_blocked(&s, 1, Some(text));
+        let h: Helper = s.table().map[&1].clone();
+        s.lock().undelivered.take(1).is_some() || h.suppressed > 0
+    };
+    assert!(!told(screen("13s, 40 lines more", "clean")), "only the text around it changed");
+    assert!(told(screen("13s", "install")));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_prompt_written_down_the_way_before_is_not_known() {
+    let dir = temp("promptform");
+    let (s, _rx) = shared_at(&dir);
+    let screen = "Run make?\n❯ 1. Yes\n  2. No";
+    let new = notify::prompt_sha(screen);
+    let before = new.split_once(':').map(|(_, sha)| sha.to_string()).unwrap();
+    assert!(notify::same_prompt(&new, screen) && !notify::same_prompt(&before, screen) && !notify::same_prompt("", screen));
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: before }]].concat());
+    work::still_blocked(&s, 1, Some(screen.into()));
+    assert!(s.lock().undelivered.take(1).is_some(), "told once more");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_an_approval_prompt_whose_screen_was_not_read_is_read_again() {
+    let dir = temp("unread");
+    let (s, rx) = shared_at(&dir);
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha("Run make?\n❯ 1. Yes") }]].concat());
+    let mut in_turn = turn::turns_at_start(&s.table());
+    let host = host_with(&[(1, PaneStatus::Busy(BusyKind::ToolAwaitingApproval))]);
+    let mut asked = || {
+        tick::tick(&s, &host, &mut in_turn, &mut tick::Parked::default());
+        rx.try_iter().filter(|j| matches!(j, Job::StillBlocked { sid: 1 })).count()
+    };
+    assert_eq!(asked(), 1);
+    // not read a while ago
+    let before = records::now_ms() - turn::REREAD_MS;
+    assert!(work::unread(&s, 1, before), "the first time it was not read");
+    assert_eq!(asked(), 1, "not known to be the same prompt");
+    assert!(!work::unread(&s, 1, before), "said once");
+    work::still_blocked(&s, 1, Some("Run make?\n❯ 1. Yes".into()));
+    assert_eq!((asked(), s.lock().prompt_unread.len()), (0, 0));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_screen_that_stays_unreadable_is_not_read_every_tick() {
+    let dir = temp("unreadoften");
+    let (s, rx) = shared_at(&dir);
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha("Run make?\n❯ 1. Yes") }]].concat());
+    let mut in_turn = turn::turns_at_start(&s.table());
+    let host = host_with(&[(1, PaneStatus::Busy(BusyKind::ToolAwaitingApproval))]);
+    let mut asked = || {
+        tick::tick(&s, &host, &mut in_turn, &mut tick::Parked::default());
+        rx.try_iter().filter(|j| matches!(j, Job::StillBlocked { sid: 1 })).count()
+    };
+    assert_eq!(asked(), 1);
+    // each read fails, as the worker would find
+    let mut reads = 1;
+    for _ in 0..20 {
+        work::still_blocked(&s, 1, None);
+        reads += asked();
+    }
+    assert_eq!(reads, 1, "read again only once the while is up");
+    s.lock().prompt_unread.insert(1, records::now_ms());
+    assert_eq!(asked(), 1, "and then");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_an_unread_prompt_of_one_that_went_leaves_nothing_behind() {
+    let dir = temp("unreadgone");
+    let (s, _rx) = shared_at(&dir);
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: String::new() }, Event::Stopped { exited: false }]].concat());
+    assert!(!work::unread(&s, 1, 0));
+    assert!(s.lock().prompt_unread.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -10,11 +10,12 @@
 
 use std::path::Path;
 
-use marspot_peer::control::{screen, sha256};
+use marspot_peer::control::{AgentKind, screen, sha256};
 
 use super::table::Helper;
 use crate::plugins::claudecode::with_helpers::NOTICE_HEAD;
 use crate::plugins::plain_file;
+use crate::plugins::usage::for_helpers;
 
 /// The most of a result file a notice carries.
 pub(super) const MAX_RESULT: usize = 256 * 1024;
@@ -78,6 +79,18 @@ pub(super) fn screen_end(screen: &str, n: usize) -> String {
     last_lines(&crate::pane_control::run_trailer::drop_status_lines(screen), n)
 }
 
+/// What a claude helper's stop says when every account refuses its
+/// model; None while one can take it.
+pub(super) fn refused_note(h: &Helper, stop: Stop) -> Option<String> {
+    if h.started.agent != AgentKind::Claude || h.contained() || stop.is_last() {
+        return None;
+    }
+    let model = Some(h.started.model.as_str()).filter(|m| *m != "default");
+    let r = for_helpers::claude_all_refused(model)?;
+    let earliest = for_helpers::earliest_text(&r).map_or_else(|| "at a time the usage feed does not give".to_string(), |t| format!("at {t}"));
+    Some(format!("All claude accounts are refusing it (out of quota); the earliest recovers {earliest}. Per account: {}.", for_helpers::recoveries_text(&r)))
+}
+
 /// The result file, cut at [`MAX_RESULT`]; None when there is none.
 pub(super) fn read_result(path: &Path) -> Option<String> {
     // a helper in a container writes there
@@ -89,11 +102,48 @@ pub(super) fn read_result(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// What tells one prompt from another, by the bottom of the screen it is
-/// on: not by where its cursor is, nor by how the lines are spaced.
+/// What [`prompt_sha`] puts first; a prompt written down without it,
+/// or not at all, is not known.
+const PROMPT_FORM: &str = "p2:";
+
+/// What tells one prompt from another, by the prompt alone (`prompt_of`):
+/// not by where its cursor is, nor by how the lines are spaced.
 pub(super) fn prompt_sha(screen: &str) -> String {
-    let mark = |c: char| c.is_whitespace() || matches!(c, '❯' | '›' | '→' | '▶' | '●' | '○');
-    sha(&screen.split(mark).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+    let mark = |c: char| c.is_whitespace() || matches!(c, '❯' | '›' | '→' | '▶' | '●' | '○' | '│');
+    let screen = crate::pane_control::run_trailer::drop_status_lines(screen);
+    format!("{PROMPT_FORM}{}", sha(&prompt_of(&screen).split(mark).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")))
+}
+
+/// Whether the prompt on `screen` is known to be the one written down as
+/// `told`: one whose screen was not read, or written down another way
+/// before, may be any.
+pub(super) fn same_prompt(told: &str, screen: &str) -> bool {
+    told.starts_with(PROMPT_FORM) && prompt_sha(screen) == told
+}
+
+/// The prompt at the bottom of `screen`: from below the last rule drawn
+/// above its last choice down to that choice.  What is above (the
+/// transcript, a status that changes) and the hints below are not it;
+/// with no rule, the [`SCREEN_LINES`] rows that end at the choice.
+pub(super) fn prompt_of(screen: &str) -> String {
+    let rows: Vec<&str> = screen.lines().collect();
+    let last = rows.iter().rposition(|r| is_choice(r)).or_else(|| rows.iter().rposition(|r| !r.trim().is_empty()));
+    let end = last.map_or(0, |i| i + 1);
+    let start = rows[..end].iter().rposition(|r| is_rule(r)).map_or(end.saturating_sub(SCREEN_LINES), |i| i + 1);
+    rows[start..end].join("\n")
+}
+
+/// A numbered choice, as `❯ 1. Yes` or `│   2) No │`.
+fn is_choice(row: &str) -> bool {
+    let bare = row.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '❯' | '›' | '>' | '→' | '▶' | '●' | '○'));
+    let digits = bare.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && bare[digits..].starts_with(['.', ')'])
+}
+
+/// A row that is a line across: a rule, or the top of a box.
+fn is_rule(row: &str) -> bool {
+    let t = row.trim();
+    t.chars().filter(|c| matches!(c, '─' | '━' | '═')).count() >= 8 && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╭' | '╮' | '┌' | '┐' | '├' | '┤' | ' '))
 }
 
 /// What tells one result text from another.

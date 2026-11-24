@@ -286,9 +286,7 @@ impl Worker {
 
     pub(super) fn unbind(&mut self, sid: u64, mut b: Binding) {
         send_notices(sid, &mut b, IdleState::Exited);
-        for d in registry::default_dirs() {
-            let _ = registry::remove_ours(&d, b.record.pid);
-        }
+        super::records::remove_record(&b.record);
         if b.subscribed {
             self.unsubscribe(&b.home, &b.thread);
         }

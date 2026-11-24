@@ -16,6 +16,17 @@ pub(super) fn live_shadows() -> HashSet<u64> {
     obs.live().filter(|x| x.entry.shadow_of != 0).map(|x| x.entry.id).collect()
 }
 
+/// Start the worker and rebuild the table; how many helpers carried
+/// over.
+pub(super) fn begin(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> std::io::Result<usize> {
+    super::work::start(Arc::clone(s))?;
+    let n = rebuild(s, live);
+    super::names::at_start(s);
+    // the worker worked out its sleep before there was a table
+    s.wake();
+    Ok(n)
+}
+
 /// Rebuild the table from the log and the sessions still running; close
 /// helpers whose task never went in; drop directories of helpers that
 /// are gone, unless the log cannot be read.  How many carried over.  `live`: the shadow panes running,

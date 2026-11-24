@@ -282,6 +282,11 @@ pub fn read_all(dir: &Path) -> Vec<Entry> {
     out
 }
 
+/// The record `<pid>.json` in `dir`, if there is one that reads.
+pub fn read(dir: &Path, pid: i32) -> Option<Entry> {
+    read_entry(&record_path(dir, pid), pid)
+}
+
 pub fn list_live(dir: &Path) -> Vec<Entry> {
     read_all(dir).into_iter().filter(Entry::is_live).collect()
 }

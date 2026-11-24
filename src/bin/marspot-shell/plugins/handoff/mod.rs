@@ -10,6 +10,7 @@ pub(crate) mod launch_line;
 pub(crate) mod history;
 pub(crate) use marspot_peer::json;
 mod ledger;
+mod menu;
 mod note;
 mod resume;
 mod switch;
@@ -18,6 +19,7 @@ mod transcript;
 
 pub use carried::remember_gemini_model;
 pub(crate) use resume::resume_word;
-pub use switch::{menu_rows, profiles, switch_op, Leaving};
+pub use menu::{menu_rows, profiles};
+pub use switch::{switch_op, Leaving};
 pub use tags::{parse_tag, profile_tag, Pick};
 pub use transcript::Agent;
