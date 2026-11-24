@@ -46,7 +46,7 @@ const LAST_ROWS: usize = 8;
 /// early refusal has not been seen, so it is not looked for.
 pub(super) fn refused_early(agent: AgentKind, screen: &str) -> bool {
     let mut rows = screen.lines().rev().filter(|l| !l.trim().is_empty()).take(LAST_ROWS);
-    agent == AgentKind::Codex && rows.any(|l| l.starts_with("■ unexpected status 401"))
+    agent == AgentKind::Codex && rows.any(|l| l.trim_start().starts_with("■ unexpected status 401"))
 }
 
 /// Judge a stop of `agent` at `now`: the token in the container ends at
@@ -98,7 +98,8 @@ pub(in super::super) fn restart(s: &Arc<Shared>, sid: u64, agent: AgentKind, acc
 }
 
 /// The restart itself.  A helper stopped meanwhile is not started again:
-/// its stop took the token away and its pane is closing.
+/// its stop took the token away and its pane is closing; one stopped
+/// while the token was written has it taken away here.
 pub(super) fn again(me: &Shared, sid: u64, agent: AgentKind, account: &str, d: Option<PathBuf>) -> Result<(), String> {
     let live = || if me.table().map.contains_key(&sid) { Ok(()) } else { Err("it was stopped meanwhile".to_string()) };
     live()?;
@@ -106,7 +107,6 @@ pub(super) fn again(me: &Shared, sid: u64, agent: AgentKind, account: &str, d: O
     let l = login::of_label(agent, account).ok_or("its login cannot be read")?;
     let d = d.ok_or("there is no docker command")?;
     docker::remove(&d, &docker::container_name(sid))?;
-    live()?;
     login::hand_over(&dir, &l).map_err(|r| r.message)?;
     if let Err(e) = live() {
         cleanup::drop_tokens(&me.root(), sid);

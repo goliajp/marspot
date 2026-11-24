@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.672"  # helpers waiting for a conversation name watch record directories made later, and a reused pid finds no earlier record
+shell   = "0.7.673"  # a codex container helper takes an indented 401 line as its token refused, and loses a token written as it stopped
 core    = "0.12.677"  # the helper panel says on its row a move that failed and follows a retargeted deny-list symlink
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
