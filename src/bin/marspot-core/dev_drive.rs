@@ -1,5 +1,6 @@
 //! Dev-panel driving: scripted drags, settings, panels and pane closes.
 
+use super::pane_control::Route;
 use super::*;
 
 impl CoreApp {
@@ -169,5 +170,25 @@ impl CoreApp {
             left = (n - 1) as u32,
             route = format!("{route:?}")
         );
+    }
+
+    /// Dev seam and tests: open one shadow pane under `parent`, through
+    /// the same path as L1's request.  Its answer goes to L1 as any other.
+    pub(super) fn dev_open_shadow(&mut self, req_id: u32, parent: u64) -> Route {
+        let m = marspot::shell_proto::PaneSpawn {
+            req_id,
+            shadow: true,
+            no_focus: true,
+            helper: false,
+            parent_sid: parent,
+            idle_s: 0,
+            cols: 0,
+            rows: 0,
+            cwd: String::new(),
+        };
+        match marspot::shell_proto::encode_pane_spawn(&m) {
+            Ok(p) => self.route_shadow_request(Frame::new(MsgType::PaneSpawn, p), req_id),
+            Err(_) => Route::Unanswerable,
+        }
     }
 }

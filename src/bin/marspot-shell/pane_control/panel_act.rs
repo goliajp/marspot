@@ -130,7 +130,7 @@ fn parent_now(obs: &Observation, sid: u64, entry: Option<u64>) -> impl Fn(u64) -
 fn close(conn: &mut Conn, ctx: &Ctx, sid: u64) -> Result<(), Reject> {
     match helpers_port::stop_sid(conn, ctx, sid) {
         Some(out) => out,
-        None => ops_pane::close(conn, ctx, &sid.to_string()).map(drop),
+        None => ops_pane::close_shadow(conn, ctx, sid).map(drop),
     }
 }
 

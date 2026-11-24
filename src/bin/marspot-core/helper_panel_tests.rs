@@ -115,7 +115,7 @@ fn helper_panel_follows_titles_closes_and_the_deny_list() {
     app.helpers_do(0, Ask::Control(0));
     assert!(acts(&mut app).is_empty());
 
-    let close = encode_pane_retire(&PaneRetire { req_id: 9, sid: a, mode: RetireMode::Delete });
+    let close = encode_pane_retire(&PaneRetire { req_id: 9, sid: a, mode: RetireMode::Delete, shadow_only: false });
     app.route_pane_control(Frame::new(MsgType::PaneRetire, close));
     assert_eq!(wait_done(&mut app, &rx, 9).code, marspot::shell_proto::DoneCode::Ok);
     assert!(rows(&mut app).is_empty(), "nothing left to list");
@@ -151,7 +151,7 @@ fn helper_panel_a_press_is_on_the_rows_last_drawn() {
     assert!(draw(&mut app)[0].rows.len() == 2);
     let top = app.helpers_rect(0).y_top;
     let (close, go) = (spot(&mut app, Ask::Close(0)).unwrap(), spot(&mut app, Ask::Move(0)).unwrap());
-    let retire = encode_pane_retire(&PaneRetire { req_id: 9, sid: a, mode: RetireMode::Delete });
+    let retire = encode_pane_retire(&PaneRetire { req_id: 9, sid: a, mode: RetireMode::Delete, shadow_only: false });
     app.route_pane_control(Frame::new(MsgType::PaneRetire, retire));
     wait_done(&mut app, &rx, 9);
     acts(&mut app);
@@ -216,6 +216,34 @@ fn helper_panel_says_on_the_row_a_move_that_failed() {
         drive(&mut app, &rx);
         app.find_window_pane_by_sid(a).is_some()
     });
+}
+
+/// A close the panel asked of a shadow pane that the core reads after
+/// the pane went to a window is refused, and the pane stays there.
+#[test]
+fn helper_panel_close_of_a_pane_moved_to_a_window_meanwhile_is_refused() {
+    let sb = sandbox();
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    let a = open_shadow(&mut app, &rx, 7, psid);
+    let b = open_shadow(&mut app, &rx, 8, psid);
+    app.open_helpers(0, psid);
+    press(&mut app, Ask::Move(0));
+    wait_for("the pane is in the window", || {
+        drive(&mut app, &rx);
+        app.find_window_pane_by_sid(a).is_some()
+    });
+    let retire = |req_id, sid| {
+        let m = PaneRetire { req_id, sid, mode: RetireMode::Delete, shadow_only: true };
+        Frame::new(MsgType::PaneRetire, encode_pane_retire(&m))
+    };
+    app.route_pane_control(retire(9, a));
+    let done = wait_done(&mut app, &rx, 9);
+    assert_eq!((done.code, done.text.as_str()), (marspot::shell_proto::DoneCode::Other, marspot::shell_proto::IN_A_WINDOW_TEXT));
+    assert!(app.find_window_pane_by_sid(a).is_some(), "still in the window");
+    assert!(session_registry::session_dir(a).exists(), "and its directory kept");
+    app.route_pane_control(retire(10, b));
+    assert_eq!(wait_done(&mut app, &rx, 10).code, marspot::shell_proto::DoneCode::Ok, "a shadow pane is closed");
+    assert!(app.shadow_index(b).is_none());
 }
 
 /// A deny list that is a symlink is watched where the link leads now,

@@ -57,6 +57,7 @@ pub(super) fn done_reject(code: DoneCode, text: &str) -> Reject {
         }
         DoneCode::Other if text == NOT_RESIZABLE_TEXT => (ErrorCode::NotResizable, "a pane in a window takes its size from the window's layout"),
         DoneCode::Other if text == marspot::shell_proto::USER_TYPING_TEXT => return super::dispatch::view_typing_reject(),
+        DoneCode::Other if text == marspot::shell_proto::IN_A_WINDOW_TEXT => return Reject::new(ErrorCode::BadRequest, "refused: in a window"),
         DoneCode::Other if text == RESTARTING_TEXT => {
             return Reject::new(ErrorCode::CoreRestarting, "the pane's session is moving to a new build; nothing was done").retry_after(200);
         }

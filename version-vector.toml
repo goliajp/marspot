@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.682"  # a helper-panel close-all reads from the registry entry whether a pane is still below the one asked of
-core    = "0.12.677"  # the helper panel says on its row a move that failed and follows a retargeted deny-list symlink
+shell   = "0.7.683"  # a helper-panel close asks the core to close the pane only while it is a shadow pane
+core    = "0.12.678"  # a close asked only of a shadow pane is refused once the pane is in a window
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound

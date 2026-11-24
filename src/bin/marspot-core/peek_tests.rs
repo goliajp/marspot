@@ -336,6 +336,7 @@ fn peek_of_a_helper_closed_or_moved_away_ends_too() {
         req_id: 21,
         sid,
         mode: RetireMode::Delete,
+        shadow_only: false,
     })));
     assert!(matches!(app.windows[0].panes[0].peek, Some(Peek::Ended { .. })));
     press(&mut app, LogicalKey::Named(NamedKey::ArrowUp));

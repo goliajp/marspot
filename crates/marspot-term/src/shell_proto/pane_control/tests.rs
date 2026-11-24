@@ -77,6 +77,7 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
                 req_id: 1,
                 sid: 2,
                 mode: RetireMode::Recycle,
+                shadow_only: true,
             }),
             |p| shown(decode_pane_retire(p)),
         ),
@@ -245,8 +246,17 @@ fn pane_control_each_frame_round_trips() {
         req_id: 1,
         sid: 2,
         mode: RetireMode::Delete,
+        shadow_only: true,
     };
-    assert_eq!(decode_pane_retire(&encode_pane_retire(&m)).unwrap(), m);
+    let bytes = encode_pane_retire(&m);
+    assert_eq!(decode_pane_retire(&bytes).unwrap(), m);
+    // a build before this one sends no flags; a later one may send more
+    assert_eq!(decode_pane_retire(&bytes[..13]).unwrap(), PaneRetire { shadow_only: false, ..m });
+    let mut later = bytes.clone();
+    later[13] |= 0x80;
+    later.extend_from_slice(&[7, 7]);
+    assert_eq!(decode_pane_retire(&later).unwrap(), m);
+    assert!(!decode_pane_retire(&encode_pane_retire(&PaneRetire { shadow_only: false, ..m })).unwrap().shadow_only);
     for to in [
         PlaceWhere::Shadow,
         PlaceWhere::Window,
@@ -354,7 +364,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
     let expected = [
         23 + cwd,
         15 + 7,
-        13,
+        14,
         22,
         12 + w + 12,
         31,
@@ -410,7 +420,7 @@ fn pane_control_truncated_payloads_are_refused_at_every_length() {
     for (t, p, decode) in samples() {
         assert!(decode(&p).is_ok(), "{t:?} decodes whole");
         // the last byte came later, and may be missing
-        let least = p.len() - usize::from(matches!(t, MsgType::HelperPanelAct | MsgType::PanePlace));
+        let least = p.len() - usize::from(matches!(t, MsgType::HelperPanelAct | MsgType::PanePlace | MsgType::PaneRetire));
         for n in 0..least {
             assert!(
                 decode(&p[..n]).is_err(),

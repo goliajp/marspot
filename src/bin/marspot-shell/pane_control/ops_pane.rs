@@ -173,12 +173,21 @@ fn type_once_at_prompt(conn: &mut Conn, ctx: &Ctx, sid: u64, cmd: &str) {
 }
 
 pub(super) fn close(conn: &mut Conn, ctx: &Ctx, t: &str) -> Result<Value, Reject> {
-    let sid = target(ctx, t)?;
+    close_as(conn, ctx, target(ctx, t)?, false)
+}
+
+/// [`close`] of a pane asked for as a shadow pane: refused by the core
+/// if it is in a window by the time it reads this.
+pub(super) fn close_shadow(conn: &mut Conn, ctx: &Ctx, sid: u64) -> Result<Value, Reject> {
+    close_as(conn, ctx, target(ctx, &sid.to_string())?, true)
+}
+
+fn close_as(conn: &mut Conn, ctx: &Ctx, sid: u64, shadow_only: bool) -> Result<Value, Reject> {
     conn.need_caps(CAP_SHADOWS)?;
     let shadow = ctx.obs.session(sid).is_some_and(|s| panes::shadow_of(&s.entry) != 0);
     let mine = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened_by(sid) == Some(ctx.caller);
     let mode = if shadow && mine { RetireMode::Delete } else { RetireMode::Recycle };
-    let out = ask_done(conn, sid, MsgType::PaneRetire, |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode })), Again::Gone);
+    let out = ask_done(conn, sid, MsgType::PaneRetire, |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode, shadow_only })), Again::Gone);
     if out.is_ok() {
         conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).closed(sid, Instant::now());
     }
