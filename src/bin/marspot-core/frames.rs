@@ -23,6 +23,10 @@ pub(super) fn pace() {
     PACED.store(true, Ordering::Relaxed);
 }
 
+pub(super) fn paced() -> bool {
+    PACED.load(Ordering::Relaxed)
+}
+
 /// Where one window's frames land: the IOSurface pair L1 handed us
 /// for it, the Metal textures wrapping them, and which half the next
 /// frame writes into.  Windows are peers; each owns its own paint
@@ -78,7 +82,7 @@ impl WindowSurfaces {
     pub(super) fn announce(&mut self) -> u32 {
         let id = self.writing_surface_id();
         self.writing_idx = 1 - self.writing_idx;
-        if PACED.load(Ordering::Relaxed) {
+        if paced() {
             self.unshown = Some(id);
         }
         id
@@ -241,7 +245,7 @@ pub(super) fn announce_settled(app: &mut CoreApp, control_writer: &FrameWriter, 
         trace::mark(Stage::SurfaceSent, wi as u32);
         // the wake a shell from before `SurfaceReady` listens for; a
         // pacing shell is not one
-        if !PACED.load(Ordering::Relaxed) {
+        if !paced() {
             let fr = Frame::new(MsgType::FrameRendered, Vec::new());
             send_to_shell(control_writer, fr, "frame_rendered");
         }

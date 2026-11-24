@@ -62,7 +62,7 @@ fn a_terminal_that_shrinks_takes_it_along_at_once() {
 fn the_loop_wakes_for_it() {
     let sb = Sandbox::new();
     let (mut app, sid) = app_with_strip(&sb, 4);
-    assert_eq!(app.strips.wait(Instant::now()), None);
+    assert_eq!(app.strips_wait(Instant::now()), None);
     let seq = app.windows[0].panes[0].grid_seq();
     let full = screen(b"\x1b[10;1Hx");
     let strip = app.strips.by_sid.get_mut(&sid).unwrap();
@@ -76,7 +76,7 @@ fn the_loop_wakes_for_it() {
     std::thread::sleep(MS * 160);
     app.strips_tick();
     assert!(app.windows[0].needs_render);
-    assert_eq!(app.strips.wait(Instant::now()), None);
+    assert_eq!(app.strips_wait(Instant::now()), None);
     app.place_strips(0);
     assert_eq!(app.strips.view(Some(sid)).unwrap().top_row, 2);
 }

@@ -9,8 +9,10 @@ impl CoreApp {
     pub(super) fn preedit(&mut self, wi: usize, text: String) {
         if !text.is_empty() {
             self.typed_before_view(wi);
+            self.strip_keys_interrupted();
         }
         if win!(self, wi).ime_preedit != text {
+            self.note_typing(wi);
             win!(self, wi).ime_preedit = text;
             win!(self, wi).needs_render = true;
         }
@@ -135,7 +137,9 @@ impl CoreApp {
             return;
         }
 
-        self.key_to_pane(wi, &event, modifiers);
+        if !self.strip_key(wi, &event, modifiers) {
+            self.key_to_pane(wi, &event, modifiers);
+        }
     }
 
     fn pane_session_holds_keys(&self, sid: u64) -> bool {
@@ -146,6 +150,8 @@ impl CoreApp {
     /// Runs `command`.  False when the key that asked for it should
     /// carry on to the pane as a key.
     fn run_command(&mut self, wi: usize, command: Command, by_escape: bool) -> bool {
+        // a command is not a key the strip waits on or has
+        self.strip_keys_interrupted();
         match command {
             Command::Settings => self.toggle_panel(wi, SurfaceKind::Settings),
             Command::Layout => self.toggle_panel(wi, SurfaceKind::Layout),
@@ -207,6 +213,7 @@ impl CoreApp {
             let moved = pane.snap_to_live();
             pane.session_mut().forward_paste(&text);
             win!(self, wi).needs_render |= moved;
+            self.note_typing(wi);
         }
         true
     }

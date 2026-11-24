@@ -108,6 +108,7 @@ impl CoreApp {
         self.shell_child_pids.remove(&id);
         self.pane_badges.remove(&id);
         self.strips.forget(id);
+        self.pane_control.strips.forget(id);
         self.pane_titles.remove(&id);
         self.esc_history.remove(&id);
     }

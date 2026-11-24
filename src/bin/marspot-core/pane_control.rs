@@ -13,8 +13,8 @@ use super::pane_reports::Reports;
 use super::*;
 use marspot::pane::ControlReach;
 use marspot::shell_proto::{
-    CAP_HELPER_PANEL, CAP_PEEK, CAP_SHADOWS, CAP_TYPE_AND_WATCH, DoneCode, PaneDone, decode_pane_type, decode_pane_watch,
-    encode_pane_control_caps, encode_pane_done,
+    CAP_HELPER_PANEL, CAP_HELPER_STRIP, CAP_PEEK, CAP_SHADOWS, CAP_TYPE_AND_WATCH, DoneCode,
+    PaneDone, decode_pane_type, decode_pane_watch, encode_pane_control_caps, encode_pane_done,
 };
 use marspot_term::frame_writer::FrameWriter;
 
@@ -56,7 +56,8 @@ impl PaneControl {
         if std::mem::replace(&mut self.caps_sent, true) {
             return;
         }
-        let caps = CAP_TYPE_AND_WATCH | CAP_SHADOWS | CAP_PEEK | CAP_HELPER_PANEL;
+        let caps =
+            CAP_TYPE_AND_WATCH | CAP_SHADOWS | CAP_PEEK | CAP_HELPER_PANEL | CAP_HELPER_STRIP;
         self.reports.push(Frame::new(
             MsgType::PaneControlCaps,
             encode_pane_control_caps(caps),
@@ -99,6 +100,10 @@ fn code_name(code: DoneCode) -> &'static str {
 impl CoreApp {
     /// L1 asked to type into, or watch, session `sid`.
     pub(super) fn route_pane_control(&mut self, f: Frame) -> Route {
+        if f.msg_type == MsgType::StripKeys {
+            self.shell_takes_strip_x(&f.payload);
+            return Route::Unanswerable;
+        }
         let Some(req_id) = f.payload.first_chunk::<4>().map(|b| u32::from_le_bytes(*b)) else {
             lx_warn!(
                 "core.pane_control.unanswerable",

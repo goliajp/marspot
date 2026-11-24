@@ -17,6 +17,7 @@ pub enum Row {
     Language,
     DimScale,
     CircledWide,
+    HelperStrip,
     ScrollFactor,
     CcStatuslineHook,
 }
@@ -83,6 +84,7 @@ pub const SECTIONS: &[Section] = &[
                 label: Msg::CircledDigitsWide,
                 cost: Msg::CostCircledDigitsWide,
             },
+            RowSpec { row: Row::HelperStrip, label: Msg::HelperStrip, cost: Msg::CostHelperStrip },
         ],
     },
     Section {
@@ -140,6 +142,7 @@ impl Row {
             Row::ReclaimPrefetch => Control::Toggle(s.reclaim_prefetch),
             Row::CcStatuslineHook => Control::Toggle(s.cc_statusline_hook),
             Row::CircledWide => Control::Toggle(s.appearance_circled_wide),
+            Row::HelperStrip => Control::Toggle(s.helper_strip),
             Row::Theme => Control::Segmented {
                 options: THEME_LABELS,
                 chosen: THEME_CHOICES.iter().position(|t| *t == s.appearance_theme).unwrap_or(usize::MAX),
@@ -172,6 +175,7 @@ impl Row {
             | Row::Theme
             | Row::Language
             | Row::CircledWide
+            | Row::HelperStrip
             | Row::DimScale
             | Row::ScrollFactor
             | Row::CcStatuslineHook => false,
@@ -192,6 +196,7 @@ impl Row {
             Row::ReclaimPrefetch => next.reclaim_prefetch = !s.reclaim_prefetch,
             Row::CcStatuslineHook => next.cc_statusline_hook = !s.cc_statusline_hook,
             Row::CircledWide => next.appearance_circled_wide = !s.appearance_circled_wide,
+            Row::HelperStrip => next.helper_strip = !s.helper_strip,
             Row::ReclaimIdleMinutes => {
                 next.reclaim_idle_minutes = *IDLE_CHOICES.get(seg)?;
             }

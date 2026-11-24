@@ -19,6 +19,7 @@ fn text(m: Msg) -> &'static str {
         Msg::WarmUpOnReturn => "Warm up on return",
         Msg::Theme => "Theme",
         Msg::DimOtherPanes => "Dim the panes you are not in",
+        Msg::HelperStrip => "List helpers under their pane",
         Msg::CircledDigitsWide => "Circled digits take two cells",
         Msg::ClaudeCodeReportsModel => "Let Claude Code report its model",
         Msg::WheelSpeed => "Wheel speed",
@@ -30,6 +31,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostDimOtherPanes => {
             "deeper tells you at a glance what has drifted; too deep and you stop reading them"
         }
+        Msg::CostHelperStrip => "the pane is that much shorter while it has any",
         Msg::CostCircledDigitsWide => {
             "sized like CJK, but moves the wrap point: text can strand a column early"
         }

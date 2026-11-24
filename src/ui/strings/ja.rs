@@ -20,6 +20,7 @@ fn text(m: Msg) -> &'static str {
         Msg::WarmUpOnReturn => "戻ったときに順次再開",
         Msg::Theme => "テーマ",
         Msg::DimOtherPanes => "操作中でないペインを暗くする",
+        Msg::HelperStrip => "ヘルパーをペインの下に一覧表示",
         Msg::CircledDigitsWide => "丸数字を2セル幅で表示",
         Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
         Msg::WheelSpeed => "ホイールの速度",
@@ -29,6 +30,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostWarmUpOnReturn => "ペインに戻ったとき、休止中のペインを1秒に1つずつ再開します",
         Msg::CostTheme => "以前の色を取得したプログラムは、再取得するまでその色のままです",
         Msg::CostDimOtherPanes => "暗くするほど見分けやすくなりますが、暗すぎると読みにくくなります",
+        Msg::CostHelperStrip => "ヘルパーがいる間は、その行数だけペインの表示が短くなります",
         Msg::CostCircledDigitsWide => "全角と同じ幅になりますが、折り返しが1桁早まることがあります",
         Msg::CostClaudeCodeReportsModel => {
             "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"

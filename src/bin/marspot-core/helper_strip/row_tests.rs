@@ -1,6 +1,6 @@
 //! What a composed row says, and which rows there are.
 
-use super::compose::{compose, Arrow, List, Pick, Row, State};
+use super::compose::{compose, Arrow, List, Pick, Row, Spot, State};
 use super::compose_tests::strip_of;
 use super::figures::{compact, cut, elapsed};
 use super::native_list::Columns;
@@ -68,7 +68,6 @@ const ROW: Row = Row {
     elapsed_ms: 3_000,
     tokens: None,
     arrow: Arrow::Up,
-    gone: false,
 };
 
 fn lines(rows: &[Row], selected: Option<Pick>, viewed: Pick, height: u16) -> Vec<String> {
@@ -118,11 +117,35 @@ fn five_rows_show_and_follow_the_selected_one() {
     assert!(viewed[1].starts_with("❯ ◯ main") && viewed[6].starts_with("  ⏺ n6"));
 }
 
+/// A strip that has not got its full height yet.
 #[test]
-fn a_row_that_is_gone_shows_while_it_is_in_view() {
-    let rows = [ROW, Row { name: "left", gone: true, ..ROW }];
-    assert_eq!(lines(&rows, None, Pick::Main, 4)[3], "");
-    assert!(lines(&rows, None, Pick::Row(1), 4)[3].starts_with("  ⏺ left"));
+fn rows_a_strip_has_no_room_for_are_counted() {
+    let names: Vec<String> = (0..7).map(|i| format!("n{i}")).collect();
+    let rows: Vec<Row> = names.iter().map(|n| Row { name: n, ..ROW }).collect();
+    let of = |n: usize, height| lines(&rows[..n], None, Pick::Main, height);
+    assert_eq!(of(2, 3)[2], "  ↓ 2 more");
+    let three = of(3, 4);
+    assert!(three[2].contains("n0"));
+    assert_eq!(three[3], "  ↓ 2 more");
+    assert!(of(2, 4)[3].contains("n1"));
+    for height in 1..9 {
+        lines(&rows, Some(Pick::Row(6)), Pick::Row(5), height);
+    }
+}
+
+#[test]
+fn every_line_is_known_by_what_is_on_it() {
+    let rows = [ROW; 7];
+    let mut strip = One::new(8);
+    strip.fit(50, 8);
+    let l = List { rows: &rows, selected: Some(Pick::Row(5)), viewed: Pick::Main, theme: &THEMES[0], native: None };
+    let d = compose(&mut strip, &l);
+    let spots: Vec<_> = (0..9).map(|r| d.at(r)).collect();
+    assert_eq!(spots[..3], [None, Some(Spot::Main), Some(Spot::Row(1))]);
+    assert_eq!(spots[6..], [Some(Spot::Row(5)), Some(Spot::More), None]);
+    let native = Some(Columns { names: 10, right: 48 });
+    let d = compose(&mut strip, &List { rows: &rows[..1], selected: None, native, ..l });
+    assert_eq!((d.at(0), d.at(1)), (Some(Spot::Row(0)), None));
 }
 
 #[test]

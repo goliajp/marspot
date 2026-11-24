@@ -37,7 +37,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-fn counted<T>(f: impl FnOnce() -> T) -> usize {
+pub(super) fn counted<T>(f: impl FnOnce() -> T) -> usize {
     ALLOCS.with(|a| a.set(Some(0)));
     let out = f();
     let n = ALLOCS.with(|a| a.take()).unwrap();
@@ -60,7 +60,6 @@ fn a_list_composed_again_allocates_nothing() {
         elapsed_ms: 0,
         tokens: Some(999_000),
         arrow: Arrow::Down,
-        gone: false,
     };
     let mut rows = [row; 7];
     let mut strip = Strip::new(8);

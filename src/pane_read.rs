@@ -23,7 +23,7 @@
 //! relative cursor moves against a screen the replay never saw -- which
 //! is why it is not the first choice.
 
-mod input_box;
+pub mod input_box;
 
 use input_box::{box_of, composer_of};
 use marspot_term::terminal::Terminal;

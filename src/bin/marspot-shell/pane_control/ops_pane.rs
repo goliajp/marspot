@@ -76,7 +76,12 @@ fn counts(tree: &Tree, parent: u64) -> SpawnCounts {
 }
 
 pub(super) fn open(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Reject> {
-    open_within(conn, ctx, a, SPAWN_WITHIN)
+    open_as(conn, ctx, a, SPAWN_WITHIN, false)
+}
+
+/// A helper's pane: the core picks its size when `a` gives none.
+pub(super) fn open_helper(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs) -> Result<Value, Reject> {
+    open_as(conn, ctx, a, SPAWN_WITHIN, true)
 }
 
 /// The count limits and the spawn rate for a new pane under `parent`.
@@ -103,7 +108,12 @@ fn open_parent(ctx: &Ctx, a: &OpenArgs) -> Result<u64, Reject> {
     })
 }
 
+#[cfg(test)]
 pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration) -> Result<Value, Reject> {
+    open_as(conn, ctx, a, within, false)
+}
+
+fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: bool) -> Result<Value, Reject> {
     let parent = open_parent(ctx, a)?;
     conn.need_caps(CAP_SHADOWS)?;
     let gate = conn.hub.shadow_gate.enter(GATE_WITHIN)?;
@@ -114,6 +124,7 @@ pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Dura
         req_id: 0,
         shadow: a.shadow,
         no_focus: true,
+        helper,
         // a pane for a window opens in the window holding this one
         parent_sid: parent,
         idle_s: SHADOW_IDLE_S,

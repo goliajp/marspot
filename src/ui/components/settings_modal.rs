@@ -412,7 +412,7 @@ mod tests {
     fn rows_are_separated_and_nothing_overflows() {
         let _scale = scale_guard();
         let s = Settings::default();
-        let rect = test_rect(1800.0, 1400.0, &s);
+        let rect = test_rect(1800.0, 1496.0, &s);
         let slots = collect(rect, &s);
         let mut m = fake_measure();
         let px = crate::ui::core::ViewPainter::px_per_pt();

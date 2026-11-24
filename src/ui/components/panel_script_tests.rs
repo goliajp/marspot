@@ -75,7 +75,7 @@ fn a_chord_is_its_modifiers_then_its_key() {
 #[test]
 fn the_pointer_can_be_moved_onto_a_target_and_out_of_the_window() {
     let l = layout();
-    let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 6], strip: None };
     let steps = parse("move:close;pointer-exit").unwrap();
     assert_eq!(steps, [Step::Move(Target::Close), Step::PointerExit]);
     let at = |step| match scene.resolve(&step).unwrap()[..] {
@@ -104,7 +104,7 @@ fn a_step_it_does_not_know_rejects_the_whole_script() {
 #[test]
 fn a_button_step_presses_the_button_the_toolbar_hit_tests() {
     let l = layout();
-    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6], strip: None };
     use crate::frame_build::chrome::{ChromeShape, ChromeSurfaces};
     use crate::ui::components::chrome_target::ChromeTarget;
     use crate::ui::components::title_strip_view::BadgesOnly;
@@ -133,7 +133,7 @@ fn a_button_step_presses_the_button_the_toolbar_hit_tests() {
 fn targets_land_where_their_names_say() {
     let l = layout();
     let c = panel();
-    let scene = Scene { layout: &l, chrome: Some(c), cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: Some(c), cell: CELL, helpers: [None; 6], strip: None };
     let at = |target| scene.point(target).unwrap();
 
     let (x, y) = at(Target::Close);
@@ -152,7 +152,7 @@ fn targets_land_where_their_names_say() {
 #[test]
 fn a_panel_target_needs_a_panel() {
     let l = layout();
-    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6], strip: None };
     for target in [Target::Close, Target::Header, Target::Outside, Target::PaneUnder] {
         assert!(scene.resolve(&Step::Click(target)).is_err(), "{target:?}");
     }
@@ -168,7 +168,7 @@ fn a_panel_target_needs_a_panel() {
 #[test]
 fn a_drag_ends_the_asked_distance_from_where_it_began() {
     let l = layout();
-    let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 6], strip: None };
     let inputs = scene.resolve(&Step::DragHeader(120.0, 40.0)).unwrap();
     let (Some(Input::Down(x, y, _)), Some(Input::Up(ux, uy))) = (inputs.get(1), inputs.last())
     else {
@@ -181,7 +181,7 @@ fn a_drag_ends_the_asked_distance_from_where_it_began() {
 #[test]
 fn keys_come_pressed_then_released() {
     let l = layout();
-    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6], strip: None };
     let keys = |step| -> Vec<(KeyState, LogicalKey, Option<String>, bool)> {
         scene
             .resolve(&step)
@@ -212,7 +212,7 @@ fn keys_come_pressed_then_released() {
 #[test]
 fn steps_are_played_one_at_a_time_and_then_it_is_finished() {
     let l = layout();
-    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6] };
+    let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6], strip: None };
     let t0 = Instant::now();
     let mut s = Script::new(parse("esc;wait:2000;click:close;type:x").unwrap(), t0);
     assert!(!s.due(t0), "not before the window has had time to fill");
@@ -222,7 +222,7 @@ fn steps_are_played_one_at_a_time_and_then_it_is_finished() {
     // No panes yet: nothing is consumed, and it looks again later.
     let mut empty = layout();
     empty.cells.clear();
-    assert!(s.play(t, &Scene { layout: &empty, chrome: None, cell: CELL, helpers: [None; 6] }).is_empty());
+    assert!(s.play(t, &Scene { layout: &empty, chrome: None, cell: CELL, helpers: [None; 6], strip: None }).is_empty());
     assert!(!s.due(t + STEP_GAP));
     let t = t + START_DELAY;
 
@@ -236,4 +236,16 @@ fn steps_are_played_one_at_a_time_and_then_it_is_finished() {
     assert!(!s.finished());
     assert!(s.play(t, &scene).is_empty());
     assert!(s.finished() && !s.due(t + START_DELAY));
+}
+
+#[test]
+fn a_line_of_the_strip_is_clicked_where_it_is() {
+    assert_eq!(parse("click:strip-3").unwrap(), [Step::Click(Target::Strip(3))]);
+    assert!(parse("click:strip-x").is_err());
+    let l = layout();
+    let mut scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 6], strip: None };
+    assert!(scene.resolve(&Step::Click(Target::Strip(0))).is_err(), "no strip");
+    scene.strip = Some((30.0, 500.0, 16.0));
+    let at = scene.resolve(&Step::Click(Target::Strip(3))).unwrap();
+    assert!(matches!(at[1], Input::Down(x, y, _) if (x, y) == (30.0, 548.0)), "{at:?}");
 }

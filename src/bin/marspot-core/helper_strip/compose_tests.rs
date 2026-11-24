@@ -63,7 +63,6 @@ fn row(line: &'static str) -> Row<'static> {
         elapsed_ms: f[4].parse().unwrap(),
         tokens: Some(f[5].parse().unwrap()),
         arrow: Arrow::Down,
-        gone: false,
     }
 }
 
@@ -154,7 +153,8 @@ fn rows_are_claudes_own_cell_for_cell() {
         let g = s.term.grid();
         let n = find(g).unwrap_or_else(|| panic!("{}: no list", s.name));
         let rows = n.last_row - n.main_row + 1;
-        let strip = strip_of(g.cols(), rows + 1, &list(s, theme(s), false));
+        // a line more: claude's own is cut short at a screen's end
+        let strip = strip_of(g.cols(), rows + 2, &list(s, theme(s), false));
         same_rows(s.name, strip.grid(), 1, g, n.main_row, rows);
     }
 }

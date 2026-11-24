@@ -105,7 +105,11 @@ fn l2_typing_and_watch_caps_go_to_l1_once_after_hello() {
     assert_eq!(caps[0].msg_type, MsgType::PaneControlCaps);
     assert_eq!(
         decode_pane_control_caps(&caps[0].payload).unwrap(),
-        CAP_TYPE_AND_WATCH | marspot::shell_proto::CAP_SHADOWS | marspot::shell_proto::CAP_PEEK | marspot::shell_proto::CAP_HELPER_PANEL
+        CAP_TYPE_AND_WATCH
+            | marspot::shell_proto::CAP_SHADOWS
+            | marspot::shell_proto::CAP_PEEK
+            | marspot::shell_proto::CAP_HELPER_PANEL
+            | marspot::shell_proto::CAP_HELPER_STRIP
     );
 }
 

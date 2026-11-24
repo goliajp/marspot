@@ -8,14 +8,26 @@ Usage: _peerbus_fake_claude.py <registry-dir> <seconds> [<log-file>]
 
 Every line that arrives on the inbox is appended to <log-file>.  The
 record and the socket are removed when the time is up.
+
+FAKE_SIZE_LOG in the environment names a file that gets the terminal's
+size, `<epoch seconds> <cols> <rows>`, at the start and at each SIGWINCH.
+With FAKE_ALT the session is on the alternate screen.  With FAKE_KEYS_LOG
+it draws Claude Code's empty input box, redrawn at each SIGWINCH, takes
+no key, and appends what it reads from the terminal to that file, one
+read a line, as hex.
 """
+import fcntl
 import json
 import os
+import select
 import signal
 import socket
+import struct
 import subprocess
 import sys
+import termios
 import time
+import tty
 import uuid
 
 def ps(field):
@@ -49,16 +61,50 @@ with open(path, "w") as f:
                "pidDomain": "darwin", "messagingSocketPath": inbox,
                "name": "fake-claude-6a", "nameSource": "derived", "nameSince": now,
                "status": "idle", "updatedAt": now, "statusUpdatedAt": now}, f)
+
+
+KEYS = os.environ.get("FAKE_KEYS_LOG")
+
+
+def draw_box(cols):
+    rule = "\u2500" * cols
+    sys.stdout.write("\x1b[H\x1b[2J%s\r\n\u276f \r\n%s\r\n  ? for shortcuts\x1b[2;3H" % (rule, rule))
+    sys.stdout.flush()
+
+
+def note_size(*_):
+    rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+    if KEYS:
+        draw_box(cols)
+    if "FAKE_SIZE_LOG" in os.environ:
+        with open(os.environ["FAKE_SIZE_LOG"], "a") as sizes:
+            sizes.write("%.3f %d %d\n" % (time.time(), cols, rows))
+
+
+if "FAKE_ALT" in os.environ:
+    sys.stdout.write("\x1b[?1049h\x1b[H")
 print("fake claude %d registered" % pid, flush=True)
+if KEYS:
+    saved = termios.tcgetattr(0)
+    tty.setraw(0)
+if "FAKE_SIZE_LOG" in os.environ or KEYS:
+    note_size()
+    signal.signal(signal.SIGWINCH, note_size)
 # a kill still removes the record and the socket
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 deadline = time.time() + seconds
 try:
     while time.time() < deadline:
         try:
-            conn, _ = listener.accept()
-        except socket.timeout:
+            ready = select.select([listener, 0] if KEYS else [listener], [], [], 0.5)[0]
+        except InterruptedError:
             continue
+        if 0 in ready:
+            with open(KEYS, "a") as keys:
+                keys.write(os.read(0, 64).hex() + "\n")
+        if listener not in ready:
+            continue
+        conn, _ = listener.accept()
         conn.settimeout(5.0)
         data = b""
         try:
@@ -73,5 +119,7 @@ try:
         with open(log, "ab") as f:
             f.write(data)
 finally:
+    if KEYS:
+        termios.tcsetattr(0, termios.TCSADRAIN, saved)
     os.unlink(path)
     os.unlink(inbox)

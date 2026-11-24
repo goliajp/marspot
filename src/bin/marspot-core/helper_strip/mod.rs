@@ -5,19 +5,33 @@
 //! (`Layout::with_strips`); drawing and the pointer read where it is
 //! from the same place.
 
+use super::helper_strip_records::Records;
 use super::*;
+use compose::{Arrow, List, Pick, Row, State};
 use marspot::frame_build::text_run::preedit_last_row;
 use marspot::layout::CellRect;
 use marspot::render::StripView;
+use marspot::shell_proto::HELPER_STRIP_ROWS;
 
+mod clock;
 mod compose;
 mod dev;
 mod figures;
+mod height;
+mod host;
+mod keys;
+mod keys_x;
 mod native_list;
+mod press;
+mod probe;
+mod sizes;
 mod strip;
 mod theme;
+mod tick;
 
 pub(super) use strip::{Over, Strip, MAX_ROWS};
+
+const NO_ROW: Row = Row { name: "", named: false, task: "", state: State::Done, elapsed_ms: 0, tokens: None, arrow: Arrow::Down };
 
 #[derive(Default)]
 pub(super) struct Strips {
@@ -25,8 +39,32 @@ pub(super) struct Strips {
     /// Dev seam only (`MARSPOT_DEV_HELPER_STRIP=n`): every pane gets a
     /// strip of n rows.
     dev: Option<u16>,
+    /// Dev seam only (`MARSPOT_DEV_STRIP_DUMP`): strips go to the log.
+    dump: bool,
+    /// The setting as last seen.
+    on: bool,
+    /// The panes with helpers, or with the rows helpers had.
+    hosts: std::collections::HashMap<u64, host::Host>,
+    /// Which records are taken in.
+    heard: u64,
+    /// Whether the shell has told of every pane there is to tell of,
+    /// and whether a pane it found waits for that.
+    told: bool,
+    waiting: bool,
+    /// When this core started: sessions are found for a while only.
+    born: Option<Instant>,
+    /// Sessions that had their first look at a layout.
+    met: std::collections::HashSet<u64>,
+    /// When the user last typed in a session's pane.
+    typed: std::collections::HashMap<u64, Instant>,
+    /// Shadows that were given the size they have.
+    sized: std::collections::HashSet<u64>,
+    /// When something is owed, if nothing happens before.
+    due: Option<Instant>,
+    clocks: clock::Clocks,
     /// Where the pointer last was, and in which window.
     pointer: Option<(u32, f64, f64)>,
+    keys: keys::Keys,
 }
 
 impl Strips {
@@ -46,8 +84,18 @@ impl Strips {
         self.by_sid.entry(sid).or_insert_with(|| Strip::new(rows)).set_rows(rows);
     }
 
+    /// Session `sid` is over.
     pub(super) fn forget(&mut self, sid: u64) {
         self.by_sid.remove(&sid);
+        self.hosts.remove(&sid);
+        self.met.remove(&sid);
+        self.typed.remove(&sid);
+        self.sized.remove(&sid);
+    }
+
+    /// Whether session `sid`'s strip is on screen.
+    pub(super) fn drawn(&self, sid: u64) -> bool {
+        self.top_row(Some(sid)).is_some()
     }
 
     pub(super) fn view(&self, sid: Option<u64>) -> Option<StripView<'_>> {
@@ -60,11 +108,6 @@ impl Strips {
 
     fn rows(&self, sid: Option<u64>) -> u16 {
         sid.and_then(|sid| self.by_sid.get(&sid)).map_or(0, Strip::rows)
-    }
-
-    /// How long until a strip has to move.
-    pub(super) fn wait(&self, now: Instant) -> Option<Duration> {
-        self.by_sid.values().filter_map(Strip::due).min().map(|due| due.saturating_duration_since(now))
     }
 
     pub(super) fn pointer_at(&mut self, window_id: u32, x_phys: f64, y_phys: f64) {
@@ -86,9 +129,42 @@ impl Strips {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// What a strip is listed for: the screen above it, which session that
+/// is and its frame, and whether it is a helper viewed in the pane's
+/// place, which draws a strip of its own.
+struct Under<'a> {
+    screen: &'a marspot_term::grid::Grid,
+    of: (u64, u64),
+    scrolled: bool,
+    viewing: bool,
+    selected: Option<Pick>,
+}
+
+/// Write what `record` says at `ms` into `strip`, if it lists anything.
+/// Nothing is allocated.
+fn list_into(strip: &mut Strip, host: &mut host::Host, record: &marspot::shell_proto::HelperStrip, under: Under, ms: u64) -> bool {
+    let (theme, native) = host.look(record.parent_agent, under.screen, under.of, under.scrolled);
+    let native = native.filter(|_| !under.viewing);
+    let viewed = if under.viewing { host.index_of(record, under.of.0).map_or(Pick::Main, Pick::Row) } else { Pick::Main };
+    let mut rows = [NO_ROW; HELPER_STRIP_ROWS];
+    let n = host.rows(record, ms, &mut rows);
+    let selected = under.selected.map(|p| match p {
+        Pick::Row(i) => Pick::Row(i.min(n.saturating_sub(1))),
+        Pick::Main if native.is_some() => Pick::Row(0),
+        main => main,
+    });
+    host.drawn = compose::compose(strip, &List { rows: &rows[..n], selected, viewed, theme, native });
+    n > 0
+}
+
 impl CoreApp {
     /// `layout` with the rows window `wi`'s panes give up taken out.
     pub(super) fn take_strip_rows(&mut self, wi: usize, layout: Layout) -> Layout {
+        self.strips_meet(wi, &layout);
         if self.strips.is_empty() {
             return layout;
         }
@@ -108,14 +184,30 @@ impl CoreApp {
         }
         let now = Instant::now();
         let w = &self.windows[wi];
+        let strips = &mut self.strips;
+        strips.clocks.keep(|id| self.windows.iter().any(|w| w.window_id == id));
+        let ms = strips.clocks.ms(w.window_id, now, now_ms());
         let composing = !w.panels.owns_pointer();
         for (i, (pane, cell)) in w.panes.iter().zip(&w.layout.cells).enumerate().filter(|(_, (_, c))| c.strip_rows > 0) {
             let Some(sid) = pane.shelld_session_id() else { continue };
-            let Some(strip) = self.strips.by_sid.get_mut(&sid) else { continue };
+            let Some(strip) = strips.by_sid.get_mut(&sid) else { continue };
+            let viewing = pane.peek.is_some();
             let pane = shown::shown_of(pane, &self.shadows);
             let screen = pane.session().grid();
-            if self.strips.dev.is_some() {
+            if strips.dev.is_some() {
                 dev::fill(strip, screen);
+            } else if let Some(host) = strips.hosts.get_mut(&sid) {
+                let scrolled = pane.view_offset() != 0;
+                let Some(record) = self.pane_control.strips.of(sid).filter(|r| !r.is_empty()) else {
+                    strip.hide();
+                    continue;
+                };
+                let of = (pane.shelld_session_id().unwrap_or(sid), pane.grid_seq());
+                let selected = strips.keys.selected(w.window_id, sid);
+                if !list_into(strip, host, record, Under { screen, of, scrolled, viewing, selected }, ms) {
+                    strip.hide();
+                    continue;
+                }
             }
             strip.place(Over {
                 screen,
@@ -126,17 +218,8 @@ impl CoreApp {
                 preedit_end: (composing && i == w.focused_idx).then(|| preedit_last_row(&w.ime_preedit, screen)).flatten(),
                 now,
             });
-        }
-    }
-
-    /// Ask for the frames in which strips move.
-    pub(super) fn strips_tick(&mut self) {
-        let now = Instant::now();
-        for (sid, strip) in self.strips.by_sid.iter_mut() {
-            if strip.ripen(now)
-                && let Some(w) = self.windows.iter_mut().find(|w| w.panes.iter().any(|p| p.shelld_session_id() == Some(*sid)))
-            {
-                w.needs_render = true;
+            if strips.dump && let Some(host) = strips.hosts.get_mut(&sid) {
+                dev::dump(strip, sid, &mut host.dumped);
             }
         }
     }
@@ -185,21 +268,12 @@ impl CoreApp {
         let (cw, ch) = self.renderer.cell_dims();
         win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
     }
-
-    /// Whether a press landed on a pane's strip.  It focuses the pane,
-    /// and drops the selection as a press off one does.
-    pub(super) fn strip_press(&mut self, wi: usize, x_phys: f64, y_phys: f64) -> bool {
-        let Some((idx, _)) = self.strip_at(wi, x_phys, y_phys) else { return false };
-        let w = &mut win!(self, wi);
-        w.selection_dragging = false;
-        w.needs_render |= w.selection.take().is_some();
-        self.focus_pane(wi, idx);
-        true
-    }
 }
 
 #[cfg(test)]
 mod alloc_tests;
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod compose_tests;
 #[cfg(test)]
@@ -208,3 +282,11 @@ mod row_tests;
 mod moving_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod sizes_tests;
+#[cfg(test)]
+mod view_tests;
+#[cfg(test)]
+mod keys_tests;
+#[cfg(test)]
+mod keys_focus_tests;

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.651"  # a request to view a shadow pane is refused while the user types where it is shown
-core    = "0.12.652"  # a shadow pane can be viewed in its parent's place
+shell   = "0.7.656"  # an input box says where it is
+core    = "0.12.663"  # a strip lets x past the input method only while x acts there
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it

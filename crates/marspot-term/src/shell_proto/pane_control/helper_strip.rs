@@ -189,3 +189,24 @@ pub fn decode_helper_strip(p: &[u8]) -> io::Result<HelperStrip> {
     }
     Ok(HelperStrip { root_sid, batch, parent_agent, flags, rows })
 }
+
+/// `StripKeys`, L2 → L1: whether window `window_id`'s keys are a
+/// strip's.  While they are, a plain `x` is dispatched without the input
+/// method, which would compose it.  L1 → L2: the same frame back, which
+/// says the shell does that; a core told nothing offers no `x`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StripKeys {
+    pub window_id: u32,
+    pub on: bool,
+}
+
+pub fn encode_strip_keys(m: &StripKeys) -> Vec<u8> {
+    let mut v = m.window_id.to_le_bytes().to_vec();
+    v.push(m.on as u8);
+    v
+}
+
+pub fn decode_strip_keys(p: &[u8]) -> io::Result<StripKeys> {
+    let mut r = Rd::new(p, "strip_keys");
+    Ok(StripKeys { window_id: r.u32()?, on: r.u8()? != 0 })
+}
