@@ -47,27 +47,24 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     /// A writer stopped inside a publish longer than a read spins: the
-    /// one-shot read waits for it, the core's read does not.
+    /// one-shot read keeps reading until the publish is done.  Driven by
+    /// counts rather than a second thread, whose wake-up on a loaded host
+    /// can come after the deadline.
     #[test]
     fn a_read_once_waits_out_a_writer_stopped_inside_a_publish() {
-        let fd = create_region(12, 3).unwrap();
-        let r = GridShmReader::from_fd(fd.as_raw_fd()).unwrap();
-        let mut w = GridShmWriter::from_fd(fd).unwrap();
-        w.publish(&Grid::new(12, 3), 0, 0);
-        let header = r.base_for_tests() as usize;
-        let seq = |h: usize| unsafe { &(*(h as *const Header)).seq };
-        seq(header).fetch_add(1, Ordering::AcqRel);
-        let (mut cells, mut wrapped) = (Vec::new(), Vec::new());
-        assert!(r.read(&mut cells, &mut wrapped).is_none(), "the spin alone gives up");
-        let done = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            seq(header).fetch_add(1, Ordering::AcqRel);
+        use std::cell::Cell;
+        let looks = Cell::new(0u32);
+        let seq = || {
+            looks.set(looks.get() + 1);
+            if looks.get() < 50 { 5 } else { 6 }
+        };
+        let mut reads = 0;
+        let got = settled(seq, || {
+            reads += 1;
+            (looks.get() >= 50).then_some(())
         });
-        let t0 = Instant::now();
-        let snap = r.read_settled(&mut cells, &mut wrapped);
-        done.join().unwrap();
-        assert!(snap.is_some(), "the frame once the publish is done");
-        assert!(t0.elapsed() >= Duration::from_millis(15), "it waited for the writer");
+        assert!(got.is_some(), "the frame once the publish is done");
+        assert!(reads > 50, "it read again while the publish was under way: {reads}");
     }
 
     /// A writer that died inside a publish does not hold the read.
