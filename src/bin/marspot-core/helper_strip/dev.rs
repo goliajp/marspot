@@ -2,7 +2,9 @@
 //! up text under every pane.
 
 use super::*;
-use marspot_term::grid::CellAttrs;
+use super::compose::{compose, Arrow, List, Pick, Row, State};
+use super::theme::Theme;
+use marspot_term::grid::Grid;
 
 impl Strips {
     pub(in super::super) fn from_env() -> Self {
@@ -18,18 +20,39 @@ impl Strips {
     }
 }
 
-pub(super) fn fill(strip: &mut Strip) {
-    let plain = CellAttrs::default();
-    let dim = CellAttrs { dim: true, ..plain };
-    strip.line(1, &[Run { col: 2, text: "● main", attrs: plain }]);
-    for row in 2..strip.rows() {
-        strip.line(
-            row,
-            &[
-                Run { col: 2, text: "○ helper", attrs: dim },
-                Run { col: 13, text: "a task of some length", attrs: plain },
-                Run { col: 37, text: "1m 32s · ↓ 115.3k tokens", attrs: dim },
-            ],
-        );
-    }
+const ROW: Row = Row {
+    name: "helper",
+    named: false,
+    task: "a task of some length",
+    state: State::Running,
+    elapsed_ms: 92_000,
+    tokens: Some(115_300),
+    arrow: Arrow::Down,
+    gone: false,
+};
+
+const ROWS: [Row; 6] = [
+    ROW,
+    Row { name: "reviewer", named: true, tokens: None, arrow: Arrow::Up, ..ROW },
+    Row { state: State::Awaiting, ..ROW },
+    Row { state: State::Done, gone: true, ..ROW },
+    Row { state: State::Failed, ..ROW },
+    Row { state: State::Stopped, ..ROW },
+];
+
+/// The made up list, going on from the agent's own on `screen` if it
+/// draws one.
+pub(super) fn fill(strip: &mut Strip, screen: &Grid) {
+    let light = marspot_term::palette::current_id() == marspot_term::palette::ThemeId::Light;
+    let native = native_list::find(screen);
+    compose(
+        strip,
+        &List {
+            rows: &ROWS,
+            selected: native.as_ref().filter(|n| n.on_last).map(|_| Pick::Row(0)),
+            viewed: Pick::Main,
+            theme: Theme::of_screen(screen).unwrap_or_else(|| Theme::for_paper(light)),
+            native: native.and_then(|n| n.columns),
+        },
+    );
 }

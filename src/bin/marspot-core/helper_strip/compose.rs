@@ -1,0 +1,245 @@
+//! The rows of a strip as Claude Code draws the list of its own
+//! subagents, cell for cell:
+//!
+//! ```text
+//! ❯ ◯ name  task                                 1m 32s · ↓ 115.3k tokens
+//! ```
+//!
+//! The name's column is as wide as the widest name, the figures end at
+//! the right edge, and the task has what is left between them.
+
+use super::figures::{compact, cut, elapsed, width, Text};
+use super::native_list::Columns;
+use super::strip::{Run, Strip};
+use super::theme::Theme;
+use marspot_term::grid::CellAttrs;
+
+/// The most rows shown at a time.
+pub(in super::super) const WINDOW: usize = 5;
+pub(super) const CURSOR: &str = "❯";
+pub(super) const IN_VIEW: &str = "⏺";
+pub(super) const NOT_IN_VIEW: &str = "◯";
+const NAME_COL: u16 = 4;
+/// The narrowest and the widest the names' column gets.
+pub(super) const NAMES: (u16, u16) = (4, 28);
+/// What is blank at the right of a row.
+const MARGIN: u16 = 2;
+
+#[derive(Clone, Copy, PartialEq)]
+pub(in super::super) enum State {
+    Running,
+    Done,
+    Failed,
+    Stopped,
+    /// It waits for an answer.
+    Awaiting,
+}
+
+/// Which way its tokens go: up until it has called a tool.
+#[derive(Clone, Copy, PartialEq)]
+pub(in super::super) enum Arrow {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy)]
+pub(in super::super) struct Row<'a> {
+    pub name: &'a str,
+    /// Whether the name was given to it, rather than said by its kind.
+    pub named: bool,
+    pub task: &'a str,
+    pub state: State,
+    pub elapsed_ms: u64,
+    pub tokens: Option<u64>,
+    pub arrow: Arrow,
+    /// It has left the list, and is in it only while it is in view.
+    pub gone: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in super::super) enum Pick {
+    Main,
+    Row(usize),
+}
+
+pub(in super::super) struct List<'a> {
+    pub rows: &'a [Row<'a>],
+    pub selected: Option<Pick>,
+    /// What the pane shows.
+    pub viewed: Pick,
+    pub theme: &'a Theme,
+    /// Where the agent's own list has its columns, when it draws one
+    /// with a `main`: the rows go on from it, with no `main` of theirs.
+    pub native: Option<Columns>,
+}
+
+impl<'a> List<'a> {
+    /// The rows there are, each with its place in `rows`.
+    fn shown(&self) -> impl Iterator<Item = (usize, &'a Row<'a>)> + '_ {
+        self.rows.iter().enumerate().filter(|(i, r)| !r.gone || self.viewed == Pick::Row(*i))
+    }
+
+    /// The first row of the window, and how many rows there are.
+    fn window(&self) -> (usize, usize) {
+        let count = self.shown().count();
+        let nth = |pick| match pick {
+            Some(Pick::Row(i)) => self.shown().position(|(at, _)| at == i),
+            _ => None,
+        };
+        let on = match self.selected {
+            Some(Pick::Main) | None => nth(Some(self.viewed)),
+            row => nth(row),
+        };
+        let first = (on.unwrap_or(0) + 1).saturating_sub(WINDOW);
+        (first.min(count.saturating_sub(WINDOW)), count)
+    }
+}
+
+/// Write `list` into `strip`: a blank row and `main` first, unless it
+/// goes on from the agent's own.  The same rows again allocate nothing.
+pub(in super::super) fn compose(strip: &mut Strip, list: &List) {
+    let (first, count) = list.window();
+    let mut at = 0;
+    if list.native.is_none() {
+        strip.line(0, &[]);
+        main_row(strip, list, first);
+        at = 2;
+    }
+    let place = Place::of(strip.cols(), list);
+    for (i, row) in list.shown().skip(first).take(WINDOW) {
+        place.row(strip, at, list, i, row);
+        at += 1;
+    }
+    let below = count.saturating_sub(first + WINDOW);
+    if below > 0 {
+        let more = more("↓", below);
+        strip.line(at, &[Run { col: 2, text: more.as_str(), attrs: list.theme.dim() }]);
+        at += 1;
+    }
+    for rest in at..strip.rows() {
+        strip.line(rest, &[]);
+    }
+}
+
+fn more(arrow: &str, n: usize) -> Text {
+    use std::fmt::Write;
+    let mut t = Text::EMPTY;
+    let _ = write!(t, "{arrow} {n} more");
+    t
+}
+
+fn main_row(strip: &mut Strip, list: &List, above: usize) {
+    let (selected, viewed) = (list.selected == Some(Pick::Main), list.viewed == Pick::Main);
+    let attrs = match (selected, viewed) {
+        (true, _) => list.theme.selected(viewed),
+        (false, true) => Theme::plain(true),
+        (false, false) => list.theme.dim(),
+    };
+    let dot = if viewed { IN_VIEW } else { NOT_IN_VIEW };
+    let up = if above > 0 { more("↑", above) } else { Text::EMPTY };
+    let up_col = strip.cols().saturating_sub(MARGIN + width(up.as_str()));
+    strip.line(
+        1,
+        &[
+            cursor(list.theme, selected),
+            Run { col: 2, text: dot, attrs },
+            Run { col: NAME_COL, text: "main", attrs },
+            Run { col: up_col.max(NAME_COL + 5), text: up.as_str(), attrs: list.theme.dim() },
+        ],
+    );
+}
+
+fn cursor(theme: &Theme, selected: bool) -> Run<'static> {
+    Run { col: 0, text: if selected { CURSOR } else { "" }, attrs: theme.selected(false) }
+}
+
+/// The figures of a row: how it ended, for how long it ran, its tokens.
+/// How it ended takes no part in how wide the figures' column is.
+fn figures(row: &Row, ending: bool) -> Text {
+    let mut t = Text::EMPTY;
+    if row.state == State::Awaiting {
+        t.join("awaiting approval");
+        return t;
+    }
+    match row.state {
+        State::Failed if ending => t.join("failed"),
+        State::Stopped if ending => t.join("stopped"),
+        _ => {}
+    }
+    t.join(elapsed(row.elapsed_ms).as_str());
+    if let Some(n) = row.tokens.filter(|n| *n > 0) {
+        use std::fmt::Write;
+        let arrow = if row.arrow == Arrow::Up { "↑" } else { "↓" };
+        let _ = write!(t, " · {arrow} {} tokens", compact(n).as_str());
+    }
+    t
+}
+
+/// Where the columns of a strip's rows are.
+struct Place {
+    cols: u16,
+    names: u16,
+    /// Where the figures end, and how wide their column is at least.
+    right: u16,
+    figures: u16,
+}
+
+impl Place {
+    fn of(cols: u16, list: &List) -> Self {
+        let names = list.shown().map(|(_, r)| width(r.name)).max().unwrap_or(0).clamp(NAMES.0, NAMES.1);
+        let figures = list.shown().map(|(_, r)| width(figures(r, false).as_str())).max().unwrap_or(0);
+        let own = Columns { names, right: cols.saturating_sub(MARGIN) };
+        let Columns { names, right } = list.native.unwrap_or(own);
+        Self { cols, names, right, figures }
+    }
+
+    fn row(&self, strip: &mut Strip, at: u16, list: &List, i: usize, row: &Row) {
+        let picked = list.selected == Some(Pick::Row(i));
+        let viewed = list.viewed == Pick::Row(i);
+        let ink = Ink::of(list.theme, row, picked, viewed);
+        let figures = figures(row, true);
+        let room = self.figures.max(width(figures.as_str()));
+        // the name gives up nothing: in a narrow pane the figures stay
+        // right of it and are cut at the pane's edge
+        let left = self.right.saturating_sub(room).max(NAME_COL + self.names + 1);
+        let figures_at = left + room - width(figures.as_str());
+        let task_at = (NAME_COL + self.names + 2).min(left);
+        let (name, name_end) = cut(row.name, self.names);
+        let (task, task_end) = cut(row.task, left.saturating_sub(task_at + 1));
+        let (figures, figures_end) = cut(figures.as_str(), self.cols.saturating_sub(figures_at));
+        strip.line(
+            at,
+            &[
+                cursor(list.theme, picked),
+                Run { col: 2, text: if viewed { IN_VIEW } else { NOT_IN_VIEW }, attrs: ink.dot },
+                Run { col: NAME_COL, text: name, attrs: ink.name },
+                Run { col: 0, text: name_end, attrs: ink.name },
+                Run { col: task_at, text: task, attrs: ink.task },
+                Run { col: 0, text: task_end, attrs: ink.task },
+                Run { col: figures_at, text: figures, attrs: ink.figures },
+                Run { col: 0, text: figures_end, attrs: ink.figures },
+            ],
+        );
+    }
+}
+
+struct Ink {
+    dot: CellAttrs,
+    name: CellAttrs,
+    task: CellAttrs,
+    figures: CellAttrs,
+}
+
+impl Ink {
+    fn of(theme: &Theme, row: &Row, picked: bool, viewed: bool) -> Self {
+        let quiet = if picked || viewed { Theme::plain(viewed) } else { theme.dim() };
+        let task = if picked { theme.selected(viewed) } else { quiet };
+        let dot = match row.state {
+            State::Done => theme.success(viewed),
+            State::Failed | State::Stopped => theme.error(viewed),
+            State::Running | State::Awaiting => task,
+        };
+        let name = if row.named && !picked { Theme::plain(viewed) } else { task };
+        Self { dot, name, task, figures: quiet }
+    }
+}

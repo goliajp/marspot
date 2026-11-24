@@ -96,6 +96,10 @@ impl Strip {
         self.rows
     }
 
+    pub(super) fn cols(&self) -> u16 {
+        self.grid.cols()
+    }
+
     pub(in super::super) fn top_row(&self) -> Option<u16> {
         self.top_row
     }
@@ -116,7 +120,8 @@ impl Strip {
     }
 
     /// Make row `row` hold exactly `runs`, which are in column order.
-    /// Only cells that differ are written, and nothing is allocated.
+    /// Only cells that differ are written; the same rows again allocate
+    /// nothing.
     pub(in super::super) fn line(&mut self, row: u16, runs: &[Run]) {
         if row >= self.grid.rows() {
             return;

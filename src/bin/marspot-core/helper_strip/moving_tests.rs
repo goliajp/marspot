@@ -1,7 +1,7 @@
 //! When a strip moves, what is under the pointer on it, and the text
 //! that is hard to lay out.
 
-use super::strip::Strip as One;
+use super::strip::{Run, Strip as One};
 use super::tests::{app_with_strip, at_row, dim, run, text};
 use super::*;
 use crate::boot_assembly_tests::Sandbox;

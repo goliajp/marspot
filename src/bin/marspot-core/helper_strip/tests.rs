@@ -1,4 +1,4 @@
-use super::strip::Strip as One;
+use super::strip::{Run, Strip as One};
 use super::*;
 use crate::boot_assembly_tests::Sandbox;
 use crate::window_state_tests::{app_in, win};
@@ -213,8 +213,8 @@ fn the_dev_seam_fills_every_pane() {
     app.place_strips(0);
     for sid in sids {
         let v = app.strips.view(Some(sid)).expect("a strip");
-        assert!(text(v.grid, 1).starts_with("  ● main"), "{:?}", text(v.grid, 1));
-        assert!(text(v.grid, 3).contains("○ helper"), "{:?}", text(v.grid, 3));
+        assert!(text(v.grid, 1).starts_with("  ⏺ main"), "{:?}", text(v.grid, 1));
+        assert!(text(v.grid, 3).contains("◯ reviewer"), "{:?}", text(v.grid, 3));
     }
 }
 

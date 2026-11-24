@@ -1,0 +1,930 @@
+@ sweep2-120x24 120 24
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|21000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|20000|11910
+> tiny|-|short|run|20000|11910
+= - -
+15 0 888888 default - ─*
+16 0 default default - ❯
+17 0 888888 default - ─*
+18 2 ff6b80 default - ⏵⏵ bypass permissions on
+18 26 999999 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+20 2 default default B ⏺ main
+21 2 999999 default - ◯ general-tester
+21 20 999999 default - Searching repo for mail server migration helpers and reading every one of th…
+21 98 999999 default - 21s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 20 999999 default - 正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话
+22 98 999999 default - 20s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 20 999999 default - short
+23 98 999999 default - 20s · ↓ 11.9k tokens
+@ b-1 100 40
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|11000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|10000|11910
+> tiny|-|short|run|10000|11910
+= - -
+31 0 888888 default - ─*
+32 0 default default - ❯
+33 0 888888 default - ─*
+34 2 ff6b80 default - ⏵⏵ bypass permissions on
+34 26 999999 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+36 2 default default B ⏺ main
+37 2 999999 default - ◯ general-tester
+37 20 999999 default - Searching repo for mail server migration helpers and rea…
+37 78 999999 default - 11s · ↓ 12.0k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - 正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报…
+38 78 999999 default - 10s · ↓ 11.9k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - short
+39 78 999999 default - 10s · ↓ 11.9k tokens
+@ sweep1-80x24 80 24
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|19000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|18000|11910
+> tiny|-|short|run|18000|11910
+= - -
+15 0 888888 default - ─*
+16 0 default default - ❯
+17 0 888888 default - ─*
+18 2 ff6b80 default - ⏵⏵ bypass permissions on
+18 26 999999 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+20 2 default default B ⏺ main
+21 2 999999 default - ◯ general-tester
+21 20 999999 default - Searching repo for mail server migra…
+21 58 999999 default - 19s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 20 999999 default - 正在读取浏览器迁移上传文件并逐个核对…
+22 58 999999 default - 18s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 20 999999 default - short
+23 58 999999 default - 18s · ↓ 11.9k tokens
+@ sweep4-60x24 60 24
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|25000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|24000|11910
+> tiny|-|short|run|24000|11910
+= - -
+15 0 888888 default - ─*
+16 0 default default - ❯
+17 0 888888 default - ─*
+18 2 ff6b80 default - ⏵⏵ bypass permissions on
+18 26 999999 default -  (shift+tab to cycle) · ← 2 age…
+20 2 default default B ⏺ main
+21 2 999999 default - ◯ general-tester
+21 20 999999 default - Searching repo f…
+21 38 999999 default - 25s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 20 999999 default - 正在读取浏览器迁…
+22 38 999999 default - 24s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 20 999999 default - short
+23 38 999999 default - 24s · ↓ 11.9k tokens
+@ sweep6-50x24 50 24
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|29000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|28000|11910
+> tiny|-|short|run|28000|11910
+= - -
+15 0 888888 default - ─*
+16 0 default default - ❯
+17 0 888888 default - ─*
+18 2 ff6b80 default - ⏵⏵ bypass permissions on
+18 26 999999 default -  (shift+tab to cycle)
+20 2 default default B ⏺ main
+21 2 999999 default - ◯ general-tester
+21 20 999999 default - Search…
+21 28 999999 default - 29s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 20 999999 default - 正在读…
+22 28 999999 default - 28s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 20 999999 default - short
+23 28 999999 default - 28s · ↓ 11.9k tokens
+@ sweep7-40x24 40 24
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|31000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|30000|11910
+> tiny|-|short|run|30000|11910
+= - -
+15 0 888888 default - ─*
+16 0 default default - ❯
+17 0 888888 default - ─*
+18 2 ff6b80 default - ⏵⏵ bypass permissions on
+18 26 999999 default -  · ← 2 agen…
+20 2 default default B ⏺ main
+21 2 999999 default - ◯ general-tester
+21 19 999999 default - 31s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 19 999999 default - 30s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 19 999999 default - 30s · ↓ 11.9k tokens
+@ sweep8-30x24 30 24
+> general-tester|-|Searching repo for mail server migration helpers and reading every one of them carefully|run|33000|12010
+> tiny|-|正在读取浏览器迁移上传文件并逐个核对每一项的结果然后汇报给主会话|run|32000|11900
+> tiny|-|short|run|32000|11900
+= - -
+15 0 888888 default - ─*
+16 0 default default - ❯
+17 0 888888 default - ─*
+18 2 ff6b80 default - ⏵⏵ bypass permissions on
+18 26 999999 default -  ·
+20 2 default default B ⏺ main
+21 2 999999 default - ◯ general-tester
+21 19 999999 default - 33s · ↓ 12…
+22 2 999999 default - ◯ tiny
+22 19 999999 default - 32s · ↓ 11…
+23 2 999999 default - ◯ tiny
+23 19 999999 default - 32s · ↓ 11…
+@ sweep17-49x24 49 24
+> tiny|-|view me then finish|run|13000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|12000|11910
+> worker-bee|named|with a name|run|12000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  (shift+tab to cycle)
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 16 999999 default - view me t…
+20 27 999999 default - 13s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 16 999999 default - bad model…
+21 36 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 16 999999 default - 正在核对…
+22 27 999999 default - 12s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 16 999999 default - with a na…
+23 27 999999 default - 12s · ↓ 11.9k tokens
+@ sweep18-48x24 48 24
+> tiny|-|view me then finish|run|13000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|12000|11910
+> worker-bee|named|with a name|run|12000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 agents · ↓ t…
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 16 999999 default - view me …
+20 26 999999 default - 13s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 16 999999 default - bad mode…
+21 35 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 16 999999 default - 正在核对…
+22 26 999999 default - 12s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 16 999999 default - with a n…
+23 26 999999 default - 12s · ↓ 11.9k tokens
+@ sweep25-41x24 41 24
+> tiny|-|view me then finish|run|18000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|17000|11910
+> worker-bee|named|with a name|run|17000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 agent…
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 16 999999 default - v…
+20 19 999999 default - 18s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 16 999999 default - b…
+21 28 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 16 999999 default - …
+22 19 999999 default - 17s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 16 999999 default - w…
+23 19 999999 default - 17s · ↓ 11.9k tokens
+@ sweep26-40x24 40 24
+> tiny|-|view me then finish|run|19000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|18000|11910
+> worker-bee|named|with a name|run|18000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 agen…
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 16 999999 default - …
+20 18 999999 default - 19s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 16 999999 default - …
+21 27 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 16 999999 default - …
+22 18 999999 default - 18s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 16 999999 default - …
+23 18 999999 default - 18s · ↓ 11.9k tokens
+@ sweep27-39x24 39 24
+> tiny|-|view me then finish|run|19000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|18000|11910
+> worker-bee|named|with a name|run|18000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 age…
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 17 999999 default - 19s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 26 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 17 999999 default - 18s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 17 999999 default - 18s · ↓ 11.9k tokens
+@ sweep28-38x24 38 24
+> tiny|-|view me then finish|run|20000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|19000|11910
+> worker-bee|named|with a name|run|19000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 ag…
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 16 999999 default - 20s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 25 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 16 999999 default - 19s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 16 999999 default - 19s · ↓ 11.9k tokens
+@ sweep29-37x24 37 24
+> tiny|-|view me then finish|run|20000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|19000|11910
+> worker-bee|named|with a name|run|19000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 a…
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 15 999999 default - 20s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 24 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 15 999999 default - 19s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 15 999999 default - 19s · ↓ 11.9k tokens
+@ sweep30-36x24 36 24
+> tiny|-|view me then finish|run|21000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|20000|11910
+> worker-bee|named|with a name|run|20000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← 2 …
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 15 999999 default - 21s · ↓ 11.9k tokens
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 24 999999 default - failed · 0s
+22 2 999999 default - ◯ tiny
+22 15 999999 default - 20s · ↓ 11.9k tokens
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 15 999999 default - 20s · ↓ 11.9k tokens
+@ sweep31-34x24 34 24
+> tiny|-|view me then finish|run|22000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|21000|11910
+> worker-bee|named|with a name|run|21000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · ← …
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 15 999999 default - 22s · ↓ 11.9k toke…
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 24 999999 default - failed · …
+22 2 999999 default - ◯ tiny
+22 15 999999 default - 21s · ↓ 11.9k toke…
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 15 999999 default - 21s · ↓ 11.9k toke…
+@ sweep32-32x24 32 24
+> tiny|-|view me then finish|run|22000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|21000|11910
+> worker-bee|named|with a name|run|21000|11910
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+17 26 999999 default -  · …
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 15 999999 default - 22s · ↓ 11.9k to…
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 24 999999 default - failed …
+22 2 999999 default - ◯ tiny
+22 15 999999 default - 21s · ↓ 11.9k to…
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 15 999999 default - 21s · ↓ 11.9k to…
+@ sweep33-28x24 28 24
+> tiny|-|view me then finish|run|23000|11900
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|22000|11900
+> worker-bee|named|with a name|run|22000|11900
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass permissions on
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 15 999999 default - 23s · ↓ 11.9…
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+21 24 999999 default - fai…
+22 2 999999 default - ◯ tiny
+22 15 999999 default - 22s · ↓ 11.9…
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 15 999999 default - 22s · ↓ 11.9…
+@ sweep34-24x24 24 24
+> tiny|-|view me then finish|run|24000|11900
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|23000|11900
+> worker-bee|named|with a name|run|23000|11900
+= - -
+14 0 888888 default - ─*
+15 0 default default - ❯
+16 0 888888 default - ─*
+17 2 ff6b80 default - ⏵⏵ bypass
+17 16 999999 default -  · ← …
+19 2 default default B ⏺ main
+20 2 999999 default - ◯ tiny
+20 15 999999 default - 24s · ↓ …
+21 2 ff6b80 default - ◯
+21 4 999999 default - broken
+22 2 999999 default - ◯ tiny
+22 15 999999 default - 23s · ↓ …
+23 2 999999 default - ◯
+23 4 default default - worker-bee
+23 15 999999 default - 23s · ↓ …
+@ b-f1 100 40
+> tiny|-|view me then finish|run|12000|11910
+> broken|-|bad model job|failed|0|0
+> tiny|-|正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话|run|11000|11910
+> worker-bee|named|with a name|run|11000|11910
+= - -
+30 0 888888 default - ─*
+31 0 default default - ❯
+32 0 888888 default - ─*
+33 2 ff6b80 default - ⏵⏵ bypass permissions on
+33 26 999999 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+35 2 default default B ⏺ main
+36 2 999999 default - ◯ tiny
+36 16 999999 default - view me then finish
+36 78 999999 default - 12s · ↓ 11.9k tokens
+37 2 ff6b80 default - ◯
+37 4 999999 default - broken
+37 16 999999 default - bad model job
+37 87 999999 default - failed · 0s
+38 2 999999 default - ◯ tiny
+38 16 999999 default - 正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项…
+38 78 999999 default - 11s · ↓ 11.9k tokens
+39 2 999999 default - ◯
+39 4 default default - worker-bee
+39 16 999999 default - with a name
+39 78 999999 default - 11s · ↓ 11.9k tokens
+@ c-1 100 40
+> an-agent-type-whose-name-is-over-28-chars|-|first job|run|14000|12010
+> tiny|-|job three|run|13000|12010
+> tiny|-|job four|run|12000|12010
+> tiny|-|job five|run|12000|11910
+> tiny|-|job six|run|11000|11910
+> tiny|-|job seven|run|11000|11900
+> tiny|-|job eight with a very long description that needs to be truncated in the list row for sure ok|run|11000|11900
+= - -
+28 0 888888 default - ─*
+29 0 default default - ❯
+30 0 888888 default - ─*
+31 2 ff6b80 default - ⏵⏵ bypass permissions on
+31 26 999999 default -  (shift+tab to cycle) · /tasks to see subagents · ← 2 agents · ↓ to man…
+33 2 default default B ⏺ main
+34 2 999999 default - ◯ an-agent-type-whose-name-is…
+34 34 999999 default - first job
+34 78 999999 default - 14s · ↓ 12.0k tokens
+35 2 999999 default - ◯ tiny
+35 34 999999 default - job three
+35 78 999999 default - 13s · ↓ 12.0k tokens
+36 2 999999 default - ◯ tiny
+36 34 999999 default - job four
+36 78 999999 default - 12s · ↓ 12.0k tokens
+37 2 999999 default - ◯ tiny
+37 34 999999 default - job five
+37 78 999999 default - 12s · ↓ 11.9k tokens
+38 2 999999 default - ◯ tiny
+38 34 999999 default - job six
+38 78 999999 default - 11s · ↓ 11.9k tokens
+39 2 999999 default - ↓ 2 more
+@ c-scroll 100 40
+> an-agent-type-whose-name-is-over-28-chars|-|first job|run|11000|12010
+> tiny|-|job three|run|11000|11900
+> tiny|-|job four|run|23000|13010
+> tiny|-|job five|run|23000|12910
+> tiny|-|job six|run|22000|12910
+> tiny|-|job seven|run|22000|13010
+> tiny|-|job eight with a very long description that needs to be truncated in the list row for sure ok|run|21000|11910
+= 6 -
+28 0 888888 default - ─*
+29 0 default default - ❯
+30 0 888888 default - ─*
+31 2 999999 default - enter to view · x to stop · ctrl+x ctrl+k to stop all agents
+33 2 default default B ⏺ main
+33 90 999999 default - ↑ 2 more
+34 2 999999 default - ◯ tiny
+34 34 999999 default - job four
+34 78 999999 default - 23s · ↓ 13.0k tokens
+35 2 999999 default - ◯ tiny
+35 34 999999 default - job five
+35 78 999999 default - 23s · ↓ 12.9k tokens
+36 2 999999 default - ◯ tiny
+36 34 999999 default - job six
+36 78 999999 default - 22s · ↓ 12.9k tokens
+37 2 999999 default - ◯ tiny
+37 34 999999 default - job seven
+37 78 999999 default - 22s · ↓ 13.0k tokens
+38 0 b1b9f9 default - ❯
+38 2 b1b9f9 default - ◯ tiny
+38 34 b1b9f9 default - job eight with a very long description tha…
+38 77 default default -  21s · ↓ 11.9k tokens
+@ sweep13-80x24 80 24
+> an-agent-type-whose-name-is-over-28-chars|-|first job|run|16000|12010
+> tiny|-|job three|run|15000|12010
+> tiny|-|job four|run|14000|12010
+> tiny|-|job five|run|14000|11910
+> tiny|-|job six|run|13000|11910
+> tiny|-|job seven|run|11000|11900
+> tiny|-|job eight with a very long description that needs to be truncated in the list row for sure ok|run|11000|11900
+= - -
+13 0 888888 default - ─*
+14 0 default default - ❯
+15 0 888888 default - ─*
+16 2 ff6b80 default - ⏵⏵ bypass permissions on
+16 26 999999 default -  (shift+tab to cycle) · /tasks to see subagents · ←…
+18 2 default default B ⏺ main
+19 2 999999 default - ◯ an-agent-type-whose-name-is…
+19 34 999999 default - first job
+19 58 999999 default - 16s · ↓ 12.0k tokens
+20 2 999999 default - ◯ tiny
+20 34 999999 default - job three
+20 58 999999 default - 15s · ↓ 12.0k tokens
+21 2 999999 default - ◯ tiny
+21 34 999999 default - job four
+21 58 999999 default - 14s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 34 999999 default - job five
+22 58 999999 default - 14s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 34 999999 default - job six
+23 58 999999 default - 13s · ↓ 11.9k tokens
+@ sweep14-40x24 40 24
+> an-agent-type-whose-name-is-over-28-chars|-|first job|run|17000|12010
+> tiny|-|job three|run|16000|11900
+> tiny|-|job four|run|15000|11900
+> tiny|-|job five|run|15000|11900
+> tiny|-|job six|run|14000|11900
+> tiny|-|job seven|run|11000|11900
+> tiny|-|job eight with a very long description that needs to be truncated in the list row for sure ok|run|11000|11900
+= - -
+13 0 888888 default - ─*
+14 0 default default - ❯
+15 0 888888 default - ─*
+16 2 ff6b80 default - ⏵⏵ bypass permissions on
+16 26 999999 default -  · /tasks t…
+18 2 default default B ⏺ main
+19 2 999999 default - ◯ an-agent-type-whose-name-is…
+19 33 999999 default - 17s · …
+20 2 999999 default - ◯ tiny
+20 33 999999 default - 16s · …
+21 2 999999 default - ◯ tiny
+21 33 999999 default - 15s · …
+22 2 999999 default - ◯ tiny
+22 33 999999 default - 15s · …
+23 2 999999 default - ◯ tiny
+23 33 999999 default - 14s · …
+@ sweep15-60x24 60 24
+> an-agent-type-whose-name-is-over-28-chars|-|first job|run|18000|12010
+> tiny|-|job three|run|17000|12010
+> tiny|-|job four|run|16000|12010
+> tiny|-|job five|run|16000|11910
+> tiny|-|job six|run|15000|11910
+> tiny|-|job seven|run|11000|11900
+> tiny|-|job eight with a very long description that needs to be truncated in the list row for sure ok|run|11000|11900
+= - -
+13 0 888888 default - ─*
+14 0 default default - ❯
+15 0 888888 default - ─*
+16 2 ff6b80 default - ⏵⏵ bypass permissions on
+16 26 999999 default -  (shift+tab to cycle) · /tasks …
+18 2 default default B ⏺ main
+19 2 999999 default - ◯ an-agent-type-whose-name-is…
+19 34 999999 default - fi…
+19 38 999999 default - 18s · ↓ 12.0k tokens
+20 2 999999 default - ◯ tiny
+20 34 999999 default - jo…
+20 38 999999 default - 17s · ↓ 12.0k tokens
+21 2 999999 default - ◯ tiny
+21 34 999999 default - jo…
+21 38 999999 default - 16s · ↓ 12.0k tokens
+22 2 999999 default - ◯ tiny
+22 34 999999 default - jo…
+22 38 999999 default - 16s · ↓ 11.9k tokens
+23 2 999999 default - ◯ tiny
+23 34 999999 default - jo…
+23 38 999999 default - 15s · ↓ 11.9k tokens
+@ b-down1 100 40
+> general-tester|-|Running slow.sh 50 (run 1 of 8)|run|41000|12010
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|40000|11910
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|40000|11910
+= main -
+31 0 888888 default - ─*
+32 0 default default - ❯
+33 0 888888 default - ─*
+34 2 999999 default - ↑/↓ to select
+36 0 b1b9f9 default - ❯
+36 2 b1b9f9 default B ⏺ main
+37 2 999999 default - ◯ general-tester
+37 20 999999 default - Running slow.sh 50 (run 1 of 8)
+37 78 999999 default - 41s · ↓ 12.0k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - Running slow.sh 50 (run 1 of 8)
+38 78 999999 default - 40s · ↓ 11.9k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - Running slow.sh 50 (run 1 of 8)
+39 78 999999 default - 40s · ↓ 11.9k tokens
+@ b-down2 100 40
+> general-tester|-|Running slow.sh 50 (run 1 of 8)|run|47000|12010
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|46000|11910
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|46000|11910
+= 0 -
+31 0 888888 default - ─*
+32 0 default default - ❯
+33 0 888888 default - ─*
+34 2 999999 default - enter to view · x to stop · ctrl+x ctrl+k to stop all agents
+36 2 default default B ⏺ main
+37 0 b1b9f9 default - ❯
+37 2 b1b9f9 default - ◯ general-tester
+37 20 b1b9f9 default - Running slow.sh 50 (run 1 of 8)
+37 51 default default -                            47s · ↓ 12.0k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - Running slow.sh 50 (run 1 of 8)
+38 78 999999 default - 46s · ↓ 11.9k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - Running slow.sh 50 (run 1 of 8)
+39 78 999999 default - 46s · ↓ 11.9k tokens
+@ b-down5 100 40
+> general-tester|-|Running slow.sh 50 (run 1 of 8)|run|49000|12010
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|48000|11910
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|48000|11910
+= 2 -
+31 0 888888 default - ─*
+32 0 default default - ❯
+33 0 888888 default - ─*
+34 2 999999 default - enter to view · x to stop · ctrl+x ctrl+k to stop all agents
+36 2 default default B ⏺ main
+37 2 999999 default - ◯ general-tester
+37 20 999999 default - Running slow.sh 50 (run 1 of 8)
+37 78 999999 default - 49s · ↓ 12.0k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - Running slow.sh 50 (run 1 of 8)
+38 78 999999 default - 48s · ↓ 11.9k tokens
+39 0 b1b9f9 default - ❯
+39 2 b1b9f9 default - ◯ tiny
+39 20 b1b9f9 default - Running slow.sh 50 (run 1 of 8)
+39 51 default default -                            48s · ↓ 11.9k tokens
+@ b-enter1 100 40
+> general-tester|-|Running slow.sh 50 (run 1 of 8)|run|51000|12010
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|50000|11910
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|50000|11910
+= 0 0
+31 0 0891b2 default - ─────────
+31 9 000000 0891b2 -  Searching repo for mail server migration helpers and reading every one of them carefully
+31 99 0891b2 default - ─
+32 0 default default - ❯
+33 0 0891b2 default - ─*
+34 2 999999 default - ↑/↓ to select · ctrl+x ctrl+k to stop all agents
+36 2 999999 default - ◯ main
+37 0 b1b9f9 default - ❯
+37 2 b1b9f9 default B ⏺ general-tester
+37 20 b1b9f9 default B Running slow.sh 50 (run 1 of 8)
+37 78 default default B 51s · ↓ 12.0k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - Running slow.sh 50 (run 1 of 8)
+38 78 999999 default - 50s · ↓ 11.9k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - Running slow.sh 50 (run 1 of 8)
+39 78 999999 default - 50s · ↓ 11.9k tokens
+@ b-va 100 40
+> general-tester|-|Running slow.sh 50 (run 1 of 8)|run|59000|12110
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|58000|12110
+> tiny|-|Running slow.sh 50 (run 1 of 8)|run|58000|12110
+= main 0
+31 0 0891b2 default - ─────────
+31 9 000000 0891b2 -  Searching repo for mail server migration helpers and reading every one of them carefully
+31 99 0891b2 default - ─
+32 0 default default - ❯
+33 0 0891b2 default - ─*
+34 2 999999 default - ↑/↓ to select · enter to view
+36 0 b1b9f9 default - ❯
+36 2 b1b9f9 default - ◯ main
+37 2 default default B ⏺ general-tester
+37 20 default default B Running slow.sh 50 (run 1 of 8)
+37 78 default default B 59s · ↓ 12.1k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - Running slow.sh 50 (run 1 of 8)
+38 78 999999 default - 58s · ↓ 12.1k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - Running slow.sh 50 (run 1 of 8)
+39 78 999999 default - 58s · ↓ 12.1k tokens
+@ b-up-many 100 40
+> general-tester|-|Running slow.sh 50 (run 2 of 8)|run|67000|12210
+> tiny|-|Running slow.sh 50 (run 2 of 8)|run|67000|12210
+> tiny|-|Running slow.sh 50 (run 2 of 8)|run|66000|12210
+= - 0
+30 0 888888 default - ───
+30 4 default default D History 1/1
+30 16 888888 default - ────────────────────────────────────────────────────────────────────────────────────
+31 0 default default - â¯ Run the Bash command ./slow.sh 50 in the foreground, eight separate times one after another,
+32 0 default default -   then reply done. Never run it in background.
+33 0 888888 default - ─*
+34 2 ff6b80 default - ⏵⏵ bypass permissions on
+34 26 999999 default -  (shift+tab to cycle) · esc to stop
+36 2 999999 default - ◯ main
+37 2 default default B ⏺ general-tester
+37 20 default default B Running slow.sh 50 (run 2 of 8)
+37 76 default default B 1m 7s · ↓ 12.2k tokens
+38 2 999999 default - ◯ tiny
+38 20 999999 default - Running slow.sh 50 (run 2 of 8)
+38 76 999999 default - 1m 7s · ↓ 12.2k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - Running slow.sh 50 (run 2 of 8)
+39 76 999999 default - 1m 6s · ↓ 12.2k tokens
+@ b-s1 100 40
+> general-tester|-|Running slow.sh 50 (run 2 of 8)|run|79000|12210
+> tiny|-|Running slow.sh 50 (run 2 of 8)|stopped|79000|12210
+> tiny|-|Running slow.sh 50 (run 2 of 8)|run|78000|12210
+= 1 0
+31 0 0891b2 default - ─────────
+31 9 000000 0891b2 -  Searching repo for mail server migration helpers and reading every one of them carefully
+31 99 0891b2 default - ─
+32 0 999999 default - ❯
+32 2 default default - x
+33 0 0891b2 default - ─*
+34 2 999999 default - enter to view · x to clear · ctrl+x ctrl+k to stop all agents
+36 2 999999 default - ◯ main
+37 2 default default B ⏺ general-tester
+37 20 default default B Running slow.sh 50 (run 2 of 8)
+37 75 default default B 1m 19s · ↓ 12.2k tokens
+38 0 b1b9f9 default - ❯
+38 2 ff6b80 default - ◯
+38 4 b1b9f9 default - tiny
+38 20 b1b9f9 default - Running slow.sh 50 (run 2 of 8)
+38 51 default default -               stopped · 1m 19s · ↓ 12.2k tokens
+39 2 999999 default - ◯ tiny
+39 20 999999 default - Running slow.sh 50 (run 2 of 8)
+39 75 999999 default - 1m 18s · ↓ 12.2k tokens
+@ b-s6 100 40
+> general-tester|-|Running slow.sh 50 (run 2 of 8)|run|90000|12210
+> tiny|-|Running slow.sh 50 (run 2 of 8)|stopped|79000|12210
+> tiny|-|Running slow.sh 50 (run 2 of 8)|stopped|89000|12210
+= 2 0
+31 0 0891b2 default - ─────────
+31 9 000000 0891b2 -  Searching repo for mail server migration helpers and reading every one of them carefully
+31 99 0891b2 default - ─
+32 0 999999 default - ❯
+32 2 default default - x
+33 0 0891b2 default - ─*
+34 2 999999 default - enter to view · x to clear
+36 2 999999 default - ◯ main
+37 2 default default B ⏺ general-tester
+37 20 default default B Running slow.sh 50 (run 2 of 8)
+37 75 default default B 1m 30s · ↓ 12.2k tokens
+38 2 ff6b80 default - ◯
+38 4 999999 default - tiny
+38 20 999999 default - Running slow.sh 50 (run 2 of 8)
+38 65 999999 default - stopped · 1m 19s · ↓ 12.2k tokens
+39 0 b1b9f9 default - ❯
+39 2 ff6b80 default - ◯
+39 4 b1b9f9 default - tiny
+39 20 b1b9f9 default - Running slow.sh 50 (run 2 of 8)
+39 51 default default -               stopped · 1m 29s · ↓ 12.2k tokens
+@ b-m6 100 40
+> general-tester|-|Running slow.sh 50 (run 3 of 8)|stopped|138000|12310
+= 0 -
+33 0 888888 default - ─*
+34 0 999999 default - ❯
+34 2 default default - x
+35 0 888888 default - ─*
+36 2 999999 default - enter to view · x to clear
+38 2 default default B ⏺ main
+39 0 b1b9f9 default - ❯
+39 2 ff6b80 default - ◯
+39 4 b1b9f9 default - general-tester
+39 20 b1b9f9 default - Running slow.sh 50 (run 3 of 8)
+39 51 default default -               stopped · 2m 18s · ↓ 12.3k tokens
+@ b-viewdone 100 40
+> tiny|-|Running slow.sh with argument 45|done|49000|12310
+= 0 0
+33 0 0891b2 default - ─────
+33 5 000000 0891b2 -  正在核对每一项的结果然后汇报给主会话请稍等片刻正在核对每一项的结果然后汇报给主会话请稍等片刻
+33 99 0891b2 default - ─
+34 0 default default - ❯
+35 0 0891b2 default - ─*
+36 2 999999 default - ↑/↓ to select
+38 2 999999 default - ◯ main
+39 0 b1b9f9 default - ❯
+39 2 4eba65 default B ⏺
+39 4 b1b9f9 default B tiny
+39 10 b1b9f9 default B Running slow.sh with argument 45
+39 78 default default B 49s · ↓ 12.3k tokens
+@ i-list 100 40
+> tiny|-|inline one|run|14000|11910
+> tiny|-|inline two|run|14000|11910
+= - -
+23 0 888888 default - ─*
+24 0 default default - ❯
+25 0 888888 default - ─*
+26 2 999999 default - ⏸ manual mode on · /tasks to see subagents · ← 2 agents · ↓ to manage
+28 2 default default B ⏺ main
+29 2 999999 default - ◯ tiny
+29 10 999999 default - inline one
+29 78 999999 default - 14s · ↓ 11.9k tokens
+30 2 999999 default - ◯ tiny
+30 10 999999 default - inline two
+30 78 999999 default - 14s · ↓ 11.9k tokens
+@ t-256-0 100 30
+> tiny|-|theme job|run|20000|11910
+= - -
+23 0 808080 default - ─*
+24 0 default default - ❯
+25 0 808080 default - ─*
+26 2 i211 default - ⏵⏵ bypass permissions on
+26 26 i246 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+28 2 default default B ⏺ main
+29 2 i246 default - ◯ tiny
+29 10 i246 default - theme job
+29 78 i246 default - 20s · ↓ 11.9k tokens
+@ t-256-2 100 30
+> tiny|-|theme job|stopped|21000|11910
+= 0 -
+23 0 808080 default - ─*
+24 0 i246 default - ❯
+25 0 808080 default - ─*
+26 2 i246 default - enter to view · x to clear
+28 2 default default B ⏺ main
+29 0 i153 default - ❯
+29 2 i211 default - ◯
+29 4 i153 default - tiny
+29 10 i153 default - theme job
+29 19 default default -                                                  stopped · 21s · ↓ 11.9k tokens
+@ t-dark-ansi-0 100 30
+> tiny|-|theme job|run|17000|11910
+= - -
+23 0 white default - ─*
+24 0 default default - ❯
+25 0 white default - ─*
+26 2 brightred default - ⏵⏵ bypass permissions on
+26 26 white default D  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+28 2 default default B ⏺ main
+29 2 white default D ◯ tiny
+29 10 white default D theme job
+29 78 white default D 17s · ↓ 11.9k tokens
+@ t-dark-ansi-2 100 30
+> tiny|-|theme job|stopped|18000|11910
+= 0 -
+23 0 white default - ─*
+24 0 white default D ❯
+25 0 white default - ─*
+26 2 white default D enter to view · x to clear
+28 2 default default B ⏺ main
+29 0 brightblue default - ❯
+29 2 brightred default - ◯
+29 4 brightblue default - tiny
+29 10 brightblue default - theme job
+29 19 default default -                                                  stopped · 18s · ↓ 11.9k tokens
+@ t-dark-daltonized-0 100 30
+> tiny|-|theme job|run|19000|11910
+= - -
+23 0 888888 default - ─*
+24 0 default default - ❯
+25 0 888888 default - ─*
+26 2 ff6666 default - ⏵⏵ bypass permissions on
+26 26 999999 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+28 2 default default B ⏺ main
+29 2 999999 default - ◯ tiny
+29 10 999999 default - theme job
+29 78 999999 default - 19s · ↓ 11.9k tokens
+@ t-dark-daltonized-2 100 30
+> tiny|-|theme job|stopped|20000|11910
+= 0 -
+23 0 888888 default - ─*
+24 0 999999 default - ❯
+25 0 888888 default - ─*
+26 2 999999 default - enter to view · x to clear
+28 2 default default B ⏺ main
+29 0 99ccff default - ❯
+29 2 ff6666 default - ◯
+29 4 99ccff default - tiny
+29 10 99ccff default - theme job
+29 19 default default -                                                  stopped · 20s · ↓ 11.9k tokens
+@ t-light-0 100 30
+> tiny|-|theme job|run|16000|11910
+= - -
+23 0 8a8a8a default - ─*
+24 0 default default - ❯
+25 0 8a8a8a default - ─*
+26 2 ab2b3f default - ⏵⏵ bypass permissions on
+26 26 666666 default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+28 2 default default B ⏺ main
+29 2 666666 default - ◯ tiny
+29 10 666666 default - theme job
+29 78 666666 default - 16s · ↓ 11.9k tokens
+@ t-light-2 100 30
+> tiny|-|theme job|stopped|17000|11910
+= 0 -
+23 0 8a8a8a default - ─*
+24 0 666666 default - ❯
+25 0 8a8a8a default - ─*
+26 2 666666 default - enter to view · x to clear
+28 2 default default B ⏺ main
+29 0 5769f7 default - ❯
+29 2 ab2b3f default - ◯
+29 4 5769f7 default - tiny
+29 10 5769f7 default - theme job
+29 19 default default -                                                  stopped · 17s · ↓ 11.9k tokens
+@ t-light-ansi-0 100 30
+> tiny|-|theme job|run|18000|11910
+= - -
+23 0 white default - ─*
+24 0 default default - ❯
+25 0 white default - ─*
+26 2 red default - ⏵⏵ bypass permissions on
+26 26 brightblack default -  (shift+tab to cycle) · ← 2 agents · ↓ to manage
+28 2 default default B ⏺ main
+29 2 brightblack default - ◯ tiny
+29 10 brightblack default - theme job
+29 78 brightblack default - 18s · ↓ 11.9k tokens
+@ t-light-ansi-2 100 30
+> tiny|-|theme job|stopped|19000|11910
+= 0 -
+23 0 white default - ─*
+24 0 brightblack default - ❯
+25 0 white default - ─*
+26 2 brightblack default - enter to view · x to clear
+28 2 default default B ⏺ main
+29 0 blue default - ❯
+29 2 red default - ◯
+29 4 blue default - tiny
+29 10 blue default - theme job
+29 19 default default -                                                  stopped · 19s · ↓ 11.9k tokens

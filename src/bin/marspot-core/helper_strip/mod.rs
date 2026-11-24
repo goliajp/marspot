@@ -10,10 +10,14 @@ use marspot::frame_build::text_run::preedit_last_row;
 use marspot::layout::CellRect;
 use marspot::render::StripView;
 
+mod compose;
 mod dev;
+mod figures;
+mod native_list;
 mod strip;
+mod theme;
 
-pub(super) use strip::{Over, Run, Strip, MAX_ROWS};
+pub(super) use strip::{Over, Strip, MAX_ROWS};
 
 #[derive(Default)]
 pub(super) struct Strips {
@@ -74,9 +78,7 @@ impl Strips {
             let Some(strip) = pane.shelld_session_id().and_then(|sid| self.by_sid.get_mut(&sid)) else { continue };
             match cells.get(i).filter(|c| c.strip_rows > 0) {
                 Some(c) => {
-                    if strip.fit(c.cols, c.strip_rows) && self.dev.is_some() {
-                        dev::fill(strip);
-                    }
+                    strip.fit(c.cols, c.strip_rows);
                 }
                 None => strip.hide(),
             }
@@ -111,6 +113,9 @@ impl CoreApp {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let Some(strip) = self.strips.by_sid.get_mut(&sid) else { continue };
             let screen = pane.session().grid();
+            if self.strips.dev.is_some() {
+                dev::fill(strip, screen);
+            }
             strip.place(Over {
                 screen,
                 shown: sid,
@@ -190,6 +195,12 @@ impl CoreApp {
     }
 }
 
+#[cfg(test)]
+mod alloc_tests;
+#[cfg(test)]
+mod compose_tests;
+#[cfg(test)]
+mod row_tests;
 #[cfg(test)]
 mod moving_tests;
 #[cfg(test)]
