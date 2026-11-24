@@ -118,7 +118,8 @@ mod tests {
 
     #[test]
     fn shadow_adopt_counts_the_moved_tree() {
-        let cfg = Config::default();
+        // the default total follows the machine's memory; 8 must fit
+        let cfg = Config { shadows_total: 24, ..Config::default() };
         // host 100 has 5 shadows; pane 1 has 2 shadows of its own: 5 + 1 + 2 = 8
         let mut edges: Vec<(u64, u64)> = (101..=105).map(|s| (s, 100)).collect();
         edges.extend([(11, 1), (12, 1)]);
