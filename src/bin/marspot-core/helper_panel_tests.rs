@@ -218,6 +218,28 @@ fn helper_panel_says_on_the_row_a_move_that_failed() {
     });
 }
 
+/// A move the core cannot even ask of the session fails at once, and is
+/// said on the row the same way.
+#[test]
+fn helper_panel_says_on_the_row_a_move_its_session_could_not_be_asked() {
+    let sb = sandbox();
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    let a = open_shadow(&mut app, &rx, 7, psid);
+    app.set_pane_title(a, "codex · a task".into());
+    app.open_helpers(0, psid);
+    app.reconnecting.insert(a);
+    press(&mut app, Ask::Move(0));
+    let failed = format!("{} · codex · a task", marspot::ui::strings::t(marspot::ui::strings::Msg::HelperNotMoved));
+    assert_eq!(draw(&mut app)[0].rows[0].doing, failed);
+    assert!(app.pane_control.shadows.places.placing.is_empty(), "nothing waits on the session");
+    app.reconnecting.remove(&a);
+    press(&mut app, Ask::Move(0));
+    wait_for("the pane is in the window", || {
+        drive(&mut app, &rx);
+        app.find_window_pane_by_sid(a).is_some()
+    });
+}
+
 /// A close the panel asked of a shadow pane that the core reads after
 /// the pane went to a window is refused, and the pane stays there.
 #[test]
