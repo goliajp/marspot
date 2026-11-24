@@ -174,10 +174,8 @@ impl CoreApp {
         let titles: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 let mut s = resolved_labels.get(i).cloned().unwrap_or_default();
-                // RFC-005 step 5 — a pane being dragged wears a ⇢ so
-                // the mode is visible without a ghost overlay: drop it
-                // on another window to move it there, release anywhere
-                // else to cancel.
+                // a pane being dragged wears a ⇢: drop it on another
+                // window to move it there, anywhere else to cancel
                 if self
                     .pane_drag
                     .is_some_and(|d| d.active && d.from_wi == wi && d.idx == i)
@@ -197,6 +195,7 @@ impl CoreApp {
 
         // the titles say how many helpers only where no strip lists them
         self.place_strips(wi);
+        self.publish_view_line(wi, &mut wr, &titles);
         self.publish_overlays(wi, &mut wr, &resolved_labels);
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.

@@ -271,3 +271,12 @@ impl MetalRenderer {
         self.last_render_split
     }
 }
+
+impl super::WindowRender {
+    /// What the window's lone pane shows in its place, for its header;
+    /// empty when it shows itself or the window has more panes.
+    /// Whether that is new.
+    pub fn set_view_line(&mut self, text: &str) -> bool {
+        self.kept.chrome.view_line.set(text)
+    }
+}

@@ -31,6 +31,7 @@ pub(crate) struct ChromeSurfaces {
     pub(crate) toolbar: ToolbarSurface,
     pub(crate) sidebar: SidebarSurface,
     pub(crate) titles: crate::ui::components::title_strip_view::TitleStripSurface,
+    pub(crate) view_line: crate::ui::components::view_line::ViewLine,
     /// The panes' rectangles for the seams, refilled every frame.
     seam_rects: Vec<Rect>,
     /// The layout generation and row count the toolbar and the sidebar
@@ -67,6 +68,7 @@ pub(crate) fn paint_chrome(
     paint_region_seams(painter, layout);
     let cell = (painter.cell_w, painter.cell_h, painter.ascent);
     surfaces.toolbar.frame(painter, &Toolbar::of(layout, state.on, cell));
+    surfaces.view_line.paint(painter, layout);
 }
 
 /// What the chrome's trees are laid out from when input arrives
