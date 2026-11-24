@@ -103,9 +103,8 @@ fn run(s: &Arc<Shared>, rx: Receiver<Job>, epoch: u64) {
             return;
         }
         account_changes(s);
-        let now = records::now_ms();
-        super::pair::write_moves(s, now);
-        super::pair::look_for_names(s, now, crate::plugins::peerbus::conversation_of);
+        super::pair::write_moves(s);
+        super::names::on_change(s, crate::plugins::peerbus::conversation_of);
         for job in super::timers::due_jobs(s, epoch, records::now_ms(), super::timers::no_agent_now) {
             if ended(s, epoch) {
                 return;
@@ -198,7 +197,6 @@ fn send(s: &Shared, sid: u64, mut n: Notice) {
     match notify::deliver(&parent, &n.body) {
         Ok(()) => {
             marspot::lx_info!("helpers.notice", &format!("sid={sid}: delivered"));
-            super::pair::settle_now(s, n.parent);
             if s.table().map.contains_key(&sid) {
                 for ev in n.events {
                     s.record(sid, ev);
@@ -256,7 +254,7 @@ fn screen_of(sid: u64) -> Option<String> {
 pub(super) fn still_blocked(s: &Arc<Shared>, sid: u64, screen: Option<String>) {
     let Some(h) = s.table().map.get(&sid).cloned() else { return };
     let Some(screen) = screen else {
-        if unread(s, sid) {
+        if unread(s, sid, records::now_ms()) {
             marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked: screen not read, looked at again"));
         }
         return;
@@ -269,11 +267,12 @@ pub(super) fn still_blocked(s: &Arc<Shared>, sid: u64, screen: Option<String>) {
     }
 }
 
-/// Helper `sid`'s screen could not be read at its prompt: asked about
-/// again, while it is a helper.  Whether it was read the last time.
-pub(super) fn unread(s: &Shared, sid: u64) -> bool {
+/// Helper `sid`'s screen could not be read at its prompt at `now_ms`:
+/// asked about again a while later, while it is a helper.  Whether it
+/// was read the last time.
+pub(super) fn unread(s: &Shared, sid: u64, now_ms: u64) -> bool {
     let mut st = s.lock();
-    st.table.map.contains_key(&sid) && st.prompt_unread.insert(sid, true).is_none()
+    st.table.map.contains_key(&sid) && st.prompt_unread.insert(sid, now_ms + super::turn::REREAD_MS).is_none()
 }
 
 /// Send the notice for a stop of `h`, and write down that it went.

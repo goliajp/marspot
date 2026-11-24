@@ -15,32 +15,24 @@ pub(in crate::plugins) fn is_pair(a: u64, b: u64, conversation_of: impl Fn(u64) 
 
 /// A pane outlives the conversation in it: another one there did not
 /// start the helper.  The helper's own pane needs no such look, as it is
-/// closed when its agent leaves it.
+/// closed when its agent leaves it.  One waiting for the name of the
+/// conversation its parent was handed to is settled by the worker alone
+/// (`names`), which sees the first one.
 fn pair_in(s: &Shared, a: u64, b: u64, conversation_of: impl Fn(u64) -> Option<Conversation>) -> bool {
-    let of_pair = |t: &Table| t.helper_of_pair(a, b).cloned();
-    let Some(h) = of_pair(&s.table()) else { return false };
+    let Some(h) = s.table().helper_of_pair(a, b).cloned() else { return false };
     if h.conv.is_none() {
         return true;
     }
-    let now = conversation_of(h.started.parent);
-    settle(s, h.started.parent, now.as_ref());
-    of_pair(&s.table()).is_some_and(|h| now.is_some_and(|c| h.conv == Some(c.id)))
+    conversation_of(h.started.parent).is_some_and(|c| h.conv == Some(c.id))
 }
 
 /// The helpers waiting for the agent their parent was handed to follow
 /// the conversation `now`, if that agent is in one.
-fn settle(s: &Shared, parent: u64, now: Option<&Conversation>) {
+pub(super) fn settle(s: &Shared, parent: u64, now: Option<&Conversation>) {
     let Some(c) = now else { return };
     let follow: Vec<u64> = s.table().under(parent).filter(|h| h.heir == Some(c.agent)).map(|h| h.sid).collect();
     for sid in follow {
         s.record(sid, Event::ConversationChanged(c.id.clone()));
-    }
-}
-
-/// [`settle`] with a look at the parent pane, when a helper waits on it.
-pub(super) fn settle_now(s: &Shared, parent: u64) {
-    if s.table().under(parent).any(|h| h.heir.is_some()) {
-        settle(s, parent, conversation_of(parent).as_ref());
     }
 }
 
@@ -63,20 +55,12 @@ pub(super) struct Move {
     pub to: ProcId,
 }
 
-/// How long after a move to a new conversation the worker looks for the
-/// name its agent gives it.
-pub(super) const NAMED_WITHIN_MS: u64 = 5 * 60_000;
-/// How often it looks meanwhile.
-pub(super) const LOOK_EVERY_MS: u64 = 1_000;
-
 /// The conversation pane `sid` is in, asked before its agent is taken
 /// down; None when no helper depends on it.
 pub(in crate::plugins) fn leaving(sid: u64) -> Option<String> {
     let s = SHARED.get()?;
     s.table().under(sid).next()?;
-    let now = conversation_of(sid);
-    settle(s, sid, now.as_ref());
-    now.map(|c| c.id)
+    conversation_of(sid).map(|c| c.id)
 }
 
 /// The new agent of `m` is up, in front of `shell` as `is_agent` knows
@@ -134,8 +118,8 @@ impl Moves {
 
 /// Write down the moves noted: the helpers of each follow the agent it
 /// was handed to, or the conversation that one resumed.  The name a new
-/// conversation gets is looked for from then on ([`look_for_names`]).
-pub(super) fn write_moves(s: &Shared, now_ms: u64) {
+/// conversation gets is waited for from then on (`names`).
+pub(super) fn write_moves(s: &Shared) {
     let pending = std::mem::take(&mut s.lock().moves.0);
     for Pending { m: Move { m, to }, sids } in pending {
         let ev = match &m.resumed {
@@ -148,32 +132,9 @@ pub(super) fn write_moves(s: &Shared, now_ms: u64) {
             }
         }
         if m.resumed.is_none() {
-            s.lock().unnamed.insert(m.pane, now_ms + NAMED_WITHIN_MS);
+            s.lock().names.add(m.pane);
         }
     }
-}
-
-/// Look at the parents whose helpers wait for the new conversation of
-/// the agent the pane was handed to, at `now_ms`: the first that agent
-/// is seen in is the one they follow, so one it moves to later (a
-/// `/clear`) is not, if it was seen in time.
-pub(super) fn look_for_names(s: &Shared, now_ms: u64, conversation_of: impl Fn(u64) -> Option<Conversation>) {
-    let waiting = |parent: u64| s.table().under(parent).any(|h| h.heir.is_some());
-    let parents: Vec<(u64, u64)> = s.lock().unnamed.iter().map(|(p, until)| (*p, *until)).collect();
-    for (parent, until) in parents {
-        if waiting(parent) && now_ms < until {
-            settle(s, parent, conversation_of(parent).as_ref());
-        }
-        if !waiting(parent) || now_ms >= until {
-            s.lock().unnamed.remove(&parent);
-        }
-    }
-}
-
-/// Parents whose helpers wait for a name, each looked at until when
-/// (ms after the epoch): those of the table of a start, from `now_ms`.
-pub(super) fn unnamed_at_start(t: &Table, now_ms: u64) -> std::collections::HashMap<u64, u64> {
-    t.map.values().filter(|h| h.heir.is_some()).map(|h| (h.started.parent, now_ms + NAMED_WITHIN_MS)).collect()
 }
 
 #[cfg(test)]

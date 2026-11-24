@@ -34,6 +34,7 @@ mod dialogs;
 mod dirs;
 mod first_screens;
 mod launch;
+mod names;
 mod notify;
 mod pair;
 mod passing;
@@ -148,14 +149,13 @@ struct State {
     turned: HashSet<u64>,
     /// Those of them whose plugin reports one now.
     at_work: HashSet<u64>,
-    /// Helpers at a prompt whose screen could not be read; true: to be
-    /// asked about again.
-    prompt_unread: HashMap<u64, bool>,
+    /// Helpers at a prompt whose screen could not be read: when it is
+    /// read again (ms after the epoch).
+    prompt_unread: HashMap<u64, u64>,
     /// Parent panes handed to another agent, not yet written down.
     moves: pair::Moves,
-    /// Parent panes whose helpers wait for the name of the conversation
-    /// they were handed to, looked at until when (ms after the epoch).
-    unnamed: HashMap<u64, u64>,
+    /// Parent panes whose helpers wait for the name of a conversation.
+    names: names::Names,
     /// What the records of the helpers' agents say of their context.
     used: HashMap<u64, strip::used::Known>,
     /// When the table was taken from the log (ms after the epoch).
@@ -274,6 +274,7 @@ impl Shared {
         self.parked.store(true, Ordering::Release);
         self.epoch.fetch_add(1, Ordering::AcqRel);
         st.watchers.clear();
+        st.names.clear();
         drop(st);
         self.wake();
     }

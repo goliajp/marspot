@@ -4,11 +4,11 @@ use std::sync::Arc;
 use marspot::pidtree::ProcId;
 use marspot_peer::control::AgentKind;
 
-use super::{LOOK_EVERY_MS, Move, Moved, NAMED_WITHIN_MS, look_for_names, note_move, pair_in, write_moves};
+use super::{Move, Moved, note_move, pair_in, write_moves};
 use crate::plugins::helpers::table::{Event, Started};
 use crate::plugins::helpers::tests::{feed, shared_at, started, temp};
 use crate::plugins::helpers::work::Job;
-use crate::plugins::helpers::{Shared, rebuild, records, timers};
+use crate::plugins::helpers::{Shared, names, rebuild, records, timers};
 use crate::plugins::peerbus::Conversation;
 
 const OLD: ProcId = ProcId { pid: 50, start_us: 5 };
@@ -23,10 +23,19 @@ fn moved(from: Option<&str>, left: ProcId, to: ProcId, resumed: Option<&str>) ->
     Move { m: Moved { pane: 1, from: from.map(String::from), left, resumed: resumed.map(String::from) }, to }
 }
 
-/// Move `m`, written down at 1 ms after the epoch.
+/// Move `m`, written down.
 fn handed(s: &Shared, m: Move) {
     note_move(s, m);
-    write_moves(s, 1);
+    write_moves(s);
+}
+
+/// The worker looks at the waiting parents, with pane 1's agent `proc`
+/// in conversation `conv`, if any; every agent waited on is alive.
+fn look(s: &Shared, now: Option<(ProcId, &str)>) {
+    names::look(s, &|_| true, |pane| {
+        assert_eq!(pane, 1, "the parent's");
+        now.map(|(p, id)| in_conversation(p, id))
+    });
 }
 
 fn by(conv: &str) -> Event {
@@ -84,9 +93,13 @@ fn helpers_follow_their_parent_to_the_agent_it_is_handed_to() {
 
     // to a new conversation, which has no name until the agent says so
     handed(&s, moved(Some("one"), OLD, NEW, None));
+    look(&s, None);
     assert!(!pair_in(&s, 10, 1, |_| None), "no name yet");
+    look(&s, Some((ProcId { pid: 60, start_us: 7 }, "x")));
     assert!(!pair(10, ProcId { pid: 60, start_us: 7 }, "x"), "not the agent it was handed to");
     carried();
+    assert!(!pair(10, NEW, "two"), "only the worker's look settles it");
+    look(&s, Some((NEW, "two")));
     assert!(pair(10, NEW, "two") && pair(10, NEW, "two"));
     assert!(!pair(10, NEW, "three"), "and then it is that conversation's");
     assert!(!pair(11, NEW, "two"), "started by an earlier conversation");
@@ -107,6 +120,7 @@ fn helpers_handed_on_before_the_agent_named_its_conversation_still_follow() {
     handed(&s, moved(Some("one"), OLD, NEW, None));
     let third = ProcId { pid: 70, start_us: 7 };
     handed(&s, moved(None, NEW, third, None));
+    look(&s, Some((third, "three")));
     assert!(pair_in(&s, 10, 1, |_| Some(in_conversation(third, "three"))));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -121,7 +135,7 @@ fn helpers_two_moves_before_the_worker_comes_to_them_are_one() {
     note_move(&s, moved(None, NEW, third, None));
     // another agent's move of the pane takes none of them along
     note_move(&s, moved(None, ProcId { pid: 90, start_us: 9 }, OLD, None));
-    write_moves(&s, 1);
+    write_moves(&s);
     assert_eq!(s.table().map[&10].heir, Some(third));
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -145,11 +159,12 @@ fn helpers_follow_the_first_conversation_their_parent_was_handed_to_not_one_afte
     let (s, _rx) = shared_at(&dir);
     feed(&s, 10, vec![by("one")]);
     handed(&s, moved(Some("one"), OLD, NEW, None));
-    assert_eq!(timers::sleep_for(&s).map(|d| d.as_millis() as u64 <= LOOK_EVERY_MS), Some(true), "looked for its name");
-    look_for_names(&s, 2, |_| None);
-    look_for_names(&s, 3, |_| Some(in_conversation(OLD, "one")));
-    look_for_names(&s, 4, |_| Some(in_conversation(NEW, "two")));
-    assert_eq!(timers::sleep_for(&s), None, "found");
+    assert_eq!(timers::sleep_for(&s), None, "no clock while it waits for a name");
+    look(&s, None);
+    look(&s, Some((OLD, "one")));
+    assert!(s.lock().names.unnamed.contains(&1), "still waiting");
+    look(&s, Some((NEW, "two")));
+    assert!(s.lock().names.unnamed.is_empty(), "found");
     // the user cleared it before anything asked which conversation it was in
     assert!(!pair_in(&s, 10, 1, |_| Some(in_conversation(NEW, "three"))), "a /clear is a new conversation");
     assert!(pair_in(&s, 10, 1, |_| Some(in_conversation(NEW, "two"))));
@@ -157,16 +172,39 @@ fn helpers_follow_the_first_conversation_their_parent_was_handed_to_not_one_afte
 }
 
 #[test]
-fn helpers_a_name_is_looked_for_a_while_and_again_after_a_start() {
+fn helpers_wait_for_a_name_as_long_as_the_agent_lives_and_follow_none_after() {
     let dir = temp("handedlate");
     let (s, _rx) = shared_at(&dir);
     feed(&s, 10, vec![by("one")]);
     handed(&s, moved(Some("one"), OLD, NEW, None));
-    let t = s.table();
-    assert_eq!(super::unnamed_at_start(&t, 5), [(1, 5 + NAMED_WITHIN_MS)].into());
-    look_for_names(&s, 1 + NAMED_WITHIN_MS, |_| panic!("not looked at past the while"));
-    assert_eq!(timers::sleep_for(&s), None);
-    assert_eq!(s.table().map[&10].heir, Some(NEW), "a later look at the pair still settles it");
+    // however long it takes: there is no clock to run out
+    for _ in 0..3 {
+        look(&s, None);
+    }
+    assert!(s.lock().names.unnamed.contains(&1));
+    // it left before naming one: whatever comes there next is not followed
+    names::look(&s, &|p| p != NEW, |_| None);
+    assert!(s.lock().names.unnamed.is_empty());
+    look(&s, Some((NEW, "two")));
+    assert!(!pair_in(&s, 10, 1, |_| Some(in_conversation(NEW, "two"))), "nothing pairs it after");
+    assert_eq!(s.table().map[&10].heir, Some(NEW));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_waiting_for_a_name_at_a_start_follow_none() {
+    let dir = temp("handedstart");
+    let (s, _rx) = shared_at(&dir);
+    feed(&s, 10, vec![by("one"), Event::TaskDelivered]);
+    handed(&s, moved(Some("one"), OLD, NEW, None));
+    // the user may have cleared it while no shell ran
+    let again = Arc::new(Shared::at(s.log.clone()));
+    rebuild::begin(&again, || HashSet::from([10])).unwrap();
+    assert_eq!(again.table().map[&10].heir, Some(NEW));
+    assert!(again.lock().names.unnamed.is_empty() && !again.lock().names.watching());
+    look(&again, Some((NEW, "after-clear")));
+    assert!(!pair_in(&again, 10, 1, |_| Some(in_conversation(NEW, "after-clear"))));
+    again.park();
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

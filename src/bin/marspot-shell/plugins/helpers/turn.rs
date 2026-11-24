@@ -16,6 +16,9 @@ use super::work::Job;
 use crate::plugins::PluginHost;
 use crate::plugins::claudecode::with_helpers::turns::{self, Look};
 
+/// How long after a screen at a prompt could not be read it is read
+/// again: a pane whose screen stays unreadable is not read every tick.
+pub(super) const REREAD_MS: u64 = 5_000;
 /// Waiting on an approval this long is a stop at a prompt.
 const BLOCKED_AFTER: Duration = Duration::from_secs(3);
 /// How long after the last of its helpers was told of or went a helper's
@@ -151,8 +154,10 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
         st.prompt_unread.remove(&h.sid);
     } else if let Some(again) = st.prompt_unread.get_mut(&h.sid)
         && *seen == Turn::BlockedTold
-        && std::mem::take(again)
+        && *again <= now_ms
     {
+        // queued: the read moves it on
+        *again = u64::MAX;
         *seen = Turn::BlockedBefore;
     }
     drop(st);
@@ -169,7 +174,11 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
     }
     match v.status {
         PaneStatus::Busy(BusyKind::ToolAwaitingApproval) if v.held >= BLOCKED_AFTER && *seen == Turn::BlockedBefore => {
-            queue(s, h.sid, seen, Turn::BlockedTold, Job::StillBlocked { sid: h.sid });
+            if !queue(s, h.sid, seen, Turn::BlockedTold, Job::StillBlocked { sid: h.sid })
+                && let Some(again) = s.lock().prompt_unread.get_mut(&h.sid)
+            {
+                *again = now_ms;
+            }
         }
         PaneStatus::Busy(BusyKind::ToolAwaitingApproval) if v.held >= BLOCKED_AFTER && *seen != Turn::BlockedTold => {
             queue_stop(s, h.sid, seen, Turn::BlockedTold, Stop::Blocked);

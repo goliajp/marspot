@@ -194,11 +194,37 @@ fn helpers_an_approval_prompt_whose_screen_was_not_read_is_read_again() {
         rx.try_iter().filter(|j| matches!(j, Job::StillBlocked { sid: 1 })).count()
     };
     assert_eq!(asked(), 1);
-    assert!(work::unread(&s, 1), "the first time it was not read");
+    // not read a while ago
+    let before = records::now_ms() - turn::REREAD_MS;
+    assert!(work::unread(&s, 1, before), "the first time it was not read");
     assert_eq!(asked(), 1, "not known to be the same prompt");
-    assert!(!work::unread(&s, 1), "said once");
+    assert!(!work::unread(&s, 1, before), "said once");
     work::still_blocked(&s, 1, Some("Run make?\n❯ 1. Yes".into()));
     assert_eq!((asked(), s.lock().prompt_unread.len()), (0, 0));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_screen_that_stays_unreadable_is_not_read_every_tick() {
+    let dir = temp("unreadoften");
+    let (s, rx) = shared_at(&dir);
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha("Run make?\n❯ 1. Yes") }]].concat());
+    let mut in_turn = turn::turns_at_start(&s.table());
+    let host = host_with(&[(1, PaneStatus::Busy(BusyKind::ToolAwaitingApproval))]);
+    let mut asked = || {
+        tick::tick(&s, &host, &mut in_turn, &mut tick::Parked::default());
+        rx.try_iter().filter(|j| matches!(j, Job::StillBlocked { sid: 1 })).count()
+    };
+    assert_eq!(asked(), 1);
+    // each read fails, as the worker would find
+    let mut reads = 1;
+    for _ in 0..20 {
+        work::still_blocked(&s, 1, None);
+        reads += asked();
+    }
+    assert_eq!(reads, 1, "read again only once the while is up");
+    s.lock().prompt_unread.insert(1, records::now_ms());
+    assert_eq!(asked(), 1, "and then");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -207,7 +233,7 @@ fn helpers_an_unread_prompt_of_one_that_went_leaves_nothing_behind() {
     let dir = temp("unreadgone");
     let (s, _rx) = shared_at(&dir);
     feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: String::new() }, Event::Stopped { exited: false }]].concat());
-    assert!(!work::unread(&s, 1));
+    assert!(!work::unread(&s, 1, 0));
     assert!(s.lock().prompt_unread.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }
