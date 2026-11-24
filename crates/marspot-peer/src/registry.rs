@@ -318,6 +318,22 @@ pub fn remove_owned_by(dir: &Path, owner: &str) -> Vec<Entry> {
 /// resolved through symlinks so a shared directory appears once.
 /// Only directories that exist; none are created.
 pub fn default_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in config_dirs().into_iter().filter_map(|c| c.join("sessions").canonicalize().ok()) {
+        if dir.is_dir() && !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+    out
+}
+
+/// The `sessions/` of each config directory that exists without one
+/// yet: where a registry directory would appear.
+pub fn missing_dirs() -> Vec<PathBuf> {
+    config_dirs().into_iter().filter(|c| c.is_dir()).map(|c| c.join("sessions")).filter(|d| d.symlink_metadata().is_err()).collect()
+}
+
+fn config_dirs() -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let mut cands: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).into_iter().collect();
     cands.push(home.join(".claude"));
@@ -330,13 +346,7 @@ pub fn default_dirs() -> Vec<PathBuf> {
         profiles.sort();
         cands.extend(profiles);
     }
-    let mut out: Vec<PathBuf> = Vec::new();
-    for dir in cands.into_iter().filter_map(|c| c.join("sessions").canonicalize().ok()) {
-        if dir.is_dir() && !out.contains(&dir) {
-            out.push(dir);
-        }
-    }
-    out
+    cands
 }
 
 fn read_entry(path: &Path, pid: i32) -> Option<Entry> {

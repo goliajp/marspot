@@ -145,6 +145,46 @@ fn container_codex_login_refused_before_its_end_takes_the_newer_one() {
     assert!(expired::judge(AgentKind::Codex, now - 1, Some(now + 1), output, now).unwrap().renewed, "once it ended any refusal counts");
 }
 
+/// The error line as the reply's rows are drawn: indented under it.
+#[test]
+fn container_codex_error_line_counts_indented() {
+    let now = 100 * 60_000;
+    let expires = now + 30 * 60_000;
+    let screen = "• Working (3m 10s)\n  ■ unexpected status 401 Unauthorized: Could not parse your authentication token.\n\n› Ask\n";
+    assert!(expired::judge(AgentKind::Codex, expires, Some(expires + 1), screen, now).unwrap().renewed);
+}
+
+/// Stopped while its token was being written: the token goes again.
+#[test]
+fn container_codex_helper_stopped_while_its_token_is_written_loses_it() {
+    let dir = temp("container-codex-again-late");
+    let fd = dir.join("fake");
+    std::fs::create_dir_all(&fd).unwrap();
+    let d = super::tests_away::fake(&fd);
+    std::fs::write(fd.join("rm-s"), "1").unwrap();
+    account(&dir.join(".codex"));
+    let mut env = marspot_term::test_env::EnvGuard::new();
+    env.set("HOME", dir.display().to_string());
+    let (s, _rx) = shared_at(&dir.join("helpers"));
+    s.record(41, Event::Started(super::super::tests::started(1, "claude", AgentKind::Codex)));
+    std::fs::create_dir_all(s.dir_of(41).join("home")).unwrap();
+    let me = std::sync::Arc::clone(&s);
+    let run = std::thread::spawn(move || expired::again(&me, 41, AgentKind::Codex, "codex", Some(d)));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(fd.join("log")).unwrap_or_default().lines().any(|l| l.starts_with("rm ")) {
+        assert!(std::time::Instant::now() < until, "docker rm was not asked");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // its stop lands while docker removes the old container
+    s.record(41, Event::Stopped { exited: false });
+    let e = run.join().unwrap().unwrap_err();
+    assert!(e.contains("stopped"), "{e}");
+    assert!(s.dir_of(41).join("expires").exists(), "the token was written");
+    assert!(!s.dir_of(41).join("home/auth.json").exists(), "and taken away");
+    drop(env);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn container_codex_stopped_helper_is_not_started_again() {
     let dir = temp("container-codex-again");

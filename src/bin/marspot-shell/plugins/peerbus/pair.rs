@@ -42,18 +42,18 @@ pub(in crate::plugins) fn conversation_of(sid: u64) -> Option<Conversation> {
     conversation_in(obs.session(sid)?, &peers::live_entries())
 }
 
-/// The files agent `pid`'s conversation is named in, in registry
+/// The files agent `agent`'s conversation is named in, in registry
 /// directory `dir`: claude's own record, and the one marspot keeps for
 /// it once it keeps one.
-pub(in crate::plugins) fn record_files(dir: &Path, pid: i32) -> Vec<PathBuf> {
-    std::iter::once(pid).chain(super::records::filed_under(pid)).map(|p| registry::record_path(dir, p)).collect()
+pub(in crate::plugins) fn record_files(dir: &Path, agent: ProcId) -> Vec<PathBuf> {
+    std::iter::once(agent.pid).chain(super::records::filed_under(agent)).map(|p| registry::record_path(dir, p)).collect()
 }
 
 /// The conversation agent `agent` is in, as its own record in `dirs`
 /// names it; read from those files alone, whatever is in front of its
 /// pane.
 pub(in crate::plugins) fn conversation_of_agent(dirs: &[PathBuf], agent: ProcId) -> Option<Conversation> {
-    let filed = super::records::filed_under(agent.pid);
+    let filed = super::records::filed_under(agent);
     let names = |e: &Entry| e.is_live() && if e.ours { e.agent_pid == Some(agent.pid) } else { e.pid == agent.pid };
     let mut records = dirs.iter().flat_map(|d| std::iter::once(agent.pid).chain(filed).filter_map(|p| registry::read(d, p)));
     let id = records.find(names)?.session_id?;
@@ -127,42 +127,71 @@ mod tests {
         assert_eq!(front(0, Vec::new()), None);
     }
 
-    /// Read from the agent's own records alone: claude's under its pid,
-    /// ours under its relay's, once written.
-    #[test]
-    fn the_conversation_of_an_agent_is_its_own_records() {
+    /// Ours for agent `agent_pid`, filed under `relay`, made at `made_ms`.
+    fn ours(relay: i32, agent_pid: i32, made_ms: i64) -> marspot_peer::registry::Record {
         use marspot_peer::envelope::Mode;
         use marspot_peer::registry::{Agent, Record, Status};
-        let dir = std::env::temp_dir().join(format!("marspot-agent-records-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let me = marspot::pidtree::proc_id(std::process::id() as i32).unwrap();
-        let relay = std::os::unix::process::parent_id() as i32;
-        assert_eq!(record_files(&dir, me.pid), vec![registry::record_path(&dir, me.pid)]);
-        assert_eq!(conversation_of_agent(std::slice::from_ref(&dir), me), None);
-        let r = Record {
+        Record {
             pid: relay,
             agent: Agent::Codex,
-            agent_pid: me.pid,
+            agent_pid,
             relay: "/tmp/r.sock".into(),
             session_id: "thread-1".into(),
             cwd: "/tmp".into(),
-            started_at_ms: 1,
+            started_at_ms: made_ms,
             proc_start: marspot_peer::proc::lstart(relay).unwrap(),
             version: String::new(),
             name: "x".into(),
-            name_since_ms: 1,
+            name_since_ms: made_ms,
             socket: "/tmp/cc-socks/x.sock".into(),
             status: Status::Idle,
             class: Mode::Bypass,
             owner: "/tmp/owner".into(),
             spool: None,
-        };
+        }
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("marspot-agent-records-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Read from the agent's own records alone: claude's under its pid,
+    /// ours under its relay's, once written.
+    #[test]
+    fn the_conversation_of_an_agent_is_its_own_records() {
+        let dir = temp_dir("own");
+        let me = marspot::pidtree::proc_id(std::process::id() as i32).unwrap();
+        let relay = std::os::unix::process::parent_id() as i32;
+        assert_eq!(record_files(&dir, me), vec![registry::record_path(&dir, me.pid)]);
+        assert_eq!(conversation_of_agent(std::slice::from_ref(&dir), me), None);
+        let r = ours(relay, me.pid, super::super::records::now_ms());
         super::super::records::write_record(std::slice::from_ref(&dir), &r);
-        assert_eq!(record_files(&dir, me.pid), vec![registry::record_path(&dir, me.pid), registry::record_path(&dir, relay)]);
+        assert_eq!(record_files(&dir, me), vec![registry::record_path(&dir, me.pid), registry::record_path(&dir, relay)]);
         let found = conversation_of_agent(std::slice::from_ref(&dir), me);
         assert_eq!(found, Some(Conversation { agent: me, id: "thread-1".into() }));
         let other = marspot::pidtree::ProcId { pid: relay, start_us: 0 };
         assert_eq!(conversation_of_agent(std::slice::from_ref(&dir), other), None, "a relay is no agent");
+        // the table outlives the test: what it filed goes with it
+        super::super::records::unfile(&r);
+        assert_eq!(super::super::records::filed_under(me), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A pid reused before the binding of the process that had it is
+    /// undone: that binding's record is not the new process's.
+    #[test]
+    fn a_record_made_before_the_agent_started_is_not_its() {
+        let dir = temp_dir("reused");
+        let me = marspot::pidtree::proc_id(std::process::id() as i32).unwrap();
+        let relay = std::os::unix::process::parent_id() as i32;
+        let earlier = (me.start_us / 1000) as i64 - 1;
+        let r = ours(relay, me.pid, earlier);
+        super::super::records::write_record(std::slice::from_ref(&dir), &r);
+        assert_eq!(record_files(&dir, me), vec![registry::record_path(&dir, me.pid)]);
+        assert_eq!(conversation_of_agent(std::slice::from_ref(&dir), me), None);
+        super::super::records::unfile(&r);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

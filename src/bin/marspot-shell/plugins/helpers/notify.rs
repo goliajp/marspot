@@ -121,15 +121,21 @@ pub(super) fn same_prompt(told: &str, screen: &str) -> bool {
     told.starts_with(PROMPT_FORM) && prompt_sha(screen) == told
 }
 
+/// How codex's approval prompt begins; it draws no rule above it.
+const CODEX_ASKS: &str = "Would you like to ";
+
 /// The prompt at the bottom of `screen`: from below the last rule drawn
-/// above its last choice down to that choice.  What is above (the
-/// transcript, a status that changes) and the hints below are not it;
-/// with no rule, the [`SCREEN_LINES`] rows that end at the choice.
+/// above its last choice, or from codex's question when that is lower,
+/// down to that choice.  What is above (the transcript, a status that
+/// changes) and the hints below are not it; with neither, the
+/// [`SCREEN_LINES`] rows that end at the choice.
 pub(super) fn prompt_of(screen: &str) -> String {
     let rows: Vec<&str> = screen.lines().collect();
     let last = rows.iter().rposition(|r| is_choice(r)).or_else(|| rows.iter().rposition(|r| !r.trim().is_empty()));
     let end = last.map_or(0, |i| i + 1);
-    let start = rows[..end].iter().rposition(|r| is_rule(r)).map_or(end.saturating_sub(SCREEN_LINES), |i| i + 1);
+    let below_rule = rows[..end].iter().rposition(|r| is_rule(r)).map(|i| i + 1);
+    let question = rows[..end].iter().rposition(|r| r.trim_start().starts_with(CODEX_ASKS));
+    let start = below_rule.max(question).unwrap_or(end.saturating_sub(SCREEN_LINES));
     rows[start..end].join("\n")
 }
 
@@ -212,3 +218,7 @@ pub(super) fn deliver(parent: &str, body: &str) -> Result<(), String> {
     let line = crate::plugins::claudecode::heads_up::frame_line(&r.socket, body);
     marspot_peer::inbox::write(&r.socket, &line)
 }
+
+#[cfg(test)]
+#[path = "tests_prompt.rs"]
+mod tests;

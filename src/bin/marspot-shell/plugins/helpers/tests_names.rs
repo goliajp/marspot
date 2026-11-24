@@ -126,3 +126,30 @@ fn helpers_waiting_for_a_name_end_when_the_agent_exits() {
     assert_eq!(s.table().map[&10].conv.as_deref(), Some("one"), "follows none");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A profile's first session makes its record directory: one made
+/// after the wait began is watched too.
+#[test]
+fn helpers_waiting_for_a_name_watch_a_record_directory_made_later() {
+    let dir = temp("namelater");
+    let (s, rx) = shared_at(&dir);
+    let me = proc_id(std::process::id() as i32).unwrap();
+    let first = dir.join("first").join("sessions");
+    let later = dir.join("later").join("sessions");
+    waiting(&s, &first, me);
+    std::fs::create_dir_all(later.parent().unwrap()).unwrap();
+    s.lock().names.dirs = Some(vec![first.clone(), later.clone()]);
+    on_change(&s);
+    assert!(s.lock().names.unnamed.contains(&1) && s.lock().names.watching());
+    wakes(&s, &rx);
+
+    std::fs::create_dir(&later).unwrap();
+    assert!(within(|| rx.try_iter().any(|j| matches!(j, Job::Wake))), "woken by the directory");
+    wakes(&s, &rx);
+    on_change(&s);
+    claude_record(&later, me.pid, "two");
+    assert!(within(|| rx.try_iter().any(|j| matches!(j, Job::Wake))), "woken by the record in it");
+    on_change(&s);
+    assert_eq!(s.table().map[&10].conv.as_deref(), Some("two"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
