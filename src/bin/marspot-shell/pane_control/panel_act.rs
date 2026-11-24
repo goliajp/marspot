@@ -98,15 +98,15 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, act: HelperPanelAct, deny: &std::p
 /// meanwhile, or to another pane when all of `top`'s are closed, is no
 /// longer one the user meant.
 ///
-/// Whether it is in a window is read from its registry entry: its
-/// session writes that before the core moves the pane, and a view of
-/// the sessions may be older than a move just done.
+/// Whose shadow it is, a window's included, is read from its registry
+/// entry: its session writes that before the core moves the pane, and a
+/// view of the sessions may be older than a move just done.
 fn still_to_close(conn: &Conn, ctx: &Ctx, sid: u64, top: Option<u64>) -> Result<(), Reject> {
     let obs = ctx.view_now();
     let parent = marspot_term::session_registry::read_session_entry(sid).ok().map(|e| e.shadow_of);
     let why = if parent.or_else(|| obs.session(sid).map(|s| s.entry.shadow_of)) == Some(0) {
         "refused: in a window"
-    } else if top.is_some_and(|top| !shadow_tree::is_under(&parent_in(&obs), sid, top)) {
+    } else if top.is_some_and(|top| !shadow_tree::is_under(&parent_now(&obs, sid, parent), sid, top)) {
         "refused: no longer below that pane"
     } else {
         return Ok(());
@@ -117,6 +117,12 @@ fn still_to_close(conn: &Conn, ctx: &Ctx, sid: u64, top: Option<u64>) -> Result<
 
 fn parent_in(obs: &Observation) -> impl Fn(u64) -> u64 + '_ {
     |sid| obs.session(sid).map_or(0, |s| s.entry.shadow_of)
+}
+
+/// [`parent_in`], with `sid`'s own parent as its entry has it, when read.
+fn parent_now(obs: &Observation, sid: u64, entry: Option<u64>) -> impl Fn(u64) -> u64 + '_ {
+    let view = parent_in(obs);
+    move |s| if s == sid { entry.unwrap_or_else(|| view(s)) } else { view(s) }
 }
 
 /// A helper is stopped, which its plugin writes down; any other shadow

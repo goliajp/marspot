@@ -151,6 +151,20 @@ fn helper_panel_a_pane_just_moved_to_a_window_is_not_closed() {
     assert_eq!(counts, (2, 1));
 }
 
+/// A pane just moved below another pane is no longer below `top`, by
+/// its registry entry, while every view still has it there.
+#[test]
+fn helper_panel_close_all_leaves_a_pane_just_moved_below_another() {
+    let sandbox = marspot_term::test_env::sandbox_state_dir();
+    live_entries(&sandbox, &[2, 3, 4]);
+    let entry_4 = marspot_term::session_registry::read_session_entry(4).unwrap();
+    marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 8, ..entry_4 }).unwrap();
+    let (closed, counts, log) = closes_seeing(act(1, PanelAct::CloseAllOfParent), |c| c.obs.clone(), "refused: no longer below");
+    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [2, 3]);
+    assert_eq!(counts, (2, 1));
+    assert!(log.contains("pane.close"), "{log}");
+}
+
 #[test]
 fn helper_panel_close_all_leaves_what_went_elsewhere_meanwhile() {
     let sandbox = marspot_term::test_env::sandbox_state_dir();

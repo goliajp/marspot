@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.681"  # a claude or kimi helper whose stop was written before a restart has its result told after it
+shell   = "0.7.682"  # a helper-panel close-all reads from the registry entry whether a pane is still below the one asked of
 core    = "0.12.677"  # the helper panel says on its row a move that failed and follows a retargeted deny-list symlink
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
