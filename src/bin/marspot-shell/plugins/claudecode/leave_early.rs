@@ -11,143 +11,17 @@
 //! half hour between ordinary moves, by their one per pass, nor by the
 //! switch that turns ordinary moves off or to a dry run.
 
-use super::burn::{Outlook, Trends, SHORT_H};
+use super::burn::SHORT_H;
 use super::*;
-use marspot::cc_usage::CcAccount;
-
-/// The account a pane leaves for has to last this long with it.
-pub(super) const TARGET_H: f64 = 6.0;
-/// What a pane is taken to use where nothing is measured: 0.6 points
-/// of a week an hour, the week's demand over its dozen panes.
-pub(super) const RHO0: f64 = 0.006;
-/// A pane told its account is short is told again only once the
-/// account has been seen to last this long.
-pub(super) const RECOVERED_H: f64 = 4.0;
+pub(super) use super::leave_plan::{plan, Part, Plan, Taking, RECOVERED_H, TARGET_H};
+use marspot::cc_usage::CcUsage;
+use std::collections::HashSet;
 
 /// What persists of this between passes.
 #[derive(Default)]
 pub(super) struct State {
-    pub(super) trends: Trends,
     /// Accounts last logged as short, with the pane staying on each.
     said: HashMap<u8, Option<u64>>,
-}
-
-/// One pane's part in this pass.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct Part {
-    pub profile: u8,
-    pub short: bool,
-    /// The slowest pane on a short account: it does not leave.
-    pub stays: bool,
-    /// Share of a week per hour.
-    pub speed: f64,
-    /// How long its account lasts, where a speed is known.
-    pub hours: Option<f64>,
-}
-
-/// A pane taking part: session, profile, the model it is judged as.
-pub(super) type Taking<'a> = (u64, u8, Option<&'a str>);
-
-/// Everything one pass decides by.
-pub(super) struct Plan {
-    parts: HashMap<u64, Part>,
-    on: HashMap<u8, usize>,
-    /// What the panes sent this pass add to each account.
-    placed: HashMap<u8, f64>,
-    rooms: Vec<(u8, quota::Room)>,
-    accounts: Vec<(u8, CcAccount)>,
-    now: i64,
-}
-
-/// Who leaves and who stays, for every pane taking part. A pane's speed
-/// is its account's, shared by the tokens each pane's responses
-/// weighed over the last ninety minutes.
-pub(super) fn plan(
-    trends: &Trends,
-    rooms: &[(u8, quota::Room)],
-    feed: &[CcAccount],
-    profiles: &[(u8, Option<String>)],
-    panes: &[Taking],
-    tokens: &HashMap<u64, f64>,
-    now: i64,
-) -> Plan {
-    let accounts: Vec<(u8, CcAccount)> = profiles
-        .iter()
-        .filter_map(|(p, mail)| Some((*p, feed.iter().find(|a| Some(&a.email) == mail.as_ref())?.clone())))
-        .collect();
-    let mut plan = Plan { parts: HashMap::new(), on: HashMap::new(), placed: HashMap::new(), rooms: rooms.to_vec(), accounts, now };
-    let mut used: HashMap<u8, f64> = HashMap::new();
-    for (sid, p, _) in panes {
-        *plan.on.entry(*p).or_default() += 1;
-        *used.entry(*p).or_default() += tokens.get(sid).copied().unwrap_or(0.0);
-    }
-    let mut slowest: HashMap<u8, (f64, u64)> = HashMap::new();
-    for (sid, p, model) in panes {
-        let n = plan.on[p] as f64;
-        let mine = tokens.get(sid).copied().unwrap_or(0.0);
-        let share = if used[p] > 0.0 { mine / used[p] } else { 1.0 / n };
-        let mut part = Part { profile: *p, speed: plan.week_speed(trends, *p).unwrap_or(RHO0 * n) * share, ..Part::default() };
-        if let Some(o) = plan.outlook(trends, *p) {
-            part.short = o.short(*model);
-            part.hours = o.hours_left(*model, 0.0, None);
-        }
-        if part.short && slowest.get(p).is_none_or(|s| (mine, *sid) < *s) {
-            slowest.insert(*p, (mine, *sid));
-        }
-        plan.parts.insert(*sid, part);
-    }
-    for (_, sid) in slowest.values() {
-        if let Some(part) = plan.parts.get_mut(sid) {
-            part.stays = true;
-        }
-    }
-    plan
-}
-
-impl Plan {
-    pub(super) fn part(&self, sid: u64) -> Part {
-        self.parts.get(&sid).copied().unwrap_or_default()
-    }
-
-    fn outlook<'a>(&'a self, trends: &'a Trends, profile: u8) -> Option<Outlook<'a>> {
-        let room = self.rooms.iter().find(|(p, _)| *p == profile).map(|(_, r)| r)?;
-        let account = self.accounts.iter().find(|(p, _)| *p == profile).map(|(_, a)| a)?;
-        Some(Outlook { trends, account, room, now: self.now })
-    }
-
-    fn week_speed(&self, trends: &Trends, profile: u8) -> Option<f64> {
-        let account = self.accounts.iter().find(|(p, _)| *p == profile).map(|(_, a)| a)?;
-        trends.per_hour(&account.email, "7d")
-    }
-
-    /// How long `profile` lasts for a pane on `model` using `speed` more.
-    fn lasts(&self, trends: &Trends, profile: u8, model: Option<&str>, speed: f64) -> f64 {
-        let Some(o) = self.outlook(trends, profile) else { return 0.0 };
-        let added = self.placed.get(&profile).copied().unwrap_or(0.0) + speed;
-        let unknown = RHO0 * self.on.get(&profile).copied().unwrap_or(0) as f64;
-        o.hours_left(model, added, Some(unknown)).unwrap_or(0.0)
-    }
-
-    /// Where a pane on `current` goes: the account the usual ranking
-    /// puts first among those lasting `TARGET_H` with it.
-    pub(super) fn target(&self, trends: &Trends, current: u8, model: Option<&str>, speed: f64) -> Option<(u8, f64)> {
-        let lasting: Vec<(u8, quota::Room)> = self
-            .rooms
-            .iter()
-            .filter(|(p, _)| *p == current || self.lasts(trends, *p, model, speed) >= TARGET_H)
-            .cloned()
-            .collect();
-        let to = quota::best_profile(&lasting, current, model)?;
-        let room = &lasting.iter().find(|(p, _)| *p == to)?.1;
-        if room.refused_for(model) || !room.known_for(model) || heads_up::nearly_out(room, model) {
-            return None;
-        }
-        Some((to, self.lasts(trends, to, model, speed)))
-    }
-
-    pub(super) fn place(&mut self, profile: u8, speed: f64) {
-        *self.placed.entry(profile).or_default() += speed;
-    }
 }
 
 fn hours(h: Option<f64>) -> String {
@@ -158,50 +32,78 @@ fn hours(h: Option<f64>) -> String {
     }
 }
 
-/// The readings the speeds are measured from, so a restart of the
-/// shell -- every silent update is one -- does not wait half an hour
-/// for a speed again.
-const TRENDS_FILE: &str = "usage_trend.tsv";
+/// The shorter of two panes' outlooks on one account, `None` (one step
+/// from out, speed unknown) the shortest, so the answer does not hang
+/// on the order the panes are met in.
+fn shorter(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        _ => None,
+    }
+}
 
 impl ClaudecodePlugin {
-    pub(super) fn load_trends(&mut self, host: &dyn PluginHost) {
-        let Ok(dir) = host.state_dir() else { return };
-        if let Ok(text) = fs::read_to_string(dir.join(TRENDS_FILE)) {
-            self.leave.trends = Trends::decode(&text);
-        }
+    /// This pass's plan: every pane that is judged, not out, and on a
+    /// numbered profile takes part.
+    pub(super) fn plan_pass<'a>(
+        &self,
+        result: &'a ScanResult,
+        rooms: &[(u8, quota::Room)],
+        usage: &CcUsage,
+        judged: impl Fn(u64, bool) -> Option<&'a str>,
+        out_for: impl Fn(u64, &BindMeta, Option<&str>) -> bool,
+    ) -> Plan<'a> {
+        let taking: Vec<Taking> = result
+            .new_meta
+            .iter()
+            .filter(|(sid, m)| {
+                let choice = result.choices.get(*sid).cloned().unwrap_or_default();
+                m.config_dir.is_some() && confirm_choice(result.new_models.get(*sid).map(String::as_str), &choice).is_ok()
+            })
+            .map(|(sid, m)| (*sid, m.profile_num, judged(*sid, self.fable_need.marked(*sid))))
+            .filter(|(sid, _, model)| !out_for(*sid, &result.new_meta[sid], *model))
+            .collect();
+        let now = rooms::unix_now();
+        plan(&result.speeds, rooms, &usage.accounts, &result.profiles, &taking, &result.pane_tokens, now)
     }
 
-    pub(super) fn persist_trends(&mut self, host: &dyn PluginHost) {
-        let Some(text) = self.leave.trends.changed() else { return };
-        let Ok(dir) = host.state_dir() else { return };
-        if let Err(e) = fs::write(dir.join(TRENDS_FILE), text) {
-            host.log(LogLevel::Warn, "quota.trend_persist_failed", &format!("{e}"));
-        }
-    }
-
-    /// One line when an account starts or stops running short, and when
-    /// the pane staying on it changes.
+    /// One line when an account starts running short, and when the pane
+    /// staying on it changes; one when a pane on it is seen to last
+    /// `RECOVERED_H` again, so a speed read either side of the line
+    /// does not flap.
     pub(super) fn say_short(&mut self, host: &dyn PluginHost, plan: &Plan) {
         let mut now: HashMap<u8, (Option<u64>, Option<f64>, usize)> = HashMap::new();
-        for (sid, part) in plan.parts.iter().filter(|(_, p)| p.short) {
+        let mut recovered: HashSet<u8> = HashSet::new();
+        for (sid, part) in &plan.parts {
+            if !part.short {
+                if part.hours.is_none_or(|h| h >= RECOVERED_H) {
+                    recovered.insert(part.profile);
+                }
+                continue;
+            }
             let e = now.entry(part.profile).or_insert((None, part.hours, 0));
+            e.1 = shorter(e.1, part.hours);
             e.2 += 1;
             if part.stays {
                 e.0 = Some(*sid);
             }
         }
-        for (profile, (stays, h, n)) in &now {
-            if self.leave.said.get(profile) != Some(stays) {
+        let mut profiles: Vec<u8> = now.keys().copied().collect();
+        profiles.sort();
+        for profile in profiles {
+            let (stays, h, n) = now[&profile];
+            if self.leave.said.get(&profile) != Some(&stays) {
                 let who = stays.map_or("none".into(), |s| format!("sid={s}"));
-                let line = format!("P{profile} lasts {} at its speed, under {SHORT_H}h; {n} panes on it, {who} stays to use the rest", hours(*h));
+                let line = format!("P{profile} lasts {} at its speed, under {SHORT_H}h; {n} panes on it, {who} stays to use the rest", hours(h));
                 host.log(LogLevel::Info, "quota.short", &line);
-                self.leave.said.insert(*profile, *stays);
+                self.leave.said.insert(profile, stays);
             }
         }
-        let over: Vec<u8> = self.leave.said.keys().copied().filter(|p| !now.contains_key(p)).collect();
+        let mut over: Vec<u8> = self.leave.said.keys().copied().filter(|p| !now.contains_key(p) && recovered.contains(p)).collect();
+        over.sort();
         for p in over {
             self.leave.said.remove(&p);
-            host.log(LogLevel::Info, "quota.short_over", &format!("P{p} lasts {SHORT_H}h or more again"));
+            host.log(LogLevel::Info, "quota.short_over", &format!("P{p} lasts {RECOVERED_H}h or more again"));
         }
     }
 
@@ -224,7 +126,7 @@ impl ClaudecodePlugin {
         }
         let part = plan.part(sid);
         let from = meta.profile_num;
-        let Some((to, lasts)) = plan.target(&self.leave.trends, from, model, part.speed) else {
+        let Some((to, lasts)) = plan.target(from, model, part.speed) else {
             self.say_once(host, sid, "leave|none", "quota.leave_nowhere", format!("sid={sid} on P{from}: no account lasts {TARGET_H}h with it"));
             return false;
         };
@@ -242,7 +144,7 @@ impl ClaudecodePlugin {
         let word = warned.then(|| heads_up::after_warned_move(false));
         if self.start_profile_cycle_to(host, sid, meta.clone(), to, word, choice.clone()) {
             self.rebalanced.insert(sid, (Instant::now(), to));
-            plan.place(to, part.speed);
+            plan.place(to, model, part.speed);
             return true;
         }
         false

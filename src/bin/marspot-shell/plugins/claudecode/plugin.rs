@@ -28,7 +28,6 @@ impl Plugin for ClaudecodePlugin {
         // scrollback and its uuid; the next scan re-arms the wake path.
         self.load_dormant(host);
         self.load_heads_up(host);
-        self.load_trends(host);
         self.load_refused(host);
         self.load_fable_need(host);
         // Resolve ~/.claude/projects.  Without HOME there's nothing
@@ -67,7 +66,7 @@ impl Plugin for ClaudecodePlugin {
         let (res_tx, res_rx) = mpsc::channel::<ScanResult>();
         let ctx = WorkerCtx {
             projects_root,
-            caches: ScanCaches::default(),
+            caches: ScanCaches { trends: burn::TrendCache::at(host.state_dir()?.join(burn::TRENDS_FILE)), ..Default::default() },
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),

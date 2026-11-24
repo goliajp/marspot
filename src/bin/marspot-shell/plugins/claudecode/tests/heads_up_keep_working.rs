@@ -65,6 +65,8 @@ fn a_told_pane_stays_until_its_account_refuses_and_is_then_moved_and_told_to_go_
     }
     assert!(host.submitted.lock().unwrap().is_empty(), "working on an account that still answers: not moved");
     assert!(!plugin.rebalance_said.contains_key(&sid), "the one pane on it stays to use what is left");
+    let logged = host.logged.lock().unwrap().clone();
+    assert!(logged.iter().any(|(e, l)| e == "quota.short" && l.contains("sid=95 stays")), "{logged:?}");
 
     feed(&home, "kw", ("rejected", 1.0));
     sweep(&mut plugin, &host, &mut result);

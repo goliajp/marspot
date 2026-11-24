@@ -38,24 +38,7 @@ impl ClaudecodePlugin {
         let profiles: Vec<u8> = result.profiles.iter().map(|(n, _)| *n).collect();
         let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
         let mut rooms = quota::rooms_for(&profiles, &usage.accounts, email, rooms::unix_now());
-        for (sid, meta) in &result.new_meta {
-            self.note_fable_refusal(host, *sid, meta, result);
-            let Some(r) = meta.refused_at.as_ref() else { continue };
-            if self.refused.note(meta.profile_num, r) {
-                let what = if r.logged_out {
-                    "could not log in".to_string()
-                } else if r.model.is_empty() {
-                    "refused every model".to_string()
-                } else {
-                    format!("refused {}", r.model)
-                };
-                host.log(
-                    LogLevel::Info,
-                    if r.logged_out { "quota.logged_out" } else { "quota.refused" },
-                    &format!("P{} {what} at {}", meta.profile_num, r.at),
-                );
-            }
-        }
+        self.note_refusals(host, result);
         let resets = seen::resets_for(&profiles, &usage.accounts, email);
         self.refused.mark(&mut rooms, &resets, rooms::unix_now());
         self.persist_refused(host);
@@ -107,20 +90,7 @@ impl ClaudecodePlugin {
                 None => true,
             }
         });
-        let taking: Vec<leave_early::Taking> = result
-            .new_meta
-            .iter()
-            .filter(|(sid, m)| {
-                let choice = result.choices.get(*sid).cloned().unwrap_or_default();
-                m.config_dir.is_some() && confirm_choice(result.new_models.get(*sid).map(String::as_str), &choice).is_ok()
-            })
-            .map(|(sid, m)| (*sid, m.profile_num, judged(*sid, marks.marked(*sid))))
-            .filter(|(sid, _, model)| !out_for(*sid, &result.new_meta[sid], *model))
-            .collect();
-        self.leave.trends.note(&usage.accounts);
-        self.persist_trends(host);
-        let now = rooms::unix_now();
-        let mut plan = leave_early::plan(&self.leave.trends, &rooms, &usage.accounts, &result.profiles, &taking, &result.pane_tokens, now);
+        let mut plan = self.plan_pass(result, &rooms, usage, judged, out_for);
         self.say_short(host, &plan);
         // Bounded with the panes, like everything else here.
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
@@ -178,7 +148,7 @@ impl ClaudecodePlugin {
                     continue;
                 }
                 if mode != marspot::settings::Rebalance::Off
-                    && self.rebalance(host, sid, &rooms, &meta, result, as_judged, &choice, in_flight, mode, rebalanced_this_pass)
+                    && self.rebalance(host, sid, &mut plan, &meta, result, as_judged, &choice, in_flight, mode, rebalanced_this_pass)
                 {
                     rebalanced_this_pass = true;
                 }
@@ -200,10 +170,30 @@ impl ClaudecodePlugin {
                 );
             }
             let model = as_judged.map(str::to_string);
-            self.move_off_refused(host, sid, &rooms, meta, result, choice, Judged { model, for_fable });
+            self.move_off_refused(host, sid, &mut plan, meta, result, choice, Judged { model, for_fable });
         }
         self.persist_heads_up(host);
         self.persist_fable_need(host);
+    }
+
+    /// Each pane's Fable refusal noted, and each account's refusal or
+    /// lost login logged once.
+    fn note_refusals(&mut self, host: &dyn PluginHost, result: &ScanResult) {
+        for (sid, meta) in &result.new_meta {
+            self.note_fable_refusal(host, *sid, meta, result);
+            let Some(r) = meta.refused_at.as_ref() else { continue };
+            if self.refused.note(meta.profile_num, r) {
+                let what = if r.logged_out {
+                    "could not log in".to_string()
+                } else if r.model.is_empty() {
+                    "refused every model".to_string()
+                } else {
+                    format!("refused {}", r.model)
+                };
+                let event = if r.logged_out { "quota.logged_out" } else { "quota.refused" };
+                host.log(LogLevel::Info, event, &format!("P{} {what} at {}", meta.profile_num, r.at));
+            }
+        }
     }
 
     pub(super) fn load_heads_up(&mut self, host: &dyn PluginHost) {
@@ -241,7 +231,7 @@ impl ClaudecodePlugin {
         &mut self,
         host: &dyn PluginHost,
         sid: u64,
-        rooms: &[(u8, quota::Room)],
+        plan: &mut leave_early::Plan,
         meta: BindMeta,
         result: &ScanResult,
         // the model and effort the sweep confirmed for this pane
@@ -267,9 +257,10 @@ impl ClaudecodePlugin {
         // Saying it to a pane that really was idle costs one line,
         // which is what the sentence is worded for — it asks the
         // session to continue *if* something was interrupted.
-        let activity = result.new_activity.get(&sid);
-        let tool_executing = matches!(activity, Some(CcActivity::ToolPending { executing: true }));
-        let needs_model = judged.room_model(rooms, meta.profile_num, result.new_models.get(&sid));
+        let tool_executing = matches!(result.new_activity.get(&sid), Some(CcActivity::ToolPending { executing: true }));
+        let needs_model = judged.room_model(plan.rooms(), meta.profile_num, result.new_models.get(&sid));
+        // somewhere that lasts six hours with it, when there is one
+        let rooms = &plan.rooms_for_move(meta.profile_num, needs_model.as_deref(), plan.speed_of(sid));
         // The idle policy's rule too: a process of its own under claude
         // (unknown counts as one) is work a move would kill.
         let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
@@ -311,11 +302,7 @@ impl ClaudecodePlugin {
                     (true, false) => ": the usage feed shows its Fable spent",
                     (false, _) => "",
                 };
-                host.log(
-                    LogLevel::Info,
-                    "quota.moving",
-                    &format!("sid={sid} P{} → P{target}{because}", meta.profile_num),
-                );
+                host.log(LogLevel::Info, "quota.moving", &format!("sid={sid} P{from} → P{target}{because}"));
                 // the move ends what runs under claude; the session is
                 // told, or it waits on background shells that are gone.
                 // A pane moved for the Fable it was refused hears which
@@ -332,6 +319,7 @@ impl ClaudecodePlugin {
                         self.fable_need.told(sid);
                     }
                     self.moved_at.insert(sid, Instant::now());
+                    plan.place(target, needs_model.as_deref(), plan.speed_of(sid));
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
                     tally.last_target = Some(target);
@@ -362,7 +350,7 @@ impl ClaudecodePlugin {
         &mut self,
         host: &dyn PluginHost,
         sid: u64,
-        rooms: &[(u8, quota::Room)],
+        plan: &mut leave_early::Plan,
         meta: &BindMeta,
         result: &ScanResult,
         // what the pane is judged as: a pane refused Fable as Fable
@@ -372,12 +360,12 @@ impl ClaudecodePlugin {
         mode: marspot::settings::Rebalance,
         already_moved_one: bool,
     ) -> bool {
-        let Some((target, why)) = rebalance::better_home(rooms, meta.profile_num, model) else {
+        let lasting = plan.lasting(meta.profile_num, model, plan.speed_of(sid));
+        let Some((target, why)) = rebalance::better_home(&lasting, meta.profile_num, model) else {
             self.rebalance_said.remove(&sid);
             return false;
         };
-        let since_last = self.rebalanced.get(&sid).map(|(at, _)| at.elapsed());
-        let pane = self.resting(host, sid, meta, result, move_in_flight, since_last);
+        let pane = self.resting(host, sid, meta, result, move_in_flight, self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()));
         let dry = mode == marspot::settings::Rebalance::DryRun;
         let held = rebalance::not_now(&pane)
             .or((already_moved_one && !dry).then_some("another pane moved this pass"));
@@ -391,9 +379,7 @@ impl ClaudecodePlugin {
         // hours ahead tick up, neither of which is news
         let key = format!("{target}|{}", held.is_some());
         let new_answer = self.rebalance_said.get(&sid) != Some(&key);
-        if new_answer {
-            self.rebalance_said.insert(sid, key);
-        }
+        if new_answer { self.rebalance_said.insert(sid, key); }
         let event = match (held, dry) {
             (Some(_), _) => "rebalance.waiting",
             (None, true) => "rebalance.would_move",
@@ -413,6 +399,7 @@ impl ClaudecodePlugin {
         let word = warned.then(|| heads_up::after_warned_move(false));
         if self.start_profile_cycle_to(host, sid, meta.clone(), target, word, choice.clone()) {
             self.rebalanced.insert(sid, (Instant::now(), target));
+            plan.place(target, model, plan.speed_of(sid));
             return true;
         }
         false

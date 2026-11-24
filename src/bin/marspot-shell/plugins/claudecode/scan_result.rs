@@ -15,6 +15,7 @@ pub(super) struct ScanCaches {
     /// so the log says when that set changes and not every pass.
     pub(super) work: HashMap<u64, Vec<String>>,
     pub(super) tokens: super::pane_tokens::TokenCache,
+    pub(super) trends: super::burn::TrendCache,
 }
 
 pub(super) struct ScanResult {
@@ -77,6 +78,8 @@ pub(super) struct ScanResult {
     /// Per pane: what its responses of the last ninety minutes weighed,
     /// in input-token equivalents.
     pub(super) pane_tokens: HashMap<u64, f64>,
+    /// Every account window's speed, from the readings the scan keeps.
+    pub(super) speeds: super::burn::Speeds,
 }
 
 /// The files the quota sweep judges by besides the bindings: the usage

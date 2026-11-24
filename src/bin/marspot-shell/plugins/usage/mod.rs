@@ -29,6 +29,8 @@ use marspot_term::{lx_info, lx_warn};
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use feed::Account;
+#[cfg(test)]
+pub(in crate::plugins) use feed::iso_utc;
 
 /// Long enough after launch that the first pass does not compete with
 /// the panes coming up.

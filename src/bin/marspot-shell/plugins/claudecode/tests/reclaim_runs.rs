@@ -173,6 +173,7 @@ fn empty_scan() -> ScanResult {
         fable_refused: HashMap::new(),
         helpers: Default::default(),
         pane_tokens: HashMap::new(),
+        speeds: Default::default(),
         scanned_at: SystemTime::now(),
         sessions_seen: Vec::new(),
         log_lines: Vec::new(),

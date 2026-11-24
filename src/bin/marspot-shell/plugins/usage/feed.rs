@@ -326,7 +326,7 @@ pub(super) fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
 
 /// Unix seconds as `2026-11-10T05:55:14+00:00`, the form the feed's
 /// reader and the devops collector both use.
-pub(super) fn iso_utc(unix: i64) -> String {
+pub(in crate::plugins) fn iso_utc(unix: i64) -> String {
     let days = unix.div_euclid(86_400);
     let secs = unix.rem_euclid(86_400);
     // civil-from-days, Howard Hinnant's algorithm

@@ -27,6 +27,7 @@ mod switching;
 mod heads_up_due;
 mod burn;
 mod leave_early;
+mod leave_plan;
 mod pane_tokens;
 pub(in crate::plugins) mod heads_up;
 mod refusal;
@@ -364,6 +365,7 @@ mod tests {
     mod settings_file;
     mod telling;
     mod leaving;
+    mod leaving_targets;
     mod heads_up_keep_working;
     mod api_errors;
     mod refusal_text;

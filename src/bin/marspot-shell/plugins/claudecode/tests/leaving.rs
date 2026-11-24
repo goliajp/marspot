@@ -2,54 +2,68 @@
 //! it go, the slowest stays, and every one working on it is told.
 
 use super::*;
-use marspot::cc_usage::{CcAccount, CcModelLimit};
+use marspot::cc_usage::{CcAccount, CcModelLimit, CcUsage};
 
-const RENEWS: i64 = 4102444800;
+pub(super) const RENEWS: i64 = 4102444800;
+
+/// One account of the feed, as JSON, collected `at`.
+pub(super) fn account(mail: &str, u7: f64, reset: i64, at: i64) -> String {
+    format!(
+        r#"{{"name":"{mail}","email":"{mail}","status":"allowed","utilization_5h":null,
+            "utilization_7d":{u7},"reset_5h":null,"reset_7d":{reset},"tier":"default_claude_max_20x",
+            "collected_at":"{}","model_limits":[{{"label":"Fable","utilization":0.1,"reset":{reset}}}]}}"#,
+        crate::plugins::usage::iso_utc(at)
+    )
+}
+
+pub(super) fn write_feed(home: &std::path::Path, accounts: &[String]) {
+    let body = format!(r#"{{"generated_at": "2026-11-25T00:00:00+00:00", "accounts": [{}]}}"#, accounts.join(","));
+    fs::write(home.join(".local/state/devops/claude-usage.json"), body).unwrap();
+}
 
 /// The feed as the sweep reads it now: P1 at `u1` of its week, P2 at
 /// a fifth.
 fn feed(home: &std::path::Path, tag: &str, u1: f64) {
-    fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
-        format!(
-            r#"{{"generated_at": "2026-11-25T00:00:00+00:00", "accounts": [
-               {{"name":"A","email":"{tag}1@example","status":"allowed","utilization_5h":null,
-                "utilization_7d":{u1},"reset_5h":null,"reset_7d":{RENEWS},"tier":"default_claude_max_20x",
-                "model_limits":[{{"label":"Fable","utilization":0.1,"reset":{RENEWS}}}]}},
-               {{"name":"B","email":"{tag}2@example","status":"allowed","utilization_5h":null,
-                "utilization_7d":0.2,"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x",
-                "model_limits":[{{"label":"Fable","utilization":0.1,"reset":4102444900}}]}}]}}"#
-        ),
-    )
-    .unwrap();
+    let now = rooms::unix_now();
+    write_feed(home, &[account(&format!("{tag}1@example"), u1, RENEWS, now), account(&format!("{tag}2@example"), 0.2, RENEWS + 100, now)]);
 }
 
-/// An hour of P1's readings, its week rising six points an hour to `u1`.
-fn p1_trend(plugin: &mut ClaudecodePlugin, tag: &str, u1: f64) {
-    let at0 = 1_795_000_000;
-    for k in 0..=12i64 {
-        let u = u1 - 0.06 * (12 - k) as f64 / 12.0;
-        plugin.leave.trends.note(&[CcAccount {
-            name: "A".into(),
-            email: format!("{tag}1@example"),
-            status: "allowed".into(),
-            util_5h: None,
-            util_7d: Some(u),
-            reset_5h: None,
-            reset_7d: Some(RENEWS),
-            model_limits: vec![CcModelLimit { label: "Fable".into(), util: Some(0.1), reset: Some(RENEWS) }],
-            collected_at: at0 + k * 300,
-            limits_as_of: None,
-            tier: "default_claude_max_20x".into(),
-        }]);
+/// What the scan thread measures: an hour of readings before the feed
+/// on disk, each account in `rising` going up `per_hour` to where the
+/// feed has it now. The feed's own reading is the newest.
+pub(super) fn measured(result: &mut ScanResult, rising: &[(&str, f64)]) {
+    let now = rooms::unix_now();
+    let feed = marspot::cc_usage::read().expect("the feed");
+    let mut cache = super::burn::TrendCache::default();
+    let mut log = Vec::new();
+    for k in (1..=12i64).rev() {
+        let at = now - k * 300;
+        let accounts: Vec<CcAccount> = feed
+            .accounts
+            .iter()
+            .filter_map(|a| {
+                let (_, speed) = rising.iter().find(|(m, _)| *m == a.email)?;
+                let u = a.util_7d? - speed * k as f64 / 12.0;
+                let fable = vec![CcModelLimit { label: "Fable".into(), util: Some(0.1), reset: a.reset_7d }];
+                Some(CcAccount { util_7d: Some(u), collected_at: at, model_limits: fable, ..a.clone() })
+            })
+            .collect();
+        cache.take(Some(&CcUsage { generated_at: at, accounts }), at, &mut log);
     }
+    assert!(feed.accounts.iter().all(|a| a.collected_at > now - 60), "the feed is current");
+    result.speeds = cache.take(Some(&feed), now, &mut log);
 }
 
-fn confirmed(uuid: &str) {
+/// P1 rising six points an hour.
+fn p1_trend(result: &mut ScanResult, tag: &str) {
+    measured(result, &[(&format!("{tag}1@example"), 0.06)]);
+}
+
+pub(super) fn confirmed(uuid: &str) {
     fs::write(model_push_dir().join(uuid), "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n").unwrap();
 }
 
-fn rest(host: &FakeHost, sid: u64) {
+pub(super) fn rest(host: &FakeHost, sid: u64) {
     host.set_status(sid, crate::plugins::PaneStatusView {
         status: marspot::pane_state::PaneStatus::AwaitingUser,
         held: Duration::from_secs(600),
@@ -57,16 +71,17 @@ fn rest(host: &FakeHost, sid: u64) {
     });
 }
 
-fn dryrun() {
-    marspot::settings::set_for_test(marspot::settings::Settings {
-        cc_rebalance: marspot::settings::Rebalance::DryRun,
-        ..Default::default()
-    });
+pub(super) fn rebalance_mode(mode: marspot::settings::Rebalance) {
+    marspot::settings::set_for_test(marspot::settings::Settings { cc_rebalance: mode, ..Default::default() });
 }
 
-/// Panes on P1 with these sessions and token weights, all resting
-/// unless `busy`.
-fn panes_on_p1(home: &TestHome, tag: &str, host: &FakeHost, panes: &[(u64, f64, bool)]) -> (ClaudecodePlugin, ScanResult) {
+fn dryrun() {
+    rebalance_mode(marspot::settings::Rebalance::DryRun);
+}
+
+/// Panes on `profile` with these sessions and token weights, all
+/// resting unless `busy`.
+pub(super) fn panes_on(home: &TestHome, tag: &str, host: &FakeHost, profile: u8, panes: &[(u64, f64, bool)]) -> (ClaudecodePlugin, ScanResult) {
     let mut plugin = ClaudecodePlugin::new();
     plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
     plugin.host_load = || None;
@@ -75,7 +90,10 @@ fn panes_on_p1(home: &TestHome, tag: &str, host: &FakeHost, panes: &[(u64, f64, 
     for &(sid, tokens, busy) in panes {
         let uuid = format!("u-{tag}-{sid}");
         confirmed(&uuid);
-        plugin.last_meta.insert(sid, pane_on_p1(home, &uuid));
+        let mut meta = pane_on_p1(home, &uuid);
+        meta.profile_num = profile;
+        meta.config_dir = Some(home.join(format!(".claude-profile-{profile}")).to_string_lossy().into_owned());
+        plugin.last_meta.insert(sid, meta);
         result.sessions_seen.push(sid);
         result.new_models.insert(sid, "opus-5-5".into());
         result.new_vetoes.insert(sid, (false, false));
@@ -88,7 +106,11 @@ fn panes_on_p1(home: &TestHome, tag: &str, host: &FakeHost, panes: &[(u64, f64, 
     (plugin, result)
 }
 
-fn moved(host: &FakeHost) -> Vec<u64> {
+fn panes_on_p1(home: &TestHome, tag: &str, host: &FakeHost, panes: &[(u64, f64, bool)]) -> (ClaudecodePlugin, ScanResult) {
+    panes_on(home, tag, host, 1, panes)
+}
+
+pub(super) fn moved(host: &FakeHost) -> Vec<u64> {
     let mut sids: Vec<u64> = host.submitted.lock().unwrap().iter().map(|(sid, _)| *sid).collect();
     sids.sort();
     sids
@@ -104,7 +126,7 @@ fn rebalance_resting_panes_leave_an_account_with_an_hour_and_a_half_left_but_the
     feed(&home, "lv", 0.91);
     let host = FakeHost::new(home.join("state"));
     let (mut plugin, mut result) = panes_on_p1(&home, "lv", &host, &[(201, 900.0, false), (202, 100.0, false), (203, 500.0, false)]);
-    p1_trend(&mut plugin, "lv", 0.91);
+    p1_trend(&mut result, "lv");
     plugin.rebalanced.insert(203, (Instant::now() - Duration::from_secs(600), 1));
 
     sweep(&mut plugin, &host, &mut result);
@@ -112,9 +134,22 @@ fn rebalance_resting_panes_leave_an_account_with_an_hour_and_a_half_left_but_the
     let sent = host.sent.lock().unwrap().clone();
     assert!(sent.iter().all(|(_, s)| s.contains(".claude-profile-2")), "{sent:?}");
     let logged = host.logged.lock().unwrap().clone();
-    assert!(logged.iter().any(|(e, l)| e == "quota.short" && l.contains("sid=202 stays")), "{logged:?}");
+    assert!(logged.iter().any(|(e, l)| e == "quota.short" && l.contains("P1 lasts 1.5h") && l.contains("sid=202 stays")), "{logged:?}");
     assert_eq!(logged.iter().filter(|(e, _)| e == "quota.leaving").count(), 2, "{logged:?}");
     assert!(!logged.iter().any(|(e, _)| e.starts_with("rebalance.")), "not an ordinary move: {logged:?}");
+}
+
+/// Ordinary moves switched off do not hold it either.
+#[test]
+fn rebalance_off_does_not_hold_leaving_a_short_account() {
+    rebalance_mode(marspot::settings::Rebalance::Off);
+    let home = quota_home("lvoff");
+    feed(&home, "lvoff", 0.91);
+    let host = FakeHost::new(home.join("state"));
+    let (mut plugin, mut result) = panes_on_p1(&home, "lvoff", &host, &[(241, 900.0, false), (242, 100.0, false)]);
+    p1_trend(&mut result, "lvoff");
+    sweep(&mut plugin, &host, &mut result);
+    assert_eq!(moved(&host), vec![241]);
 }
 
 #[test]
@@ -124,7 +159,7 @@ fn rebalance_the_last_pane_on_a_short_account_does_not_leave() {
     feed(&home, "lone", 0.91);
     let host = FakeHost::new(home.join("state"));
     let (mut plugin, mut result) = panes_on_p1(&home, "lone", &host, &[(211, 900.0, false)]);
-    p1_trend(&mut plugin, "lone", 0.91);
+    p1_trend(&mut result, "lone");
     sweep(&mut plugin, &host, &mut result);
     assert!(moved(&host).is_empty(), "it uses what is left");
 }
@@ -137,7 +172,7 @@ fn rebalance_an_account_lasting_over_two_hours_is_not_left() {
     feed(&home, "long", 0.80);
     let host = FakeHost::new(home.join("state"));
     let (mut plugin, mut result) = panes_on_p1(&home, "long", &host, &[(221, 900.0, false), (222, 100.0, true)]);
-    p1_trend(&mut plugin, "long", 0.80);
+    p1_trend(&mut result, "long");
     sweep(&mut plugin, &host, &mut result);
     assert!(moved(&host).is_empty());
     assert!(plugin.heads_up.is_empty(), "nobody told");
@@ -152,7 +187,7 @@ fn heads_up_reaches_every_busy_pane_on_a_short_account_including_the_one_that_st
     feed(&home, "lvh", 0.91);
     let host = FakeHost::new(home.join("state"));
     let (mut plugin, mut result) = panes_on_p1(&home, "lvh", &host, &[(231, 900.0, true), (232, 100.0, true)]);
-    p1_trend(&mut plugin, "lvh", 0.91);
+    p1_trend(&mut result, "lvh");
     sweep(&mut plugin, &host, &mut result);
     assert!(moved(&host).is_empty(), "busy panes are not moved");
     for sid in [231, 232] {
@@ -170,4 +205,33 @@ fn heads_up_reaches_every_busy_pane_on_a_short_account_including_the_one_that_st
     assert_eq!(moved(&host), vec![231]);
     let sent = host.sent.lock().unwrap().clone();
     assert!(sent[0].1.contains(&super::heads_up::after_warned_move(false)), "{:?}", sent[0].1);
+}
+
+/// Back over two hours is not yet recovered: the busy panes are not
+/// told again and the account is not logged as over it until it is
+/// seen to last four.
+#[test]
+fn heads_up_and_the_short_line_wait_for_four_hours_before_counting_an_account_recovered() {
+    dryrun();
+    let home = quota_home("rec");
+    feed(&home, "rec", 0.91);
+    let host = FakeHost::new(home.join("state"));
+    let (mut plugin, mut result) = panes_on_p1(&home, "rec", &host, &[(251, 900.0, true), (252, 100.0, true)]);
+    let p1 = "rec1@example";
+    measured(&mut result, &[(p1, 0.06)]);
+    sweep(&mut plugin, &host, &mut result);
+    assert!(plugin.heads_up.contains_key(&251));
+    let over = |host: &FakeHost| host.logged.lock().unwrap().iter().filter(|(e, _)| e == "quota.short_over").count();
+
+    // nine points at three an hour: three hours
+    measured(&mut result, &[(p1, 0.03)]);
+    sweep(&mut plugin, &host, &mut result);
+    assert!(plugin.heads_up.contains_key(&251), "three hours is not a recovery");
+    assert_eq!(over(&host), 0);
+
+    // at 1.8 an hour: five
+    measured(&mut result, &[(p1, 0.018)]);
+    sweep(&mut plugin, &host, &mut result);
+    assert!(!plugin.heads_up.contains_key(&251), "recovered: told again next time");
+    assert_eq!(over(&host), 1, "{:?}", host.logged.lock().unwrap());
 }

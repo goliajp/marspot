@@ -408,6 +408,7 @@ pub(super) fn worker_main(
     req_rx: Receiver<()>,
     res_tx: Sender<ScanResult>,
 ) {
+    ctx.caches.trends.load();
     while req_rx.recv().is_ok() {
         // Deliberately outside `scan_once`: this one reaches out of
         // marspot and edits Claude Code's settings, and `scan_once`
@@ -728,9 +729,7 @@ impl WorkerCtx {
                 new_activity.insert(f.shelld_sid, activity_of(tail.as_deref(), has_young_child));
             }
             self.note_context(f.shelld_sid, bound_by, jsonl_path.as_deref());
-            if let Some(path) = jsonl_path.as_ref() {
-                pane_tokens.insert(f.shelld_sid, self.caches.tokens.recent(path, super::rooms::unix_now()));
-            }
+            pane_tokens.extend(jsonl_path.as_ref().map(|p| (f.shelld_sid, self.caches.tokens.recent(p, super::rooms::unix_now()))));
             turn_looks.extend(turns::look_in(bound_by, tail.as_deref()).map(|l| (f.shelld_sid, l)));
             // a read failure is an empty window, which every check below
             // takes as "no evidence"
@@ -810,10 +809,11 @@ impl WorkerCtx {
             .collect();
         let profiles = self.caches.profiles.read();
         let (usage, choices) = quota_inputs(&new_meta);
+        let speeds = self.caches.trends.take(usage.as_ref(), super::rooms::unix_now(), &mut log_lines);
         ScanResult {
             new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes,
             scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused, fable_refused,
-            helpers: super::with_helpers::HelperRoles::of_observation(obs), pane_tokens,
+            helpers: super::with_helpers::HelperRoles::of_observation(obs), pane_tokens, speeds,
         }
     }
 }
