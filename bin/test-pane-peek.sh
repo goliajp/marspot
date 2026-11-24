@@ -239,6 +239,8 @@ for (( i = 0; i < 40; i++ )); do
 done
 check "the parent took the title strip's row ($HOST_SIZE -> $LONE)" test "$LONE" != "$HOST_SIZE"
 sleep 1
+# the counts below prove nothing unless the shells' SIGWINCH records exist
+check "the parent was told its new size, so its SIGWINCHes are counted" test "$(tail -1 "$SD/winch-host" 2>/dev/null)" = "$LONE"
 WINCH1=$(cat "$SD/winch-host" 2>/dev/null | wc -l)
 lines=$(events PEEK_LINE)
 check "place peek" pc place "$H2" peek
@@ -246,6 +248,7 @@ check "the header says what is viewed" wait_count "$SD" PEEK_LINE "$lines" 10
 check "in words that fit the header" test "$(last_of PEEK_LINE drawn)" = 1 -a "$(last_of PEEK_LINE chars)" -gt 0
 check "the helper has the parent's size" bash -c "$(printf '%q' "$PEER") pane run $H2 --timeout 20 'stty size > $SD/h2-size' >/dev/null && [[ \$(cat $SD/h2-size) == '$LONE' ]]"
 sleep 1
+check "and was told it, so its SIGWINCHes are counted" test "$(tail -1 "$SD/winch-h2" 2>/dev/null)" = "$LONE"
 WINCH2=$(cat "$SD/winch-h2" 2>/dev/null | wc -l)
 lines=$(events PEEK_LINE)
 left=$(events PEEK_LEFT)

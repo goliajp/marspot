@@ -227,6 +227,7 @@ impl CoreApp {
             return;
         }
         let (cw, ch) = self.renderer.cell_dims();
+        // the ascent moves only the baseline, which the log does not say
         let drawn = marspot::ui::components::view_line::place(&win!(self, wi).layout, line, (cw as f32, ch as f32, 0.0));
         lx_event!("PEEK_LINE", "the header of a window with one pane says what the pane shows",
             chars = line.chars().count() as u32, drawn = drawn.is_some() as u32);

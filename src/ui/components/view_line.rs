@@ -35,7 +35,8 @@ pub fn place(layout: &Layout, text: &str, (cell_w, cell_h, ascent): (f32, f32, f
     let pane = layout.cells.first()?;
     let gap = chrome::px(chrome::TITLE_GAP);
     let buttons = layout.toolbar_buttons();
-    let left = buttons.iter().map(|b| b.x + b.w).fold(0.0, f64::max) + gap;
+    // a zero-width button is one this layout does not show
+    let left = buttons.iter().filter(|b| b.w > 0.0).map(|b| b.x + b.w).fold(0.0, f64::max) + gap;
     let version = Toolbar::of(layout, [false; 5], (cell_w, cell_h, ascent)).label;
     let right = version.map_or(layout.window_w, |(x, _)| x as f64) - gap;
     let room = right - left;
@@ -45,6 +46,8 @@ pub fn place(layout: &Layout, text: &str, (cell_w, cell_h, ascent): (f32, f32, f
     let (bytes, clipped) = fit_mono_len(text, room, cell_w as f64);
     let shown = cells(&text[..bytes]) + usize::from(clipped);
     let w = shown as f64 * cell_w as f64;
+    // centred over the pane, then kept between toolbar and label: in a
+    // window too narrow to centre it the line starts at the toolbar
     let centred = pane.x + (pane.w - w) * 0.5;
     let x = centred.clamp(left, (right - w).max(left));
     // the header's one row, as the version label is set on it

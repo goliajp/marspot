@@ -78,6 +78,26 @@ fn peek_line_is_not_drawn_without_a_lone_pane_viewing_and_a_header() {
     });
 }
 
+/// A button the layout does not show (zero wide) does not push the
+/// line right, wherever its rect is.
+#[test]
+fn peek_line_ignores_a_hidden_button() {
+    at_scale(1.0, || {
+        let Some(stage) = Stage::new() else { return };
+        let l = lone(&stage, (1400.0, 900.0), 1.0, 1);
+        let shown = place(&l, TEXT, cell(&stage)).unwrap();
+        let mut hidden = l.clone();
+        hidden.settings_button_rect.w = 0.0;
+        hidden.settings_button_rect.x = 1000.0;
+        let mut cut = l.clone();
+        cut.settings_button_rect.w = 0.0;
+        let at = place(&hidden, TEXT, cell(&stage)).unwrap();
+        assert_eq!(at, place(&cut, TEXT, cell(&stage)).unwrap());
+        assert!(at.x < 1000.0, "{at:?}");
+        assert_eq!(at.x, shown.x, "centred as before: {at:?}");
+    });
+}
+
 /// A window too narrow for the line cuts it with an ellipsis and keeps
 /// it off the toolbar and the version label.
 #[test]
