@@ -81,6 +81,7 @@ cleanup() {
   for h in ${STARTED[@]+"${STARTED[@]}"}; do
     [[ -n "$h" ]] || continue
     T=60 peer helper stop "$h" >/dev/null 2>&1 || say "could not stop $h"
+    timeout 30 docker ps -q --filter "label=marspot.helper=$h" 2>/dev/null | xargs -r timeout 60 docker rm -f >/dev/null 2>&1
   done
   [[ -n "$PARENT" ]] && T=30 peer pane close "$PARENT" >/dev/null 2>&1
   rm -rf "${OWN:?}"
@@ -194,7 +195,7 @@ measure_box() {
   cli="$(tree_rss "${shell:-0}" | cut -d' ' -f1)"
   [[ -n "${mem// }" ]] || { fail "$agent box: docker reports no memory for container $id"; return 1; }
   echo "MEM agent=$agent isolation=container sid=$sid container_mem=${mem// /,} host_cli_kib=$cli"
-  ROWS+=("$agent container mem ${samples[1]} in the container, $cli KiB of docker CLI on the host")
+  ROWS+=("$agent container mem $(median <<< "${samples[*]}") in the container, $cli KiB of docker CLI on the host")
 }
 
 # whether the account switching takes claude helper `$1` into account:
@@ -247,13 +248,18 @@ run_one() {
     if [[ $agent == codex ]]; then
       local after; after="$(app_servers)"
       echo "MEM agent=codex isolation=host part=app-server kib_and_count_before=${servers_before// /,} after=${after// /,}"
+      [[ "${after#* }" != 0 ]] || fail "codex host: no app-server daemon found to measure"
       ROWS+=("codex host app-server daemons (outside the pane, shared): ${servers_before% *} -> ${after% *} KiB")
     fi
     [[ $agent == claude ]] && ((!MEMORY_ONLY)) && check_switchable "$sid" "$from"
   else
     measure_box "$agent" "$sid"
   fi
-  T=60 peer helper stop "$sid" >/dev/null && STARTED=(${STARTED[@]+"${STARTED[@]/$sid}"})
+  if T=60 peer helper stop "$sid" >/dev/null; then
+    local kept=() h
+    for h in ${STARTED[@]+"${STARTED[@]}"}; do [[ "$h" == "$sid" ]] || kept+=("$h"); done
+    STARTED=(${kept[@]+"${kept[@]}"})
+  fi
 }
 
 reply="$(T=30 peer pane open --json --cwd "$CWD" ${UNDER:+--parent "$UNDER"})" || { echo "pane open failed: $reply"; exit 1; }

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.676"  # the default cap on shadow panes follows the machine memory
+shell   = "0.7.677"  # an unreadable machine memory size is logged before the cap falls to its floor
 core    = "0.12.677"  # the helper panel says on its row a move that failed and follows a retargeted deny-list symlink
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound

@@ -35,6 +35,9 @@ fn physical_memory() -> u64 {
     let mut len = std::mem::size_of::<u64>();
     // SAFETY: hw.memsize is a u64 and `len` says how big the buffer is
     let rc = unsafe { libc::sysctlbyname(c"hw.memsize".as_ptr(), (&raw mut bytes).cast(), &mut len, std::ptr::null_mut(), 0) };
+    if rc != 0 {
+        marspot::lx_warn!("pane_control.memsize.unread", &format!("rc={rc} errno={}", std::io::Error::last_os_error()));
+    }
     if rc == 0 { bytes } else { 0 }
 }
 
