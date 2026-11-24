@@ -203,6 +203,8 @@ mod tests {
         // fill the terminal nobody reads, then exit without closing it first
         let fill = "use Fcntl; my $f = fcntl(STDOUT, F_GETFL, 0); fcntl(STDOUT, F_SETFL, $f | O_NONBLOCK); \
                     1 while defined(syswrite(STDOUT, 'x' x 4096)); fcntl(STDOUT, F_SETFL, $f); POSIX::_exit(0)";
+        // the reaper under test waits for it
+        #[allow(clippy::zombie_processes)]
         let child = Command::new("/usr/bin/perl")
             .args(["-MPOSIX", "-e", fill])
             .stdin(std::process::Stdio::null())
