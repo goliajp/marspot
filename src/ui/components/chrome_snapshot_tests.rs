@@ -165,7 +165,7 @@ fn snapshot_on(
     let strip_grids: Vec<Option<Grid>> = panes
         .iter()
         .zip(&layout.cells)
-        .map(|(p, c)| (p.strip > 0).then(|| super::helper_strip_tests::strip_scene(c.cols, p.strip)))
+        .map(|(p, c)| (p.strip > 0).then(|| super::helper_strip_view_tests::strip_scene(c.cols, p.strip)))
         .collect();
 
     let grids: Vec<Grid> =
@@ -193,7 +193,7 @@ fn snapshot_on(
             highlight_spans: p.hits,
             search_overlay: p.search.clone(),
             history: p.history, session: 0,
-            strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_tests::strip_under(grid, strip)),
+            strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_view_tests::strip_under(grid, strip)),
             seq: 1 + i as u64,
         })
         .collect();

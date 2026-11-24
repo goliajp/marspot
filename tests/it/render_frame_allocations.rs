@@ -46,8 +46,14 @@ const CEILING: usize = 14;
 /// moved out of it: moving an allocation into a helper does not take it
 /// off the frame path.
 fn render_inner_body() -> String {
-    let mut body = fn_body("src/bin/marspot-core.rs", "fn render_inner(");
+    let mut body = fn_body("src/bin/marspot-core/draw.rs", "fn render_inner(");
     assert!(body.lines().count() > 50, "render_inner came out {} lines long", body.lines().count());
+    for head in ["fn pane_labels(", "fn publish_overlays("] {
+        body.push('\n');
+        body.push_str(&fn_body("src/bin/marspot-core/draw.rs", head));
+    }
+    body.push('\n');
+    body.push_str(&fn_body("src/bin/marspot-core/helper_strip/mod.rs", "pub(super) fn place_strips("));
     body.push('\n');
     body.push_str(&fn_body("src/bin/marspot-core/panes.rs", "pub(super) fn pane_names("));
     body

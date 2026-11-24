@@ -66,7 +66,7 @@ pub(crate) mod panel_snapshot_tests;
 #[cfg(test)]
 mod chrome_snapshot_tests;
 #[cfg(test)]
-mod helper_strip_tests;
+mod helper_strip_view_tests;
 #[cfg(test)]
 mod settings_view_tests;
 #[cfg(test)]
