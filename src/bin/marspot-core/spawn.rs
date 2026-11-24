@@ -270,7 +270,7 @@ pub(super) fn spawn_l3_pane_async_as(
 /// window appears immediately holding one "starting…" pane per saved
 /// slot; the real panes replace them when the worker lands.
 ///
-/// `sweeps_registry: false` — see `assemble_panes_at_boot`.
+/// `Sweep::Off` — see `assemble_panes_at_boot`.
 pub(super) fn assemble_restore_window_async(
     window_id: u32,
     record: marspot::state::SavedWindowLayout,
@@ -290,7 +290,7 @@ pub(super) fn assemble_restore_window_async(
                 cols,
                 rows,
                 &inner_tx,
-                false,
+                Sweep::Off,
                 &std::collections::HashSet::new(),
             );
             let _ = tx.send(CoreEvent::WindowRestoreFinished(

@@ -66,3 +66,15 @@ fn an_image_that_takes_over_removes_only_the_socket_the_first_one_bound() {
     adopt_bound(SocketId::of(&theirs)).0.leave_unreachable();
     assert!(!theirs.exists(), "its own goes");
 }
+
+/// An image too old to carry the socket's id handed over: the socket at
+/// the path is the one it bound, and it goes with the session.
+#[test]
+fn an_image_that_takes_over_from_one_without_the_socket_id_removes_the_socket() {
+    let _sandbox = sandbox_state_dir();
+    std::fs::create_dir_all(session_dir(SID)).unwrap();
+    let left = session_socket_path(SID);
+    std::fs::write(&left, "").unwrap();
+    adopt().0.leave_unreachable();
+    assert!(!left.exists(), "the socket the old image bound is left behind");
+}

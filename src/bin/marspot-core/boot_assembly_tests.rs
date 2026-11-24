@@ -186,7 +186,7 @@ fn dead_sessions_resurrect_in_saved_slot_order() {
     let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
     let (tx, _rx) = mpsc::channel();
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(
         pane_sids(&panes),
         vec![9, 12, 5],
@@ -214,7 +214,7 @@ fn assembly_binds_the_saved_slots_to_their_sessions() {
     }
     let s = saved(&[(4, ""), (6, "")]);
     let (tx, _rx) = mpsc::channel();
-    let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
+    let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(pane_sids(&panes), vec![4, 6]);
 }
 
@@ -227,7 +227,7 @@ fn spawn_failure_yields_vacant_slots_never_compacts() {
     let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
     let (tx, _rx) = mpsc::channel();
     let (panes, _) =
-        assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
     let sids = pane_sids(&panes);
     assert_eq!(sids[0], 7, "slot 0 keeps its sid for revive");
@@ -256,7 +256,7 @@ fn orphan_live_session_adopted_not_killed() {
 
     let s = saved(&[(0, "")]);
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, Sweep::Full, &Default::default());
     let sids = pane_sids(&panes);
     assert_eq!(panes.len(), 2, "slot pane + adopted orphan: {sids:?}");
     assert!(
@@ -281,7 +281,7 @@ fn unreferenced_dead_dir_retires_to_recycle_bin() {
     let s = saved(&[(700, "")]);
     let (tx, _rx) = mpsc::channel();
     let (panes, _) =
-        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.len(), 1);
     assert!(
         !reg::session_dir(31).exists(),
@@ -323,7 +323,7 @@ fn a_restore_assembly_leaves_other_windows_sessions_alone() {
     sb.break_session_bin(); // this window's own slot stays vacant
     let s = saved(&[(700, "")]);
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, false, &Default::default());
+        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, Sweep::Off, &Default::default());
 
     let sids = pane_sids(&panes);
     assert_eq!(panes.len(), 1, "only its own slot: {sids:?}");
@@ -365,7 +365,7 @@ fn sessions_owned_by_another_saved_window_are_left_for_it() {
     let reserved: std::collections::HashSet<u64> = [live_sid, 41].into_iter().collect();
     let s = saved(&[(700, "")]);
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &reserved);
+        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, Sweep::Full, &reserved);
 
     let sids = pane_sids(&panes);
     assert_eq!(panes.len(), 1, "boot window keeps only its own slot: {sids:?}");
@@ -420,7 +420,7 @@ fn a_dormant_slot_boots_as_a_placeholder() {
     };
     let (tx, _rx) = mpsc::channel();
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.len(), 2);
     assert!(!panes[0].is_dormant(), "live slot stays a session slot");
     assert!(panes[1].is_dormant(), "dormant slot is a placeholder again");
@@ -436,7 +436,7 @@ fn duplicate_saved_sid_does_not_double_bind() {
     let s = saved(&[(9, "a"), (9, "b")]);
     let (tx, _rx) = mpsc::channel();
     let (panes, _) =
-        assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, Sweep::Full, &Default::default());
     let sids = pane_sids(&panes);
     assert_eq!(sids.len(), 2);
     assert_eq!(sids[0], 9);
@@ -463,7 +463,7 @@ fn a_closed_session_is_not_restored() {
     }
     let layout = saved(&[(dead, "d"), (kept, "k"), (live, "l")]);
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&layout), 3, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&layout), 3, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.iter().map(Pane::is_dormant).collect::<Vec<_>>(), [true, false, true]);
     assert_eq!(pane_sids(&panes)[1], kept);
     assert!(reattached.is_empty());

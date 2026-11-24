@@ -232,7 +232,9 @@ impl SessionListener {
             keep_listener: Some(listener),
             suppress_drop: false,
             ended: false,
-            socket_id,
+            // an image older than the one that carries the socket's id
+            // bound the one at the path
+            socket_id: socket_id.or_else(|| crate::own_socket::SocketId::of(&session_socket_path(id))),
             // RFC-004 A.3 — the pre-execv image's lock fd is still
             // open in this same process (CLOEXEC cleared before the
             // swap), so the flock is already ours; nothing to acquire.

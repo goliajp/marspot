@@ -2468,7 +2468,7 @@ mod scrollbar_input;
 mod boot_assembly;
 #[path = "marspot-core/saved_slots.rs"]
 mod saved_slots;
-use boot_assembly::assemble_panes_at_boot;
+use boot_assembly::{Sweep, assemble_panes_at_boot};
 #[path = "marspot-core/spawn.rs"]
 mod spawn;
 use spawn::{
@@ -2821,7 +2821,7 @@ fn main() {
     // takes windows[0]; the rest are restored as L1 opens them (each
     // `SurfaceAttachWindow` for an unseen id pops the next record).
     let mut saved_state = marspot::state::read();
-    saved_slots::forget_closed_slots(&mut saved_state);
+    let boot_sweep = saved_slots::forget_closed_slots(&mut saved_state);
     // Each record keeps the slot it was read from — that index is what
     // pairs it with `window-state.bin`'s geometry list, and it has to
     // survive windows being closed and parked.
@@ -2882,11 +2882,8 @@ fn main() {
         Ok(false) => {}
         Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
     }
-    // RFC-004 B.1 — identity-keyed slot assembly (extracted to
-    // `assemble_panes_at_boot`; see its doc for the semantics).
-    // The boot assembly is the sweeping one: it adopts orphaned
-    // live sessions and retires unclaimed dirs.  Restored windows
-    // (step 6b) run the same function with that turned off.
+    // RFC-004 B.1 — identity-keyed slot assembly; the boot one sweeps
+    // the registry (see `Sweep`), restored windows do not.
     let reserved_sids = saved_slots::reserved_sids(&saved_windows);
     let (assembled, reattached_ids) = assemble_panes_at_boot(
         boot_window.as_ref(),
@@ -2894,7 +2891,7 @@ fn main() {
         boot_cols,
         boot_rows,
         &event_tx,
-        true,
+        boot_sweep,
         &reserved_sids,
     );
     let mut panes = assembled;

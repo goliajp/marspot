@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.667"  # mcp initialize tells every agent when to start a helper; the helpers skill leads with its trigger
-core    = "0.12.669"  # the helper strip is on by default
-session = "0.11.437"  # a line break inside a string a text watch skipped keeps it unsure
+core    = "0.12.672"  # the slow-exit reaper test skips when the runner let the exit finish first
+session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
