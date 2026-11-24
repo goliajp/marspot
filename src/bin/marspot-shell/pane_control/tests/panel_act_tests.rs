@@ -183,7 +183,7 @@ fn helper_panel_close_all_leaves_a_pane_just_moved_below_another() {
 fn helper_panel_a_pane_the_core_finds_in_a_window_is_not_closed() {
     let sandbox = marspot_term::test_env::sandbox_state_dir();
     live_entries(&sandbox, &[2, 3, 4]);
-    let (closed, counts, log) = closes_seeing(act(1, PanelAct::CloseAllOfParent), |c| c.obs.clone(), "refused: in a window", &[2]);
+    let (closed, counts, log) = closes_seeing(act(1, PanelAct::CloseAllOfParent), |c| c.obs.clone(), r#""sid":2,"count":1,"bytes":0,"result":"bad_request""#, &[2]);
     assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3]);
     assert_eq!(counts, (2, 1));
     assert!(log.contains("pane.close"), "{log}");
