@@ -125,3 +125,23 @@ fn pane_control_resize_right_after_an_open_reaches_the_core() {
     assert_eq!(window.map(|_| ()).map_err(|r| r.code), Err(ErrorCode::NotResizable));
     resized.unwrap_or_else(|r| panic!("the view is older than the pane, and the resize was refused: {r:?}"));
 }
+
+#[test]
+fn pane_control_only_a_helpers_pane_is_said_to_be_one() {
+    let (hub, rx) = hub_at(&temp("openhelper"));
+    let c = ctx(CallerKey::Pane(10), vec![entry(10, "/w/spg")], Config::default());
+    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 0, rows: 0, command: None };
+    let said = std::sync::Mutex::new(Vec::new());
+    let answer = |hub: &Hub, msg: MsgType, p: &[u8]| {
+        if let Some(Ok(m)) = (msg == MsgType::PaneSpawn).then(|| decode_pane_spawn(p)) {
+            said.lock().unwrap().push(m.helper);
+        }
+        spawn_as(4245)(hub, msg, p);
+    };
+    with_core(&hub, rx, answer, || {
+        let mut conn = Conn::new(&hub, Peer::default(), None);
+        ops_pane::open(&mut conn, &c, &open).unwrap();
+        ops_pane::open_helper(&mut conn, &c, &open).unwrap();
+    });
+    assert_eq!(*said.lock().unwrap(), [false, true]);
+}
