@@ -103,8 +103,8 @@ impl Track {
         self.last_output
     }
 
-    /// Position and status of the latest `OSC 133 ; D`, of any and of
-    /// a run's.
+    /// Position and status of the latest `OSC 133 ; D`, of any, of
+    /// a run's and of a prompt hook's.
     pub(crate) fn ends(&self) -> LatestEnds {
         self.ends.latest()
     }

@@ -68,6 +68,11 @@ impl PaneCtl {
         self.watches.check_every_batch();
     }
 
+    #[cfg(test)]
+    pub(crate) fn refuse_reports(&mut self, n: u32) {
+        self.watches.refuse_reports(n);
+    }
+
     /// The line of the first watch that was met, if one was.
     #[cfg(test)]
     pub(crate) fn met(&self) -> Option<Option<u64>> {
@@ -97,7 +102,8 @@ impl PaneCtl {
     /// After the loop's turn of parsing: note what the batch did, move
     /// input along, look at the watches, and send what is owed.  A
     /// watch met is reported here alone, and the screen it was met on
-    /// is published first: its reader looks at once.
+    /// is published first, once, if L2 is connected: its reader looks at
+    /// once.
     pub(crate) fn after_turn(
         &mut self,
         session: &mut SessionImpl,
@@ -111,8 +117,9 @@ impl PaneCtl {
         }
         self.step(session, poke.as_deref_mut());
         self.watches.evaluate(session, &mut self.track, batch, procs_changed);
-        if let Some(f) = frames
-            && self.watches.unsent()
+        if self.watches.take_met()
+            && let Some(f) = frames
+            && poke.is_some()
         {
             f.publish_withheld(session, poke.as_deref_mut());
         }
@@ -231,6 +238,10 @@ fn drain(poke: Option<&mut ControlWriter>) {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[cfg(test)]
+#[path = "watch_frames_tests.rs"]
+mod watch_frames_tests;
 
 #[cfg(test)]
 #[path = "watch_perf_tests.rs"]

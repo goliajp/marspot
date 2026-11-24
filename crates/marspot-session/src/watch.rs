@@ -64,6 +64,8 @@ enum State {
     Fired {
         report: PaneWatchFired,
         sent: bool,
+        /// Met since the last [`Watches::take_met`].
+        fresh: bool,
     },
 }
 
@@ -100,6 +102,12 @@ impl Watches {
     #[cfg(test)]
     pub(crate) fn check_every_batch(&mut self) {
         self.every_batch = true;
+    }
+
+    /// Take the next `n` reports as refused by the writer.
+    #[cfg(test)]
+    pub(crate) fn refuse_reports(&mut self, n: u32) {
+        self.refuse = n;
     }
 
     #[cfg(test)]
@@ -265,7 +273,7 @@ impl Watches {
         if let Some((pos, status, line)) = met {
             let report = PaneWatchFired { sid: self.sid, watch_id: b.watch_id, reason: WatchReason::Met, pos, status, line };
             let text = b.kind == WatchKind::Text;
-            slot.state = State::Fired { report, sent: false };
+            slot.state = State::Fired { report, sent: false, fresh: true };
             if text {
                 self.stream_texts(session);
             }
@@ -339,7 +347,7 @@ impl Watches {
                 let met = reason == WatchReason::SessionEnded && slot.body.kind == WatchKind::Exit;
                 let reason = if met { WatchReason::Met } else { reason };
                 let report = PaneWatchFired { sid: self.sid, watch_id: slot.body.watch_id, reason, pos: track.pos(), status: None, line: None };
-                slot.state = State::Fired { report, sent: false };
+                slot.state = State::Fired { report, sent: false, fresh: false };
             }
         }
     }
@@ -349,12 +357,20 @@ impl Watches {
         self.slots.iter().flatten().any(|s| matches!(s.state, State::Fired { sent: false, .. }))
     }
 
+    /// Whether a watch was met since the last call.
+    pub(crate) fn take_met(&mut self) -> bool {
+        self.slots.iter_mut().flatten().fold(false, |met, s| match &mut s.state {
+            State::Fired { fresh, .. } => std::mem::take(fresh) | met,
+            _ => met,
+        })
+    }
+
     /// Send the reports not sent yet, in slot order, until the writer
     /// refuses one.
     pub(crate) fn send_fired(&mut self, mut poke: Option<&mut ControlWriter>) {
         self.retry = false;
         for slot in self.slots.iter_mut().flatten() {
-            let State::Fired { report, sent: sent @ false } = &mut slot.state else { continue };
+            let State::Fired { report, sent: sent @ false, .. } = &mut slot.state else { continue };
             let Some(w) = poke.as_deref_mut() else { return };
             let frame = Frame::new(MsgType::PaneWatchFired, encode_pane_watch_fired(report));
             let refused = if self.refuse > 0 {

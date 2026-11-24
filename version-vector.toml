@@ -30,4 +30,4 @@
 
 shell   = "0.7.647"  # a run ends at the command end its own status line prints
 core    = "0.12.643"  # the terminal tells whether a command started after its latest end
-session = "0.11.429"  # a run whose status line never ran ends at the prompt hook's end
+session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it
