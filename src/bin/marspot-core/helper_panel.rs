@@ -16,11 +16,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use marspot::control_deny::Cover;
 use marspot::fs_watch::Watcher;
-use marspot::shell_proto::{CwdControl, HelperPanelAct, PanelAct, PanePlace, PlaceWhere, encode_helper_panel_act};
+use marspot::shell_proto::{CwdControl, HelperPanelAct, PanelAct, encode_helper_panel_act};
 use marspot::ui::components::helpers_view::{self, Ask, Control, HelperGroup, HelperRow, HelpersRender, HelpersSurface};
 
-use super::shadow_place::L2_REQ_UNTRACKED;
 use super::*;
+
+#[path = "helper_panel_move.rs"]
+mod moves;
 
 /// The badge menu's row that opens the panel: the core's own, outside
 /// every plugin's range.
@@ -45,6 +47,8 @@ pub(super) struct Family {
     counted: bool,
     /// What the panel about to open is of.
     opening: u64,
+    /// Shadow panes the panel failed to move to a window, until tried again.
+    unmoved: std::collections::HashSet<u64>,
 }
 
 impl Family {
@@ -112,6 +116,7 @@ impl CoreApp {
         let sids: Vec<u64> = self.shadows.iter().filter_map(Pane::shelld_session_id).collect();
         let fam = &mut self.pane_control.shadows.family;
         fam.parents.retain(|sid, _| sids.contains(sid));
+        fam.unmoved.retain(|sid| sids.contains(sid));
         for sid in &sids {
             // one the registry alone knows about: adopted at boot
             if let std::collections::hash_map::Entry::Vacant(v) = fam.parents.entry(*sid)
@@ -166,14 +171,7 @@ impl CoreApp {
 
     /// The data of the panel that just opened.
     pub(super) fn new_helper_panel(&mut self) -> HelperPanelState {
-        let wake = self.event_tx.clone();
-        let deny = Watcher::spawn(&[marspot::control_deny::file_of(&marspot::control_deny::path())], move || {
-            DENY_CHANGED.store(true, Ordering::Release);
-            drop(wake.send(CoreEvent::L3Ready));
-        });
-        if let Err(e) = &deny {
-            lx_warn!("core.helper_panel.deny_unwatched", &format!("{e}; shown as it was when the panel opened"));
-        }
+        let deny = self.watch_deny();
         HelperPanelState {
             of: std::mem::take(&mut self.pane_control.shadows.family.opening),
             groups: Default::default(),
@@ -181,7 +179,7 @@ impl CoreApp {
             top: None,
             scroll: Default::default(),
             surface: Default::default(),
-            _deny: deny.ok(),
+            _deny: deny,
         }
     }
 
@@ -215,7 +213,7 @@ impl CoreApp {
             sid,
             parent: self.pane_control.shadows.family.parents.get(&sid).copied().unwrap_or(0),
             name: full_name(sid, &cwd),
-            doing: self.pane_titles.get(&sid).cloned().unwrap_or(cwd),
+            doing: self.doing(sid, self.pane_titles.get(&sid).cloned().unwrap_or(cwd)),
             started_unix: pid.and_then(marspot::pidtree::proc_row).map(|r| r.start_us / 1_000_000),
         }
     }
@@ -335,13 +333,6 @@ impl CoreApp {
         }
     }
 
-    /// Into the window of its parent; the answer is nobody's.
-    fn move_helper_to_window(&mut self, sid: u64, parent: u64) {
-        let m = PanePlace { req_id: L2_REQ_UNTRACKED, sid, to: PlaceWhere::Window, host_sid: parent, force: false };
-        let route = self.place_pane(m);
-        lx_event!("HELPER_PANEL_MOVE", "the user moved a shadow pane to a window", session = sid, route = format!("{route:?}"));
-    }
-
     /// A row of a badge's menu was picked: the core's own, or one whose
     /// tag the plugin that made it knows.
     pub(super) fn pick_badge_row(&mut self, wi: usize, sid: u64, tag: u32) {
@@ -357,44 +348,6 @@ impl CoreApp {
         }
         let payload = marspot::shell_proto::encode_pane_badge_menu_action(sid, tag);
         self.pending_to_shell.push((MsgType::PaneBadgeMenuAction, payload));
-    }
-
-    /// Dev seam (`MARSPOT_DEV_PANELS`): where the first pane's `+N` is,
-    /// then the first button of each kind on the open panel.
-    pub(super) fn dev_helper_spots(&mut self, wi: usize) -> [Option<(f64, f64)>; 6] {
-        let mut out = [None; 6];
-        if self.shadows.is_empty() || !self.dev_panels.as_ref().is_some_and(|s| s.wants_helpers()) {
-            return out;
-        }
-        if let Some(c) = win!(self, wi).layout.cells.first() {
-            let (x, y, w) = (c.x, c.y_top + 4.0, c.w as usize);
-            out[0] = (0..w)
-                .map(|dx| (x + dx as f64, y))
-                .find(|p| matches!(self.chrome_at(wi, p.0, p.1), Some(ChromeTarget::Helpers(0))));
-        }
-        if win!(self, wi).helpers_panel.is_some() {
-            let r = self.helpers_rect(wi);
-            let at = |i: usize, n: f64| i as f64 * 4.0 + n + 2.0;
-            for (iy, ix) in (0..(r.h / 4.0) as usize).flat_map(|iy| (0..(r.w / 4.0) as usize).map(move |ix| (iy, ix))) {
-                let p = (at(ix, r.x), at(iy, r.y_top));
-                let spot = match self.helper_ask_at(wi, p) {
-                    Ask::Move(0) => 1,
-                    Ask::Close(0) => 2,
-                    Ask::CloseAll(0) => 3,
-                    Ask::Control(0) => 4,
-                    Ask::View(0) => 5,
-                    _ => continue,
-                };
-                out[spot].get_or_insert(p);
-            }
-        }
-        out
-    }
-
-    fn helper_ask_at(&mut self, wi: usize, p: (f64, f64)) -> Ask {
-        let surface = win!(self, wi).helpers_panel.as_ref().map(|s| Rc::clone(&s.surface));
-        let hit = surface.and_then(|s| s.borrow().kept.surface.hit(p));
-        hit.map_or(Ask::None, |h| helpers_view::asked(h.action))
     }
 }
 

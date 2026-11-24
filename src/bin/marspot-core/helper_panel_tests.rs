@@ -188,3 +188,57 @@ fn helper_panel_a_title_of_an_ended_session_is_not_kept() {
     app.set_pane_title(u64::MAX - 6, "c".into());
     assert_eq!(app.pane_titles.len(), 2);
 }
+
+/// A move asked on the panel that failed is said on the pane's row,
+/// until it is asked again.
+#[test]
+fn helper_panel_says_on_the_row_a_move_that_failed() {
+    let sb = sandbox();
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    let a = open_shadow(&mut app, &rx, 7, psid);
+    app.set_pane_title(a, "codex · a task".into());
+    app.open_helpers(0, psid);
+    press(&mut app, Ask::Move(0));
+    // the session did not answer in time
+    app.expire_places(Instant::now() + Duration::from_secs(4));
+    let failed = format!("{} · codex · a task", marspot::ui::strings::t(marspot::ui::strings::Msg::HelperNotMoved));
+    assert_eq!(draw(&mut app)[0].rows[0].doing, failed);
+    wait_for("its late answer is undone", || {
+        drive(&mut app, &rx);
+        app.pane_control.shadows.places.expired.is_empty()
+    });
+    assert!(app.find_window_pane_by_sid(a).is_none());
+    assert_eq!(draw(&mut app)[0].rows[0].doing, failed, "still said");
+
+    press(&mut app, Ask::Move(0));
+    assert_eq!(draw(&mut app)[0].rows[0].doing, "codex · a task", "asked again");
+    wait_for("the pane is in the window", || {
+        drive(&mut app, &rx);
+        app.find_window_pane_by_sid(a).is_some()
+    });
+}
+
+/// A deny list that is a symlink is watched where the link leads now,
+/// not where it led when the panel opened.
+#[test]
+fn helper_panel_deny_list_is_watched_where_its_link_leads_now() {
+    let dir = std::env::temp_dir().join(format!("helper-panel-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("kept")).unwrap();
+    let (b, link) = (dir.join("kept/b"), dir.join("control-deny.tsv"));
+    std::fs::write(dir.join("kept/a"), "").unwrap();
+    std::fs::write(&b, "").unwrap();
+    std::os::unix::fs::symlink("kept/a", &link).unwrap();
+    let (tx, heard) = std::sync::mpsc::channel();
+    let _w = Watcher::spawn(&moves::deny_watched(&link), move || {
+        let _ = tx.send(());
+    }).unwrap();
+    let next = dir.join("next");
+    std::os::unix::fs::symlink("kept/b", &next).unwrap();
+    std::fs::rename(&next, &link).unwrap();
+    heard.recv_timeout(Duration::from_secs(5)).expect("the link was pointed elsewhere");
+    while heard.recv_timeout(Duration::from_millis(200)).is_ok() {}
+    std::fs::write(&b, "/w\n").unwrap();
+    heard.recv_timeout(Duration::from_secs(5)).expect("the file it leads to now was written");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

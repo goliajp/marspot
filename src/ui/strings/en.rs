@@ -144,6 +144,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperViewBack => "Back to this session",
         Msg::HelperEnded => "ended",
         Msg::HelperMoveToWindow => "Move to window",
+        Msg::HelperNotMoved => "Not moved to a window",
         Msg::HelperClose => "Close",
         Msg::HelpersCloseAll => "Close all helpers of this session",
         Msg::HelpersDeny => "Block pane control from this directory",

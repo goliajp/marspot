@@ -188,6 +188,7 @@ impl CoreApp {
             code = code_name(code)
         );
         if super::shadow_place::is_own(req_id) {
+            self.panel_move_answered(req_id, sid, code);
             return Route::Answered(code);
         }
         let done = PaneDone {

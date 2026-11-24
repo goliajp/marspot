@@ -138,6 +138,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperViewBack => "回到这个会话",
         Msg::HelperEnded => "已结束",
         Msg::HelperMoveToWindow => "移到窗口",
+        Msg::HelperNotMoved => "没能移到窗口",
         Msg::HelperClose => "关闭",
         Msg::HelpersCloseAll => "关闭这个会话的全部帮手",
         Msg::HelpersDeny => "禁止这个目录的会话操控窗格",

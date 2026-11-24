@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.667"  # mcp initialize tells every agent when to start a helper; the helpers skill leads with its trigger
-core    = "0.12.675"  # a task cut short inside its own column is not read as a helper row's figures
+shell   = "0.7.671"  # a string for a helper not moved to a window
+core    = "0.12.677"  # the helper panel says on its row a move that failed and follows a retargeted deny-list symlink
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
