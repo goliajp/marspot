@@ -18,8 +18,11 @@ pub(crate) const WAIT_FOR_WRITER: Duration = Duration::from_millis(100);
 /// `read` until it finds a frame, while `seq` says a publish is under
 /// way.  A read that fails twice at the same even `seq` fails for what
 /// the frame is (no size, another layout), and is not waited out.
-pub(crate) fn settled<T>(seq: impl Fn() -> u64, mut read: impl FnMut() -> Option<T>) -> Option<T> {
-    let until = Instant::now() + WAIT_FOR_WRITER;
+pub(crate) fn settled<T>(seq: impl Fn() -> u64, read: impl FnMut() -> Option<T>) -> Option<T> {
+    settled_by(Instant::now() + WAIT_FOR_WRITER, seq, read)
+}
+
+fn settled_by<T>(until: Instant, seq: impl Fn() -> u64, mut read: impl FnMut() -> Option<T>) -> Option<T> {
     let mut failed_at: Option<u64> = None;
     loop {
         if let Some(v) = read() {
@@ -48,8 +51,8 @@ mod tests {
 
     /// A writer stopped inside a publish longer than a read spins: the
     /// one-shot read keeps reading until the publish is done.  Driven by
-    /// counts rather than a second thread, whose wake-up on a loaded host
-    /// can come after the deadline.
+    /// counts rather than a second thread, and with a deadline no loaded
+    /// host reaches: fifty yields can take longer than the real one.
     #[test]
     fn a_read_once_waits_out_a_writer_stopped_inside_a_publish() {
         use std::cell::Cell;
@@ -59,7 +62,7 @@ mod tests {
             if looks.get() < 50 { 5 } else { 6 }
         };
         let mut reads = 0;
-        let got = settled(seq, || {
+        let got = settled_by(Instant::now() + Duration::from_secs(60), seq, || {
             reads += 1;
             (looks.get() >= 50).then_some(())
         });

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.690"  # the deny list sets its mode on the open file; PaneRetire's codec moves to its own file
-core    = "0.12.680"  # the core refuses to retire a shadow-only pane once it is in a window; the deny list sets its mode on the open file
-session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
+shell   = "0.7.691"  # a one-shot frame read takes its deadline as an argument, for tests
+core    = "0.12.681"  # a one-shot frame read takes its deadline as an argument, for tests
+session = "0.11.439"  # a one-shot frame read takes its deadline as an argument, for tests
