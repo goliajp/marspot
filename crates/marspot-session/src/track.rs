@@ -6,12 +6,17 @@
 //! row on screen, the same count a published frame's header carries.
 //! A line keeps its number as it scrolls into the history.
 
+mod ends;
+
 use std::time::Instant;
 
 use marspot_term::grid::{Grid, Reach};
 
 use crate::SessionImpl;
 use crate::pane_ctl::{Marks, local, shell_in_front};
+
+use ends::CommandEnds;
+pub(crate) use ends::{End, LatestEnds};
 
 /// Points kept to find where a position's output went.
 const RING: usize = 64;
@@ -33,8 +38,7 @@ pub(crate) struct Track {
     main: Point,
     pos: u64,
     last_output: Instant,
-    commands_seen: u64,
-    command_end: Option<(u64, Option<u8>)>,
+    ends: CommandEnds,
     inputs_seen: u64,
     /// Where the latest `OSC 133 ; B` the shell wrote in front was;
     /// none while the pane is taken at its quiet alone.
@@ -81,8 +85,7 @@ impl Track {
             main: NOWHERE,
             pos: local(session).output_pos(),
             last_output: Instant::now(),
-            commands_seen: session.terminal().command_end().0,
-            command_end: resumed.command_end,
+            ends: CommandEnds::new(session.terminal(), resumed.ends),
             inputs_seen,
             input_start,
             input_since_end: input_start.is_some(),
@@ -100,9 +103,10 @@ impl Track {
         self.last_output
     }
 
-    /// Position and status of the latest `OSC 133 ; D`.
-    pub(crate) fn command_end(&self) -> Option<(u64, Option<u8>)> {
-        self.command_end
+    /// Position and status of the latest `OSC 133 ; D`, of any and of
+    /// a run's.
+    pub(crate) fn ends(&self) -> LatestEnds {
+        self.ends.latest()
     }
 
     /// Position of the latest `OSC 133 ; B`, placed like a command end.
@@ -148,15 +152,7 @@ impl Track {
             self.pos = pos;
             self.last_output = Instant::now();
         }
-        // the batch's first end: a shell's hook may print its own right
-        // behind the one a command printed, with another status
-        let (count, latest) = session.terminal().command_end();
-        let ended = count != self.commands_seen;
-        if ended {
-            let first = session.terminal().command_end_status(self.commands_seen + 1).unwrap_or(latest);
-            self.commands_seen = count;
-            self.command_end = Some((pos, first));
-        }
+        let ended = self.ends.after_batch(session.terminal(), pos);
         let inputs = session.terminal().input_starts();
         // a mark from a program the shell runs (ssh) says nothing of
         // this shell's prompt; the foreground is read after the batch,
@@ -259,8 +255,7 @@ mod tests {
             main: NOWHERE,
             pos: 0,
             last_output: Instant::now(),
-            commands_seen: 0,
-            command_end: None,
+            ends: CommandEnds::new(&marspot_term::terminal::Terminal::new(4, 2), LatestEnds::default()),
             inputs_seen: 0,
             input_start: None,
             input_since_end: false,

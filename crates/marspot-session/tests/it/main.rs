@@ -21,6 +21,7 @@ mod signals_in_the_pane;
 mod stray_pointer;
 mod typing;
 mod typing_after_exec;
+mod typing_run_end;
 mod typing_run_trailer;
 mod watch;
 mod watch_prompt;

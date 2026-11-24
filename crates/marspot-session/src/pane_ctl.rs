@@ -17,7 +17,7 @@ use std::sync::mpsc::Sender;
 
 use crate::control_writer::ControlWriter;
 use crate::{SessionEvent, SessionImpl};
-use crate::track::Track;
+use crate::track::{LatestEnds, Track};
 use crate::typing::{Step, Typing};
 use crate::watch::Watches;
 
@@ -32,12 +32,12 @@ pub(crate) enum Request {
 }
 
 /// What one image hands the next so that positions never go back: the
-/// output position, the latest command end (its position, status) and
-/// the position of the latest input start, if the shell marks them.
+/// output position, the latest command ends and the position of the
+/// latest input start, if the shell marks them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Marks {
     pub(crate) pos: u64,
-    pub(crate) command_end: Option<(u64, Option<u8>)>,
+    pub(crate) ends: LatestEnds,
     pub(crate) input_start: Option<u64>,
 }
 
@@ -74,7 +74,7 @@ impl PaneCtl {
     }
 
     pub(crate) fn marks(&self, session: &SessionImpl) -> Marks {
-        Marks { pos: local(session).output_pos(), command_end: self.track.command_end(), input_start: self.track.input_start() }
+        Marks { pos: local(session).output_pos(), ends: self.track.ends(), input_start: self.track.input_start() }
     }
 
     pub(crate) fn request(&mut self, r: Request, session: &mut SessionImpl, mut poke: Option<&mut ControlWriter>) {

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.646"  # a codex that resumed a thread keeps its inbox over a restart
-core    = "0.12.641"  # a pane's shell can trap a hangup its session was started ignoring
-session = "0.11.426"  # a pane's shell can trap a hangup its session was started ignoring
+shell   = "0.7.647"  # a run ends at the command end its own status line prints
+core    = "0.12.642"  # the terminal tells a run's command end from others
+session = "0.11.427"  # a run ends at the command end its own status line prints

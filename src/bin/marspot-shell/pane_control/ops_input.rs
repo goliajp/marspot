@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use marspot::shell_proto::{
-    CAP_TYPE_AND_WATCH, MsgType, PaneType, PaneTyped, TypedResult, WatchBody, WatchKind, WatchReason, encode_pane_type, run_trailer,
+    CAP_TYPE_AND_WATCH, MsgType, PaneType, PaneTyped, RUN_END_MARK, TypedResult, WatchBody, WatchKind, WatchReason, encode_pane_type, run_trailer,
 };
 use marspot_peer::control::{ErrorCode, Input, Reject, RunArgs, SendArgs, keys};
 use marspot_peer::json::{Value, obj};
@@ -119,6 +119,13 @@ pub(super) fn run_text(command: &str, fish: bool) -> String {
     format!("{}\n{}", command.trim_end_matches('\n'), run_trailer(fish))
 }
 
+/// The end of a run: the one its own status line prints.  A hook's
+/// comes sooner in a shell that is still starting or that takes the
+/// pasted lines one by one.
+pub(super) fn run_end() -> WatchBody {
+    WatchBody { watch_id: 0, kind: WatchKind::CommandEnd, since_pos: 0, quiet_ms: 0, text: RUN_END_MARK.into() }
+}
+
 fn runs_fish(ctx: &Ctx, sid: u64) -> bool {
     let Some(s) = ctx.obs.session(sid) else { return false };
     let Some(id) = s.shell else { return false };
@@ -132,8 +139,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, a: &RunArgs) -> Result<Value, Reje
     let text = run_text(&a.command, runs_fish(ctx, sid));
     admit_bytes(conn, ctx, sid, text.len())?;
     prompt_first(conn, ctx.caller, sid, PROMPT_WITHIN)?;
-    let body = WatchBody { watch_id: 0, kind: WatchKind::CommandEnd, since_pos: 0, quiet_ms: 0, text: String::new() };
-    let body = conn.add_watch(sid, ctx.caller, body)?;
+    let body = conn.add_watch(sid, ctx.caller, run_end())?;
     let t = PaneType { req_id: 0, sid, paste: true, enter: true, only_at_shell: true, bytes: text.clone().into_bytes(), watch: Some(body.clone()) };
     let deadline = Instant::now() + Duration::from_secs(a.timeout_s.into());
     let out = type_into(conn, sid, t).and_then(|typed| {

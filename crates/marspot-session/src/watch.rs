@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use marspot_term::shell_proto::{
-    DoneCode, Frame, MsgType, PaneWatchFired, WatchBody, WatchKind, WatchReason, encode_pane_watch_fired,
+    DoneCode, Frame, MsgType, PaneWatchFired, RUN_END_MARK, WatchBody, WatchKind, WatchReason, encode_pane_watch_fired,
 };
 
 use crate::SessionImpl;
@@ -238,10 +238,11 @@ impl Watches {
         let quiet_for = |from: Instant, d: Duration| after && now >= from + d;
         let met = match b.kind {
             WatchKind::Change => after.then_some((track.pos(), None, None)),
-            WatchKind::CommandEnd => match track.command_end() {
-                Some((pos, status)) if pos > b.since_pos => Some((pos, status.map(i16::from), None)),
-                _ => None,
-            },
+            WatchKind::CommandEnd => {
+                let ends = track.ends();
+                let end = if b.text == RUN_END_MARK { ends.run } else { ends.any };
+                end.filter(|&(pos, _)| pos > b.since_pos).map(|(pos, status)| (pos, status.map(i16::from), None))
+            }
             WatchKind::Quiet => quiet_for(last_output, Duration::from_millis(b.quiet_ms.into())).then_some((track.pos(), None, None)),
             WatchKind::Prompt if !*parked && quiet_for(slot.front.quiet_from(last_output), prompt_quiet(track, b.since_pos)) => {
                 *parked = !shell_in_front(session);

@@ -4,17 +4,18 @@
 
 use std::os::unix::fs::PermissionsExt;
 
-use marspot_term::shell_proto::{TypedResult, WatchKind, run_trailer};
+use marspot_term::shell_proto::{TypedResult, run_trailer};
 use marspot_term::test_env::{StateSandbox, sandbox_state_dir};
 
-use crate::pane_link::{Link, bin, body, wait, with_zsh};
+use crate::pane_link::{Link, bin, wait, with_zsh};
 use crate::support::{COLS, ROWS, Session};
+use crate::typing_run_end::run_end;
 
 /// The command and the command-end line, typed as `pane.run` types
 /// them; the status the watch reports.
 fn run(l: &mut Link, watch_id: u32, command: &str) -> Option<i16> {
     let input = format!("{command}\n{}", run_trailer(false));
-    let req = l.type_in(input.as_bytes(), true, true, true, Some(body(watch_id, WatchKind::CommandEnd, 0)));
+    let req = l.type_in(input.as_bytes(), true, true, true, Some(run_end(watch_id, 0)));
     let f = l.fired(watch_id, 10.0);
     assert_eq!(l.typed(req, 1.0).result, TypedResult::Written);
     l.cancel(watch_id);
