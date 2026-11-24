@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.683"  # a helper-panel close asks the core to close the pane only while it is a shadow pane
-core    = "0.12.678"  # a close asked only of a shadow pane is refused once the pane is in a window
+shell   = "0.7.684"  # the deny list's new content is created with the list's mode instead of chmod-ed to it
+core    = "0.12.679"  # the deny list's new content is created with the list's mode instead of chmod-ed to it
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
