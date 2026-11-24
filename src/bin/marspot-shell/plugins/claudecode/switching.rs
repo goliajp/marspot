@@ -4,10 +4,12 @@
 
 use super::*;
 use super::fable_need::Judged;
-use super::quota::roomiest;
 
 const HEADS_UP_FILE: &str = "heads_up.tsv";
 const REFUSED_FILE: &str = "refused.tsv";
+
+#[path = "refused_choice.rs"]
+pub(super) mod refused_choice;
 
 impl ClaudecodePlugin {
     /// Every pane sitting on an account that cannot answer moves to
@@ -92,6 +94,7 @@ impl ClaudecodePlugin {
         });
         let mut plan = self.plan_pass(result, &rooms, usage, judged, out_for);
         self.say_short(host, &plan);
+        let mut view = self.view_for(result);
         // Bounded with the panes, like everything else here.
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalanced.retain(|sid, _| result.sessions_seen.contains(sid));
@@ -144,13 +147,12 @@ impl ClaudecodePlugin {
                 let part = plan.part(sid);
                 self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged, part);
                 if part.short {
-                    rebalanced_this_pass |= !part.stays && self.leave_short(host, sid, &meta, result, as_judged, &choice, in_flight, &mut plan);
+                    rebalanced_this_pass |= !part.stays && self.leave_short(host, sid, &meta, result, as_judged, &choice, in_flight, &mut plan, &mut view);
                     continue;
                 }
-                if mode != marspot::settings::Rebalance::Off
-                    && self.rebalance(host, sid, &mut plan, &meta, result, as_judged, &choice, in_flight, mode, rebalanced_this_pass)
-                {
-                    rebalanced_this_pass = true;
+                if mode != marspot::settings::Rebalance::Off {
+                    let p = alloc_moves::Resting { sid, meta: &meta, model: as_judged, choice: &choice, in_flight, mode, already_moved_one: rebalanced_this_pass };
+                    rebalanced_this_pass |= self.follow_core(host, &mut view, &mut plan, result, p);
                 }
                 continue;
             }
@@ -170,7 +172,7 @@ impl ClaudecodePlugin {
                 );
             }
             let model = as_judged.map(str::to_string);
-            self.move_off_refused(host, sid, &mut plan, meta, result, choice, Judged { model, for_fable });
+            self.move_off_refused(host, sid, &mut plan, &mut view, meta, result, choice, Judged { model, for_fable });
         }
         self.persist_heads_up(host);
         self.persist_fable_need(host);
@@ -232,6 +234,7 @@ impl ClaudecodePlugin {
         host: &dyn PluginHost,
         sid: u64,
         plan: &mut leave_early::Plan,
+        view: &mut allocation_view::View,
         meta: BindMeta,
         result: &ScanResult,
         // the model and effort the sweep confirmed for this pane
@@ -259,30 +262,15 @@ impl ClaudecodePlugin {
         // session to continue *if* something was interrupted.
         let tool_executing = matches!(result.new_activity.get(&sid), Some(CcActivity::ToolPending { executing: true }));
         let needs_model = judged.room_model(plan.rooms(), meta.profile_num, result.new_models.get(&sid));
-        // somewhere that lasts six hours with it, when there is one
-        let rooms = &plan.rooms_for_move(meta.profile_num, needs_model.as_deref(), plan.speed_of(sid));
         // The idle policy's rule too: a process of its own under claude
         // (unknown counts as one) is work a move would kill.
         let work_running = result.new_vetoes.get(&sid).is_none_or(|v| v.0);
         let warned = self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num));
-        let decision = quota::next_move(&quota::Situation {
-            rooms,
-            current: meta.profile_num,
-            needs_model: needs_model.as_deref(),
-            tool_executing,
-            work_running,
-            moves_this_episode: self.stranded.get(&sid).map(|s| s.moves).unwrap_or(0),
-            last_target: self.stranded.get(&sid).and_then(|s| s.last_target),
-            stranded_for: self.stranded.get(&sid).map(|s| s.since.elapsed()),
-            since_last_move: self.moved_at.get(&sid).map(|at| at.elapsed()),
-            warned,
-            background_refused: result.agent_refused.get(&sid),
-        });
-        // a helper goes where the most is left, or helpers refused one
-        // after another all land on the account that renews first
         let helper = result.helpers.is_helper(sid);
-        let (from, feed_at) = (meta.profile_num, result.usage.as_ref().map_or(0, |u| u.generated_at));
-        let decision = if helper { roomiest::helper_move(roomiest::Pool::Claude, feed_at, decision, rooms, from, needs_model.as_deref()) } else { decision };
+        let class = allocation_view::class_of_judged(needs_model.as_deref());
+        let from = meta.profile_num;
+        let r = refused_choice::Refused { sid, meta: &meta, needs_model: needs_model.as_deref(), class, helper, tool_executing, work_running, warned };
+        let (decision, inputs) = self.refused_choice(plan, view, result, &r);
         match decision {
             quota::Move::Hold(why) => {
                 let tally = self.stranded.entry(sid).or_default();
@@ -291,6 +279,7 @@ impl ClaudecodePlugin {
                     let (event, line) = judged.hold_line(sid, meta.profile_num, why);
                     host.log(LogLevel::Info, event, &line);
                 }
+                self.note_held_back(host, sid, &meta, Some(why));
             }
             quota::Move::To(target) => {
                 let fable_word = judged.for_fable.then(|| self.fable_need.word(sid, meta.profile_num, target)).flatten();
@@ -314,12 +303,16 @@ impl ClaudecodePlugin {
                     (None, false, true) => heads_up::after_ended_work(&resume_word()),
                     (None, false, false) => resume_word(),
                 };
+                self.note_held_back(host, sid, &meta, None);
                 if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
                     if told_fable {
                         self.fable_need.told(sid);
                     }
                     self.moved_at.insert(sid, Instant::now());
                     plan.place(target, needs_model.as_deref(), plan.speed_of(sid));
+                    view.placed(sid, target);
+                    // a helper's account is still `roomiest`'s choice, not the core's
+                    self.record_moved(host, sid, from, target, class, if helper { "helper" } else { "out" }, inputs.as_ref());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
                     tally.last_target = Some(target);
@@ -338,70 +331,5 @@ impl ClaudecodePlugin {
         self.rebalanced
             .get(&sid)
             .is_some_and(|(at, to)| *to != bound_to && at.elapsed() < rebalance::LANDING)
-    }
-
-    /// Move a resting pane whose account is not out onto a better one.
-    /// True when a move was started.
-    ///
-    /// At most one per pass: several panes restarting at once all land
-    /// on the same account, and the next pass sees where they went.
-    #[allow(clippy::too_many_arguments)] // one call site, each argument a separate fact
-    fn rebalance(
-        &mut self,
-        host: &dyn PluginHost,
-        sid: u64,
-        plan: &mut leave_early::Plan,
-        meta: &BindMeta,
-        result: &ScanResult,
-        // what the pane is judged as: a pane refused Fable as Fable
-        model: Option<&str>,
-        choice: &CliChoice,
-        move_in_flight: bool,
-        mode: marspot::settings::Rebalance,
-        already_moved_one: bool,
-    ) -> bool {
-        let lasting = plan.lasting(meta.profile_num, model, plan.speed_of(sid));
-        let Some((target, why)) = rebalance::better_home(&lasting, meta.profile_num, model) else {
-            self.rebalance_said.remove(&sid);
-            return false;
-        };
-        let pane = self.resting(host, sid, meta, result, move_in_flight, self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()));
-        let dry = mode == marspot::settings::Rebalance::DryRun;
-        let held = rebalance::not_now(&pane)
-            .or((already_moved_one && !dry).then_some("another pane moved this pass"));
-        let line = match held {
-            Some(reason) => format!("sid={sid} P{} → P{target} ({why}) waits: {reason}", meta.profile_num),
-            None if dry => format!("sid={sid} P{} → P{target} ({why}) model={model:?}", meta.profile_num),
-            None => format!("sid={sid} P{} → P{target}: {why}", meta.profile_num),
-        };
-        // one line when a pane starts waiting for a target and one when it
-        // moves; the reason it waits flips every pass or two and the
-        // hours ahead tick up, neither of which is news
-        let key = format!("{target}|{}", held.is_some());
-        let new_answer = self.rebalance_said.get(&sid) != Some(&key);
-        if new_answer { self.rebalance_said.insert(sid, key); }
-        let event = match (held, dry) {
-            (Some(_), _) => "rebalance.waiting",
-            (None, true) => "rebalance.would_move",
-            (None, false) => "rebalance.moving",
-        };
-        if new_answer || (held.is_none() && !dry) {
-            host.log(LogLevel::Info, event, &line);
-        }
-        if held.is_some() || dry {
-            return false;
-        }
-        // A resting pane had nothing interrupted, unless it was told
-        // its account was nearly out: it may have stopped for that, and
-        // is told to go on, not to stay idle, whatever the move is for.
-        // Nothing runs under it, or it would not be moved.
-        let warned = self.heads_up.get(&sid).is_some_and(|h| h.landed_on(meta.profile_num));
-        let word = warned.then(|| heads_up::after_warned_move(false));
-        if self.start_profile_cycle_to(host, sid, meta.clone(), target, word, choice.clone()) {
-            self.rebalanced.insert(sid, (Instant::now(), target));
-            plan.place(target, model, plan.speed_of(sid));
-            return true;
-        }
-        false
     }
 }

@@ -102,14 +102,46 @@ fn an_account_that_refused_a_pane_is_no_destination() {
         measured_at: 1_793_836_800,
     };
     let feed = vec![(1u8, room(0.9, 4102444800)), (2u8, room(0.2, 4103049600))];
-    let opus = Some("opus-5-5");
+    // the allocation's view, which reads both accounts open
+    let account = |profile: u8, week_used: f64, renews: i64| super::super::allocation_inputs::AccountIn {
+        profile,
+        week_used,
+        fable_used: None,
+        fable_known: true,
+        week_renews: renews,
+        fable_renews: renews,
+        open: true,
+        measured_at: 1_793_836_800,
+    };
+    let pane = super::super::allocation_inputs::PaneIn {
+        sid: 1,
+        profile: 2,
+        class: crate::plugins::allocation::Class::Plain,
+        marked_at: None,
+        refused_at: None,
+        resting: true,
+        helper: false,
+        out: true,
+        transcript: None,
+    };
+    let snap = super::super::allocation_inputs::Snapshot {
+        now: 1_793_836_800,
+        feed_at: Some(1_793_836_800),
+        accounts: vec![account(1, 0.9, 4102444800), account(2, 0.2, 4103049600)],
+        panes: vec![pane],
+        live: vec![1],
+    };
+    let view = super::super::allocation_view::View::of_defaults(&snap);
     let target = |seen: &mut seen::Seen| {
         let mut rooms = feed.clone();
         seen.mark(&mut rooms, &[], AFTER);
-        super::super::rebalance::better_home(&rooms, 2, opus).map(|(t, _)| t)
+        match view.must_move(&rooms, 1, 2, crate::plugins::allocation::Class::Plain).0 {
+            quota::Move::To(t) => Some(t),
+            quota::Move::Hold(_) => None,
+        }
     };
 
-    // with nothing known against it, P1 renews first and is where a resting pane goes
+    // with nothing known against it, P1 is where a pane leaving P2 goes
     let mut seen = seen::Seen::default();
     assert_eq!(target(&mut seen), Some(1));
 

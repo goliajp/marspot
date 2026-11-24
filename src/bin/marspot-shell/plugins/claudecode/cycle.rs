@@ -59,15 +59,17 @@ impl ClaudecodePlugin {
                     "cycle.rooms",
                     &format!("current=P{} model={needs:?} rooms={rooms:?}", meta.profile_num),
                 );
-                quota::best_profile(&rooms, meta.profile_num, needs.as_deref()).filter(|p| {
-                    rooms
-                        .iter()
-                        .find(|(n, _)| n == p)
-                        .is_some_and(|(_, r)| !r.refused_for(needs.as_deref()))
-                })
+                // the allocation's rule (a) over what the feed and the
+                // refusals say now, the panes as the last scan saw them
+                let class = allocation_view::class_of_judged(needs.as_deref());
+                let mails: Vec<(u8, Option<String>)> = profiles.iter().map(|p| (*p, quota::profile_email(home, *p))).collect();
+                let accounts = allocation_inputs::accounts_of(&mails, u, rooms::unix_now());
+                let view = allocation_view::View::for_click(rooms::unix_now(), accounts, self.alloc_view.as_ref());
+                view.by_hand(&rooms, shelld_sid, meta.profile_num, class)
             }
             _ => None,
         };
+        let (picked, inputs) = picked.map_or((None, None), |(to, i)| (Some(to), i));
         let Some(next_profile) = picked else {
             let why = if usage.is_some() { "no account has room for this model" } else { "no usage feed" };
             host.log(
@@ -84,7 +86,10 @@ impl ClaudecodePlugin {
             "cycle.profiles",
             &format!("discovered={profiles:?} current=P{} next=P{next_profile}", meta.profile_num),
         );
-        self.switch_by_hand(host, shelld_sid, meta, next_profile);
+        let (from, class) = (meta.profile_num, allocation_view::class_of_judged(needs.as_deref()));
+        if self.switch_by_hand(host, shelld_sid, meta, next_profile) {
+            self.record_moved(host, shelld_sid, from, next_profile, class, "badge", inputs.as_ref());
+        }
     }
 
 
@@ -95,7 +100,7 @@ impl ClaudecodePlugin {
     /// until the new process is bound, and the sweep must not start a
     /// move of its own over the top of this one: the same "not landed"
     /// mark an automatic move leaves covers that gap.
-    pub(super) fn switch_by_hand(&mut self, host: &dyn PluginHost, sid: u64, meta: BindMeta, target: u8) {
+    pub(super) fn switch_by_hand(&mut self, host: &dyn PluginHost, sid: u64, meta: BindMeta, target: u8) -> bool {
         // Asked for or not, a switch starts a new claude, and it starts
         // on the model the pane is on or not at all.
         let choice = pushed_choice(&meta.uuid);
@@ -110,7 +115,7 @@ impl ClaudecodePlugin {
                 ),
             );
             let _ = host.submit_pty_op(sid, cycle_blocked_op(t(Msg::BadgeModelUnknown)));
-            return;
+            return false;
         }
         // The person may switch away from a turn that was cut off by the
         // quota and walk off; the new claude is told the same as after
@@ -123,9 +128,11 @@ impl ClaudecodePlugin {
         } else {
             resume_word()
         };
-        if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
+        let started = self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice);
+        if started {
             self.stranded.entry(sid).or_default().last_target = Some(target);
         }
+        started
     }
 
     /// Start the exit → resume cycle towards an explicit target

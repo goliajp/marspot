@@ -32,11 +32,15 @@ pub(super) struct Stranding {
     /// showed what kept it there (2026-10-08).  So: again whenever it
     /// changes.
     pub(super) hold_said: Option<&'static str>,
+    /// Held back for the Fable panes as of the last sweep, so the hold
+    /// is logged once per episode.  The session is not told: it would
+    /// answer on the account that refuses it and be refused again.
+    pub(super) held_back: bool,
 }
 
 impl Default for Stranding {
     fn default() -> Self {
-        Self { moves: 0, last_target: None, since: Instant::now(), hold_said: None }
+        Self { moves: 0, last_target: None, since: Instant::now(), hold_said: None, held_back: false }
     }
 }
 

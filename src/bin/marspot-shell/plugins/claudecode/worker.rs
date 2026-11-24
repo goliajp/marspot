@@ -790,7 +790,7 @@ impl WorkerCtx {
         ScanResult {
             new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes,
             scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused, fable_refused,
-            helpers: super::with_helpers::HelperRoles::of_observation(obs), pane_tokens, speeds,
+            helpers: super::with_helpers::HelperRoles::of_observation(obs), pane_tokens, speeds, alloc: None,
         }
     }
 }

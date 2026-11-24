@@ -1,5 +1,5 @@
-//! Moving a pane that is not stuck onto quota that would otherwise
-//! lapse.
+//! When a pane that is not stuck may be moved: the vetoes every
+//! resting move checks, whatever chose it.
 //!
 //! Until 2026-11-05 a pane moved only when its account refused it, so
 //! a pane stayed wherever it happened to start.  That day five Opus
@@ -17,13 +17,6 @@
 
 use std::time::Duration;
 
-use super::heads_up::nearly_out;
-use super::quota::{best_profile, needs_fable, Room};
-
-/// How much sooner the other account's week has to renew to be worth a
-/// restart.  Accounts here renew days apart; hours apart is noise
-/// against the cost of a restart.
-pub(super) const MIN_LEAD_S: i64 = 6 * 3600;
 /// How long the session must have written nothing before it counts as
 /// resting rather than between two turns.
 pub(super) const SETTLE: Duration = Duration::from_secs(60);
@@ -33,61 +26,6 @@ pub(super) const COOLDOWN: Duration = Duration::from_secs(1800);
 /// How long a move is taken to be on its way.  The pane reads as being
 /// on the account it left until the scan binds the new claude.
 pub(super) const LANDING: Duration = Duration::from_secs(120);
-
-/// Why a pane is better off elsewhere.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum Why {
-    /// It is not on Fable, it sits on an account that still has Fable,
-    /// and an account whose Fable is spent has room for it.  Fable
-    /// panes can only go where Fable is left.
-    KeepsFable,
-    /// The other account's week renews this many hours sooner.
-    RenewsSooner { hours: i64 },
-}
-
-impl std::fmt::Display for Why {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Why::KeepsFable => write!(f, "leaves Fable to the panes that need it"),
-            Why::RenewsSooner { hours } => write!(f, "its week renews {hours}h sooner"),
-        }
-    }
-}
-
-/// The account a resting pane on `current` should be on instead, or
-/// `None` where it is is good enough.
-///
-/// The ranking is `best_profile`'s, the same one a refused pane and a
-/// badge click get; this only adds how much better is worth a restart.
-/// A pane whose own account is out is not this function's business.
-pub(super) fn better_home(rooms: &[(u8, Room)], current: u8, model: Option<&str>) -> Option<(u8, Why)> {
-    let here = rooms.iter().find(|(p, _)| *p == current).map(|(_, r)| r)?;
-    if *here == Room::Unknown || here.refused_for(model) {
-        return None;
-    }
-    let target = best_profile(rooms, current, model)?;
-    let there = rooms.iter().find(|(p, _)| *p == target).map(|(_, r)| r)?;
-    // a restart is paid for with a reading, not with a guess
-    if there.refused_for(model) || !there.known_for(model) || nearly_out(there, model) {
-        return None;
-    }
-    // an account running short is left by `leave_early`, which keeps
-    // its slowest pane on it
-    if nearly_out(here, model) {
-        return None;
-    }
-    if !needs_fable(model) {
-        match (here.fable_spent(), there.fable_spent()) {
-            (false, true) => return Some((target, Why::KeepsFable)),
-            // the ranking only offers this when no account whose Fable
-            // is spent has room, and then here is the better place
-            (true, false) => return None,
-            _ => {}
-        }
-    }
-    let lead = here.reset_7d() - there.reset_7d();
-    (here.known_for(model) && lead >= MIN_LEAD_S).then_some((target, Why::RenewsSooner { hours: lead / 3600 }))
-}
 
 /// What is known about the pane itself.
 #[derive(Debug, Clone, Copy)]
@@ -152,9 +90,7 @@ pub(super) fn not_now(p: &Pane) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::rooms::rooms_for;
     use super::*;
-    use marspot::cc_usage::{CcAccount, CcModelLimit};
 
     fn resting() -> Pane {
         Pane {
@@ -200,152 +136,4 @@ mod tests {
         assert_eq!(not_now(&pane(3)), Some("it is a helper or helpers work for it"), "it is a helper");
     }
 
-    /// The feed at 2026-11-05 05:33 UTC, addresses replaced.  None of
-    /// the eight accounts has a 5h reading.
-    const NOW: i64 = 1_793_856_780;
-
-    fn feed() -> Vec<CcAccount> {
-        let row = |n: u8, status: &str, u7: f64, reset: i64, fable: f64| CcAccount {
-            name: format!("Claude {n}"),
-            email: format!("p{n}"),
-            status: status.into(),
-            util_5h: None,
-            util_7d: Some(u7),
-            reset_5h: None,
-            reset_7d: Some(reset),
-            model_limits: vec![CcModelLimit { label: "Fable".into(), util: Some(fable), reset: Some(reset) }],
-            collected_at: NOW - 5,
-            limits_as_of: None,
-            tier: "default_claude_max_20x".into(),
-        };
-        vec![
-            row(1, "rejected", 1.00, 1_793_934_000, 0.74),
-            row(2, "allowed", 0.98, 1_794_171_599, 0.84),
-            row(3, "allowed", 0.98, 1_794_114_000, 0.27),
-            row(4, "allowed", 0.98, 1_793_977_199, 0.77),
-            row(5, "allowed", 0.02, 1_794_448_800, 0.00),
-            row(6, "rejected", 0.98, 1_793_941_200, 1.00),
-            row(7, "allowed", 0.00, 1_794_283_199, 0.00),
-            row(8, "allowed", 0.27, 1_794_373_200, 0.14),
-        ]
-    }
-
-    fn rooms_at(now: i64) -> Vec<(u8, Room)> {
-        rooms_for(&[1, 2, 3, 4, 5, 6, 7, 8], &feed(), |p| Some(format!("p{p}")), now)
-    }
-
-    /// The feed at 2026-11-20 05:05 UTC, cut to three accounts. P3's
-    /// Fable is spent and its week is at 99%; an Opus pane was moved
-    /// onto it from P8 to leave P8's Fable alone, and five Opus panes
-    /// were told P3 was nearly out and stayed on it for hours.
-    #[test]
-    fn an_account_one_step_from_out_is_left_and_never_gone_to() {
-        let now = 1_795_158_300;
-        let row = |n: u8, status: &str, u7: f64, reset: i64, fable: f64| CcAccount {
-            name: format!("Claude {n}"),
-            email: format!("p{n}"),
-            status: status.into(),
-            util_5h: None,
-            util_7d: Some(u7),
-            reset_5h: None,
-            reset_7d: Some(reset),
-            model_limits: vec![CcModelLimit { label: "Fable".into(), util: Some(fable), reset: Some(reset) }],
-            collected_at: now - 5,
-            limits_as_of: None,
-            tier: "default_claude_max_20x".into(),
-        };
-        let feed = vec![
-            row(3, "rejected", 0.99, 1_795_323_599, 1.00),
-            row(5, "allowed", 0.00, 1_795_658_399, 0.00),
-            row(8, "allowed", 0.61, 1_795_582_799, 0.67),
-        ];
-        let rooms = rooms_for(&[3, 5, 8], &feed, |p| Some(format!("p{p}")), now);
-        let opus = Some("opus-5-5");
-        assert_eq!(better_home(&rooms, 8, opus), None, "not onto P3 to keep P8's Fable");
-        assert_eq!(best_profile(&rooms, 5, opus), Some(8), "P3 renews first but is one step from out");
-        assert_eq!(better_home(&rooms, 3, opus), None, "leaving it is not this function's business");
-    }
-
-    /// Where every pane running that afternoon is sent.
-    ///
-    /// Before: the four accounts at 98% counted as spent and nothing
-    /// that was not refused moved, so all ten stayed put, and the
-    /// Fable pane refused on P2 at 05:30 went to P7, a week renewing
-    /// on 11-10.
-    #[test]
-    fn the_panes_of_2026_11_05_go_where_the_quota_lapses_first() {
-        let rooms = rooms_at(NOW);
-        let opus = Some("opus-5-5");
-        let fable = Some("fable-5-1");
-        // five Opus panes on P5: P6's Fable is spent and its week has
-        // room, and it renews tomorrow
-        assert_eq!(better_home(&rooms, 5, opus), Some((6, Why::KeepsFable)));
-        // Fable panes on P8 and P7: P4's 2% lapses tomorrow night
-        let p8 = better_home(&rooms, 8, fable).unwrap();
-        assert_eq!(p8.0, 4);
-        assert!(matches!(p8.1, Why::RenewsSooner { hours } if hours > 100), "{p8:?}");
-        assert_eq!(better_home(&rooms, 7, fable).map(|m| m.0), Some(4));
-        // the refused Fable pane on P2 also goes to P4, not P7
-        assert_eq!(best_profile(&rooms, 2, fable), Some(4));
-        // an Opus pane already on P6 stays
-        assert_eq!(better_home(&rooms, 6, opus), None);
-        // a Fable pane on P4 stays: nothing renews sooner with Fable left
-        assert_eq!(better_home(&rooms, 4, fable), None);
-    }
-
-    /// The next afternoon, once P1 and P6 have renewed with nobody
-    /// having read them again: both have a whole week ahead, and P4 is
-    /// still the one to empty.
-    #[test]
-    fn the_day_after_the_renewed_accounts_rank_by_their_next_renewal() {
-        let rooms = rooms_at(1_793_941_200 + 3_600);
-        assert!(!rooms[0].1.refused_for(Some("fable-5-1")), "P1 has renewed");
-        assert_eq!(better_home(&rooms, 5, Some("opus-5-5")).map(|m| m.0), Some(4));
-        assert_eq!(better_home(&rooms, 8, Some("fable-5-1")).map(|m| m.0), Some(4));
-    }
-
-    /// Hours apart is not worth a restart.
-    #[test]
-    fn a_renewal_less_than_six_hours_sooner_is_not_worth_a_move() {
-        let rooms = vec![
-            (1, room(0.5, 10_000 + MIN_LEAD_S - 1, 0.1)),
-            (2, room(0.5, 10_000, 0.1)),
-        ];
-        assert_eq!(better_home(&rooms, 1, Some("opus-5-5")), None);
-        let rooms = vec![(1, room(0.5, 10_000 + MIN_LEAD_S, 0.1)), (2, room(0.5, 10_000, 0.1))];
-        assert_eq!(better_home(&rooms, 1, Some("opus-5-5")), Some((2, Why::RenewsSooner { hours: 6 })));
-    }
-
-    /// A pane not on Fable that sits where Fable is spent is where it
-    /// should be, even if an account with Fable left renews sooner.
-    #[test]
-    fn a_pane_off_fable_does_not_leave_an_account_whose_fable_is_spent_for_one_whose_is_not() {
-        let rooms = vec![(1, room(0.5, 900_000, 1.0)), (2, room(0.5, 10_000, 0.1))];
-        assert_eq!(better_home(&rooms, 1, Some("opus-5-5")), None);
-        assert_eq!(better_home(&rooms, 1, Some("fable-5-1")), None, "a Fable pane is out there");
-    }
-
-    /// Out is the refused path's business, and a refused account is no
-    /// destination.
-    #[test]
-    fn nothing_is_moved_from_or_to_an_account_that_is_out() {
-        let rooms = vec![(1, room(1.0, 900_000, 0.1)), (2, room(0.5, 10_000, 0.1))];
-        assert_eq!(better_home(&rooms, 1, None), None);
-        let rooms = vec![(1, room(0.5, 900_000, 0.1)), (2, room(1.0, 10_000, 0.1))];
-        assert_eq!(better_home(&rooms, 1, None), None);
-        let rooms = vec![(1, Room::Unknown), (2, room(0.5, 10_000, 0.1))];
-        assert_eq!(better_home(&rooms, 1, None), None, "nothing known about here");
-    }
-
-    fn room(u7: f64, reset: i64, fable: f64) -> Room {
-        Room::Known {
-            status: "allowed".into(),
-            util_5h: None,
-            util_7d: Some(u7),
-            reset_7d: reset,
-            models: vec![("fable".into(), Some(fable))],
-            models_measured_at: i64::MAX,
-            measured_at: i64::MAX,
-        }
-    }
 }

@@ -80,6 +80,9 @@ pub(super) struct ScanResult {
     pub(super) pane_tokens: HashMap<u64, f64>,
     /// Every account window's speed, from the readings the scan keeps.
     pub(super) speeds: super::burn::Speeds,
+    /// The allocation core's view of this scan, filled in by the worker
+    /// after the scan; `None` when there was no feed.
+    pub(super) alloc: Option<super::allocation_view::View>,
 }
 
 /// The files the quota sweep judges by besides the bindings: the usage

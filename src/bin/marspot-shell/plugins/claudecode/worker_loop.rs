@@ -25,12 +25,13 @@ pub(super) fn worker_main(
         for line in ctx.reconcile_statusline() {
             marspot::lx_info!("plugin.claudecode.statusline_hook", &line);
         }
-        let result = ctx.scan_once(&crate::observe::shared().latest());
-        // recorded and logged only: no pane is moved by it yet
+        let mut result = ctx.scan_once(&crate::observe::shared().latest());
         let now = rooms::unix_now();
+        allocation.set_live(marspot::settings::get().cc_rebalance == marspot::settings::Rebalance::Live, now);
         for (tag, line) in allocation.observe(&snapshot(&result, &ctx.seen, marks.read(now), now)) {
             marspot::lx_info!(&*format!("plugin.claudecode.{tag}"), &line);
         }
+        result.alloc = allocation.view.take();
         if res_tx.send(result).is_err() {
             // Main side hung up; nothing left to do.
             break;

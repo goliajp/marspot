@@ -1,21 +1,27 @@
 //! The one setting with three positions.
 
-/// What the claudecode plugin does with an idle pane that has a better
-/// account to be on.
+/// What the claudecode plugin does with the moves of resting panes the
+/// quota allocation decides.
+///
+/// `on` and `true` once switched on an older rule that moved idle panes
+/// by renewal and kept Fable for the panes on it.  That rule is gone,
+/// and a file that still says `on` was written for it, not for the
+/// allocation: it reads as `DryRun`, as does any word that is none of
+/// the known ones.  Only `live` makes the moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rebalance {
     Off,
     DryRun,
-    On,
+    Live,
 }
 
 impl Rebalance {
-    pub(super) fn parse(v: &str, fallback: Self) -> Self {
+    pub(super) fn parse(v: &str) -> Self {
         match v.to_ascii_lowercase().as_str() {
-            "on" | "true" => Self::On,
-            "dryrun" | "dry_run" | "dry-run" => Self::DryRun,
+            "live" => Self::Live,
             "off" | "false" => Self::Off,
-            _ => fallback,
+            // `dryrun`, the old `on` and `true`, and anything unknown
+            _ => Self::DryRun,
         }
     }
 
@@ -23,7 +29,7 @@ impl Rebalance {
         match self {
             Self::Off => "off",
             Self::DryRun => "dryrun",
-            Self::On => "on",
+            Self::Live => "live",
         }
     }
 }

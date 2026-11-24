@@ -31,13 +31,16 @@ fn targets(host: &FakeHost) -> Vec<(u64, u8)> {
     out
 }
 
-/// P3 renews seven hours before P2 but lasts an hour and a half: an
-/// idle pane on P2 stays where it is. With P3 lasting, the same pane
-/// goes there.
+/// The allocation would move an idle pane on P2 to P3, which lasts an
+/// hour and a half at the speed its readings show: the pane stays
+/// where it is.  With P3 lasting, the same pane goes there.  A planned
+/// wait (`u_out`) goes though P3 runs short: the core chose that target
+/// knowing it would be left again.
 #[test]
 fn rebalance_an_idle_pane_is_not_moved_onto_an_account_running_short() {
-    rebalance_mode(marspot::settings::Rebalance::On);
-    for (tag, p3_rising, goes) in [("rbs", true, false), ("rbl", false, true)] {
+    use crate::plugins::allocation::replay::Why;
+    rebalance_mode(marspot::settings::Rebalance::Live);
+    for (tag, p3_rising, why, goes) in [("rbs", true, Why::Plan, false), ("rbl", false, Why::Plan, true), ("rbu", true, Why::UOut, true)] {
         let home = three(tag);
         let now = rooms::unix_now();
         write_feed(&home, &[account(&mail(tag, 2), 0.2, RENEWS + 7 * 3600, now), account(&mail(tag, 3), 0.91, RENEWS, now)]);
@@ -46,9 +49,19 @@ fn rebalance_an_idle_pane_is_not_moved_onto_an_account_running_short() {
         let p3 = mail(tag, 3);
         let rising: Vec<(&str, f64)> = if p3_rising { vec![(p3.as_str(), 0.06)] } else { vec![] };
         measured(&mut result, &rising);
-        sweep(&mut plugin, &host, &mut result);
+        for (s, m) in &plugin.last_meta {
+            result.new_meta.insert(*s, m.clone());
+        }
+        (result.usage, result.choices) = quota_inputs(&result.new_meta);
+        let snap = super::super::allocation_inputs::snapshot(&result, &HashMap::new(), &HashMap::new(), now);
+        let mut view = super::super::allocation_view::View::of_defaults(&snap);
+        let rooms = rooms::rooms_for(&[2, 3], &result.usage.as_ref().unwrap().accounts, |p| Some(mail(tag, p)), now);
+        let (_, inputs) = view.by_hand(&rooms, 301, 2, crate::plugins::allocation::Class::Plain).unwrap();
+        view.rest.insert(301, (3, why, inputs.expect("the core chose it")));
+        result.alloc = Some(view);
+        plugin.sweep_unusable_profiles(&host, &result);
         if goes {
-            assert_eq!(targets(&host), vec![(301, 3)], "{:?}", host.logged.lock().unwrap());
+            assert_eq!(targets(&host), vec![(301, 3)], "{tag}: {:?}", host.logged.lock().unwrap());
         } else {
             assert!(moved(&host).is_empty(), "{:?}", host.logged.lock().unwrap());
         }

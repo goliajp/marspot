@@ -145,22 +145,28 @@ impl Plan<'_> {
             .collect()
     }
 
-    /// Where a pane on `current` goes: the account the usual ranking
-    /// puts first among those lasting `TARGET_H` with it.
-    pub(in crate::plugins) fn target(&self, current: u8, model: Option<&str>, speed: f64) -> Option<(u8, f64)> {
-        let lasting = self.lasting(current, model, speed);
-        let to = quota::best_profile(&lasting, current, model)?;
-        let room = &lasting.iter().find(|(p, _)| *p == to)?.1;
-        if to == current || room.refused_for(model) || !room.known_for(model) || heads_up::nearly_out(room, model) {
-            return None;
-        }
+    /// Where a pane on `current` goes: the account `rank` puts first
+    /// among the others lasting `TARGET_H` with it that have room for it.
+    pub(in crate::plugins) fn target(&self, current: u8, model: Option<&str>, speed: f64, rank: impl Fn(&[u8]) -> Option<u8>) -> Option<(u8, f64)> {
+        let lasting: Vec<u8> = self
+            .lasting(current, model, speed)
+            .iter()
+            .filter(|(p, r)| *p != current && !r.refused_for(model) && r.known_for(model) && !heads_up::nearly_out(r, model))
+            .map(|(p, _)| *p)
+            .collect();
+        let to = rank(&lasting).filter(|to| lasting.contains(to))?;
         Some((to, self.lasts(to, model, speed)))
     }
 
-    /// The rooms a refused pane chooses among: those lasting `TARGET_H`
-    /// with it when one of them can take it, else all of them.
-    pub(in crate::plugins) fn rooms_for_move(&self, current: u8, model: Option<&str>, speed: f64) -> Vec<(u8, quota::Room)> {
-        if self.target(current, model, speed).is_some() { self.lasting(current, model, speed) } else { self.rooms.clone() }
+    /// The rooms a refused helper chooses among, as for every pane before
+    /// the allocation chose: those lasting `TARGET_H` with it when the
+    /// usual ranking's first among them can take it, else all of them.
+    pub(in crate::plugins) fn rooms_for_helper(&self, current: u8, model: Option<&str>, speed: f64) -> Vec<(u8, quota::Room)> {
+        let lasting = self.lasting(current, model, speed);
+        let fits = quota::best_profile(&lasting, current, model)
+            .and_then(|to| lasting.iter().find(|(p, _)| *p == to))
+            .is_some_and(|(to, r)| *to != current && !r.refused_for(model) && r.known_for(model) && !heads_up::nearly_out(r, model));
+        if fits { lasting } else { self.rooms.clone() }
     }
 
     /// A pane of `speed` on `model` was sent to `profile` this pass.

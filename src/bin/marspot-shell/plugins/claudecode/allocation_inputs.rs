@@ -82,20 +82,24 @@ pub(super) fn snapshot(result: &ScanResult, seen: &HashMap<PathBuf, SessionInfo>
         return Snapshot { now, live: result.sessions_seen.clone(), ..Snapshot::default() };
     };
     let email = |p: u8| result.profiles.iter().find(|(n, _)| *n == p).and_then(|(_, e)| e.clone());
-    let accounts = result
-        .profiles
-        .iter()
-        .filter_map(|(p, _)| {
-            let mail = email(*p)?;
-            let a = usage.accounts.iter().find(|a| a.email == mail)?;
-            let fable_reset = a.model_limits.iter().find(|m| quota::same_model("fable", &m.label.to_ascii_lowercase())).and_then(|m| m.reset);
-            account_in(*p, &rooms::room_of(a, now), fable_reset.filter(|r| *r > now))
-        })
-        .collect();
+    let accounts = accounts_of(&result.profiles, usage, now);
     let rooms: Vec<(u8, Room)> = rooms::rooms_for(&result.profiles.iter().map(|(n, _)| *n).collect::<Vec<_>>(), &usage.accounts, email, now);
     let mut panes: Vec<PaneIn> = result.new_meta.iter().filter_map(|(sid, m)| pane_in(*sid, m, result, seen, marks, &rooms, now)).collect();
     panes.sort_by_key(|p| p.sid);
     Snapshot { now, feed_at: Some(usage.generated_at), accounts, panes, live: result.sessions_seen.clone() }
+}
+
+/// Each numbered profile's account as the feed reads it, `profiles`
+/// pairing each with its address.
+pub(super) fn accounts_of(profiles: &[(u8, Option<String>)], usage: &marspot::cc_usage::CcUsage, now: i64) -> Vec<AccountIn> {
+    profiles
+        .iter()
+        .filter_map(|(p, mail)| {
+            let a = usage.accounts.iter().find(|a| Some(&a.email) == mail.as_ref())?;
+            let fable_reset = a.model_limits.iter().find(|m| quota::same_model("fable", &m.label.to_ascii_lowercase())).and_then(|m| m.reset);
+            account_in(*p, &rooms::room_of(a, now), fable_reset.filter(|r| *r > now))
+        })
+        .collect()
 }
 
 fn account_in(profile: u8, room: &Room, fable_renews: Option<i64>) -> Option<AccountIn> {

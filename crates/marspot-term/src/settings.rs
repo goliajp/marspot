@@ -141,13 +141,15 @@ pub struct Settings {
     /// nothing typed before an agent runs.  A setting because it
     /// fetches and runs each vendor's installer unattended.
     pub agents_install: bool,
-    /// Move idle claudecode panes onto the account whose quota runs
-    /// out soonest, and panes not on Fable onto accounts whose Fable is
-    /// spent.
+    /// Move resting claudecode panes the way the quota allocation plans:
+    /// following the plan while there is more quota than use, off what
+    /// only the Fable panes can use, and onto Fable that would lapse.
     ///
     /// A setting because a move restarts the pane's claude: the
     /// conversation resumes, but its prompt cache does not come along.
-    /// `DryRun` logs what would be moved and moves nothing.
+    /// `dryrun` (default; also the old `on`/`true` and unknown words) logs each move with every
+    /// input that chose it and moves nothing; only `live` moves; `off`/`false` do neither.
+    /// Leaving an account that runs short and moving a refused pane are not this setting's.
     pub cc_rebalance: Rebalance,
     /// List a pane's helpers in rows at its bottom, as the agent in it
     /// lists its own.  The program in the pane is made shorter while
@@ -174,7 +176,7 @@ impl Default for Settings {
             cc_statusline_hook: true,
             codex_follow_updates: true,
             agents_install: true,
-            cc_rebalance: Rebalance::On,
+            cc_rebalance: Rebalance::DryRun,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
@@ -382,7 +384,7 @@ pub fn parse(body: &str) -> Settings {
                 s.codex_follow_updates = parse_bool(v, s.codex_follow_updates)
             }
             "agents.install" => s.agents_install = parse_bool(v, s.agents_install),
-            "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v, s.cc_rebalance),
+            "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v),
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -505,17 +507,29 @@ mod tests {
         assert!(!kept.agents_install, "a rewrite keeps it off");
     }
 
-    /// The three rebalance modes read back as written, a rewrite keeps
-    /// them, and a word that is none of them leaves the default.
+    /// The three rebalance modes read back as written and a rewrite
+    /// keeps them.  The words an older build wrote for a rule that is
+    /// gone, `on` and `true`, read as a dry run, as does a word that is
+    /// none of them: only `live` moves.
     #[test]
-    fn rebalance_takes_three_words_and_ignores_others() {
-        for (word, want) in [("on", Rebalance::On), ("dryrun", Rebalance::DryRun), ("off", Rebalance::Off)] {
+    fn rebalance_moves_only_when_live() {
+        for (word, want) in [
+            ("live", Rebalance::Live),
+            ("dryrun", Rebalance::DryRun),
+            ("off", Rebalance::Off),
+            ("on", Rebalance::DryRun),
+            ("true", Rebalance::DryRun),
+            ("ON", Rebalance::DryRun),
+            ("false", Rebalance::Off),
+            ("maybe", Rebalance::DryRun),
+        ] {
             let body = format!("claudecode.rebalance = {word}\n");
             let s = parse(&body);
             assert_eq!(s.cc_rebalance, want, "{word}");
             assert_eq!(parse(&render(&s, &body)).cc_rebalance, want, "{word} after a rewrite");
         }
-        assert_eq!(parse("claudecode.rebalance = maybe\n").cc_rebalance, Rebalance::On);
+        assert_eq!(parse("claudecode.rebalance = off\nclaudecode.rebalance = maybe\n").cc_rebalance, Rebalance::DryRun, "unknown is a dry run, not the line before");
+        assert_eq!(value_of(&parse("claudecode.rebalance = live\n"), "claudecode.rebalance"), "live");
     }
 
     /// The theme is dark until the file names another, `system` is a

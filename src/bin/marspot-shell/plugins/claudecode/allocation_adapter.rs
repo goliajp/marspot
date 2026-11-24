@@ -15,13 +15,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use super::allocation_events::{DAY, Event, EventLog, KEEP_DAYS};
+use super::allocation_events::{DAY, Event, EventLog, KEEP_DAYS, Tail};
 use super::allocation_inputs::{PaneIn, Snapshot};
 use super::allocation_prices::{Tokens, class_of, weeks};
 use super::allocation_usage::Readers;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::notice::Told;
-use crate::plugins::allocation::replay::Why;
 use crate::plugins::allocation::rest::MOVES_PER_WEEK;
 use crate::plugins::allocation::speed::{PaneUse, Slope, WINDOW_S};
 
@@ -71,10 +70,15 @@ pub(super) struct Allocation {
     /// Per profile: the week's and Fable's readings.
     pub(super) slopes: HashMap<u8, (Slope, Slope)>,
     pub(super) told: Told,
-    /// Plan-following would-moves of the last hour.
+    /// Plan-following moves of the last hour, counted as `allocation_caps` says.
     pub(super) band_moves: VecDeque<i64>,
     pub(super) said: HashMap<&'static str, String>,
     rebuilt: bool,
+    /// `claudecode.rebalance` is `live`: moves made count, not would-moves.
+    pub(super) live: bool,
+    tail: Tail,
+    /// The last scan's view, for the main thread to choose by.
+    pub(super) view: Option<super::allocation_view::View>,
 }
 
 /// Events in `dir` under the claudecode plugin's state directory.
@@ -102,6 +106,9 @@ impl Allocation {
             band_moves: VecDeque::new(),
             said: HashMap::new(),
             rebuilt: false,
+            live: false,
+            tail: Tail::default(),
+            view: None,
         }
     }
 
@@ -127,7 +134,8 @@ impl Allocation {
         }
         let profiles: Vec<u8> = snap.accounts.iter().map(|a| a.profile).collect();
         self.slopes.retain(|p, _| profiles.contains(p));
-        super::allocation_decide::decide(self, snap, &mut log);
+        self.count_made(snap.now);
+        self.view = super::allocation_decide::decide(self, snap, &mut log);
         log
     }
 
@@ -219,7 +227,8 @@ impl Allocation {
     /// running all along.
     pub(super) fn rebuild(&mut self, now: i64) {
         self.rebuilt = true;
-        for e in self.events.read_since(now - KEEP_DAYS * DAY, now) {
+        let events = self.events.read_since(now - KEEP_DAYS * DAY, now);
+        for e in &events {
             if e.kind == "bound" && e.profile.is_none() {
                 self.last.remove(&e.sid);
                 self.used.remove(&e.sid);
@@ -238,12 +247,7 @@ impl Allocation {
                 "rest" | "busy" => l.resting = Some(e.kind == "rest"),
                 "refused" => l.refused_at = at_of(&e.detail),
                 "marked" => l.marked_at = at_of(&e.detail),
-                "would_move" => {
-                    l.would = e.detail.split(' ').find_map(|w| w.strip_prefix("to=P")).and_then(|p| p.parse().ok());
-                    if e.detail.split(' ').find_map(|w| w.strip_prefix("why=")).and_then(Why::from_word).is_some_and(Why::resting) {
-                        l.rest_moved(e.at);
-                    }
-                }
+                "would_move" => l.would = e.detail.split(' ').find_map(|w| w.strip_prefix("to=P")).and_then(|p| p.parse().ok()),
                 "used" if e.at > now - WINDOW_S => {
                     let model = e.detail.split(' ').find_map(|w| w.strip_prefix("model="));
                     if let (Some(m), Some(t)) = (model, Tokens::parse(&e.detail)) {
@@ -253,6 +257,7 @@ impl Allocation {
                 _ => {}
             }
         }
+        self.count_from(&events, now);
         for (sid, l) in &self.last {
             if let Some(at) = l.bound_at {
                 self.used.entry(*sid).or_default().watched(at);
@@ -268,6 +273,13 @@ fn at_of(detail: &str) -> Option<i64> {
     detail.strip_prefix("at=")?.parse().ok()
 }
 
+#[path = "allocation_caps.rs"]
+mod caps;
+
 #[cfg(test)]
 #[path = "allocation_adapter_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "allocation_replay_tests.rs"]
+mod replay_tests;

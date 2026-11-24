@@ -120,13 +120,22 @@ impl ClaudecodePlugin {
         choice: &CliChoice,
         move_in_flight: bool,
         plan: &mut Plan,
+        view: &mut super::allocation_view::View,
     ) -> bool {
         if move_in_flight {
             return false;
         }
         let part = plan.part(sid);
         let from = meta.profile_num;
-        let Some((to, lasts)) = plan.target(from, model, part.speed) else {
+        // the order is the allocation's rule (a), among the accounts lasting with it
+        let class = super::allocation_view::class_of_judged(model);
+        let chosen = std::cell::RefCell::new(None);
+        let rank = |ids: &[u8]| {
+            let (to, inputs) = view.rank_among(plan.rooms(), sid, from, class, ids)?;
+            *chosen.borrow_mut() = Some((ids.to_vec(), inputs));
+            Some(to)
+        };
+        let Some((to, lasts)) = plan.target(from, model, part.speed, rank) else {
             self.say_once(host, sid, "leave|none", "quota.leave_nowhere", format!("sid={sid} on P{from}: no account lasts {TARGET_H}h with it"));
             return false;
         };
@@ -145,6 +154,12 @@ impl ClaudecodePlugin {
         if self.start_profile_cycle_to(host, sid, meta.clone(), to, word, choice.clone()) {
             self.rebalanced.insert(sid, (Instant::now(), to));
             plan.place(to, model, part.speed);
+            view.placed(sid, to);
+            // the inputs and the accounts it was ranked among: rule (a)
+            // over those inputs, kept to these accounts, chose `to`
+            let (among, inputs) = chosen.into_inner().map_or((Vec::new(), None), |(ids, i)| (ids, Some(i)));
+            let among: Vec<String> = among.iter().map(|p| format!("P{p}")).collect();
+            self.record_moved(host, sid, from, to, class, &format!("leave_early among={}", among.join(";")), inputs.as_ref());
             return true;
         }
         false

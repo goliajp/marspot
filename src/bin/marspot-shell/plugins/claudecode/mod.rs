@@ -65,6 +65,8 @@ mod allocation_inputs;
 mod allocation_line;
 mod allocation_prices;
 mod allocation_usage;
+mod allocation_view;
+mod alloc_moves;
 mod worker_loop;
 pub(in crate::plugins) mod with_helpers;
 
@@ -162,6 +164,10 @@ pub struct ClaudecodePlugin {
     refused: seen::Seen,
     /// Panes refused Fable, judged as Fable panes for a while.
     fable_need: fable_need::Marks,
+    /// The allocation's view of the last scan, for a badge click.
+    alloc_view: Option<allocation_view::View>,
+    /// Where moves made by the allocation's choice are written.
+    alloc_moved: Option<allocation_events::EventLog>,
 
     /// Panes whose claude has been reclaimed and that are waiting for a
     /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
@@ -260,6 +266,8 @@ impl ClaudecodePlugin {
             unjudged: std::collections::HashSet::new(),
             refused: seen::Seen::default(),
             fable_need: fable_need::Marks::default(),
+            alloc_view: None,
+            alloc_moved: None,
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
@@ -374,6 +382,8 @@ mod tests {
     mod profile_list;
     mod cycle_script;
     mod moves;
+    mod core_moves;
+    mod held_back;
     mod helpers_switch;
     mod cycle_clicks;
     mod fable_refused;
