@@ -237,14 +237,15 @@ impl ShellApp {
         Self::forget_closed_for_control(&open);
     }
 
-    /// Send the current core every badge, title and recede level it
-    /// has not been sent.  Nothing goes to a core before its HelloAck:
+    /// Send the current core every badge, title, recede level and
+    /// helper strip it has not been sent.  Nothing goes to a core before its HelloAck:
     /// that is where `core_replaced` marks everything pending, and a
     /// frame written before it would only be written again.
     pub(super) fn flush_pane_decls(&mut self) {
         let Some(conn) = self.active.as_ref().filter(|c| c.hello_acked) else {
             return;
         };
-        self.pane_look.flush(|t, payload| conn.send(t, payload));
+        let caps = crate::pane_control::hub().map_or(0, |h| h.caps());
+        self.pane_look.flush(caps, |t, payload| conn.send(t, payload));
     }
 }

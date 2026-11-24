@@ -600,7 +600,7 @@ pub enum MsgType {
     /// L1 → L2: the icon asked for.  `symbol u16, point_px u16,
     /// side u16`, then `side * side` bytes of coverage.
     IconMask = 87,
-    // ── pane control (130..=143): payloads and directions in `pane_control` ──
+    // ── pane control (130..=144): payloads and directions in `pane_control` ──
     PaneSpawn = 130,
     PaneSpawned = 131,
     PaneRetire = 132,
@@ -615,6 +615,7 @@ pub enum MsgType {
     PaneControlCaps = 141,
     SessionReadsPaneControl = 142,
     HelperPanelAct = 143,
+    HelperStrip = 144,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -717,6 +718,7 @@ impl MsgType {
             141 => MsgType::PaneControlCaps,
             142 => MsgType::SessionReadsPaneControl,
             143 => MsgType::HelperPanelAct,
+            144 => MsgType::HelperStrip,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1107,19 +1109,6 @@ pub fn decode_scroll(payload: &[u8]) -> io::Result<(f64, f64, bool, u32)> {
 }
 
 // ── Focus / Resize / Preedit ──
-
-pub fn encode_focus(focused: bool) -> Vec<u8> {
-    vec![if focused { 1 } else { 0 }]
-}
-pub fn decode_focus(payload: &[u8]) -> io::Result<bool> {
-    if payload.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "focus payload empty",
-        ));
-    }
-    Ok(payload[0] != 0)
-}
 
 /// Resize payload layout:
 ///

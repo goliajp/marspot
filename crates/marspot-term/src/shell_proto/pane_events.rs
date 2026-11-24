@@ -82,6 +82,19 @@ pub fn decode_pane_terminal_focus(payload: &[u8]) -> io::Result<(u64, bool)> {
     Ok((u64::from_le_bytes(payload[0..8].try_into().unwrap()), payload[8] != 0))
 }
 
+pub fn encode_focus(focused: bool) -> Vec<u8> {
+    vec![if focused { 1 } else { 0 }]
+}
+pub fn decode_focus(payload: &[u8]) -> io::Result<bool> {
+    if payload.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "focus payload empty",
+        ));
+    }
+    Ok(payload[0] != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

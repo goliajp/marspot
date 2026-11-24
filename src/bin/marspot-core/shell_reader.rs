@@ -116,6 +116,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         | MsgType::PaneRetire
         | MsgType::PanePlace
         | MsgType::PaneSize => Some(CoreEvent::ShellPaneControl(f.clone())),
+        MsgType::HelperStrip => marspot::shell_proto::decode_helper_strip(&f.payload)
+            .ok()
+            .map(CoreEvent::HelperStrip),
         MsgType::IconMask => marspot::shell_proto::decode_icon_mask(&f.payload)
             .ok()
             .map(|(symbol, point_px, side, mask)| CoreEvent::IconMask(symbol, point_px, side, mask)),
