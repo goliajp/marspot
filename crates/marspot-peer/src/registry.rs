@@ -330,14 +330,23 @@ pub fn default_dirs() -> Vec<PathBuf> {
 /// The `sessions/` of each config directory that exists without one
 /// yet: where a registry directory would appear.
 pub fn missing_dirs() -> Vec<PathBuf> {
-    config_dirs().into_iter().filter(|c| c.is_dir()).map(|c| c.join("sessions")).filter(|d| d.symlink_metadata().is_err()).collect()
+    missing_in(config_dirs())
+}
+
+fn missing_in(configs: Vec<PathBuf>) -> Vec<PathBuf> {
+    configs.into_iter().filter(|c| c.is_dir()).map(|c| c.join("sessions")).filter(|d| d.symlink_metadata().is_err()).collect()
 }
 
 fn config_dirs() -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let mut cands: Vec<PathBuf> = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).into_iter().collect();
+    config_dirs_of(&home, std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+}
+
+/// `$CLAUDE_CONFIG_DIR` (`config`), then those `home` holds.
+fn config_dirs_of(home: &Path, config: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut cands: Vec<PathBuf> = config.into_iter().collect();
     cands.push(home.join(".claude"));
-    if let Ok(rd) = fs::read_dir(&home) {
+    if let Ok(rd) = fs::read_dir(home) {
         let mut profiles: Vec<PathBuf> = rd
             .flatten()
             .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(".claude-profile-")))
@@ -529,6 +538,24 @@ mod tests {
         assert_eq!(all.len(), 1, "only the canonical name counts");
         assert!(!all[0].ours);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A profile directory without its `sessions/` yet is where one will
+    /// appear; once it has one, it is not missing.
+    #[test]
+    fn a_profile_without_sessions_is_listed_as_missing_until_it_has_them() {
+        let home = tmpdir("home");
+        let missing = || missing_in(config_dirs_of(&home, None));
+        assert!(missing().is_empty(), "no config directory at all");
+        fs::create_dir(home.join(".claude-profile-3")).unwrap();
+        assert_eq!(missing(), vec![home.join(".claude-profile-3/sessions")]);
+        fs::create_dir(home.join(".claude-profile-3/sessions")).unwrap();
+        assert!(missing().is_empty());
+        // a dangling link is there too: a directory would not appear in its place
+        fs::create_dir(home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink("nowhere", home.join(".claude").join("sessions")).unwrap();
+        assert!(missing().is_empty());
+        fs::remove_dir_all(&home).unwrap();
     }
 
     /// A rename an earlier marspot made is undone in place: the old

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.684"  # the deny list's new content is created with the list's mode instead of chmod-ed to it
+shell   = "0.7.685"  # the registry directories still to appear are found from a given home, so they can be tested
 core    = "0.12.679"  # the deny list's new content is created with the list's mode instead of chmod-ed to it
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
