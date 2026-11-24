@@ -23,6 +23,8 @@ pub(crate) mod codex_approval;
 mod codex_config;
 mod daemon;
 mod deliver;
+#[cfg(test)]
+mod fake_daemon;
 mod gemini_bind;
 mod gemini_config;
 mod idle;
@@ -31,6 +33,9 @@ mod kimi_bind;
 mod kimi_config;
 mod leftovers;
 mod lifecycle;
+pub(crate) mod moving;
+#[cfg(test)]
+mod moving_tests;
 mod names;
 mod others;
 mod pair;
@@ -70,7 +75,7 @@ pub(crate) fn threads() -> HashMap<u64, ThreadView> {
     THREADS.lock().unwrap().clone().unwrap_or_default()
 }
 
-pub(super) fn publish_threads(views: HashMap<u64, ThreadView>) {
+pub(crate) fn publish_threads(views: HashMap<u64, ThreadView>) {
     *THREADS.lock().unwrap() = Some(views);
 }
 
@@ -161,6 +166,7 @@ impl Plugin for PeerbusPlugin {
             .name("peerbus".into())
             .spawn(move || w.run())
             .map_err(|e| PluginError::Other(format!("peerbus worker: {e}")))?;
+        moving::connect(Some(tx.clone()));
         self.tx = Some(tx);
         self.worker = Some(handle);
         host.log(LogLevel::Info, "start", "worker running");
@@ -247,6 +253,7 @@ impl Plugin for PeerbusPlugin {
     /// Remove every inbox and record before marspot quits, so no
     /// session is left listing a peer that cannot answer.
     fn stop(&mut self, _host: &dyn PluginHost) {
+        moving::connect(None);
         self.agents = None;
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(Event::Stop);

@@ -203,6 +203,8 @@ impl Worker {
         let r = self.bind_with(p, thread, codex, argv, class, subscribed);
         if r.is_err() && subscribed {
             self.unsubscribe(&p.home, thread);
+        } else if r.is_ok() {
+            self.moved_in(p.sid, codex);
         }
         r
     }
@@ -285,6 +287,7 @@ impl Worker {
     }
 
     pub(super) fn unbind(&mut self, sid: u64, mut b: Binding) {
+        self.moved_out(sid);
         send_notices(sid, &mut b, IdleState::Exited);
         super::records::remove_record(&b.record);
         if b.subscribed {

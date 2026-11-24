@@ -163,6 +163,12 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeNoUsageData => "⚠ 没有用量数据",
         Msg::BadgeModelUnknown => "⚠ 模型未知",
         Msg::BadgeHeldByBgJob => "⚠ 后台任务占用中",
+        Msg::BadgeCodexTurnRunning => "⚠ 正在跑一轮，没换账户",
+        Msg::BadgeCodexAgentRunning => "⚠ 子代理还在跑，没换账户",
+        Msg::BadgeCodexQueued => "⚠ 旧账户有排队的消息，没换账户",
+        Msg::BadgeCodexCustomCommand => "⚠ 命令行带自定义参数，没换账户",
+        Msg::BadgeCodexStateUnknown => "⚠ 查不到会话状态，没换账户",
+        Msg::BadgeCodexSwitching => "⚠ 正在换账户",
 
         Msg::Language => "语言",
         Msg::CostLanguage => "立即应用于 Marspot 的面板和菜单",

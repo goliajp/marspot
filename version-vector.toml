@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.697"  # the allocation log keeps tokens, follows only live agent files and records a would-move's whole input
-core    = "0.12.684"  # the text lane writes a lone character after a wide one in place
+shell   = "0.7.698"  # the codex badge switch waits until the session may move, and resumes it by id
+core    = "0.12.685"  # the badge says why a codex switch did not happen
 session = "0.11.443"  # the text lane writes a lone character after a wide one in place

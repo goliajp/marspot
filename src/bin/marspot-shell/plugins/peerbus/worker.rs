@@ -19,8 +19,8 @@ use std::{sync::mpsc::{Receiver, RecvTimeoutError, SyncSender}, time::{Duration,
 use marspot::pidtree;
 use marspot_peer::envelope::Mode;
 use marspot_peer::frame::{IdleState, Priority, Receipt, UserFrame};
-use marspot_peer::{json::{obj, Value}, registry::{self, Record, Status}};
-use marspot_peer::rpc::{RpcError, RpcSender};
+use marspot_peer::{json::Value, registry::{self, Record, Status}};
+use marspot_peer::rpc::RpcSender;
 use marspot_term::{lx_info, lx_warn};
 
 use super::bind::Unbound;
@@ -88,6 +88,8 @@ pub(crate) enum Event {
     Subscribe { key: u64, from: String, msg_id: String },
     /// `peer_idle_notice` for a subscription this session placed.
     Notice { key: u64, from: String, state: String, finished_at: Option<i64> },
+    /// A codex pane moving to another account (`moving`).
+    Move(super::moving::Ask),
     Rpc { home: PathBuf, msg: Value },
     RpcClosed { home: PathBuf },
     Stop,
@@ -168,6 +170,7 @@ pub(crate) struct Worker {
     skill_notes: Vec<String>,
     /// Notes a change to the configuration that nobody here made.
     config_watch: Option<changes::Watch>,
+    pub(super) moves: super::moving::Moves,
 }
 
 impl Worker {
@@ -201,6 +204,7 @@ impl Worker {
             skill_notes: Vec::new(),
             config_watch: None,
             names_passes: 0,
+            moves: Default::default(),
         }
     }
 
@@ -297,6 +301,7 @@ impl Worker {
                 Event::Inbound { key, frame, peer_pid } => self.deliver(key, frame, peer_pid),
                 Event::Subscribe { key, from, msg_id } => self.subscribe(key, from, msg_id),
                 Event::Notice { key, from, state, finished_at } => self.notice(key, &from, &state, finished_at),
+                Event::Move(a) => self.on_move(a),
                 Event::Rpc { home, msg } => self.on_note(&home, &msg),
                 Event::RpcClosed { home } => {
                     if self.conns.remove(&home).is_some() {
@@ -403,13 +408,13 @@ impl Worker {
         }
     }
 
-    fn find(&self, home: &Path, thread: &str) -> Option<u64> {
+    pub(super) fn find(&self, home: &Path, thread: &str) -> Option<u64> {
         self.bindings.iter().find(|(_, b)| b.home == home && b.thread == thread).map(|(sid, _)| *sid)
     }
 
     // ── delivery ──────────────────────────────────────────────────
 
-    fn deliver(&mut self, key: u64, frame: UserFrame, peer_pid: Option<i32>) {
+    pub(super) fn deliver(&mut self, key: u64, frame: UserFrame, peer_pid: Option<i32>) {
         let reply_to = deliver::reply_address(&frame);
         let pair = self.is_from_pair(key, &frame);
         let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else {
@@ -459,20 +464,6 @@ impl Worker {
         }
     }
 
-    /// Put `text` into the thread: steering the running turn when asked
-    /// to and able, queued as the next input otherwise.
-    pub(super) fn hand_over(&mut self, home: &Path, thread: &str, text: String, steer_turn: Option<String>, id: String) -> (Result<Value, RpcError>, &'static str) {
-        let input = Value::Arr(vec![obj([("type", Value::from("text")), ("text", Value::from(text))])]);
-        if let Some(turn) = steer_turn {
-            let p = obj([("threadId", Value::from(thread)), ("expectedTurnId", Value::from(turn)), ("input", input.clone())]);
-            let r = self.call(home, "turn/steer", p);
-            if r.is_ok() {
-                return (r, "turn/steer");
-            }
-        }
-        let p = obj([("threadId", Value::from(thread)), ("clientUserMessageId", Value::from(id)), ("input", input)]);
-        (self.call(home, "thread/queue/add", p), "thread/queue/add")
-    }
 }
 
 fn status_of(s: &Value) -> Option<Status> {

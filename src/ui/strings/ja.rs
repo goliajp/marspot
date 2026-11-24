@@ -168,6 +168,12 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeNoUsageData => "⚠ 使用状況データなし",
         Msg::BadgeModelUnknown => "⚠ モデル不明",
         Msg::BadgeHeldByBgJob => "⚠ バックグラウンドジョブ実行中",
+        Msg::BadgeCodexTurnRunning => "⚠ ターン実行中のため切り替えなし",
+        Msg::BadgeCodexAgentRunning => "⚠ サブエージェント実行中のため切り替えなし",
+        Msg::BadgeCodexQueued => "⚠ キューにメッセージがあるため切り替えなし",
+        Msg::BadgeCodexCustomCommand => "⚠ カスタム引数のため切り替えなし",
+        Msg::BadgeCodexStateUnknown => "⚠ セッション状態不明のため切り替えなし",
+        Msg::BadgeCodexSwitching => "⚠ 切り替え中",
 
         Msg::Language => "言語",
         Msg::CostLanguage => "Marspotのパネルとメニューにすぐ反映されます",

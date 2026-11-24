@@ -13,9 +13,12 @@ pub(crate) fn argv_thread_id(codex_pid: i32) -> Option<String> {
     let line = pidtree::proc_cmdline(codex_pid)?;
     let mut it = line.split(' ');
     it.by_ref().find(|w| *w == "resume")?;
-    it.find(|w| !w.starts_with('-'))
-        .filter(|w| w.len() == 36 && w.chars().filter(|c| *c == '-').count() == 4)
-        .map(str::to_string)
+    it.find(|w| !w.starts_with('-')).filter(|w| is_thread_id(w)).map(str::to_string)
+}
+
+/// Shaped like a thread id: a uuid.
+pub(super) fn is_thread_id(w: &str) -> bool {
+    w.len() == 36 && w.chars().filter(|c| *c == '-').count() == 4
 }
 
 /// The home a live codex runs under: its `CODEX_HOME`, or `~/.codex`.
@@ -94,7 +97,6 @@ pub(super) fn profile_from(codex_home: Option<String>) -> Option<u8> {
     name.strip_prefix(CODEX_PROFILE_PREFIX)?.parse().ok()
 }
 
-
 /// What the pane is running, remembered so a menu pick knows what it
 /// is changing and what to leave alone.
 #[derive(Clone)]
@@ -107,69 +109,55 @@ pub(crate) struct PaneCodex {
     /// the live process.  `None` when it could not be determined —
     /// the menu then marks nothing as current rather than guessing.
     pub profile: Option<u8>,
+    /// Its command line, when it could be read.
+    pub argv: Option<Vec<String>>,
 }
 
-
-/// Take codex down and bring the SAME session back under another
-/// account profile.
+/// Take codex down and bring the SAME thread back under another
+/// account profile, in the directory it ran in.
 ///
 /// `CODEX_HOME` on the resume line rather than the `codexN` alias: an
 /// alias is an interactive shell's, defined in the user's rc file, and
 /// reproducing one depends on all of that still being true in that
 /// shell at that moment.  Setting the variable IS what the alias
-/// expands to.
-///
-/// `resume --last` and not a session id, for the same reason the
-/// effort switch uses it: codex filters the picker by working
-/// directory, so within a pane's own cwd the most recent session is
-/// that pane's.  NOTE that history lives inside the profile directory,
-/// so resuming under a DIFFERENT profile finds that profile's most
-/// recent session in this cwd — which is the honest meaning of
-/// switching accounts, not a bug to paper over.
-///
-/// The session is told the same sentence an automatic claude move
-/// carries, as the prompt `--last` takes in place of a session id: a
-/// switch is often made because the turn was cut off by the quota.
-pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &std::path::Path) -> Option<pty_op::PtyOp> {
-    let dir = dir.to_str()?;
-    let line = pty_op::PtyCommand::new("codex")
-        .env("CODEX_HOME", dir)
-        .arg("resume")
-        .arg("--last")
-        .quoted_arg(crate::plugins::handoff::resume_word())
-        .clear_screen_first(true)
-        .to_bytes()?;
-    Some(
-        pty_op::PtyOp::new("codex.profile_switch")
-            .hold_screen(true)
-            .badge(format!("→ P{profile}"))
-            .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
-            .step(
-                pty_op::Step::terminate(pane.codex, libc::SIGTERM)
-                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
-            )
-            .shell_line(pane.shell_pid, line, "resume")
-            .step(
-                pty_op::Step::await_process(pane.shell_pid, looks_like_codex)
-                    .timeout(Duration::from_secs(20)),
-            ),
-    )
+/// expands to.  The thread by id: `--last` picks the newest thread a
+/// home has registered for the directory, and a directory can hold two.
+pub(super) fn profile_switch_op(
+    pane: &PaneCodex,
+    profile: u8,
+    dir: &std::path::Path,
+    thread: &str,
+    cwd: Option<String>,
+) -> Option<pty_op::PtyOp> {
+    resume_op("codex.profile_switch", format!("→ P{profile}"), pane, dir, thread, cwd)
 }
 
 /// Take an outdated codex TUI down and bring the same thread back
 /// under the codex now installed (see `update`).
 ///
 /// `codex` from the shell's PATH, which is where the installer puts the
-/// current release; the thread by id, never `--last`, which picks the
-/// newest thread in the directory and a directory can hold two.  The
-/// daemon keeps the thread and anything it is running while no TUI is
-/// attached, so nothing but the screen is redrawn.
+/// current release.  The daemon keeps the thread and anything it is
+/// running while no TUI is attached, so nothing but the screen is
+/// redrawn.
 pub(super) fn refresh_op(
     pane: &PaneCodex,
     home: &std::path::Path,
     thread: &str,
     cwd: Option<String>,
     to: super::update::Release,
+) -> Option<pty_op::PtyOp> {
+    resume_op("codex.refresh", format!("↻ {to}"), pane, home, thread, cwd)
+}
+
+/// End the TUI and start `codex resume <thread>` under `home`, with
+/// what was in the composer put back once the new one has drawn.
+fn resume_op(
+    name: &'static str,
+    badge: String,
+    pane: &PaneCodex,
+    home: &std::path::Path,
+    thread: &str,
+    cwd: Option<String>,
 ) -> Option<pty_op::PtyOp> {
     let line = pty_op::PtyCommand::new("codex")
         .env("CODEX_HOME", home.to_str()?)
@@ -180,9 +168,9 @@ pub(super) fn refresh_op(
         .to_bytes()?;
     let held = pty_op::Job::new();
     Some(
-        pty_op::PtyOp::new("codex.refresh")
+        pty_op::PtyOp::new(name)
             .hold_screen(true)
-            .badge(format!("↻ {to}"))
+            .badge(badge)
             .step(pty_op::Step::capture_composer(std::sync::Arc::clone(&held)))
             .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
             .step(
@@ -211,8 +199,11 @@ mod profile_menu_tests {
             codex: marspot::pidtree::ProcId { pid: 4242, start_us: 0 },
             shell_pid: 4200,
             profile: Some(profile),
+            argv: None,
         }
     }
+
+    const THREAD: &str = "01a133f4-8e7b-7331-9630-9c40ff4b467f";
 
     fn line_of(op: &super::pty_op::PtyOp) -> String {
         op.steps
@@ -225,34 +216,35 @@ mod profile_menu_tests {
     }
 
     #[test]
-    fn the_switch_sets_the_variable_the_alias_expands_to() {
+    fn the_switch_resumes_the_thread_by_id_under_the_variable_the_alias_expands_to() {
         // `codexN` is an interactive shell alias; reproducing it would
         // depend on the user's rc file still defining it, in that
         // shell, at that moment.  What it expands to is a variable,
         // and that is what goes on the line.
-        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"))
+        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"), THREAD, Some("/Users/x/work".into()))
             .expect("op builds");
         let line = line_of(&op);
-        assert!(
-            line.contains("CODEX_HOME='/Users/x/.codex-profile-2'"),
-            "{line}"
-        );
-        assert!(line.contains("codex resume --last"), "{line}");
-        // after --last, so codex reads it as the prompt, not a session id
-        let word = crate::plugins::handoff::resume_word();
-        assert!(line.contains(&format!("--last '{word}'")), "{line}");
+        assert!(line.contains("CODEX_HOME='/Users/x/.codex-profile-2'"), "{line}");
+        assert!(line.contains(&format!("codex resume {THREAD}")), "{line}");
+        assert!(!line.contains("--last"), "a directory can hold two threads: {line}");
+        assert!(line.contains("cd '/Users/x/work'"), "{line}");
         // The pane's own screen is cleared first so the new session
         // does not paint over the old one's tail.  It goes out as a
         // shell `printf`, not a raw escape — the line is typed at a
         // shell, so the shell is what emits it.
         assert!(line.contains(r"printf '\033[H\033[2J'"), "{line}");
+        // what was typed and not sent comes back after the first frame
+        let kinds: Vec<&str> = op.steps.iter().map(|s| s.label).collect();
+        let at = |l: &str| kinds.iter().position(|k| *k == l).unwrap_or_else(|| panic!("{l} in {kinds:?}"));
+        assert!(at("capture_composer") < at("resume") && at("first_frame") < at("restore_composer"), "{kinds:?}");
+        assert_eq!(op.badge.as_deref(), Some("→ P2"));
     }
 
     #[test]
     fn codex_is_signalled_not_typed_at() {
         // A `/quit` typed through the PTY echoes into the grid; a
         // signal does not.  Same rule the claudecode plugin follows.
-        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"))
+        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"), THREAD, None)
             .expect("op builds");
         assert!(
             op.steps.iter().any(|s| matches!(
@@ -269,7 +261,7 @@ mod profile_menu_tests {
         let op = super::refresh_op(
             &pane(1),
             Path::new("/Users/x/.codex-profile-1"),
-            "01a133f4-8e7b-7331-9630-9c40ff4b467f",
+            THREAD,
             Some("/Users/x/work/alt".into()),
             release,
         )

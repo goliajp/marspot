@@ -174,6 +174,12 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeNoUsageData => "⚠ no usage data",
         Msg::BadgeModelUnknown => "⚠ model unknown",
         Msg::BadgeHeldByBgJob => "⚠ held by bg job",
+        Msg::BadgeCodexTurnRunning => "⚠ turn running, not switched",
+        Msg::BadgeCodexAgentRunning => "⚠ sub-agent running, not switched",
+        Msg::BadgeCodexQueued => "⚠ messages queued, not switched",
+        Msg::BadgeCodexCustomCommand => "⚠ custom command line, not switched",
+        Msg::BadgeCodexStateUnknown => "⚠ session state unknown, not switched",
+        Msg::BadgeCodexSwitching => "⚠ already switching",
 
         Msg::Language => "Language",
         Msg::CostLanguage => "applies at once to Marspot's own panels and menus",

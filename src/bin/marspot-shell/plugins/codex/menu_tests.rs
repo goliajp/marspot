@@ -44,7 +44,7 @@ fn a_pick_on_claude_s_badge_makes_codex_submit_nothing() {
     // pane on profile 1, as it wrongly did for pane 484
     const SID: u64 = 484;
     let mut plugin = CodexPlugin::new();
-    plugin.panes.insert(SID, PaneCodex { codex: ProcId { pid: i32::MAX, start_us: 1 }, shell_pid: i32::MAX, profile: Some(1) });
+    plugin.panes.insert(SID, PaneCodex { codex: ProcId { pid: i32::MAX, start_us: 1 }, shell_pid: i32::MAX, profile: Some(1), argv: None });
     let host = Recorder::default();
 
     let mut claude_rows = crate::plugins::claudecode::badge_menu_for(1, &[1, 2]);
@@ -55,7 +55,8 @@ fn a_pick_on_claude_s_badge_makes_codex_submit_nothing() {
     }
     assert_eq!(*host.submitted.lock().unwrap(), [], "codex acted on a row of claude's menu");
 
-    // the same pane, codex's own P2 row: that one is codex's
+    // the same pane, codex's own P2 row: that one is codex's, and with
+    // no thread known to resume by, the conversation is handed over
     plugin.on_pane_badge_menu_action(&host, SID, handoff::profile_tag(Agent::Codex, 2));
-    assert_eq!(*host.submitted.lock().unwrap(), [(SID, "codex.profile_switch")]);
+    assert_eq!(*host.submitted.lock().unwrap(), [(SID, "handoff.switch")]);
 }
