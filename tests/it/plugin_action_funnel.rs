@@ -78,6 +78,13 @@ fn is_op_runner(path: &str) -> bool {
     path.ends_with("pty_op.rs") || path.contains("/pty_op/")
 }
 
+/// The one other sender: the codex switch's bounded `sqlite3` read kills
+/// that helper, its own unreaped child, when it overruns. It never
+/// reaches a pane's processes, which is what the checkpoint is about.
+fn kills_its_own_helper(path: &str) -> bool {
+    path.ends_with("peerbus/moving_checks.rs")
+}
+
 /// A signal is sent in exactly one place, and that place is the op runner.
 ///
 /// `libc::kill(pid, 0)` is not a signal -- it asks whether a pid exists --
@@ -90,7 +97,7 @@ fn signalling_happens_only_inside_the_op_runner() {
             if !sends_a_signal(line) {
                 continue;
             }
-            if is_op_runner(&path) {
+            if is_op_runner(&path) || kills_its_own_helper(&path) {
                 continue;
             }
             offenders.push(format!("{path}:{n}: {}", line.trim()));
