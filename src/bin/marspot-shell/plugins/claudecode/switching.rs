@@ -95,16 +95,16 @@ impl ClaudecodePlugin {
         let mut plan = self.plan_pass(result, &rooms, usage, judged, out_for);
         self.say_short(host, &plan);
         let mut view = self.view_for(result);
-        // Bounded with the panes, like everything else here.
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalanced.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalance_said.retain(|sid, _| result.sessions_seen.contains(sid));
         self.heads_up.retain(|sid, _| result.sessions_seen.contains(sid));
-        let mode = marspot::settings::get().cc_rebalance;
-        let mut rebalanced_this_pass = false;
+        let (mode, mut rebalanced_this_pass) = (marspot::settings::get().cc_rebalance, false);
         self.unjudged.retain(|sid| result.sessions_seen.contains(sid));
-        let sids: Vec<u64> = result.new_meta.keys().copied().collect();
-        for sid in sids {
+        // each move loads its target for the next: ordinary panes first, helpers fit around them
+        let mut sids: Vec<(bool, u64)> = result.new_meta.keys().map(|&sid| (result.helpers.is_helper(sid), sid)).collect();
+        sids.sort();
+        for (_, sid) in sids {
             let Some(meta) = result.new_meta.get(&sid).cloned() else { continue };
             // Started with no config dir, it is on the CLI's default
             // login, which is no numbered profile's: there is nothing
