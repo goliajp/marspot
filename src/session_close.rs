@@ -59,12 +59,13 @@ fn delete_regions(entry: Option<&SessionEntry>) {
 }
 
 /// Close a slot that has no L3 as far as the caller knows: what is left
-/// of its session goes to the recycle dir, unless an L3 holds it after
-/// all.
+/// of its session goes to the recycle dir.  A live L3 that holds it
+/// after all is closed.
 pub fn close_dead_session(sid: u64) {
     let entry = read_session_entry(sid).ok();
     match retire_dead_session(sid) {
         Ok(true) => delete_regions(entry.as_ref()),
+        Ok(false) if entry.as_ref().is_some_and(entry_is_live) => close_session(sid),
         Ok(false) => {}
         Err(e) => lx_warn!("session.close.retire_failed", &format!("{e}"), session = sid),
     }

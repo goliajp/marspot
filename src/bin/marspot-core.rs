@@ -2884,16 +2884,9 @@ fn main() {
     // The boot assembly is the sweeping one: it adopts orphaned
     // live sessions and retires unclaimed dirs.  Restored windows
     // (step 6b) run the same function with that turned off.
-    //
-    // Every sid the OTHER saved windows own is reserved: those
-    // sessions are neither orphans to adopt nor junk to retire,
-    // they are simply waiting for their own window to be opened.
-    let reserved_sids: std::collections::HashSet<u64> = saved_windows
-        .iter()
-        .flat_map(|(_, w)| w.panes.iter())
-        .map(|p| p.sid)
-        .filter(|sid| *sid != 0)
-        .collect();
+    // Every sid the OTHER saved windows own is reserved.
+    let reserved_sids = boot_assembly::reserved_sids(&saved_windows);
+    let closed_at_boot = boot_assembly::closed_at_boot();
     let (assembled, reattached_ids) = assemble_panes_at_boot(
         boot_window.as_ref(),
         n_sessions,
@@ -2902,6 +2895,7 @@ fn main() {
         &event_tx,
         true,
         &reserved_sids,
+        &closed_at_boot,
     );
     let mut panes = assembled;
     let taken: std::collections::HashSet<u64> =
@@ -3002,6 +2996,7 @@ fn main() {
         }],
         key_window: 0,
     };
+    app.pane_control.shadows.closed.at_boot = closed_at_boot;
     app.rebuild_layout(0);
     // RFC-005 step 6b — ask L1 to reopen the windows the last session
     // had past this one.  Frame index i+1 because the boot window is

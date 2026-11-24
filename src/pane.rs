@@ -635,10 +635,8 @@ impl L3Process {
         }
     }
 
-    /// `Child::try_wait` for the Spawned variant; emulated via
-    /// `kill(pid, 0)` for the Reattached variant (we don't own the
-    /// process so syscall waitpid isn't allowed).  Returns the same
-    /// shape as `Child::try_wait` so call sites don't branch.
+    /// `Child::try_wait`; `kill(pid, 0)` for a Reattached L3, which is
+    /// not ours to wait for.
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         match self {
             Self::Spawned(c) => c.try_wait(),
@@ -1029,11 +1027,11 @@ impl L3Conn {
 
 impl Drop for L3Conn {
     fn drop(&mut self) {
-        // Never kill the L3 child here (RFC-003 Amendment 12): a
-        // pane the user closed was already signalled and its dir
-        // deleted, and on L2's own exit the L3s must outlive it so
-        // the next core can reattach them.  Dropping the handles is
-        // all: the L3 sees EOF and waits for that core.
+        // never killed: a closed pane's L3 was told to end, and on L2's
+        // exit the L3s outlive it for the next core to reattach
+        if let L3Process::Spawned(c) = &self.child && !self.exited {
+            crate::l3_reaper::reap_when_exited(c.id());
+        }
     }
 }
 

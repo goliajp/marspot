@@ -82,6 +82,9 @@ impl CoreApp {
             .panes_mut()
             .find(|p| p.shelld_session_id() == Some(sid))
         else {
+            if let Ok(spawn) = &outcome.0 {
+                marspot::l3_reaper::reap_when_exited(spawn.child.id());
+            }
             match outcome.0 {
                 _ if !closed => {}
                 Ok(_) => self.retire_pane_session(sid, true),

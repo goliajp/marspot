@@ -40,6 +40,7 @@ mod resurrect;
 mod shadow;
 mod local_session;
 mod pane_ctl;
+mod own_socket;
 mod pane_env;
 mod pointer;
 mod publish_gate;
@@ -780,7 +781,6 @@ fn main() {
 /// no business taking a tenth of a second, so anything past this is
 /// already anomalous and worth a line in the log.
 const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
-
 
 const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();

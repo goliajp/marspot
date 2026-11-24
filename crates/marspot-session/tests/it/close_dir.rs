@@ -110,3 +110,20 @@ fn close_mark_left_behind_is_not_the_next_sessions() {
     assert!(session_dir(sid(15)).join("state.bin").exists());
     regions.delete();
 }
+
+/// The directory was taken over, and its new session bound its socket
+/// at the same path: the session that leaves removes nothing of it.
+#[test]
+fn close_by_a_new_owner_leaves_the_new_owners_socket() {
+    let mut sandbox = Sandbox::new();
+    let (mut s, regions) = flooding(&mut sandbox, 16);
+    let sock = session_dir(sid(16)).join("sock");
+    std::fs::remove_file(&sock).unwrap();
+    let _theirs = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let mut entry = read_session_entry(sid(16)).unwrap();
+    entry.pid = 1;
+    write_session_entry(&entry).unwrap();
+    wait(20.0, "the session's exit", || s.child.try_wait().unwrap().is_some());
+    assert!(sock.exists(), "the new owner's socket is there");
+    regions.delete();
+}

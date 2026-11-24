@@ -276,6 +276,7 @@ pub(super) fn assemble_restore_window_async(
     record: marspot::state::SavedWindowLayout,
     cols: u16,
     rows: u16,
+    closed_at_boot: std::collections::HashSet<u64>,
     event_tx: &Sender<CoreEvent>,
 ) {
     let tx = event_tx.clone();
@@ -292,6 +293,7 @@ pub(super) fn assemble_restore_window_async(
                 &inner_tx,
                 false,
                 &std::collections::HashSet::new(),
+                &closed_at_boot,
             );
             let _ = tx.send(CoreEvent::WindowRestoreFinished(
                 window_id,
