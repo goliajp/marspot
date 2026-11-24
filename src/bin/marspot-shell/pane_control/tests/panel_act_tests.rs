@@ -16,6 +16,7 @@ use super::super::dispatch::Ctx;
 use super::super::panel_act;
 use super::{ctx, entry, hub_at, temp};
 use crate::observe::Observation;
+use marspot_term::session_registry::SessionEntry;
 
 fn act(sid: u64, act: PanelAct) -> HelperPanelAct {
     HelperPanelAct { sid, act, want: CwdControl::Flip }
@@ -39,8 +40,8 @@ fn closes_seeing(what: HelperPanelAct, view: fn(&Ctx) -> Arc<Observation>, says:
     hub.caps.store(CAP_SHADOWS, Ordering::Release);
     // 2 and 3 are shadows of 1, 4 of 3; 9 of another pane.  Alive: this process.
     let mut entries = vec![entry(1, "/w"), entry(2, "/w"), entry(3, "/w"), entry(4, "/w"), entry(8, "/w"), entry(9, "/w")];
-    for (id, parent) in [(2, 1), (3, 1), (4, 3), (9, 8)] {
-        entries.iter_mut().find(|e| e.id == id).unwrap().shadow_of = parent;
+    for e in &mut entries {
+        e.shadow_of = parent_of(e.id);
     }
     let mut c = ctx(CallerKey::External, entries, Config::default());
     c.view = view;
@@ -126,9 +127,28 @@ fn helper_panel_a_pane_in_a_window_is_not_closed() {
     let (closed, counts) = closes(act(1, PanelAct::CloseHelper));
     assert_eq!((closed.len(), counts), (0, (0, 1)));
     // a shadow when the panel asked, in a window by now
+    let entry_2 = marspot_term::session_registry::read_session_entry(2).unwrap();
+    marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 0, ..entry_2 }).unwrap();
     let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| moved(c, &[(2, 0)]), "refused: in a window");
     assert_eq!((closed.len(), counts), (0, (0, 1)));
     assert!(log.contains("pane.close"), "{log}");
+}
+
+/// A move just done is in the session's registry entry before any view
+/// of the sessions has it.
+#[test]
+fn helper_panel_a_pane_just_moved_to_a_window_is_not_closed() {
+    let sandbox = marspot_term::test_env::sandbox_state_dir();
+    live_entries(&sandbox, &[1, 2, 3, 4]);
+    let entry_2 = marspot_term::session_registry::read_session_entry(2).unwrap();
+    marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 0, ..entry_2 }).unwrap();
+    // every view still has 2 for a shadow of 1
+    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| c.obs.clone(), "refused: in a window");
+    assert_eq!((closed.len(), counts), (0, (0, 1)));
+    assert!(log.contains("pane.close"), "{log}");
+    let (closed, counts) = closes(act(1, PanelAct::CloseAllOfParent));
+    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3], "all but the one in a window");
+    assert_eq!(counts, (2, 1));
 }
 
 #[test]
@@ -181,6 +201,11 @@ fn helper_panel_denies_and_allows_the_directory_and_writes_it_down() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Whose shadow each pane of the panes [`closes_seeing`] knows is.
+fn parent_of(sid: u64) -> u64 {
+    [(2, 1), (3, 1), (4, 3), (9, 8)].into_iter().find(|t| t.0 == sid).map_or(0, |t| t.1)
+}
+
 /// Registry entries of sessions whose process runs: this one.
 fn live_entries(_sandbox: &marspot_term::test_env::StateSandbox, sids: &[u64]) {
     for sid in sids {
@@ -188,6 +213,7 @@ fn live_entries(_sandbox: &marspot_term::test_env::StateSandbox, sids: &[u64]) {
         std::fs::create_dir_all(&dir).unwrap();
         let mut e = entry(*sid, "/w");
         e.pid = std::process::id() as i32;
+        e.shadow_of = parent_of(*sid);
         marspot_term::session_registry::write_session_entry(&e).unwrap();
     }
 }
