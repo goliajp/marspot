@@ -29,13 +29,11 @@ fn handed(s: &Shared, m: Move) {
     write_moves(s);
 }
 
-/// The worker looks at the waiting parents, with pane 1's agent `proc`
-/// in conversation `conv`, if any; every agent waited on is alive.
+/// The worker looks at the waiting parents, with agent `proc` in
+/// conversation `conv` by its own record, if any; every agent waited on
+/// is alive.
 fn look(s: &Shared, now: Option<(ProcId, &str)>) {
-    names::look(s, &|_| true, |pane| {
-        assert_eq!(pane, 1, "the parent's");
-        now.map(|(p, id)| in_conversation(p, id))
-    });
+    names::look(s, &|_| true, |heir| now.filter(|(p, _)| *p == heir).map(|(p, id)| in_conversation(p, id)));
 }
 
 fn by(conv: &str) -> Event {

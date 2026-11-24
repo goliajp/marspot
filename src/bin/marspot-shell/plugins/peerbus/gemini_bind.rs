@@ -65,9 +65,7 @@ impl GeminiBinding {
     /// restarts binds the same session again and finds it there.
     pub(super) fn unbind(mut self, session_gone: bool) {
         self.notify(marspot_peer::frame::IdleState::Exited);
-        for d in registry::default_dirs() {
-            let _ = registry::remove_ours(&d, self.record.pid);
-        }
+        super::records::remove_record(&self.record);
         if session_gone {
             let _ = std::fs::remove_file(&self.spool);
         }

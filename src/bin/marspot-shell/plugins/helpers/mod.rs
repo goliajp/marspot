@@ -83,6 +83,7 @@ mod tests_follow;
 
 pub(in crate::plugins) use strip::used;
 pub(in crate::plugins) use pair::{Moved, is_pair, leaving, moved};
+pub(in crate::plugins) use names::record_written;
 use table::{Event, Table};
 
 /// A parent pane with no agent this long loses the helpers an agent
@@ -330,11 +331,14 @@ impl Plugin for HelpersPlugin {
         let no_agent = st.no_agent.keys().copied().collect();
         let over = st.batches.next_ms(&st.table);
         let (retry, closing) = (st.undelivered.waiting_on(&obs), st.closing.clone());
+        // u64::MAX: the read again is queued, nothing to wait for
+        let reread = st.prompt_unread.values().copied().filter(|at| *at != u64::MAX).min();
         drop(st);
         let (t, now) = (shared().table(), records::now_ms());
         let due = tick::due(&t, &no_agent, &self.parked_parents, &obs, retry, now);
-        let strips = over.map_or(TickDue::Event, |at| tick::at(at, now));
-        tick::sooner(tick::sooner(due, strips), tick::gone_due(&t, &closing, &obs, now))
+        let at = |ms: Option<u64>| ms.map_or(TickDue::Event, |at| tick::at(at, now));
+        let timed = tick::sooner(at(over), at(reread));
+        tick::sooner(tick::sooner(due, timed), tick::gone_due(&t, &closing, &obs, now))
     }
 
     fn stop(&mut self, _host: &dyn PluginHost) {

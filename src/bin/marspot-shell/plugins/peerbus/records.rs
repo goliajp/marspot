@@ -1,7 +1,9 @@
 //! The files the worker keeps outside its own memory: registry records,
 //! and the directories its sockets live in.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use marspot_peer::registry::{self, Record};
@@ -32,12 +34,34 @@ impl Worker {
     }
 }
 
+/// The pid each record of ours is filed under (its relay's), by the pid
+/// of the agent it stands for: one per binding.
+static FILED: Mutex<Option<HashMap<i32, i32>>> = Mutex::new(None);
+
 pub(super) fn write_record(dirs: &[PathBuf], r: &Record) {
     for d in dirs {
         if let Err(e) = registry::write(d, r, now_ms()) {
             lx_warn!("peerbus.registry.write_failed", &e.to_string(), dir = d.display().to_string());
         }
     }
+    FILED.lock().unwrap().get_or_insert_default().insert(r.agent_pid, r.pid);
+    crate::plugins::helpers::record_written();
+}
+
+/// Remove record `r` from every registry directory.
+pub(super) fn remove_record(r: &Record) {
+    for d in registry::default_dirs() {
+        let _ = registry::remove_ours(&d, r.pid);
+    }
+    if let Some(m) = FILED.lock().unwrap().as_mut() {
+        m.retain(|agent, relay| (*agent, *relay) != (r.agent_pid, r.pid));
+    }
+}
+
+/// The pid the record marspot keeps for agent `agent_pid` is filed
+/// under, while it keeps one.
+pub(super) fn filed_under(agent_pid: i32) -> Option<i32> {
+    FILED.lock().unwrap().as_ref()?.get(&agent_pid).copied()
 }
 
 /// `<pid>-<8 hex>.sock`: only files of this shape are ours to delete.

@@ -104,7 +104,7 @@ fn run(s: &Arc<Shared>, rx: Receiver<Job>, epoch: u64) {
         }
         account_changes(s);
         super::pair::write_moves(s);
-        super::names::on_change(s, crate::plugins::peerbus::conversation_of);
+        super::names::on_change(s);
         for job in super::timers::due_jobs(s, epoch, records::now_ms(), super::timers::no_agent_now) {
             if ended(s, epoch) {
                 return;

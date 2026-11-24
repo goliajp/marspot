@@ -12,7 +12,7 @@ use marspot::pidtree::ProcId;
 use marspot_term::fs_watch::Watcher;
 
 use super::{Shared, pair};
-use crate::plugins::peerbus::Conversation;
+use crate::plugins::peerbus::{Conversation, conversation_of_agent, record_files};
 
 #[derive(Default)]
 pub(super) struct Names {
@@ -38,6 +38,12 @@ impl Names {
         self.due = true;
     }
 
+    /// Something may have named a conversation: look, if one waits.
+    fn touch(&mut self) -> bool {
+        self.due |= !self.unnamed.is_empty();
+        self.due
+    }
+
     #[cfg(test)]
     pub fn watching(&self) -> bool {
         self.watch.is_some()
@@ -55,24 +61,35 @@ impl Names {
 fn heirs(s: &Shared) -> Vec<ProcId> {
     let parents: Vec<u64> = s.lock().names.unnamed.iter().copied().collect();
     let t = s.table();
-    let mut out: Vec<ProcId> = parents.iter().flat_map(|p| t.under(*p).filter_map(|h| h.heir)).collect();
-    out.sort_unstable_by_key(|p| (p.pid, p.start_us));
-    out.dedup();
-    out
+    dedup(parents.iter().flat_map(|p| t.under(*p).filter_map(|h| h.heir)).collect())
 }
 
-/// Watch the record directories, each heir's own record (claude
-/// rewrites it in place) and each heir's exit, while a parent waits;
-/// stop once none does.
+fn dirs(s: &Shared) -> Vec<PathBuf> {
+    s.lock().names.dirs.clone().unwrap_or_else(marspot_peer::registry::default_dirs)
+}
+
+/// marspot wrote a record of its own: a parent waiting on the agent it
+/// stands for looks.  The first such record of an agent is filed under
+/// a name not watched until then.
+pub(in crate::plugins) fn record_written() {
+    let Some(s) = super::SHARED.get() else { return };
+    if s.lock().names.touch() {
+        s.wake();
+    }
+}
+
+/// Watch each heir's own records (the directory holding them reports
+/// one coming, going or replaced; claude also rewrites its own in
+/// place) and each heir's exit, while a parent waits; stop once none
+/// does.
 fn sync_watch(s: &Arc<Shared>) {
     let heirs = heirs(s);
     if heirs.is_empty() {
         s.lock().names.watch = None;
         return;
     }
-    let dirs = s.lock().names.dirs.clone().unwrap_or_else(marspot_peer::registry::default_dirs);
-    let mut files = dirs.clone();
-    files.extend(dirs.iter().flat_map(|d| heirs.iter().map(move |h| d.join(format!("{}.json", h.pid)))));
+    let dirs = dirs(s);
+    let files: Vec<PathBuf> = dirs.iter().flat_map(|d| heirs.iter().flat_map(|h| record_files(d, h.pid))).collect();
     let pids: Vec<i32> = heirs.iter().map(|h| h.pid).collect();
     let same = |w: &Watch| w.files == files && w.pids == pids && w.w.alive();
     if s.lock().names.watch.as_ref().is_some_and(same) {
@@ -102,27 +119,32 @@ fn sync_watch(s: &Arc<Shared>) {
 
 /// On the worker, after a job: if something the waiting parents wait on
 /// changed, look at them.
-pub(super) fn on_change(s: &Arc<Shared>, conversation_of: impl Fn(u64) -> Option<Conversation>) {
+pub(super) fn on_change(s: &Arc<Shared>) {
     if !std::mem::take(&mut s.lock().names.due) {
         return;
     }
     // armed before the look: a record written after it is an event
     sync_watch(s);
-    look(s, &|p: ProcId| marspot::pidtree::proc_id(p.pid) == Some(p), conversation_of);
+    let dirs = dirs(s);
+    look(s, &|p: ProcId| marspot::pidtree::proc_id(p.pid) == Some(p), |heir| conversation_of_agent(&dirs, heir));
     sync_watch(s);
 }
 
 /// Look at the waiting parents: the helpers of each follow the
-/// conversation the agent it was handed to is in now, if it is in one.
-/// A parent stops waiting once that agent is gone (`alive`): its
-/// helpers follow no conversation, until the pane is handed on again.
-pub(super) fn look(s: &Shared, alive: &dyn Fn(ProcId) -> bool, conversation_of: impl Fn(u64) -> Option<Conversation>) {
+/// conversation the agent it was handed to is in now, as that agent's
+/// own record names it (`conversation_of`), if it is in one.  A parent
+/// stops waiting once that agent is gone (`alive`): its helpers follow
+/// no conversation, until the pane is handed on again.
+pub(super) fn look(s: &Shared, alive: &dyn Fn(ProcId) -> bool, conversation_of: impl Fn(ProcId) -> Option<Conversation>) {
     let parents: Vec<u64> = s.lock().names.unnamed.iter().copied().collect();
     for parent in parents {
         let waits = |p: &Option<ProcId>| p.is_some_and(alive);
         let heirs = s.table().under(parent).filter(|h| h.heir.is_some()).count();
-        if s.table().under(parent).any(|h| waits(&h.heir)) {
-            pair::settle(s, parent, conversation_of(parent).as_ref());
+        let waited: Vec<ProcId> = s.table().under(parent).filter_map(|h| h.heir).filter(|p| alive(*p)).collect();
+        if !waited.is_empty() {
+            for heir in dedup(waited) {
+                pair::settle(s, parent, conversation_of(heir).as_ref());
+            }
             if s.table().under(parent).any(|h| waits(&h.heir)) {
                 continue;
             }
@@ -131,6 +153,12 @@ pub(super) fn look(s: &Shared, alive: &dyn Fn(ProcId) -> bool, conversation_of: 
         }
         s.lock().names.unnamed.remove(&parent);
     }
+}
+
+fn dedup(mut v: Vec<ProcId>) -> Vec<ProcId> {
+    v.sort_unstable_by_key(|p| (p.pid, p.start_us));
+    v.dedup();
+    v
 }
 
 /// At a start, helpers that waited for a name: whether the conversation
