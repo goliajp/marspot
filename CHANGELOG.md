@@ -4,6 +4,26 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.14.0
+
+- The list of helpers under their pane is on by default. In a Claude
+  Code pane it continues Claude's own list of agents, row for row in
+  the same columns, glyphs and colours; it stays aligned when one of
+  Claude's rows shows no time or tokens. Turn it off in Settings.
+- Viewing a helper in a window with a single pane now says in the
+  window's header which helper is shown and how to leave.
+- Codex helpers can run in a container: they get only an access token,
+  from an account whose token outlives the helper's time budget, and are
+  started again with a renewed one when it is refused.
+- Closing panes leaves no session process, no zombie process and no
+  stray socket behind, and a closed pane does not come back as an empty
+  session after the core restarts.
+- Waiting for text in a pane no longer misses text printed just before a
+  full-screen program starts, nor matches text drawn by one that has
+  left.
+- Helpers notify once per approval prompt across restarts, and follow
+  the conversation their pane was handed to, not one after a `/clear`.
+
 ## 0.13.0
 
 - A helper can be viewed in the pane it works for: the helper panel's
