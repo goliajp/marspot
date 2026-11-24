@@ -140,6 +140,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperViewBack => "このセッションに戻る",
         Msg::HelperEnded => "終了",
         Msg::HelperMoveToWindow => "ウインドウに移動",
+        Msg::HelperNotMoved => "ウインドウに移動できませんでした",
         Msg::HelperClose => "閉じる",
         Msg::HelpersCloseAll => "このセッションのヘルパーをすべて閉じる",
         Msg::HelpersDeny => "このディレクトリからのペイン操作を禁止",

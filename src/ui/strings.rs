@@ -1,9 +1,7 @@
 //! Every string a user reads, in one place.
 //!
-//! S7-01. v1 is a commercial product for a Japanese company, so the text
-//! has to be translatable; today it is English literals spread through the
-//! components that draw them, which is not a thing a translator can be
-//! handed.
+//! v1 is a commercial product for a Japanese company, so the text has to
+//! be translatable, by a translator handed this catalogue.
 //!
 //! ## Why a `match` and not a table
 //!
@@ -189,6 +187,7 @@ pub enum Msg {
     HelperViewBack,
     HelperEnded,
     HelperMoveToWindow,
+    HelperNotMoved,
     HelperClose,
     HelpersCloseAll,
     HelpersDeny,
@@ -451,6 +450,7 @@ pub const ALL: &[Msg] = &[
     Msg::HelperViewBack,
     Msg::HelperEnded,
     Msg::HelperMoveToWindow,
+    Msg::HelperNotMoved,
     Msg::HelperClose,
     Msg::HelpersCloseAll,
     Msg::HelpersDeny,
