@@ -203,14 +203,14 @@ fn container_account_needs_a_login_that_outlives_the_budget() {
 fn container_stop_with_an_expired_login_says_so() {
     let refusal = "● Please run /login · API Error: 401 OAuth token has expired";
     let now = 100 * 60_000;
-    assert!(expired::judge(now + 1, None, "● Done.", now).is_none(), "the login is still good");
-    assert!(!expired::judge(now + 1, None, refusal, now).unwrap().renewed, "refused before its end, and nothing newer");
-    let o = expired::judge(now - 5 * 60_000, None, refusal, now).unwrap();
+    assert!(expired::judge(AgentKind::Claude, now + 1, None, "● Done.", now).is_none(), "the login is still good");
+    assert!(expired::judge(AgentKind::Claude, now + 1, Some(now + 2), refusal, now).is_none(), "claude's early refusal is not looked for");
+    let o = expired::judge(AgentKind::Claude, now - 5 * 60_000, None, refusal, now).unwrap();
     assert!(!o.renewed && o.note.contains("expired 5 min ago") && o.note.contains("has not been renewed"), "{}", o.note);
-    assert!(!expired::judge(now - 1, Some(now - 1), refusal, now).unwrap().renewed, "the same login on the host");
-    let o = expired::judge(now - 1, Some(now + 1), refusal, now).unwrap();
+    assert!(!expired::judge(AgentKind::Claude, now - 1, Some(now - 1), refusal, now).unwrap().renewed, "the same login on the host");
+    let o = expired::judge(AgentKind::Claude, now - 1, Some(now + 1), refusal, now).unwrap();
     assert!(o.renewed && o.note.contains("started again"), "{}", o.note);
-    assert!(!expired::judge(now - 1, Some(now + 1), "● Done.", now).unwrap().renewed, "not refused: nothing to go on with");
+    assert!(!expired::judge(AgentKind::Claude, now - 1, Some(now + 1), "● Done.", now).unwrap().renewed, "not refused: nothing to go on with");
 
     let dir = temp("container-expired");
     let (s, _rx) = shared_at(&dir);

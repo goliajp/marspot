@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.659"  # codex container helpers: ask mode, early refusal, token cleanup
+shell   = "0.7.660"  # container helpers: early refusal only from codex's own line, -s forms, tokens swept without docker
 core    = "0.12.666"  # a closed session's slot is emptied in the saved layout before its close is finished; exiting l3s are reaped with a blocking wait
 session = "0.11.435"  # the socket the first image bound crosses the handoff; leaving unreachable is no abnormal drop

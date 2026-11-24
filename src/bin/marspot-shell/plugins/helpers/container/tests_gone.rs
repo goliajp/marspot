@@ -108,14 +108,21 @@ fn container_directory_stays_until_a_start_could_remove_the_container() {
     std::fs::create_dir_all(root.join("42")).unwrap();
     for sid in [41, 42] {
         pending::add(&root, sid, &[]).unwrap();
+        std::fs::create_dir_all(root.join(format!("{sid}/home"))).unwrap();
+        std::fs::write(root.join(format!("{sid}/env")), "CLAUDE_CODE_OAUTH_TOKEN=t").unwrap();
+        std::fs::write(root.join(format!("{sid}/home/auth.json")), "{}").unwrap();
     }
+    // with no docker the containers cannot be removed, but the tokens go
+    cleanup::sweep_now(&root, None, |sid| sid == 42);
+    assert!(root.join("41/home").is_dir() && !root.join("41/env").exists() && !root.join("41/home/auth.json").exists());
+    assert!(root.join("42/env").exists() && root.join("42/home/auth.json").exists(), "a live helper keeps its");
     std::fs::write(dir.join("rm-says"), "removal in progress").unwrap();
-    cleanup::sweep_now(&root, &d, |sid| sid == 42);
+    cleanup::sweep_now(&root, Some(&d), |sid| sid == 42);
     assert!(root.join("41").is_dir());
     let (s, _rx) = shared_at(&root);
     assert!(!s.dir_is_over(41, |_| true), "left for the next start");
     std::fs::write(dir.join("rm-says"), "No such container: x").unwrap();
-    cleanup::sweep_now(&root, &d, |sid| sid == 42);
+    cleanup::sweep_now(&root, Some(&d), |sid| sid == 42);
     assert!(!root.join("41").exists() && root.join("42").is_dir());
     assert_eq!(pending::all(&root), [42].into());
     std::fs::remove_dir_all(&dir).unwrap();

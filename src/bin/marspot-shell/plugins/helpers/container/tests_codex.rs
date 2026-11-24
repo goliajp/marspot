@@ -109,7 +109,7 @@ fn container_codex_refused_login_is_judged_like_claudes() {
     let refusal = "Error: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
     let now = 100 * 60_000;
     assert!(expired::refused(refusal) && expired::refused("ERROR: Failed to refresh token: 400 Bad Request"));
-    assert!(expired::judge(now - 1, Some(now + 1), refusal, now).unwrap().renewed);
+    assert!(expired::judge(AgentKind::Codex, now - 1, Some(now + 1), refusal, now).unwrap().renewed);
     let text = login::none_text(AgentKind::Codex, &vec![(1, Some(1500))], 30);
     assert!(text.starts_with("a codex helper in a container needs an account whose login lasts 40 min"), "{text}");
     assert!(text.contains("renewed when codex runs on that account on the host"), "{text}");
@@ -130,11 +130,39 @@ fn container_codex_login_refused_before_its_end_takes_the_newer_one() {
     let refusal = "■ unexpected status 401 Unauthorized: Could not parse your authentication token. Please try signing in again.";
     let now = 100 * 60_000;
     let expires = now + 30 * 60_000;
-    assert!(expired::judge(expires, None, "• Working (3m 10s)", now).is_none(), "not refused, and not over");
-    let o = expired::judge(expires, Some(expires + 1), refusal, now).unwrap();
+    assert!(expired::judge(AgentKind::Codex, expires, None, "• Working (3m 10s)", now).is_none(), "not refused, and not over");
+    let o = expired::judge(AgentKind::Codex, expires, Some(expires + 1), refusal, now).unwrap();
     assert!(o.renewed && o.note.contains("still had 30 min left") && o.note.contains("started again"), "{}", o.note);
-    let o = expired::judge(expires, Some(expires), refusal, now).unwrap();
+    let o = expired::judge(AgentKind::Codex, expires, Some(expires), refusal, now).unwrap();
     assert!(!o.renewed && o.note.contains("has not been renewed"), "the same login on the host: {}", o.note);
+    // before its end only codex's own error line near the bottom counts
+    let output = "  └ HTTP/1.1 401 Unauthorized\n    api error: 401 authentication_error\n• The endpoint says 401 Unauthorized without a key.\n\n› Ask\n";
+    assert!(expired::judge(AgentKind::Codex, expires, Some(expires + 1), output, now).is_none(), "a command's 401 is not the token's");
+    let far = format!("{refusal}\n{}", "• more output\n".repeat(8));
+    assert!(expired::judge(AgentKind::Codex, expires, Some(expires + 1), &far, now).is_none(), "an old error further up");
+    let near = format!("{refusal}\n\n› Ask\n\n  ? for shortcuts\n");
+    assert!(expired::judge(AgentKind::Codex, expires, Some(expires + 1), &near, now).unwrap().renewed);
+    assert!(expired::judge(AgentKind::Codex, now - 1, Some(now + 1), output, now).unwrap().renewed, "once it ended any refusal counts");
+}
+
+#[test]
+fn container_codex_stopped_helper_is_not_started_again() {
+    let dir = temp("container-codex-again");
+    let fd = dir.join("fake");
+    std::fs::create_dir_all(&fd).unwrap();
+    let d = super::tests_away::fake(&fd);
+    account(&dir.join(".codex"));
+    let mut env = marspot_term::test_env::EnvGuard::new();
+    env.set("HOME", dir.display().to_string());
+    let (s, _rx) = shared_at(&dir.join("helpers"));
+    std::fs::create_dir_all(s.dir_of(41).join("home")).unwrap();
+    // no longer in the table: its stop came before the restart ran
+    let e = expired::again(&s, 41, AgentKind::Codex, "codex", Some(d)).unwrap_err();
+    assert!(e.contains("stopped"), "{e}");
+    assert!(!s.dir_of(41).join("home/auth.json").exists() && !s.dir_of(41).join("expires").exists());
+    assert!(!std::fs::read_to_string(fd.join("log")).unwrap().lines().any(|l| l.starts_with("rm ")), "docker was not asked");
+    drop(env);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -146,12 +174,12 @@ fn container_codex_ask_and_own_flags_run_without_its_sandbox() {
     let (dir, run) = written(AgentKind::Codex, "-c model_verbosity=low");
     assert!(run.contains(" '-c' 'model_verbosity=low' '-s' 'danger-full-access' "), "{run}");
     std::fs::remove_dir_all(&dir).unwrap();
-    for kept in ["--dangerously-bypass-approvals-and-sandbox", "-a on-request --sandbox danger-full-access"] {
+    for kept in ["--dangerously-bypass-approvals-and-sandbox", "-a on-request --sandbox danger-full-access", "-sdanger-full-access", "-s=danger-full-access"] {
         let (dir, run) = written(AgentKind::Codex, kept);
         assert_eq!(run.matches("danger-full-access").count(), kept.matches("danger-full-access").count(), "{run}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
-    for refused in ["-s workspace-write", "--sandbox=read-only", "--full-auto", "-c sandbox_mode=\"workspace-write\""] {
+    for refused in ["-s workspace-write", "-sworkspace-write", "-s=read-only", "-s", "--sandbox=read-only", "--full-auto", "-c sandbox_mode=\"workspace-write\""] {
         let dir = temp("container-codex-sandbox");
         super::tests::account(AgentKind::Codex, &dir.join("account"));
         let r = write_files(&dir, 41, &super::tests::args(AgentKind::Codex), "proj#12", refused, &super::tests::ready(AgentKind::Codex, &dir.join("account")));

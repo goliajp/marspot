@@ -94,22 +94,37 @@ fn mode_flags(agent: AgentKind, mode: &str) -> Result<Vec<String>, Reject> {
 /// sandbox, and codex is told to use none.
 const FULL: &str = "danger-full-access";
 
+/// The sandbox that the flag at the start of `w` names, if it is one:
+/// `-s v`, `-sv`, `-s=v`, `--sandbox v` or `--sandbox=v`.  No other
+/// option of codex's is `-s` followed by more.
+fn sandbox_named<'a>(w: &[&'a str]) -> Option<&'a str> {
+    let first = *w.first()?;
+    if first == "-s" || first == "--sandbox" {
+        return Some(w.get(1).copied().unwrap_or(""));
+    }
+    if let Some(v) = first.strip_prefix("--sandbox=") {
+        return Some(v);
+    }
+    let v = first.strip_prefix("-s")?;
+    Some(v.strip_prefix('=').unwrap_or(v))
+}
+
 /// Arguments given for codex in a container, with no sandbox of its own.
 fn codex_custom(custom: &str) -> Result<Vec<&str>, Reject> {
     let words: Vec<&str> = custom.split_whitespace().collect();
-    let other = |w: &[&str]| match w {
-        ["-s" | "--sandbox", v, ..] => *v != FULL,
-        [w, ..] => w.strip_prefix("--sandbox=").is_some_and(|v| v != FULL) || *w == "--full-auto" || (w.contains("sandbox_mode=") && !w.trim_end_matches(['"', '\'']).ends_with(FULL)),
-        [] => false,
+    let in_config = |w: &str| w.contains("sandbox_mode=");
+    let other = |w: &[&str]| {
+        sandbox_named(w).is_some_and(|v| v != FULL)
+            || w.first().is_some_and(|w| *w == "--full-auto" || (in_config(w) && !w.trim_end_matches(['"', '\'']).ends_with(FULL)))
     };
     if (0..words.len()).any(|i| other(&words[i..])) {
         let why = "codex's own sandbox cannot start in a container, so every command in it would fail: in a container leave its sandbox out \
                    (the container is the sandbox), or use isolation host";
         return Err(bad(why));
     }
-    let given = |w: &&str| matches!(*w, "-s" | "--sandbox" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo") || w.starts_with("--sandbox=") || w.contains("sandbox_mode=");
+    let given = |w: &[&str]| sandbox_named(w).is_some() || w.first().is_some_and(|w| matches!(*w, "--dangerously-bypass-approvals-and-sandbox" | "--yolo") || in_config(w));
     let mut out = words.clone();
-    if !words.iter().any(given) {
+    if !(0..words.len()).any(|i| given(&words[i..])) {
         out.extend(["-s", FULL]);
     }
     Ok(out)

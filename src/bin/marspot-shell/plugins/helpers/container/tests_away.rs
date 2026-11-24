@@ -155,13 +155,13 @@ fn container_sweep_removes_what_is_left_of_gone_helpers() {
     let mut left = std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
     std::fs::write(dir.join("ps/marspot-helper-x-41"), format!("{}\n41\n", left.id())).unwrap();
     std::fs::write(dir.join("ps/marspot-helper-x-42"), "0\n42\n").unwrap();
-    cleanup::sweep_now(&dir, &d, |sid| sid == 42);
+    cleanup::sweep_now(&dir, Some(&d), |sid| sid == 42);
     assert!(!dir.join("ps/marspot-helper-x-41").exists() && dir.join("ps/marspot-helper-x-42").exists());
     assert!(!left.wait().unwrap().success(), "ended");
     assert!(log(&dir).contains("ps -a --filter label=marspot.state="));
     // a docker whose answer is an error is not believed
     std::fs::write(dir.join("ps-fails"), "").unwrap();
-    cleanup::sweep_now(&dir, &d, |_| false);
+    cleanup::sweep_now(&dir, Some(&d), |_| false);
     assert!(dir.join("ps/marspot-helper-x-42").exists());
     std::fs::remove_dir_all(&dir).unwrap();
 }
