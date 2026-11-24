@@ -27,14 +27,18 @@ pub(super) fn args(agent: AgentKind) -> HelperStartArgs {
     }
 }
 
-fn ready(agent: AgentKind, home: &Path) -> Ready {
+pub(super) fn ready(agent: AgentKind, home: &Path) -> Ready {
     Ready {
         docker: PathBuf::from("/usr/local/bin/docker"),
         image_there: true,
         account: Account { n: 2, home: home.into() },
         binds: creds::of(agent, home).unwrap(),
         cwd: "/Users/someone/proj".into(),
-        login: (agent == AgentKind::Claude).then(|| login::Login { token: TOKEN.into(), expires_at: Some(records::now_ms() as i64 + 3_600_000), tier: None }),
+        login: match agent {
+            AgentKind::Claude => Some(login::Login::Claude(login::ClaudeLogin { token: TOKEN.into(), expires_at: Some(records::now_ms() as i64 + 3_600_000), tier: None })),
+            AgentKind::Codex => Some(login::Login::Codex(super::tests_codex::auth())),
+            _ => None,
+        },
     }
 }
 
@@ -59,13 +63,14 @@ pub(super) fn account(agent: AgentKind, home: &Path) {
             file("oauth/kimi-code", "");
             file("config.toml", "default_model = \"m\"\n[[hooks]]\ncommand = \"evil\"\n[thinking]\neffort = \"max\"\n");
         }
-        AgentKind::Claude | AgentKind::Codex => {}
+        AgentKind::Codex => super::tests_codex::account(home),
+        AgentKind::Claude => {}
     }
 }
 
 /// The helper's directory with every file written for `agent`, and its
 /// script.
-fn written(agent: AgentKind, mode: &str) -> (PathBuf, String) {
+pub(super) fn written(agent: AgentKind, mode: &str) -> (PathBuf, String) {
     let dir = temp(&format!("container-{}", agent.as_str()));
     account(agent, &dir.join("account"));
     write_files(&dir, 41, &args(agent), "proj#12", mode, &ready(agent, &dir.join("account"))).unwrap();
@@ -110,12 +115,12 @@ fn container_token_is_in_the_env_file_only() {
     }
     assert!(others >= 7, "{others} other files were read");
     // written again for a newer login, as private as the first
-    let newer = login::Login { token: "another".into(), expires_at: Some(9_000), tier: None };
+    let newer = login::ClaudeLogin { token: "another".into(), expires_at: Some(9_000), tier: None };
     login::write_env(&dir, &newer).unwrap();
     assert_eq!(std::fs::read_to_string(&env).unwrap(), "CLAUDE_CODE_OAUTH_TOKEN=another\n");
     assert_eq!(std::fs::metadata(&env).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(login::expires_ms(&dir), Some(9_000));
-    let broken = login::Login { token: "two\nlines".into(), expires_at: None, tier: None };
+    let broken = login::ClaudeLogin { token: "two\nlines".into(), expires_at: None, tier: None };
     assert!(login::write_env(&dir, &broken).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -155,14 +160,6 @@ fn container_other_agents_get_their_login_and_nothing_else_of_the_account() {
 }
 
 #[test]
-fn container_refuses_codex() {
-    let dir = temp("container-codex");
-    let r = check(&args(AgentKind::Codex), &dir.to_string_lossy());
-    assert!(r.is_err_and(|e| e.code == ErrorCode::NotSupported && e.message.contains("auth.json")));
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
 fn container_refuses_what_cannot_go_on_the_line() {
     let dir = temp("container-bad");
     let mut r = ready(AgentKind::Claude, &dir);
@@ -190,7 +187,7 @@ fn container_account_needs_a_login_that_outlives_the_budget() {
     assert!(login::lasts(Some(40 * 60), 30));
     assert!(!login::lasts(Some(40 * 60 - 1), 30));
     assert!(!login::lasts(None, 1));
-    let text = login::none_text(&vec![(1, Some(1500)), (2, Some(-4)), (3, None)], 30);
+    let text = login::none_text(AgentKind::Claude, &vec![(1, Some(1500)), (2, Some(-4)), (3, None)], 30);
     let dir = temp("container-lasts");
     let until = |m: i64| std::fs::write(dir.join("expires"), (records::now_ms() as i64 + min(m)).to_string()).unwrap();
     until(45);
@@ -206,21 +203,22 @@ fn container_account_needs_a_login_that_outlives_the_budget() {
 fn container_stop_with_an_expired_login_says_so() {
     let refusal = "● Please run /login · API Error: 401 OAuth token has expired";
     let now = 100 * 60_000;
-    assert!(expired::judge(now + 1, None, refusal, now).is_none(), "the login is still good");
-    let o = expired::judge(now - 5 * 60_000, None, refusal, now).unwrap();
+    assert!(expired::judge(AgentKind::Claude, now + 1, None, "● Done.", now).is_none(), "the login is still good");
+    assert!(expired::judge(AgentKind::Claude, now + 1, Some(now + 2), refusal, now).is_none(), "claude's early refusal is not looked for");
+    let o = expired::judge(AgentKind::Claude, now - 5 * 60_000, None, refusal, now).unwrap();
     assert!(!o.renewed && o.note.contains("expired 5 min ago") && o.note.contains("has not been renewed"), "{}", o.note);
-    assert!(!expired::judge(now - 1, Some(now - 1), refusal, now).unwrap().renewed, "the same login on the host");
-    let o = expired::judge(now - 1, Some(now + 1), refusal, now).unwrap();
+    assert!(!expired::judge(AgentKind::Claude, now - 1, Some(now - 1), refusal, now).unwrap().renewed, "the same login on the host");
+    let o = expired::judge(AgentKind::Claude, now - 1, Some(now + 1), refusal, now).unwrap();
     assert!(o.renewed && o.note.contains("started again"), "{}", o.note);
-    assert!(!expired::judge(now - 1, Some(now + 1), "● Done.", now).unwrap().renewed, "not refused: nothing to go on with");
+    assert!(!expired::judge(AgentKind::Claude, now - 1, Some(now + 1), "● Done.", now).unwrap().renewed, "not refused: nothing to go on with");
 
     let dir = temp("container-expired");
     let (s, _rx) = shared_at(&dir);
-    s.record(41, Event::Started(boxed(AgentKind::Codex)));
+    s.record(41, Event::Started(boxed(AgentKind::Gemini)));
     let h = s.table().map[&41].clone();
     std::fs::create_dir_all(s.dir_of(41)).unwrap();
     std::fs::write(s.dir_of(41).join("expires"), "5").unwrap();
-    assert!(at_stop(&s, &h, Stop::Idle, Some(refusal)).is_none(), "only claude's is a token");
+    assert!(at_stop(&s, &h, Stop::Idle, Some(refusal)).is_none(), "only claude's and codex's are a token");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

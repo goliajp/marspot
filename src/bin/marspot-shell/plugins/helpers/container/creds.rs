@@ -14,7 +14,8 @@
 //!   the account out.
 //! - codex renames over `auth.json` and has no other way: mounted by
 //!   itself, it loses the new refresh token after the old one was used.
-//!   The directory around it holds hooks and rules, so it is refused.
+//!   So it gets no credential file of the account: like claude, only its
+//!   access token, in a login of its own (`codex_auth`).
 
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
@@ -31,15 +32,6 @@ use crate::plugins::usage::for_helpers::{self, Pick};
 pub(super) struct Bind {
     pub from: PathBuf,
     pub to: &'static str,
-}
-
-pub(super) fn supported(agent: AgentKind) -> Result<(), Reject> {
-    if agent == AgentKind::Codex {
-        let why = "codex in a container is not supported: it renews its login by replacing auth.json, which a container that has only that file cannot do, \
-                   and the directory around it holds more than the login; use isolation host, or another agent";
-        return Err(Reject::new(ErrorCode::NotSupported, why));
-    }
-    Ok(())
 }
 
 fn none(m: String) -> Reject {
@@ -75,7 +67,6 @@ fn only(dir: &Path, fit: impl Fn(&str, &Metadata) -> bool) -> Result<PathBuf, Re
 
 /// The credentials of `agent`'s account at `home`.
 pub(super) fn of(agent: AgentKind, home: &Path) -> Result<Vec<Bind>, Reject> {
-    supported(agent)?;
     match agent {
         AgentKind::Claude | AgentKind::Codex => Ok(Vec::new()),
         AgentKind::Gemini => {
@@ -102,7 +93,6 @@ pub(super) fn of(agent: AgentKind, home: &Path) -> Result<Vec<Bind>, Reject> {
 /// The account for a gemini or kimi helper among those whose login can
 /// be mounted, and that login.
 pub(super) fn pick(agent: AgentKind, asked: Option<u8>, model: Option<&str>) -> Result<(Account, Vec<Bind>), Reject> {
-    supported(agent)?;
     let mut homes = handoff::profiles(agent_of(agent));
     let mut why = none(match asked {
         Some(n) => format!("{} has no account P{n} on this machine", agent.as_str()),

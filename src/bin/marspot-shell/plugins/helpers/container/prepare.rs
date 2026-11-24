@@ -17,7 +17,7 @@ const PROMPT_WITHIN: Duration = Duration::from_secs(10);
 /// How long a core or a socket that is starting is waited for.
 const CORE_WITHIN: Duration = Duration::from_secs(60);
 const NOT_BUILT: &str = "was closed: the container image it needs could not be built within 15 minutes; marspot's log has the reason.";
-const NOT_LASTING: &str = "was closed: while its container image was built, the account's login came to last less than its budget and 10 minutes; it is renewed when claude runs on that account on the host.";
+const NOT_LASTING: &str = "was closed: while its container image was built, the account's login came to last less than its budget and 10 minutes; it is renewed when the agent runs on that account on the host.";
 const NOT_TYPED: &str = "was closed: its container image is there, but the line that starts it did not go in.";
 
 /// Build the image, then hand helper `sid` its task.
@@ -48,13 +48,14 @@ fn deliver(s: &Arc<Shared>, sid: u64, agent: AgentKind) -> Result<(), (&'static 
     let dir = s.dir_of(sid);
     image::name_in(&dir).map_err(|e| failed(e.to_string()))?;
     let Some(h) = s.table().map.get(&sid).cloned() else { return Ok(()) };
-    if agent == AgentKind::Claude
-        && let Some(l) = login::of_label(&h.account)
-        && l.expires_at > login::expires_ms(&dir)
+    let handed = matches!(agent, AgentKind::Claude | AgentKind::Codex);
+    if handed
+        && let Some(l) = login::of_label(agent, &h.account)
+        && l.expires_at() > login::expires_ms(&dir)
     {
-        login::write_env(&dir, &l).map_err(|r| failed(r.message))?;
+        login::hand_over(&dir, &l).map_err(|r| failed(r.message))?;
     }
-    if agent == AgentKind::Claude && !login::still_lasts(&dir, h.started.budget_min) {
+    if handed && !login::still_lasts(&dir, h.started.budget_min) {
         return Err((NOT_LASTING, "the login lasts too short a time by now".into()));
     }
     let pos = type_line(s, sid, &launch::start_line(&dir)).map_err(failed)?;

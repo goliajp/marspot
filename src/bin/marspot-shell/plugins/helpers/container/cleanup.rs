@@ -27,13 +27,21 @@ fn spawn(what: &str, f: impl FnOnce() + Send + 'static) {
     }
 }
 
+/// Remove helper `sid`'s token from its directory, whose removal may wait
+/// for docker.  It is read when the container starts and not after:
+/// claude's, and codex's, which is in a directory the container writes to.
+pub(super) fn drop_tokens(root: &Path, sid: u64) {
+    let dir = root.join(sid.to_string());
+    let _ = std::fs::remove_file(dir.join("env"));
+    let _ = std::fs::remove_file(dir.join("home/auth.json"));
+}
+
 /// Remove helper `sid`'s container, then its directory, which the
 /// container may have written to until then.  One docker would not
 /// remove is the next start's to sweep.
 pub(in super::super) fn remove_later(sid: u64, root: PathBuf) {
     spawn("stop", move || {
-        // read when the container starts, and not after
-        let _ = std::fs::remove_file(root.join(sid.to_string()).join("env"));
+        drop_tokens(&root, sid);
         let Some(d) = docker::find() else { return };
         let name = docker::container_name(sid);
         remove(&d, &name);
@@ -66,15 +74,20 @@ pub(in super::super) fn sweep(s: &Arc<Shared>, live: HashSet<u64>) {
     }
     let me = Arc::clone(s);
     spawn("sweep", move || {
-        let Some(d) = docker::find() else { return };
         // one started since is in the table before it has a container
-        sweep_now(&me.root(), &d, |sid| live.contains(&sid) || me.table().map.contains_key(&sid));
+        sweep_now(&me.root(), docker::find().as_deref(), |sid| live.contains(&sid) || me.table().map.contains_key(&sid));
     });
 }
 
-pub(super) fn sweep_now(root: &Path, d: &Path, kept: impl Fn(u64) -> bool) {
+/// The tokens go even when docker is not there to remove the containers.
+pub(super) fn sweep_now(root: &Path, d: Option<&Path>, kept: impl Fn(u64) -> bool) {
+    let gone: Vec<u64> = pending::all(root).into_iter().filter(|sid| !kept(*sid)).collect();
+    for sid in &gone {
+        drop_tokens(root, *sid);
+    }
+    let Some(d) = d else { return };
     sweep_listed(d, &kept);
-    for sid in pending::all(root).into_iter().filter(|sid| !kept(*sid)) {
+    for sid in gone {
         if remove(d, &docker::container_name(sid)) {
             pending::gone(root, sid);
         }

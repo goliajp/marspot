@@ -85,12 +85,15 @@ fn container_directory_goes_after_the_container() {
     pending::add(&s.root(), 41, &[]).unwrap();
     std::fs::create_dir_all(s.dir_of(41)).unwrap();
     std::fs::write(s.dir_of(41).join("env"), "x").unwrap();
+    std::fs::create_dir_all(s.dir_of(41).join("home")).unwrap();
+    std::fs::write(s.dir_of(41).join("home/auth.json"), "x").unwrap();
     s.record(41, Event::Stopped { exited: false });
     let asked = || std::fs::read_to_string(dir.join("log")).is_ok_and(|l| l.contains("rm -f"));
     wait("docker is asked", asked);
     s.sweep_dirs_where(|_| true);
     assert!(s.dir_of(41).is_dir(), "the container may still write there");
     assert!(!s.dir_of(41).join("env").exists());
+    assert!(!s.dir_of(41).join("home/auth.json").exists(), "codex's token goes with claude's");
     wait("then it goes", || !s.dir_of(41).exists());
     assert!(pending::all(&s.root()).is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
@@ -105,14 +108,21 @@ fn container_directory_stays_until_a_start_could_remove_the_container() {
     std::fs::create_dir_all(root.join("42")).unwrap();
     for sid in [41, 42] {
         pending::add(&root, sid, &[]).unwrap();
+        std::fs::create_dir_all(root.join(format!("{sid}/home"))).unwrap();
+        std::fs::write(root.join(format!("{sid}/env")), "CLAUDE_CODE_OAUTH_TOKEN=t").unwrap();
+        std::fs::write(root.join(format!("{sid}/home/auth.json")), "{}").unwrap();
     }
+    // with no docker the containers cannot be removed, but the tokens go
+    cleanup::sweep_now(&root, None, |sid| sid == 42);
+    assert!(root.join("41/home").is_dir() && !root.join("41/env").exists() && !root.join("41/home/auth.json").exists());
+    assert!(root.join("42/env").exists() && root.join("42/home/auth.json").exists(), "a live helper keeps its");
     std::fs::write(dir.join("rm-says"), "removal in progress").unwrap();
-    cleanup::sweep_now(&root, &d, |sid| sid == 42);
+    cleanup::sweep_now(&root, Some(&d), |sid| sid == 42);
     assert!(root.join("41").is_dir());
     let (s, _rx) = shared_at(&root);
     assert!(!s.dir_is_over(41, |_| true), "left for the next start");
     std::fs::write(dir.join("rm-says"), "No such container: x").unwrap();
-    cleanup::sweep_now(&root, &d, |sid| sid == 42);
+    cleanup::sweep_now(&root, Some(&d), |sid| sid == 42);
     assert!(!root.join("41").exists() && root.join("42").is_dir());
     assert_eq!(pending::all(&root), [42].into());
     std::fs::remove_dir_all(&dir).unwrap();

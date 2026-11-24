@@ -43,6 +43,19 @@ pub(super) fn kimi_config(host: &str) -> String {
     out
 }
 
+/// codex's config: the account's choice of model and effort, from the
+/// top of its own, and no notice of a newer version to answer.
+pub(super) fn codex_config(host: &str) -> String {
+    let mut out = String::from("check_for_update_on_startup = false\n");
+    for l in host.lines().map(str::trim).take_while(|l| !l.starts_with('[')) {
+        let kept = l.split_once('=').is_some_and(|(k, v)| matches!(k.trim(), "model" | "model_reasoning_effort") && whole(v.trim()));
+        if kept {
+            out.push_str(&format!("{l}\n"));
+        }
+    }
+    out
+}
+
 pub(super) fn gemini_settings(host: &str) -> String {
     let model = json::parse(host).ok().and_then(|v| v.at(&["model", "name"]).and_then(Value::str).map(str::to_string));
     let auth = obj([("auth", obj([("selectedType", "oauth-personal".into())]))]);
@@ -68,6 +81,6 @@ pub(super) fn write(agent: AgentKind, dir: &Path, account: &Path) -> std::io::Re
             file("trustedFolders.json", r#"{"/work":"TRUST_FOLDER"}"#)
         }
         AgentKind::Kimi => file("config.toml", &kimi_config(&of_host("config.toml"))),
-        AgentKind::Codex => Ok(()),
+        AgentKind::Codex => file("config.toml", &codex_config(&of_host("config.toml"))),
     }
 }

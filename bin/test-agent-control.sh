@@ -323,7 +323,8 @@ check "docker was told to remove its container" grep -q "^rm -f marspot-helper-.
 check "no container is left" bash -c "[[ -z \$(ls '$FAKE_DOCKER_DIR/ps') ]]"
 for (( i = 0; i < 20; i++ )); do [[ ! -e "$SD/helpers/$S_BOX" ]] && break; sleep 0.5; done
 check "its directory is gone" test ! -e "$SD/helpers/$S_BOX"
-check "codex is not supported in a container" bash -c "grep -q not_supported <<<\"\$1\"" _ "$(start_helper codex 30 --container "Look around.")"
+check "codex with no login there: no_account" bash -c "grep -q no_account <<<\"\$1\" && grep -q 'P1 has no login' <<<\"\$1\"" _ "$(start_helper codex 30 --container "Look around.")"
+check "and nothing was made in its account" test ! -e "$HOME/.codex-profile-1/auth.json"
 check "gemini with no login there: no_account" bash -c "grep -q no_account <<<\"\$1\"" _ "$(start_helper gemini 30 --container "Look around.")"
 check "and nothing was made in its account" test ! -e "$HOME/.gemini-profile-1/.gemini/oauth_creds.json"
 check "the home directory is refused" bash -c "grep -q bad_request <<<\"\$1\"" _ "$(HELPER_CWD="$HOME" start_helper claude 30 --container "Look around.")"
