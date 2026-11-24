@@ -200,6 +200,43 @@ fn session_cpu_ns(pid: u32) -> Option<Spend> {
     })
 }
 
+/// The session's logical and device write bytes, read until two reads
+/// 100 ms apart agree (at most 5 s).
+fn settled_writes(pid: u32) -> Option<(u64, u64)> {
+    let read = || {
+        let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+        // SAFETY: a live rusage_info_v4 for the flavour that fills one.
+        let rc = unsafe {
+            libc::proc_pid_rusage(pid as libc::c_int, libc::RUSAGE_INFO_V4, (&mut info as *mut libc::rusage_info_v4).cast())
+        };
+        (rc == 0).then_some((info.ri_logical_writes, info.ri_diskio_byteswritten))
+    };
+    let mut last = read()?;
+    for _ in 0..50 {
+        thread::sleep(Duration::from_millis(100));
+        let now = read()?;
+        if now == last {
+            return Some(now);
+        }
+        last = now;
+    }
+    Some(last)
+}
+
+/// Every file the trial left, with its length and the bytes given it.
+fn list_files(dir: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let Ok(m) = e.metadata() else { continue };
+        if m.is_dir() {
+            list_files(&e.path());
+        } else {
+            eprintln!("file: {} len={} allocated={}", e.path().display(), m.len(), m.blocks() * 512);
+        }
+    }
+}
+
 /// What one trial cost, in every unit the kernel will report.
 struct Spend {
     user_ns: u64,
@@ -450,5 +487,13 @@ fn main() {
         }
         None => println!("{wall_ns} - - - - -"),
     }
+    // what the session handed the kernel to write, once its writer
+    // threads have caught up with the trial: the reply can come before
+    // the last history and bytelog buffers are written.  Read after
+    // the CPU figures so the wait is not in them.
+    if let Some((logical, disk)) = settled_writes(session_pid) {
+        eprintln!("writes: logical_bytes={logical} diskio_bytes={disk}");
+    }
+    list_files(&sandbox);
     let _ = std::fs::remove_dir_all(&sandbox);
 }

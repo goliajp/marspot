@@ -30,4 +30,4 @@
 
 shell   = "0.7.691"  # a one-shot frame read takes its deadline as an argument, for tests
 core    = "0.12.683"  # the style index takes its top bits by trailing ones
-session = "0.11.441"  # the style index takes its top bits by trailing ones
+session = "0.11.442"  # the throughput probe reports the bytes handed to the kernel to write
