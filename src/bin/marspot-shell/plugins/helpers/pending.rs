@@ -3,7 +3,11 @@
 //! is tried again when the program in front of its parent pane changes
 //! (an agent started there has an inbox), at most [`TRIES`] times; the
 //! facts the notice stands for are written only once it is delivered,
-//! so a helper's new result stays new until then.
+//! so a helper's new result stays new until then.  A notice with no
+//! retry left before a new program (a parent at a shell has no inbox)
+//! or none left at all, or one refused by a parent at its shell prompt,
+//! writes its stop at once: the helper shows as stopped, and only its
+//! result waits for the delivery.
 //!
 //! An agent in front of the parent that has not registered its inbox
 //! yet is on its way: that failure spends no try, and the notice goes
@@ -22,7 +26,7 @@ use crate::observe::Observation;
 /// Deliveries of one notice, the first included.
 pub(super) const TRIES: u32 = 5;
 /// Notices kept at once; a helper has at most one.
-const CAP: usize = 32;
+pub(super) const CAP: usize = 32;
 const SETTLE_STEP_MS: u64 = 2_000;
 const SETTLE_FOR_MS: u64 = 30_000;
 /// The waits before the slow retries with one program in front.
@@ -81,6 +85,22 @@ impl Notice {
             self.slow += 1;
         }
     }
+
+    /// Whether nothing will try it again with this program in front.
+    pub fn out_of_retries(&self) -> bool {
+        self.retry_ms.is_none() || self.tries >= TRIES
+    }
+
+    /// The facts of the stop it tells of, taken out; what is left is
+    /// written when it is delivered.  They are written at the time they
+    /// are taken, which counts as a notice that went (`noticed_at`): it
+    /// takes a place in the rate's window, and the strip says the parent
+    /// was told, though nothing reached it.
+    pub fn take_stop(&mut self) -> Vec<Event> {
+        let (result, stop) = std::mem::take(&mut self.events).into_iter().partition(|e| matches!(e, Event::ResultDelivered { .. }));
+        self.events = result;
+        stop
+    }
 }
 
 /// One undelivered notice per helper; a newer one replaces it.
@@ -96,19 +116,25 @@ pub(super) fn front_of(obs: &Observation, parent: u64) -> Option<i32> {
 impl Undelivered {
     /// Keep `n` for helper `sid` unless it has been tried enough; false
     /// when it is dropped.
+    #[cfg(test)]
     pub fn keep(&mut self, sid: u64, n: Notice) -> bool {
+        self.keep_evicting(sid, n).0
+    }
+
+    /// [`Self::keep`], with the notice put out to make room for it, of
+    /// the helper it is for: past [`CAP`], the most tried one goes.
+    pub fn keep_evicting(&mut self, sid: u64, n: Notice) -> (bool, Option<(u64, Notice)>) {
         if n.tries >= TRIES {
             self.map.remove(&sid);
-            return false;
+            return (false, None);
         }
+        let mut evicted = None;
         if self.map.len() >= CAP && !self.map.contains_key(&sid) {
             let most_tried = self.map.iter().max_by_key(|(_, n)| n.tries).map(|(k, _)| *k);
-            if let Some(k) = most_tried {
-                self.map.remove(&k);
-            }
+            evicted = most_tried.and_then(|k| Some((k, self.map.remove(&k)?)));
         }
         self.map.insert(sid, n);
-        true
+        (true, evicted)
     }
 
     pub fn take(&mut self, sid: u64) -> Option<Notice> {

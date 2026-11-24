@@ -1,16 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use marspot::pane_state::{BusyKind, PaneStatus};
 use marspot_peer::control::{AgentKind, ErrorCode, Reject};
 
 use super::notify::{self, Stop};
-use super::pending::{Notice, SLOW_MS, Undelivered};
+use super::pending::{CAP, Notice, SLOW_MS, Undelivered};
 use super::table::{Event, Helper};
 use super::tests::{feed, host_with, shared_at, started, temp};
 use super::tests_review::panes;
 use super::work::{self, Job};
-use super::{close, stop_all, tick, timers, turn};
+use super::{close, rebuild, records, service, stop_all, tell, tick, timers, turn};
 
 fn delivered(agent: AgentKind) -> Vec<Event> {
     vec![Event::Started(started(10, "shell", agent)), Event::TaskDelivered]
@@ -124,4 +124,115 @@ fn helpers_a_notice_says_a_directory_name_without_control_characters() {
     assert!(t.starts_with("[marspot helper notice] Helper \"a[2Jb &lt;/helper-result>'#5521\" (codex on account P2) stopped"), "{t}");
     assert_eq!(t.matches("</helper-result>").count(), 1);
     assert!(!t.contains(['\x1b', '\u{202e}']));
+}
+
+#[test]
+fn helpers_a_stop_a_parent_cannot_be_told_shows_once_the_slow_retries_are_used_up() {
+    let dir = temp("shell_parent");
+    let (s, _rx) = shared_at(&dir);
+    feed(&s, 1, [delivered(AgentKind::Codex), vec![Event::ResultChanged]].concat());
+    // a program in front that has no inbox: it may still register one
+    let front = panes(&[(10, 55)]);
+    let sha = "cd".repeat(32);
+    let mut now = records::now_ms();
+    let mut n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
+    let no_pane = "no pane is named \"proj#10\"";
+    // the wait for an inbox, then the slow retries
+    for wait in [30_000, SLOW_MS[0], SLOW_MS[1], SLOW_MS[2]] {
+        assert_eq!(service::state_of(&s.table().map[&1]), "running");
+        work::not_delivered(&s, 1, n, no_pane, &front, now);
+        now += wait;
+        n = s.lock().undelivered.take(1).unwrap();
+        // what `send` counts; a slow retry hands it back in `failed`
+        n.tries += 1;
+    }
+    work::not_delivered(&s, 1, n, no_pane, &front, now);
+    let h = s.table().map[&1].clone();
+    assert_eq!(service::state_of(&h), "stopped");
+    assert!(h.result_new, "the result is still to be delivered");
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *s.table(), "the record says the same");
+    // an agent there later is told, and only the result is left to write
+    let mut st = s.lock();
+    assert_eq!(st.undelivered.next_retry_ms(), None);
+    assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1);
+    assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
+    drop(st);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_stop_notice_put_out_past_the_cap_shows_as_stopped() {
+    let dir = temp("cap");
+    let (s, _rx) = shared_at(&dir);
+    let sha = "ef".repeat(32);
+    let waiting = |tries| Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries, retry_ms: Some(u64::MAX), ..Notice::default() };
+    for sid in 100..100 + CAP as u64 {
+        feed(&s, sid, [delivered(AgentKind::Codex), vec![Event::ResultChanged]].concat());
+        // the most tried goes first
+        assert!(s.lock().undelivered.keep(sid, waiting(if sid == 100 { 4 } else { 1 })));
+    }
+    feed(&s, 1, delivered(AgentKind::Codex));
+    let n = Notice { parent: 10, body: "y".into(), tries: 1, ..Notice::default() };
+    work::not_delivered(&s, 1, n, "connection refused", &panes(&[(10, 55)]), records::now_ms());
+    let st = s.lock();
+    assert!(!st.undelivered.holds(100) && st.undelivered.holds(1) && st.undelivered.len() == CAP);
+    drop(st);
+    let t = s.table();
+    assert_eq!(service::state_of(&t.map[&100]), "stopped", "put out, never to be tried again");
+    assert!(t.map[&100].result_new);
+    assert!((101..100 + CAP as u64).all(|sid| service::state_of(&t.map[&sid]) == "running"), "the others still wait");
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *t, "the record says the same");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_stop_a_parent_at_its_shell_prompt_refuses_shows_at_once() {
+    let dir = temp("at_shell");
+    let (s, _rx) = shared_at(&dir);
+    feed(&s, 1, [delivered(AgentKind::Claude), vec![Event::ResultChanged]].concat());
+    let sha = "a1".repeat(32);
+    let n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
+    let now = records::now_ms();
+    work::not_delivered(&s, 1, n, "no pane is named \"proj#10\"", &panes(&[(10, 0)]), now);
+    let h = s.table().map[&1].clone();
+    assert_eq!(service::state_of(&h), "stopped", "after the first refusal");
+    assert!(h.result_new);
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *s.table(), "the record says the same");
+    let mut st = s.lock();
+    // the result still waits, slow retries and all
+    assert_eq!(st.undelivered.next_retry_ms(), Some(now + SLOW_MS[0]));
+    assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1);
+    assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
+    drop(st);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_result_whose_stop_was_written_is_told_after_a_restart() {
+    let dir = temp("retell");
+    let (s, _rx) = shared_at(&dir);
+    let at_shell = panes(&[(10, 0)]);
+    let sha = notify::sha("done");
+    for (sid, agent) in [(1, AgentKind::Claude), (2, AgentKind::Codex)] {
+        feed(&s, sid, [delivered(agent), vec![Event::ResultChanged]].concat());
+        std::fs::create_dir_all(s.dir_of(sid)).unwrap();
+        std::fs::write(s.result_path(sid), "done").unwrap();
+        let n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
+        work::not_delivered(&s, sid, n, "no pane is named \"proj#10\"", &at_shell, records::now_ms());
+    }
+    // the shell starts again: what was held in memory is gone
+    let (again, rx) = shared_at(&dir);
+    rebuild::rebuild(&again, || HashSet::from([1, 2]));
+    let retold: Vec<u64> = rx.try_iter().filter_map(|j| if let Job::Retell { sid } = j { Some(sid) } else { None }).collect();
+    assert_eq!(retold, vec![1], "codex is told again by its screen");
+    for _ in 0..2 {
+        tell::retell(&again, 1, &at_shell);
+    }
+    let mut st = again.lock();
+    assert_eq!(st.undelivered.len(), 1);
+    assert_eq!(st.undelivered.next_retry_ms(), None, "no slow retries at the same shell");
+    assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1, "an agent there is told");
+    assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
+    drop(st);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

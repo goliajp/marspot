@@ -60,6 +60,9 @@ pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> u
         s.watch_result(h.sid);
         s.missed_result(h);
         super::settle::resume(s, h.sid, h.started.agent);
+        if super::tell::result_untold(h) && !s.queue(Job::Retell { sid: h.sid }) {
+            marspot::lx_warn!("helpers.not_queued", &format!("sid={} retell", h.sid));
+        }
     }
     carried
 }
