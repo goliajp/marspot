@@ -2,6 +2,7 @@
 
 use super::{Handler, Terminal};
 use crate::lx_debug;
+use crate::shell_proto::RUN_END_MARK;
 
 /// The most a program may put on the clipboard in one OSC 52.
 ///
@@ -18,50 +19,88 @@ const OSC52_MAX: usize = 64 * 1024;
 const ENDS_KEPT: usize = 8;
 
 #[derive(Default)]
-pub(super) struct CommandEnds {
+struct Ends {
     count: u64,
     statuses: [Option<u8>; ENDS_KEPT],
-    /// How many `OSC 133 ; B` (the prompt is drawn, input starts).
-    inputs: u64,
 }
 
-impl CommandEnds {
+impl Ends {
     fn push(&mut self, status: Option<u8>) {
         self.statuses[(self.count % ENDS_KEPT as u64) as usize] = status;
         self.count += 1;
     }
 
-    pub(super) fn latest(&self) -> (u64, Option<u8>) {
+    fn latest(&self) -> (u64, Option<u8>) {
         (self.count, self.status(self.count).flatten())
     }
 
-    pub(super) fn inputs(&self) -> u64 {
-        self.inputs
-    }
-
     /// The status of end number `n` (from 1), if it is still kept.
-    pub(super) fn status(&self, n: u64) -> Option<Option<u8>> {
+    fn status(&self, n: u64) -> Option<Option<u8>> {
         let kept = n >= 1 && n <= self.count && self.count - n < ENDS_KEPT as u64;
         kept.then(|| self.statuses[((n - 1) % ENDS_KEPT as u64) as usize])
     }
+}
+
+/// The latest end not marked as a run's, while no command was said to
+/// start (`OSC 133 ; C`) after it.
+#[derive(Default)]
+struct HookEnd {
+    changes: u64,
+    status: Option<Option<u8>>,
+}
+
+impl HookEnd {
+    fn set(&mut self, status: Option<Option<u8>>) {
+        self.changes += 1;
+        self.status = status;
+    }
+}
+
+#[derive(Default)]
+pub(super) struct CommandEnds {
+    all: Ends,
+    /// Those a run's status line printed, kept apart so that no number
+    /// of a hook's own ends pushes one out.
+    runs: Ends,
+    hook: HookEnd,
+    /// How many `OSC 133 ; B` (the prompt is drawn, input starts).
+    inputs: u64,
 }
 
 impl Terminal {
     /// How many `OSC 133 ; D` the terminal has parsed, and what the
     /// latest one said the exit status was.
     pub fn command_end(&self) -> (u64, Option<u8>) {
-        self.command_end.latest()
+        self.command_end.all.latest()
     }
 
     /// The status of the `n`-th `OSC 133 ; D` (from 1), while it is one
     /// of the latest eight.
     pub fn command_end_status(&self, n: u64) -> Option<Option<u8>> {
-        self.command_end.status(n)
+        self.command_end.all.status(n)
+    }
+
+    /// [`Self::command_end`], of the ends marked as a run's alone.
+    pub fn run_end(&self) -> (u64, Option<u8>) {
+        self.command_end.runs.latest()
+    }
+
+    /// [`Self::command_end_status`], of the ends marked as a run's
+    /// alone.
+    pub fn run_end_status(&self, n: u64) -> Option<Option<u8>> {
+        self.command_end.runs.status(n)
+    }
+
+    /// The status of the latest `OSC 133 ; D` not marked as a run's,
+    /// unless an `OSC 133 ; C` came after it, and how many of both the
+    /// terminal has parsed.
+    pub fn hook_end(&self) -> (u64, Option<Option<u8>>) {
+        (self.command_end.hook.changes, self.command_end.hook.status)
     }
 
     /// How many `OSC 133 ; B` (input starts) the terminal has parsed.
     pub fn input_starts(&self) -> u64 {
-        self.command_end.inputs()
+        self.command_end.inputs
     }
 }
 
@@ -131,10 +170,12 @@ impl Handler<'_> {
             // scroll to, and the rest are refinements of those; an
             // unknown letter is ignored rather than guessed at.
             //
-            // Options arrive as `;key=value` after the letter and are
-            // skipped, except `D`'s first parameter, which is the exit
-            // status. "No status" is a different thing from zero: a
+            // Options arrive as `;key=value` after the letter. `D`'s
+            // first parameter is the exit status, unless it is such an
+            // option; "no status" is a different thing from zero: a
             // shell that did not say cannot be reported as success.
+            // After it, the mark of a run's status line is read; every
+            // other option is skipped.
             Some(133) => {
                 let body = std::str::from_utf8(rest).unwrap_or("");
                 let mut parts = body.split(';');
@@ -144,13 +185,21 @@ impl Handler<'_> {
                         self.command_end.inputs += 1;
                         crate::grid::PromptMark::InputStart
                     }
-                    Some("C") => crate::grid::PromptMark::OutputStart,
+                    Some("C") => {
+                        self.command_end.hook.set(None);
+                        crate::grid::PromptMark::OutputStart
+                    }
                     Some("D") => {
                         let status = parts
                             .next()
                             .filter(|p| !p.is_empty() && !p.contains('='))
                             .and_then(|p| p.parse::<u8>().ok());
-                        self.command_end.push(status);
+                        self.command_end.all.push(status);
+                        if parts.any(|p| p == RUN_END_MARK) {
+                            self.command_end.runs.push(status);
+                        } else {
+                            self.command_end.hook.set(Some(status));
+                        }
                         crate::grid::PromptMark::CommandEnd(status)
                     }
                     _ => return,

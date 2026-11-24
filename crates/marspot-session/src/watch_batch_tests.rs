@@ -28,7 +28,7 @@ impl Pane {
     fn turn(&mut self, out: &str) {
         self.tx.send(out.as_bytes().to_vec().into()).expect("queue a chunk");
         self.session.pump();
-        self.ctl.after_turn(&mut self.session, false, None);
+        self.ctl.after_turn(&mut self.session, None, false, None);
     }
 
     fn pos(&self) -> u64 {

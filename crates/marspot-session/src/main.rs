@@ -1401,7 +1401,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             }
         };
         awake.after_turn(n > 0, procs_changed, poke.as_mut());
-        pane_ctl.after_turn(&mut session, procs_changed, poke.as_mut());
+        pane_ctl.after_turn(&mut session, Some(&mut frames), procs_changed, poke.as_mut());
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
         // replies L4 sent.  Empty `line_count` means "no more history

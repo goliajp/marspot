@@ -282,6 +282,17 @@ fn run_puts_the_status_line_on_its_own_line() {
 }
 
 #[test]
+fn pane_control_run_waits_for_the_end_its_own_line_prints() {
+    let w = ops_input::run_end();
+    assert_eq!((w.kind, w.since_pos), (marspot::shell_proto::WatchKind::CommandEnd, 0));
+    for fish in [false, true] {
+        assert!(!w.text.is_empty() && ops_input::run_text("true", fish).contains(&format!(";{}", w.text)));
+    }
+    let any = ops_read::watch_body(&marspot_peer::control::Wait::CommandEnd);
+    assert_eq!(any.text, "", "a read takes any end");
+}
+
+#[test]
 fn reads_are_cut_from_the_oldest_end() {
     let long = "old line\n".repeat(200_000);
     let (t, cut) = ops_read::cap_text(format!("{long}newest"));

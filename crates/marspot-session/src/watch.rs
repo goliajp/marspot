@@ -10,13 +10,13 @@
 use std::time::{Duration, Instant};
 
 use marspot_term::shell_proto::{
-    DoneCode, Frame, MsgType, PaneWatchFired, WatchBody, WatchKind, WatchReason, encode_pane_watch_fired,
+    DoneCode, Frame, MsgType, PaneWatchFired, RUN_END_MARK, WatchBody, WatchKind, WatchReason, encode_pane_watch_fired,
 };
 
 use crate::SessionImpl;
 use crate::control_writer::ControlWriter;
 use crate::pane_ctl::{local, local_mut, shell_in_front};
-use crate::track::{At, Batch, Track};
+use crate::track::{At, Batch, End, Track};
 use crate::typing::Reserved;
 use crate::watch_text::{BATCH_ROWS, Needle, stream_text};
 
@@ -41,7 +41,8 @@ const PROMPT_QUIET: Duration = Duration::from_millis(150);
 /// How long it must be quiet instead while the input start mark the
 /// shell set before has not come: a shell that stopped setting it
 /// (`exec bash`) is waited for this long once, not until the caller's
-/// deadline.
+/// deadline.  Also how long the prompt must be quiet after a hook's
+/// command end for a run to have ended without its status line.
 const PROMPT_UNMARKED_QUIET: Duration = Duration::from_secs(1);
 /// When to try again a report the writer refused.
 const RETRY: Duration = Duration::from_millis(10);
@@ -56,13 +57,15 @@ enum State {
     /// is written.  Nothing looks at it until then.
     Pending,
     Waiting {
-        /// `prompt` held but for the foreground: no deadline until the
+        /// `prompt`, or a run's end, held but for the foreground: no deadline until the
         /// output or the process group changes.
         parked: bool,
     },
     Fired {
         report: PaneWatchFired,
         sent: bool,
+        /// Met since the last [`Watches::take_met`].
+        fresh: bool,
     },
 }
 
@@ -73,7 +76,7 @@ struct Slot {
     needle: Option<Box<Needle>>,
     /// Where the output after `since` started.
     from: At,
-    /// For a `prompt` watch.
+    /// For a watch that waits for the shell in front to be quiet.
     front: Front,
 }
 
@@ -99,6 +102,12 @@ impl Watches {
     #[cfg(test)]
     pub(crate) fn check_every_batch(&mut self) {
         self.every_batch = true;
+    }
+
+    /// Take the next `n` reports as refused by the writer.
+    #[cfg(test)]
+    pub(crate) fn refuse_reports(&mut self, n: u32) {
+        self.refuse = n;
     }
 
     #[cfg(test)]
@@ -183,7 +192,7 @@ impl Watches {
         let Some(slot) = self.slots[at].as_mut() else { return };
         slot.from = track.at(slot.body.since_pos);
         slot.state = State::Waiting { parked: false };
-        if slot.body.kind == WatchKind::Prompt {
+        if watches_front(&slot.body) {
             slot.front.seen(shell_in_front(session), Instant::now());
         }
         self.stream_texts(session);
@@ -205,7 +214,7 @@ impl Watches {
             if let State::Waiting { parked } = &mut slot.state {
                 *parked &= !(procs || batch.is_some());
                 texts |= slot.body.kind == WatchKind::Text;
-                if procs && slot.body.kind == WatchKind::Prompt {
+                if procs && watches_front(&slot.body) {
                     slot.front.seen(shell_in_front(session), Instant::now());
                 }
             }
@@ -238,17 +247,18 @@ impl Watches {
         let quiet_for = |from: Instant, d: Duration| after && now >= from + d;
         let met = match b.kind {
             WatchKind::Change => after.then_some((track.pos(), None, None)),
-            WatchKind::CommandEnd => match track.command_end() {
-                Some((pos, status)) if pos > b.since_pos => Some((pos, status.map(i16::from), None)),
-                _ => None,
-            },
+            WatchKind::CommandEnd if !is_run_end(b) => after_since(track.ends().any, b.since_pos).map(end_met),
+            WatchKind::CommandEnd => {
+                let ends = track.ends();
+                after_since(ends.run, b.since_pos).map(end_met).or_else(|| {
+                    let hook = after_since(ends.hook, b.since_pos).filter(|_| !*parked)?;
+                    let quiet = quiet_for(slot.front.quiet_from(last_output), PROMPT_UNMARKED_QUIET);
+                    (quiet && slot.front.settled(parked, shell_in_front(session), now)).then(|| end_met(hook))
+                })
+            }
             WatchKind::Quiet => quiet_for(last_output, Duration::from_millis(b.quiet_ms.into())).then_some((track.pos(), None, None)),
             WatchKind::Prompt if !*parked && quiet_for(slot.front.quiet_from(last_output), prompt_quiet(track, b.since_pos)) => {
-                *parked = !shell_in_front(session);
-                if *parked {
-                    slot.front.seen(false, now);
-                }
-                let met = !*parked && !slot.front.back_unseen(now);
+                let met = slot.front.settled(parked, shell_in_front(session), now);
                 if met && !track.prompt_drawn(b.since_pos) {
                     track.forget_input_start();
                 }
@@ -263,7 +273,7 @@ impl Watches {
         if let Some((pos, status, line)) = met {
             let report = PaneWatchFired { sid: self.sid, watch_id: b.watch_id, reason: WatchReason::Met, pos, status, line };
             let text = b.kind == WatchKind::Text;
-            slot.state = State::Fired { report, sent: false };
+            slot.state = State::Fired { report, sent: false, fresh: true };
             if text {
                 self.stream_texts(session);
             }
@@ -315,6 +325,9 @@ impl Watches {
             let at = match slot.body.kind {
                 WatchKind::Quiet => track.last_output() + Duration::from_millis(slot.body.quiet_ms.into()),
                 WatchKind::Prompt if !parked => slot.front.quiet_from(track.last_output()) + prompt_quiet(track, slot.body.since_pos),
+                WatchKind::CommandEnd if !parked && waits_on_hook(&slot.body, track) => {
+                    slot.front.quiet_from(track.last_output()) + PROMPT_UNMARKED_QUIET
+                }
                 _ => continue,
             };
             if track.pos() > slot.body.since_pos {
@@ -334,7 +347,7 @@ impl Watches {
                 let met = reason == WatchReason::SessionEnded && slot.body.kind == WatchKind::Exit;
                 let reason = if met { WatchReason::Met } else { reason };
                 let report = PaneWatchFired { sid: self.sid, watch_id: slot.body.watch_id, reason, pos: track.pos(), status: None, line: None };
-                slot.state = State::Fired { report, sent: false };
+                slot.state = State::Fired { report, sent: false, fresh: false };
             }
         }
     }
@@ -344,12 +357,20 @@ impl Watches {
         self.slots.iter().flatten().any(|s| matches!(s.state, State::Fired { sent: false, .. }))
     }
 
+    /// Whether a watch was met since the last call.
+    pub(crate) fn take_met(&mut self) -> bool {
+        self.slots.iter_mut().flatten().fold(false, |met, s| match &mut s.state {
+            State::Fired { fresh, .. } => std::mem::take(fresh) | met,
+            _ => met,
+        })
+    }
+
     /// Send the reports not sent yet, in slot order, until the writer
     /// refuses one.
     pub(crate) fn send_fired(&mut self, mut poke: Option<&mut ControlWriter>) {
         self.retry = false;
         for slot in self.slots.iter_mut().flatten() {
-            let State::Fired { report, sent: sent @ false } = &mut slot.state else { continue };
+            let State::Fired { report, sent: sent @ false, .. } = &mut slot.state else { continue };
             let Some(w) = poke.as_deref_mut() else { return };
             let frame = Frame::new(MsgType::PaneWatchFired, encode_pane_watch_fired(report));
             let refused = if self.refuse > 0 {
@@ -371,6 +392,29 @@ impl Watches {
 /// before a `prompt` watch holds.
 fn prompt_quiet(track: &Track, since: u64) -> Duration {
     if track.prompt_drawn(since) { PROMPT_QUIET } else { PROMPT_UNMARKED_QUIET }
+}
+
+fn after_since(end: Option<End>, since: u64) -> Option<End> {
+    end.filter(|&(pos, _)| pos > since)
+}
+
+fn end_met((pos, status): End) -> (u64, Option<i16>, Option<u64>) {
+    (pos, status.map(i16::from), None)
+}
+
+fn is_run_end(b: &WatchBody) -> bool {
+    b.kind == WatchKind::CommandEnd && b.text == RUN_END_MARK
+}
+
+fn watches_front(b: &WatchBody) -> bool {
+    b.kind == WatchKind::Prompt || is_run_end(b)
+}
+
+/// A run whose status line the shell may have dropped (Ctrl-C, a
+/// syntax error): a hook's end came after `since`, and no command
+/// started after it.
+fn waits_on_hook(b: &WatchBody, track: &Track) -> bool {
+    is_run_end(b) && after_since(track.ends().hook, b.since_pos).is_some()
 }
 
 fn invalid(b: &WatchBody) -> Option<Code> {

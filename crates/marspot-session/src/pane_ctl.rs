@@ -16,8 +16,9 @@ use marspot_term::shell_proto::{
 use std::sync::mpsc::Sender;
 
 use crate::control_writer::ControlWriter;
+use crate::frames::Frames;
 use crate::{SessionEvent, SessionImpl};
-use crate::track::Track;
+use crate::track::{LatestEnds, Track};
 use crate::typing::{Step, Typing};
 use crate::watch::Watches;
 
@@ -32,12 +33,12 @@ pub(crate) enum Request {
 }
 
 /// What one image hands the next so that positions never go back: the
-/// output position, the latest command end (its position, status) and
-/// the position of the latest input start, if the shell marks them.
+/// output position, the latest command ends and the position of the
+/// latest input start, if the shell marks them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Marks {
     pub(crate) pos: u64,
-    pub(crate) command_end: Option<(u64, Option<u8>)>,
+    pub(crate) ends: LatestEnds,
     pub(crate) input_start: Option<u64>,
 }
 
@@ -67,6 +68,11 @@ impl PaneCtl {
         self.watches.check_every_batch();
     }
 
+    #[cfg(test)]
+    pub(crate) fn refuse_reports(&mut self, n: u32) {
+        self.watches.refuse_reports(n);
+    }
+
     /// The line of the first watch that was met, if one was.
     #[cfg(test)]
     pub(crate) fn met(&self) -> Option<Option<u64>> {
@@ -74,7 +80,7 @@ impl PaneCtl {
     }
 
     pub(crate) fn marks(&self, session: &SessionImpl) -> Marks {
-        Marks { pos: local(session).output_pos(), command_end: self.track.command_end(), input_start: self.track.input_start() }
+        Marks { pos: local(session).output_pos(), ends: self.track.ends(), input_start: self.track.input_start() }
     }
 
     pub(crate) fn request(&mut self, r: Request, session: &mut SessionImpl, mut poke: Option<&mut ControlWriter>) {
@@ -82,7 +88,6 @@ impl PaneCtl {
             Request::Watch(w) => {
                 let code = self.watches.register(w.watch, session, &mut self.track);
                 self.done(w.req_id, code, poke.as_deref_mut());
-                self.watches.send_fired(poke);
             }
             Request::Type(t) => {
                 if let Some(mut reply) = self.typing.queue(t) {
@@ -95,14 +100,29 @@ impl PaneCtl {
     }
 
     /// After the loop's turn of parsing: note what the batch did, move
-    /// input along, look at the watches, and send what is owed.
-    pub(crate) fn after_turn(&mut self, session: &mut SessionImpl, procs_changed: bool, mut poke: Option<&mut ControlWriter>) {
+    /// input along, look at the watches, and send what is owed.  A
+    /// watch met is reported here alone, and the screen it was met on
+    /// is published first, once, if L2 is connected: its reader looks at
+    /// once.
+    pub(crate) fn after_turn(
+        &mut self,
+        session: &mut SessionImpl,
+        frames: Option<&mut Frames>,
+        procs_changed: bool,
+        mut poke: Option<&mut ControlWriter>,
+    ) {
         let batch = self.track.after_batch(session);
         if self.typing.idle() && self.watches.is_empty() {
             return;
         }
         self.step(session, poke.as_deref_mut());
         self.watches.evaluate(session, &mut self.track, batch, procs_changed);
+        if self.watches.take_met()
+            && let Some(f) = frames
+            && poke.is_some()
+        {
+            f.publish_withheld(session, poke.as_deref_mut());
+        }
         self.watches.send_fired(poke);
     }
 
@@ -174,7 +194,6 @@ impl PaneCtl {
                 Step::Refused(req_id, code) => self.done(req_id, code, poke.as_deref_mut()),
             }
         }
-        self.watches.send_fired(poke);
     }
 
     fn typed(&self, mut reply: PaneTyped, poke: Option<&mut ControlWriter>) {
@@ -219,6 +238,10 @@ fn drain(poke: Option<&mut ControlWriter>) {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[cfg(test)]
+#[path = "watch_frames_tests.rs"]
+mod watch_frames_tests;
 
 #[cfg(test)]
 #[path = "watch_perf_tests.rs"]
