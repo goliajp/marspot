@@ -150,8 +150,8 @@ pub struct Settings {
     /// `DryRun` logs what would be moved and moves nothing.
     pub cc_rebalance: Rebalance,
     /// List a pane's helpers in rows at its bottom, as the agent in it
-    /// lists its own.  Off until it has been lived with: the program in
-    /// the pane is made shorter while there are any.
+    /// lists its own.  The program in the pane is made shorter while
+    /// there are any; a pane without helpers is not touched.
     pub helper_strip: bool,
     /// The theme everything is drawn in; `None` follows the system.
     /// Dark by default, so an upgrade changes nothing a user can see.
@@ -175,7 +175,7 @@ impl Default for Settings {
             codex_follow_updates: true,
             agents_install: true,
             cc_rebalance: Rebalance::On,
-            helper_strip: false,
+            helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
         }

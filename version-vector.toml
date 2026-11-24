@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.660"  # container helpers: early refusal only from codex's own line, -s forms, tokens swept without docker
-core    = "0.12.668"  # a lone pane says in the header which helper it shows
+core    = "0.12.669"  # the helper strip is on by default
 session = "0.11.435"  # the socket the first image bound crosses the handoff; leaving unreachable is no abnormal drop
