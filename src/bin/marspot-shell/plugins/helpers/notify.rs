@@ -102,12 +102,23 @@ pub(super) fn read_result(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// What [`prompt_sha`] puts first; a prompt written down without it,
+/// or not at all, is not known.
+const PROMPT_FORM: &str = "p2:";
+
 /// What tells one prompt from another, by the prompt alone (`prompt_of`):
 /// not by where its cursor is, nor by how the lines are spaced.
 pub(super) fn prompt_sha(screen: &str) -> String {
     let mark = |c: char| c.is_whitespace() || matches!(c, '❯' | '›' | '→' | '▶' | '●' | '○' | '│');
     let screen = crate::pane_control::run_trailer::drop_status_lines(screen);
-    sha(&prompt_of(&screen).split(mark).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" "))
+    format!("{PROMPT_FORM}{}", sha(&prompt_of(&screen).split(mark).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")))
+}
+
+/// Whether the prompt on `screen` is known to be the one written down as
+/// `told`: one whose screen was not read, or written down another way
+/// before, may be any.
+pub(super) fn same_prompt(told: &str, screen: &str) -> bool {
+    told.starts_with(PROMPT_FORM) && prompt_sha(screen) == told
 }
 
 /// The prompt at the bottom of `screen`: from below the last rule drawn

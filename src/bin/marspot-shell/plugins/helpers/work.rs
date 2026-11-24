@@ -103,7 +103,9 @@ fn run(s: &Arc<Shared>, rx: Receiver<Job>, epoch: u64) {
             return;
         }
         account_changes(s);
-        super::pair::write_moves(s, super::pair::look_now);
+        let now = records::now_ms();
+        super::pair::write_moves(s, now);
+        super::pair::look_for_names(s, now, crate::plugins::peerbus::conversation_of);
         for job in super::timers::due_jobs(s, epoch, records::now_ms(), super::timers::no_agent_now) {
             if ended(s, epoch) {
                 return;
@@ -254,15 +256,24 @@ fn screen_of(sid: u64) -> Option<String> {
 pub(super) fn still_blocked(s: &Arc<Shared>, sid: u64, screen: Option<String>) {
     let Some(h) = s.table().map.get(&sid).cloned() else { return };
     let Some(screen) = screen else {
-        marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked: screen not read, looked at again"));
-        s.lock().prompt_unread.insert(sid);
+        if unread(s, sid) {
+            marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked: screen not read, looked at again"));
+        }
         return;
     };
-    let same = h.blocked_prompt.is_empty() || notify::prompt_sha(&screen) == h.blocked_prompt;
+    s.lock().prompt_unread.remove(&sid);
+    let same = notify::same_prompt(&h.blocked_prompt, &screen);
     marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked same={same}"));
     if !same {
         stopped(s, sid, Stop::Blocked, false);
     }
+}
+
+/// Helper `sid`'s screen could not be read at its prompt: asked about
+/// again, while it is a helper.  Whether it was read the last time.
+pub(super) fn unread(s: &Shared, sid: u64) -> bool {
+    let mut st = s.lock();
+    st.table.map.contains_key(&sid) && st.prompt_unread.insert(sid, true).is_none()
 }
 
 /// Send the notice for a stop of `h`, and write down that it went.

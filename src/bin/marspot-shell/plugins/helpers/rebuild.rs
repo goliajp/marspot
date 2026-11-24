@@ -21,6 +21,7 @@ pub(super) fn live_shadows() -> HashSet<u64> {
 pub(super) fn begin(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> std::io::Result<usize> {
     super::work::start(Arc::clone(s))?;
     let n = rebuild(s, live);
+    s.lock().unnamed = super::pair::unnamed_at_start(&s.table(), super::records::now_ms());
     // the worker worked out its sleep before there was a table
     s.wake();
     Ok(n)

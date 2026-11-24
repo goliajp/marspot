@@ -32,7 +32,8 @@ pub(super) fn sleep_for(s: &Shared) -> Option<Duration> {
     let now = records::now_ms();
     let st = s.lock();
     let next = next_ms(&s.table(), &st.closing, &st.close_retry, &st.no_agent, now);
-    let next = next.into_iter().chain(st.undelivered.next_retry_ms()).min();
+    let names = (!st.unnamed.is_empty()).then_some(now + super::pair::LOOK_EVERY_MS);
+    let next = next.into_iter().chain(st.undelivered.next_retry_ms()).chain(names).min();
     drop(st);
     next.map(|ms| Duration::from_millis(ms.saturating_sub(now)))
 }

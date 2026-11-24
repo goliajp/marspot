@@ -224,20 +224,20 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
             job.finish(Err(format!("spawn: {e}")));
         }
     }
-    let commit: pty_op::CallFn = Arc::new(move || match pending.lock().unwrap().take() {
-        Some((l, moved)) => {
-            // the new agent is up, whatever becomes of the ledger
-            helpers::moved(moved);
-            l.save(&dir, sid).map_err(|e| format!("ledger: {e}"))
-        }
-        None => Ok(()),
-    });
     let predicate = match to {
         Agent::Claude => claudecode::looks_like_claudecode,
         Agent::Codex => codex::looks_like_codex,
         Agent::Gemini => gemini::looks_like_gemini,
         Agent::Kimi => kimi::looks_like_kimi,
     };
+    let commit: pty_op::CallFn = Arc::new(move || match pending.lock().unwrap().take() {
+        Some((l, moved)) => {
+            // the new agent is up, whatever becomes of the ledger
+            helpers::moved(moved, leaving.shell_pid, predicate);
+            l.save(&dir, sid).map_err(|e| format!("ledger: {e}"))
+        }
+        None => Ok(()),
+    });
     Some(
         PtyOp::new("handoff.switch")
             .hold_screen(true)

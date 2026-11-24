@@ -148,10 +148,14 @@ struct State {
     turned: HashSet<u64>,
     /// Those of them whose plugin reports one now.
     at_work: HashSet<u64>,
-    /// Helpers at a prompt whose screen could not be read.
-    prompt_unread: HashSet<u64>,
+    /// Helpers at a prompt whose screen could not be read; true: to be
+    /// asked about again.
+    prompt_unread: HashMap<u64, bool>,
     /// Parent panes handed to another agent, not yet written down.
     moves: pair::Moves,
+    /// Parent panes whose helpers wait for the name of the conversation
+    /// they were handed to, looked at until when (ms after the epoch).
+    unnamed: HashMap<u64, u64>,
     /// What the records of the helpers' agents say of their context.
     used: HashMap<u64, strip::used::Known>,
     /// When the table was taken from the log (ms after the epoch).
