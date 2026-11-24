@@ -90,9 +90,15 @@ fn recent_slot(s: PackedStyle) -> usize {
     (s.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 60) as usize
 }
 
+/// Two rounds of mixing, then the top bits: a value's low byte is the
+/// same for every colour of a kind and a background alone leaves the
+/// low half zero, so one product's low or middle bits pile counted-up
+/// colours onto a few slots.  Only a miss in `recent` pays for it.
 #[inline(always)]
 fn slot_of(s: PackedStyle, mask: usize) -> usize {
-    (s.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & mask
+    let h = s.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let h = (h ^ h >> 32).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h.rotate_left(mask.count_ones()) as usize & mask
 }
 
 impl StyleTable {
@@ -568,6 +574,36 @@ mod tests {
         }
         assert_eq!(t.find(PackedStyle(3 << 8)), None);
         assert_eq!(t.intern(PackedStyle(5 << 8)), Some(gone), "the freed number is reused");
+    }
+
+    /// Values that differ only in a colour's payload spread over the
+    /// whole index: each entry sits a probe or two from its home slot.
+    /// A hash whose low bits ignore those bytes piles every value onto
+    /// a few homes, and each new number then probes a long run.
+    #[test]
+    fn colours_counted_up_spread_over_the_index() {
+        let n: u64 = if cfg!(miri) { 2000 } else { 1 << 16 };
+        let shapes: [fn(u64) -> CellAttrs; 3] = [
+            |k| CellAttrs { bg: Color::rgb((k >> 16) as u8, (k >> 8) as u8, k as u8), ..CellAttrs::default() },
+            |k| CellAttrs { fg: Color::rgb((k >> 16) as u8, (k >> 8) as u8, k as u8), ..CellAttrs::default() },
+            |k| CellAttrs { fg: Color::indexed(k as u8), bg: Color::indexed((k >> 8) as u8), ..CellAttrs::default() },
+        ];
+        for (shape, attrs) in shapes.iter().enumerate() {
+            let mut t = StyleTable::new(1 << 20);
+            for k in 1..=n {
+                t.intern(PackedStyle::pack(&attrs(k))).expect("room");
+            }
+            let mask = t.index.len() - 1;
+            let (mut entries, mut probes) = (0u64, 0u64);
+            for (j, &e) in t.index.iter().enumerate() {
+                if e != 0 {
+                    entries += 1;
+                    probes += ((j.wrapping_sub(slot_of(t.styles[e as usize - 1], mask))) & mask) as u64 + 1;
+                }
+            }
+            let mean = probes as f64 / entries as f64;
+            assert!(mean < 2.0, "shape {shape}: {mean:.1} probes a lookup over {entries} entries");
+        }
     }
 
     /// The shared way stops at its limit, and the limit keeps values
