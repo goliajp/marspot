@@ -244,7 +244,7 @@ impl KimiPlugin {
                 self.woken.remove(sid);
                 continue;
             }
-            if self.woken.contains(sid) || !matches!(marspot::pane_read::composer_box(*sid), Ok(Some(typed)) if typed.is_empty()) {
+            if self.woken.contains(sid) || !matches!(marspot::pane_read::composer_box_now(*sid), Ok(Some(typed)) if typed.is_empty()) {
                 continue;
             }
             match host.submit_pty_op(*sid, wake_op()) {

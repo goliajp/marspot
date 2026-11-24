@@ -94,7 +94,7 @@ pub fn screen(sid: u64, extra_lines: u16) -> std::io::Result<String> {
 /// has one already, so the record is not replayed a second time.
 pub fn screen_with(sid: u64, extra_lines: u16, replay: Option<&Terminal>) -> std::io::Result<String> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let Some(frame) = live_frame(&entry)? else {
+    let Some(frame) = live_frame(&entry, true)? else {
         return screen_text(&session_dir_of(sid), entry.cols, entry.rows, extra_lines);
     };
     let grid = grid_of(&frame);
@@ -132,7 +132,7 @@ pub fn screen_with(sid: u64, extra_lines: u16, replay: Option<&Terminal>) -> std
 /// typed is worse than handing back nothing.
 pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let Some(frame) = live_frame(&entry)? else {
+    let Some(frame) = live_frame(&entry, true)? else {
         return composer_text(&session_dir_of(sid), entry.cols, entry.rows);
     };
     Ok(composer_in_frame(&frame))
@@ -144,8 +144,18 @@ pub fn composer(sid: u64) -> std::io::Result<Option<String>> {
 /// exactly.  For a caller about to type into the pane, which may only
 /// do so into an empty box.
 pub fn composer_box(sid: u64) -> std::io::Result<Option<String>> {
+    composer_box_within(sid, true)
+}
+
+/// [`composer_box`] that does not wait for a publish under way, for the
+/// shell's main thread: None then, and it looks again on its next tick.
+pub fn composer_box_now(sid: u64) -> std::io::Result<Option<String>> {
+    composer_box_within(sid, false)
+}
+
+fn composer_box_within(sid: u64, wait: bool) -> std::io::Result<Option<String>> {
     let entry = marspot_term::session_registry::read_session_entry(sid)?;
-    let frame = live_frame(&entry)?;
+    let frame = live_frame(&entry, wait)?;
     Ok(frame.and_then(|f| box_of(&grid_of(&f))).filter(|t| !t.contains(marspot_term::grid::UNKNOWN_CLUSTER)))
 }
 
@@ -160,11 +170,13 @@ fn composer_in_frame(frame: &marspot_term::grid_shm::Frame) -> Option<String> {
 /// looking at.
 fn live_frame(
     entry: &marspot_term::session_registry::SessionEntry,
+    wait: bool,
 ) -> std::io::Result<Option<marspot_term::grid_shm::Frame>> {
     let Some(regions) = marspot_term::grid_shm::SessionRegions::of_entry(entry) else {
         return Ok(None);
     };
-    match marspot_term::grid_shm::peek_frame(&regions) {
+    let frame = if wait { marspot_term::grid_shm::peek_frame(&regions) } else { marspot_term::grid_shm::peek_frame_now(&regions) };
+    match frame {
         Ok(frame) => Ok(frame.filter(|f| f.view_offset == 0)),
         // another session's region: this one's screen is in its record
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Ok(None),

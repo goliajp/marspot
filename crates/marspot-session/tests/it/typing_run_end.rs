@@ -15,12 +15,12 @@ pub(crate) fn run_end(watch_id: u32, since_pos: u64) -> WatchBody {
 }
 
 /// Run `command` as `pane.run` does: what the watch reports, and the
-/// screen as it was published then.
+/// screen as it was published then, read once as `pane.run` reads it.
 pub(crate) fn run(s: &Session, l: &mut Link, watch_id: u32, command: &str) -> (PaneWatchFired, Vec<String>) {
     let input = format!("{command}\n{}", run_trailer(false));
     let req = l.type_in(input.as_bytes(), true, true, true, Some(run_end(watch_id, 0)));
     let f = l.fired(watch_id, 20.0);
-    let screen = s.try_screen(COLS, ROWS).unwrap_or_default();
+    let screen = s.try_screen(COLS, ROWS).expect("a frame is published when the watch is reported");
     assert_eq!(l.typed(req, 1.0).result, TypedResult::Written);
     l.cancel(watch_id);
     (f, screen)
@@ -190,7 +190,7 @@ fn typing_run_end_closing_a_flood_is_reported_with_its_last_line_on_screen() {
         l.armed(run_end(id as u32, p));
         l.inject(&format!("cat '{}'\r", flood.display()));
         l.fired(id as u32, 20.0);
-        let screen = s.try_screen(COLS, ROWS).unwrap_or_default();
+        let screen = s.try_screen(COLS, ROWS).expect("a frame is published when the watch is reported");
         l.cancel(id as u32);
         assert!(screen.iter().any(|r| r.starts_with(&format!("last-{id}"))), "run {id}\n{screen:#?}");
         std::thread::sleep(std::time::Duration::from_millis(100));
