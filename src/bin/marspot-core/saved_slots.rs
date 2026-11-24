@@ -7,17 +7,21 @@ use super::*;
 /// not finished, and write the layout back, before the boot sweep
 /// finishes those closes: the sweep removes what marks them closed, and
 /// a window restored from a layout still naming them, by this core or
-/// one after it, would start their slots afresh.
-pub(super) fn forget_closed_slots(saved: &mut Option<marspot::state::SavedState>) {
+/// one after it, would start their slots afresh.  Returns how the boot
+/// sweep may go: when the layout could not be written back, the closes
+/// are left for a later core to finish.
+pub(super) fn forget_closed_slots(saved: &mut Option<marspot::state::SavedState>) -> boot_assembly::Sweep {
     let closed: std::collections::HashSet<u64> = session_registry::closed_session_ids().into_iter().collect();
-    let Some(state) = saved.as_mut() else { return };
+    let Some(state) = saved.as_mut() else { return boot_assembly::Sweep::Full };
     let mut emptied = false;
     for w in &mut state.windows {
         emptied |= empty_closed_slots(w, &closed);
     }
     if emptied && let Err(e) = marspot::state::write(state) {
-        lx_warn!("core.state_file.write_failed", &format!("{e}; closed slots not persisted"));
+        lx_warn!("core.state_file.write_failed", &format!("{e}; closed slots not persisted, closes left unfinished"));
+        return boot_assembly::Sweep::KeepingCloses;
     }
+    boot_assembly::Sweep::Full
 }
 
 /// A slot whose session was closed keeps its place and nothing else; a

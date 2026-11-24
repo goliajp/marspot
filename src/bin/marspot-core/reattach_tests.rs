@@ -64,7 +64,7 @@ fn session_showing_the_mark(tx: &mpsc::Sender<CoreEvent>, rx: &mpsc::Receiver<Co
 fn take_over(entry: &SessionEntry, tx: &mpsc::Sender<CoreEvent>) -> Pane {
     let s = saved(&[(entry.id, "")]);
     let (mut panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 1, 60, 16, tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 1, 60, 16, tx, Sweep::Full, &Default::default());
     assert_eq!(reattached, vec![entry.id], "the live session was not taken over");
     assert_eq!(panes.len(), 1);
     panes.remove(0)
@@ -146,7 +146,7 @@ fn a_session_that_cannot_move_and_cannot_update_is_started_again() {
 
     let s = saved(&[(before.id, "")]);
     let (panes, reattached) =
-        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
+        assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, Sweep::Full, &Default::default());
     assert!(reattached.is_empty(), "taken over with no region to show");
     assert_eq!(pane_sids(&panes), vec![before.id], "the slot keeps its session id");
     for pane in panes {

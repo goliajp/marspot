@@ -54,6 +54,18 @@ fn slot_specs<'a>(
     specs
 }
 
+/// What an assembly does with the registry beyond its own slots.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Sweep {
+    /// a restored window's: its own slots only
+    Off,
+    /// the boot window's: adopt orphans, retire unclaimed dirs, finish closes
+    Full,
+    /// the boot window's when the saved layout could not be told of the
+    /// closes: finishing them would drop what marks their slots closed
+    KeepingCloses,
+}
+
 /// RFC-004 B.1 — identity-keyed boot assembly.  Extracted from
 /// `main()` so the slot semantics (order preserved, never
 /// compacted, sid-stable, vacant on failure) are testable with a
@@ -66,7 +78,7 @@ pub(super) fn assemble_panes_at_boot(
     boot_cols: u16,
     boot_rows: u16,
     event_tx: &Sender<CoreEvent>,
-    sweeps_registry: bool,
+    sweep: Sweep,
     reserved_sids: &std::collections::HashSet<u64>,
 ) -> (Vec<Pane>, Vec<u64>) {
     // entry.toml titles, collected during the registry scan below.
@@ -93,7 +105,8 @@ pub(super) fn assemble_panes_at_boot(
     // Closed sessions are no slot's and nobody's orphans.
     let closed: std::collections::HashSet<u64> =
         session_registry::closed_session_ids().into_iter().collect();
-    if sweeps_registry {
+    let sweeps_registry = sweep != Sweep::Off;
+    if sweep == Sweep::Full {
         marspot::session_close::finish_closed();
     }
     let raw_list = list_session_entries();
