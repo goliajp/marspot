@@ -18,20 +18,23 @@
 //!
 //! Which texts the stream held whole is said apart from that, for a
 //! check on rows the batch went to and left again: a cursor that moved
-//! is no sign that the text is new there.
+//! is no sign that the text is new there.  Text drawn on the alternate
+//! screen is never one of them.
+
+#[path = "prefilter/plain.rs"]
+mod plain;
+#[path = "prefilter/screen.rs"]
+mod screen;
+#[path = "prefilter/text.rs"]
+mod text;
+
+use screen::Private;
+use text::Text;
 
 /// Texts looked for at once: one per text watch.
 const TEXTS: usize = 8;
 /// Longest last line of a chunk without a text's last byte that is read.
 const TAIL_READ: usize = 512;
-const ONES: u64 = 0x0101_0101_0101_0101;
-const HIGHS: u64 = 0x8080_8080_8080_8080;
-
-/// One of the word's bytes is zero.
-#[inline]
-fn zero_byte(x: u64) -> bool {
-    x.wrapping_sub(ONES) & !x & HIGHS != 0
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -39,56 +42,12 @@ enum Mode {
     Esc,
     /// `ESC` and intermediate bytes: a charset or line-size switch.
     EscInter,
+    /// Just after `CSI`: a `?` starts a private mode sequence.
+    CsiFirst,
     Csi,
+    Private,
     /// OSC, DCS, APC, PM, SOS: until BEL or `ESC \`.
     Str,
-    StrEsc,
-}
-
-struct Text {
-    /// Whose it is, as it was set: a bit of `seen`.
-    id: usize,
-    bytes: Vec<u8>,
-    back: Vec<u16>,
-    state: usize,
-}
-
-impl Text {
-    fn new(id: usize, bytes: &[u8]) -> Self {
-        let mut back = vec![0u16; bytes.len()];
-        let mut k = 0;
-        for i in 1..bytes.len() {
-            while k > 0 && bytes[i] != bytes[k] {
-                k = usize::from(back[k - 1]);
-            }
-            if bytes[i] == bytes[k] {
-                k += 1;
-            }
-            back[i] = k as u16;
-        }
-        Self { id, bytes: bytes.to_vec(), back, state: 0 }
-    }
-
-    #[inline]
-    fn step(&mut self, b: u8) -> bool {
-        let mut s = self.state;
-        while s > 0 && self.bytes[s] != b {
-            s = usize::from(self.back[s - 1]);
-        }
-        if self.bytes[s] == b {
-            s += 1;
-        }
-        if s == self.bytes.len() {
-            self.state = usize::from(self.back[s - 1]);
-            return true;
-        }
-        self.state = s;
-        false
-    }
-
-    fn last(&self) -> u8 {
-        self.bytes[self.bytes.len() - 1]
-    }
 }
 
 pub(crate) struct Prefilter {
@@ -111,6 +70,10 @@ pub(crate) struct Prefilter {
     /// may have begun in them; and the text bytes read since.
     skipped: bool,
     after_skip: Vec<u8>,
+    /// The bytes draw on the alternate screen; set to the grid's at
+    /// each ask.
+    alt: bool,
+    private: Private,
 }
 
 impl Default for Prefilter {
@@ -127,6 +90,8 @@ impl Default for Prefilter {
             seen: 0,
             skipped: false,
             after_skip: Vec::new(),
+            alt: false,
+            private: Private::default(),
         }
     }
 }
@@ -147,10 +112,16 @@ impl Prefilter {
             self.lasts[i] = t.last();
         }
         *self.stops = stops;
-        self.firsts = self.texts.iter().map(|t| ONES * u64::from(t.bytes[0])).collect();
+        self.firsts = self.texts.iter().map(|t| plain::word(t.bytes[0])).collect();
         self.firsts.dedup();
         // what is owed for output a held grid has not parsed stays owed
         self.forget();
+    }
+
+    /// The bytes from now on draw on the alternate screen: for the
+    /// first text set, as the bytes are not followed while none is.
+    pub(crate) fn starts_on(&mut self, alt: bool) {
+        self.alt = alt;
     }
 
     pub(crate) fn active(&self) -> bool {
@@ -162,9 +133,13 @@ impl Prefilter {
     }
 
     /// Whether a batch since the last ask has to be checked on the
-    /// grid, and a bit for the id of each text it held whole.
-    pub(crate) fn take(&mut self) -> (bool, u8) {
-        (std::mem::take(&mut self.check), std::mem::take(&mut self.seen))
+    /// grid, and a bit for the id of each text it held whole.  `alt`
+    /// says the grid is on the alternate screen: the bits of text drawn
+    /// before it was entered are kept until it is left.
+    pub(crate) fn take(&mut self, alt: bool) -> (bool, u8) {
+        self.alt = alt;
+        let seen = if alt { 0 } else { std::mem::take(&mut self.seen) };
+        (std::mem::take(&mut self.check), seen)
     }
 
     pub(crate) fn took(&mut self, bytes: &[u8]) {
@@ -179,16 +154,32 @@ impl Prefilter {
         // no match ends here, but one can start in the last line: that
         // line is read when it is short, so a chunk cut before a line's
         // last byte leaves a known state
-        let tail = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |at| at + 1);
+        // only as far back as a line that is read can start
+        let near = bytes.len().saturating_sub(TAIL_READ + 1);
+        let tail = bytes[near..].iter().rposition(|&b| b == b'\n').map_or(near, |at| near + at + 1);
         if bytes.len() - tail > TAIL_READ {
-            self.forget();
+            self.skip(bytes);
+            // an escape the chunk ends in is read, so that the rest of
+            // it in the next chunk is not taken for text
+            let near = bytes.len() - TAIL_READ;
+            if let Some(at) = bytes[near..].iter().rposition(|&b| b == 0x1b) {
+                self.read(&bytes[near + at..]);
+            }
             return;
         }
         if tail > 0 {
-            self.forget();
+            self.skip(&bytes[..tail]);
             self.line_break();
         }
         self.read(&bytes[tail..]);
+    }
+
+    /// Leave `bytes` unread.
+    fn skip(&mut self, bytes: &[u8]) {
+        self.forget();
+        if let Some(on) = screen::last_switch(bytes) {
+            self.alt = on;
+        }
     }
 
     fn forget(&mut self) {
@@ -231,16 +222,24 @@ impl Prefilter {
                 Mode::Text => {
                     self.text_byte(b, after_cr);
                     if self.mode == Mode::Text && self.idle() {
-                        i = self.plain_end(bytes, i);
+                        i = plain::end(&self.firsts, &self.stops, bytes, i);
                     }
                 }
+                // as in the parser: an escape starts anew in any sequence,
+                // CAN and SUB end it
+                _ if is_abort(b) => self.abort(b),
                 Mode::Esc => self.esc_byte(b),
                 Mode::EscInter => {
                     if (0x30..=0x7e).contains(&b) {
                         self.mode = Mode::Text;
                     }
                 }
-                Mode::Csi => {
+                Mode::CsiFirst if b == b'?' => {
+                    self.mode = Mode::Private;
+                    self.private = Private::default();
+                }
+                Mode::CsiFirst | Mode::Csi => {
+                    self.mode = Mode::Csi;
                     // parameters and intermediates up to the final byte
                     let mut b = b;
                     while (0x20..0x40).contains(&b) && i < bytes.len() {
@@ -248,41 +247,44 @@ impl Prefilter {
                         i += 1;
                     }
                     if (0x40..=0x7e).contains(&b) {
-                        self.mode = Mode::Text;
-                        // colour, erasing and reports leave cells where they are;
-                        // mode changes can move the cursor (origin mode, leaving
-                        // the alternate screen), so they count as moves
-                        if !b"mKJXnctqp".contains(&b) {
-                            self.moved();
-                        }
+                        self.csi_end(b);
+                    } else if is_abort(b) {
+                        self.abort(b);
                     }
                 }
-                Mode::Str => match b {
-                    0x07 => self.mode = Mode::Text,
-                    0x1b => self.mode = Mode::StrEsc,
-                    _ => {}
-                },
-                Mode::StrEsc => self.mode = if b == b'\\' { Mode::Text } else { Mode::Str },
+                Mode::Private => self.private_byte(b),
+                Mode::Str => {
+                    if b == 0x07 {
+                        self.mode = Mode::Text;
+                    }
+                }
             }
         }
     }
 
-    /// Where the plain text from `i` on ends: the next control byte, or
-    /// the next first byte of a text.  Eight bytes at a time.
-    #[inline]
-    fn plain_end(&self, bytes: &[u8], mut i: usize) -> usize {
-        while let Some(word) = bytes.get(i..i + 8) {
-            let x = u64::from_le_bytes(word.try_into().unwrap_or_default());
-            let control = x.wrapping_sub(ONES * 0x20) & !x & HIGHS;
-            if control != 0 || self.firsts.iter().any(|&f| zero_byte(x ^ f)) {
-                break;
-            }
-            i += 8;
+    fn csi_end(&mut self, b: u8) {
+        self.mode = Mode::Text;
+        // colour, erasing and reports leave cells where they are;
+        // mode changes can move the cursor (origin mode, leaving
+        // the alternate screen), so they count as moves
+        if !b"mKJXnctqp".contains(&b) {
+            self.moved();
         }
-        while i < bytes.len() && !self.stops[usize::from(bytes[i])] {
-            i += 1;
+    }
+
+    fn abort(&mut self, b: u8) {
+        self.mode = if b == 0x1b { Mode::Esc } else { Mode::Text };
+    }
+
+    fn private_byte(&mut self, b: u8) {
+        if !(0x40..=0x7e).contains(&b) {
+            self.private.byte(b);
+            return;
         }
-        i
+        if let Some(on) = self.private.end(b) {
+            self.alt = on;
+        }
+        self.csi_end(b);
     }
 
     fn idle(&self) -> bool {
@@ -305,7 +307,7 @@ impl Prefilter {
                 for t in &mut self.texts {
                     let last = t.last() == b;
                     let whole = t.step(b) || (self.skipped && last && t.bytes.ends_with(&self.after_skip));
-                    self.seen |= u8::from(whole) << t.id;
+                    self.seen |= u8::from(whole && !self.alt) << t.id;
                     self.check |= whole || (self.unknown && last);
                 }
             }
@@ -314,7 +316,7 @@ impl Prefilter {
 
     fn esc_byte(&mut self, b: u8) {
         self.mode = match b {
-            b'[' => Mode::Csi,
+            b'[' => Mode::CsiFirst,
             b']' | b'P' | b'X' | b'^' | b'_' => Mode::Str,
             b'=' | b'>' | b'\\' => Mode::Text,
             0x20..=0x2f => {
@@ -322,11 +324,24 @@ impl Prefilter {
                 Mode::EscInter
             }
             _ => {
+                // a full reset leaves the alternate screen
+                self.alt &= b != b'c';
                 self.moved();
                 Mode::Text
             }
         };
     }
+}
+
+/// Whether output that leaves a grid on `alt`, then `chunks` not yet
+/// parsed into it, draws on the alternate screen.
+pub(super) fn screen_after(alt: bool, chunks: &[Vec<u8>]) -> bool {
+    chunks.iter().rev().find_map(|c| screen::last_switch(c)).unwrap_or(alt)
+}
+
+/// ESC, CAN and SUB, which end any sequence being read.
+fn is_abort(b: u8) -> bool {
+    matches!(b, 0x1b | 0x18 | 0x1a)
 }
 
 #[cfg(test)]
@@ -337,7 +352,7 @@ mod tests {
     /// before the last byte.
     fn settle(p: &mut Prefilter) {
         p.took(b"\r\nE\r\n");
-        assert!(!p.take().0);
+        assert!(!p.take(false).0);
     }
 
     fn set(text: &str) -> Prefilter {
@@ -351,7 +366,7 @@ mod tests {
         for c in chunks {
             p.took(c.as_bytes());
         }
-        p.take().0
+        p.take(false).0
     }
 
     #[test]
@@ -398,7 +413,7 @@ mod tests {
     fn watch_prefilter_tells_a_whole_text_from_a_moved_cursor() {
         let held = |p: &mut Prefilter, chunks: &[&str]| {
             chunks.iter().for_each(|c| p.took(c.as_bytes()));
-            p.take().1
+            p.take(false).1
         };
         let mut p = Prefilter::default();
         p.set(&[(2, b"DONE"), (5, b"FIVE")]);
@@ -412,7 +427,63 @@ mod tests {
         assert_eq!(held(&mut p, &["\r\n", &long, "\x1b[5;1HE"]), 0, "nor beside it");
         p.took(b"\r\nDONE FIVE");
         p.set(&[(2, b"DONE"), (5, b"GONE")]);
-        assert_eq!(p.take(), (true, 1 << 2), "kept for the text that stays");
+        assert_eq!(p.take(false), (true, 1 << 2), "kept for the text that stays");
+    }
+
+    #[test]
+    fn watch_prefilter_holds_no_text_drawn_on_the_alternate_screen() {
+        let mut p = set("DONE");
+        p.took(b"\x1b[?1049hDONE\x1b[?1049l");
+        assert_eq!(p.take(false), (true, 0), "drawn there and left");
+        p.took(b"DONE\x1b[?1;1049h");
+        assert_eq!(p.take(true), (true, 0), "kept while it is on");
+        p.took(b"\x1b[?1049l");
+        assert_eq!(p.take(false), (true, 1), "given once it is left");
+        let unread = format!("\x1b[?1049h{}", "y".repeat(TAIL_READ + 1));
+        p.took(unread.as_bytes());
+        p.took(b"\r\nDONE");
+        assert_eq!(p.take(false).1, 0, "entered in bytes not read");
+        let cut = format!("x\r\n{}DO\x1b[", "y".repeat(TAIL_READ));
+        p.took(cut.as_bytes());
+        p.took(b"1mNE");
+        assert_eq!(p.take(false).1, 1, "unread bytes that end in an escape");
+    }
+
+    #[test]
+    fn watch_prefilter_ends_a_sequence_where_the_parser_does() {
+        let held = |chunk: &str| {
+            let mut p = set("DONE");
+            p.took(chunk.as_bytes());
+            p.take(false).1
+        };
+        // in order: an escape in a private mode sequence, in a sequence's
+        // parameters, CAN, SUB, an escape in a title
+        let chunks = [
+            "\x1b[?\x1b[?1049hDONE\x1b[?1049l",
+            "\x1b[1\x1b[?1049hDONE\x1b[?1049l",
+            "\x1b[?1\x18049hDONE",
+            "\x1b[?1\x1a049hDONE",
+            "\x1b]0;title\x1b[1mDONE\r\n",
+        ];
+        assert_eq!(chunks.map(held), [0, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn watch_prefilter_leaves_the_alternate_screen_on_a_full_reset() {
+        // read, in bytes not read, and the last switch in them counting
+        let mut p = set("DONE");
+        let mut held = |unread: &str, read: &str| {
+            p.took(unread.as_bytes());
+            p.took(read.as_bytes());
+            p.take(false).1
+        };
+        let long = "y".repeat(TAIL_READ + 1);
+        let seen = [
+            held("", "\x1b[?1049h\x1bcDONE"),
+            held(&format!("\x1b[?1049hy\x1bc{long}"), "\r\nDONE"),
+            held(&format!("\x1bc\x1b[?1049h\x1b[?25l{long}"), "\r\nDONE"),
+        ];
+        assert_eq!(seen, [1, 1, 0]);
     }
 
     /// How fast build-like output is read when every line has the
@@ -428,7 +499,7 @@ mod tests {
         let mut checks = 0;
         for chunk in out.chunks(64 * 1024) {
             p.took(chunk);
-            checks += usize::from(p.take().0);
+            checks += usize::from(p.take(false).0);
         }
         let took = started.elapsed();
         eprintln!("prefilter: {:.0} MiB/s, {checks} checks", out.len() as f64 / took.as_secs_f64() / (1 << 20) as f64);

@@ -36,6 +36,9 @@ pub(crate) struct Track {
     len: usize,
     /// The latest point taken on the main screen.
     main: Point,
+    /// How far up and down the main screen's cursor went in the batch
+    /// that went to the alternate screen, kept until it is left.
+    held: Option<Reach>,
     pos: u64,
     last_output: Instant,
     ends: CommandEnds,
@@ -58,7 +61,10 @@ pub(crate) struct Batch {
     from: At,
     pub(crate) to: At,
     /// The rows it went up from and to in between, on the main screen.
-    pub(crate) reach: Option<Reach>,
+    reach: Option<Reach>,
+    /// Those of the batch that went to the alternate screen, on the
+    /// batch that left it.
+    before: Option<Reach>,
     /// The latest point on the main screen before the batch: `from`,
     /// or where the output that left the main screen started.
     main: Point,
@@ -72,6 +78,13 @@ impl Batch {
         let (pos, at) = self.main;
         if since <= pos { at } else { self.from }
     }
+
+    /// The rows the batch went up from and to, for a watch from
+    /// `since`: with those of the batch that went to the alternate
+    /// screen, for a watch older than it.
+    pub(crate) fn reach(&self, since: u64) -> Option<Reach> {
+        Reach::join(self.reach, self.before.filter(|_| since <= self.main.0))
+    }
 }
 
 impl Track {
@@ -83,6 +96,7 @@ impl Track {
             head: 0,
             len: 0,
             main: NOWHERE,
+            held: None,
             pos: local(session).output_pos(),
             last_output: Instant::now(),
             ends: CommandEnds::new(session.terminal(), resumed.ends),
@@ -163,12 +177,21 @@ impl Track {
         self.inputs_seen = inputs;
         self.note_marks(pos, ended, input);
         let (from, main) = (self.last_at(), self.main);
-        // taken on the alternate screen too, and then let go: by the
-        // time that is left, a watch may be younger than those rows
+        // the main screen's, kept while the alternate one is on: a
+        // watch younger than the batch that entered it does not read
+        // those rows.  A resize meanwhile reflows the main screen and
+        // these numbers are off by what it moved, as is `main`; they
+        // are kept, as they are read only for a text the bytes held
+        // whole, and forgetting them would miss it
         let reach = session.terminal_mut().take_cursor_reach();
-        let reach = reach.filter(|_| !session.terminal().in_alt_screen());
+        let (reach, before) = if session.terminal().in_alt_screen() {
+            self.held = Reach::join(self.held, reach);
+            (None, None)
+        } else {
+            (reach, self.held.take())
+        };
         let to = self.mark(session);
-        Some(Batch { from, to, reach, main })
+        Some(Batch { from, to, reach, before, main })
     }
 
     /// Keep the input start rule only while the shell marks an input
@@ -253,6 +276,7 @@ mod tests {
             head: 0,
             len: 0,
             main: NOWHERE,
+            held: None,
             pos: 0,
             last_output: Instant::now(),
             ends: CommandEnds::new(&marspot_term::terminal::Terminal::new(4, 2), LatestEnds::default()),
