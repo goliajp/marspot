@@ -46,8 +46,11 @@ enum Mode {
     CsiFirst,
     Csi,
     Private,
-    /// OSC, DCS, APC, PM, SOS: until BEL or `ESC \`.
-    Str,
+    /// OSC: until BEL or `ESC \`.
+    Osc,
+    /// DCS, SOS, PM, APC: until `ESC \`, as the parser takes no BEL
+    /// for their end.
+    Ignore,
 }
 
 pub(crate) struct Prefilter {
@@ -158,28 +161,47 @@ impl Prefilter {
         let near = bytes.len().saturating_sub(TAIL_READ + 1);
         let tail = bytes[near..].iter().rposition(|&b| b == b'\n').map_or(near, |at| near + at + 1);
         if bytes.len() - tail > TAIL_READ {
-            self.skip(bytes);
             // an escape the chunk ends in is read, so that the rest of
             // it in the next chunk is not taken for text
-            let near = bytes.len() - TAIL_READ;
-            if let Some(at) = bytes[near..].iter().rposition(|&b| b == 0x1b) {
-                self.read(&bytes[near + at..]);
+            if let Some(at) = self.skip(bytes).filter(|&at| bytes.len() - at <= TAIL_READ) {
+                self.read(&bytes[at..]);
             }
             return;
         }
         if tail > 0 {
             self.skip(&bytes[..tail]);
-            self.line_break();
+            // a line break inside a string sequence the skip left open
+            // moves nothing
+            if self.mode == Mode::Text {
+                self.line_break();
+            }
         }
         self.read(&bytes[tail..]);
     }
 
-    /// Leave `bytes` unread.
-    fn skip(&mut self, bytes: &[u8]) {
+    /// Leave `bytes` unread; where their last escape is.  A string
+    /// sequence they leave open goes on, as its payload can be longer
+    /// than any line that is read.
+    fn skip(&mut self, bytes: &[u8]) -> Option<usize> {
+        let before = self.mode;
         self.forget();
-        if let Some(on) = screen::last_switch(bytes) {
+        let (switch, last) = screen::scan(bytes);
+        if let Some(on) = switch {
             self.alt = on;
         }
+        let (open, rest) = match last {
+            Some(at) => (esc_string(bytes.get(at + 1)), bytes.get(at + 2..).unwrap_or_default()),
+            None => (before, bytes),
+        };
+        let ends: &[u8] = match open {
+            Mode::Osc => &[0x07, 0x18, 0x1a],
+            Mode::Ignore => &[0x18, 0x1a],
+            _ => return last,
+        };
+        if !ends.iter().any(|&b| super::has_byte(rest, b)) {
+            self.mode = open;
+        }
+        last
     }
 
     fn forget(&mut self) {
@@ -253,11 +275,12 @@ impl Prefilter {
                     }
                 }
                 Mode::Private => self.private_byte(b),
-                Mode::Str => {
+                Mode::Osc => {
                     if b == 0x07 {
                         self.mode = Mode::Text;
                     }
                 }
+                Mode::Ignore => {}
             }
         }
     }
@@ -317,7 +340,7 @@ impl Prefilter {
     fn esc_byte(&mut self, b: u8) {
         self.mode = match b {
             b'[' => Mode::CsiFirst,
-            b']' | b'P' | b'X' | b'^' | b'_' => Mode::Str,
+            b']' | b'P' | b'X' | b'^' | b'_' => esc_string(Some(&b)),
             b'=' | b'>' | b'\\' => Mode::Text,
             0x20..=0x2f => {
                 self.moved();
@@ -337,6 +360,15 @@ impl Prefilter {
 /// parsed into it, draws on the alternate screen.
 pub(super) fn screen_after(alt: bool, chunks: &[Vec<u8>]) -> bool {
     chunks.iter().rev().find_map(|c| screen::last_switch(c)).unwrap_or(alt)
+}
+
+/// The string sequence the byte after an escape starts, if any.
+fn esc_string(b: Option<&u8>) -> Mode {
+    match b {
+        Some(b']') => Mode::Osc,
+        Some(b'P' | b'X' | b'^' | b'_') => Mode::Ignore,
+        _ => Mode::Text,
+    }
 }
 
 /// ESC, CAN and SUB, which end any sequence being read.
@@ -466,6 +498,74 @@ mod tests {
             "\x1b]0;title\x1b[1mDONE\r\n",
         ];
         assert_eq!(chunks.map(held), [0, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn watch_prefilter_ends_dcs_sos_pm_apc_only_where_the_parser_does() {
+        let held = |chunk: &str| {
+            let mut p = set("DONE");
+            p.took(chunk.as_bytes());
+            p.take(false).1
+        };
+        // BEL ends a title, not the others
+        let chunks = ["\x1b]0;t\x07DONE\r\n", "\x1bPq\x07DONE\x1b\\", "\x1bX\x07DONE\x1b\\", "\x1b^\x07DONE\x1b\\", "\x1b_G\x07DONE\x1b\\"];
+        assert_eq!(chunks.map(held), [1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn watch_prefilter_keeps_a_string_open_across_bytes_not_read() {
+        let payload = "A".repeat(TAIL_READ + 100);
+        let held = |chunks: &[String]| {
+            let mut p = set("DONE");
+            chunks.iter().for_each(|c| p.took(c.as_bytes()));
+            p.take(false).1
+        };
+        // begun before the last bytes looked at, in a chunk and the one
+        // after, with a line break in it, and ended in bytes not read
+        let cases = [
+            vec![format!("\x1b_Ga=q;{payload}"), "DONE\x1b\\\r\n".into()],
+            vec![format!("\x1b]52;c;{payload}"), payload.clone(), "DONE\x07\r\n".into()],
+            vec![format!("\x1bPq{payload}\nAA"), "DONE\x1b\\\r\n".into()],
+            vec![format!("\x1b_Ga=q;{payload}\x1b\\{payload}"), "\r\nDONE".into()],
+            vec![format!("\x1b]0;t{payload}\x07{payload}"), "\r\nDONE".into()],
+        ];
+        assert_eq!(cases.map(|c| held(&c)), [0, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn watch_prefilter_does_not_take_a_line_break_in_an_open_string_for_one() {
+        let mut p = set("DONE");
+        p.took(b"DO\x1b]0;a\nb");
+        p.took(b"\x07NE");
+        assert_eq!(p.take(false).1, 1);
+    }
+
+    #[test]
+    fn watch_prefilter_switches_screens_only_where_the_terminal_does() {
+        let held = |unread: &[u8], read: &[u8]| {
+            let mut p = set("DONE");
+            p.took(unread);
+            p.took(read);
+            p.take(false).1
+        };
+        let skips = format!("{}\r\n", "y".repeat(TAIL_READ + 1));
+        let sixteen = format!("\x1b[?{}1049h", ";".repeat(16));
+        // the parser ignores these, or they have more than a `?`
+        let ignored: [&[u8]; 5] = [b"\x1b[?1049$h", b"\x1b[?1049?h", b"\x1b[?1049\xc3h", b"\x1b[?>1049h", sixteen.as_bytes()];
+        for seq in ignored {
+            let read = [seq, b"DONE\r\n"].concat();
+            assert_eq!(held(b"", &read), 1, "read {:?}", String::from_utf8_lossy(seq));
+            let unread = [seq, skips.as_bytes()].concat();
+            assert_eq!(held(&unread, b"DONE"), 1, "not read {:?}", String::from_utf8_lossy(seq));
+        }
+        // a colon's parameter is set too, and a control in the sequence
+        // is executed with the sequence going on
+        for seq in [&b"\x1b[?1049:1h"[..], b"\x1b[?1:1049h", b"\x1b[?10\x0749h", b"\x1b[?1049\rh"] {
+            let read = [seq, b"DONE\r\n"].concat();
+            assert_eq!(held(b"", &read), 0, "read {:?}", String::from_utf8_lossy(seq));
+            let unread = [seq, skips.as_bytes()].concat();
+            assert_eq!(held(&unread, b"DONE"), 0, "not read {:?}", String::from_utf8_lossy(seq));
+        }
     }
 
     #[test]
