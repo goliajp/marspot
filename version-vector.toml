@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.667"  # mcp initialize tells every agent when to start a helper; the helpers skill leads with its trigger
-core    = "0.12.670"  # a core that cannot write the settled layout back leaves the closes for the next one
+core    = "0.12.671"  # a pid refused a watch as exiting is waited for on the reaper thread, not the main loop
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
