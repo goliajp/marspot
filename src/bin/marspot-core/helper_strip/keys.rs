@@ -36,9 +36,9 @@ struct Probe {
 pub(super) struct Focus {
     at: At,
     pub selected: Pick,
-    /// How the screen was when the keys were taken; none once a key
-    /// came since.
-    provisional: Option<Look>,
+    /// How the screen was when the keys were taken, and the frame last
+    /// looked at; none once a key came since.
+    provisional: Option<(Look, u64)>,
 }
 
 #[derive(Default)]
@@ -84,12 +84,17 @@ impl CoreApp {
     /// How the screen in front of `at` looks, if it has an empty input
     /// box with the cursor in it.
     fn look_at(&self, at: At) -> Option<Look> {
+        let pane = self.shown_at(at)?;
+        look(pane.session().grid(), pane.session().cursor_visible())
+    }
+
+    /// What is in front of `at`, with nothing being composed over it.
+    fn shown_at(&self, at: At) -> Option<&Pane> {
         let (wi, _) = self.slot_showing(at.shown)?;
         if self.windows[wi].window_id != at.window_id || !self.windows[wi].ime_preedit.is_empty() {
             return None;
         }
-        let pane = self.focused_shown(wi).filter(|p| p.shelld_session_id() == Some(at.shown))?;
-        look(pane.session().grid(), pane.session().cursor_visible())
+        self.focused_shown(wi).filter(|p| p.shelld_session_id() == Some(at.shown))
     }
 
     /// The agent in front of `at`, as the shell says.
@@ -143,14 +148,19 @@ impl CoreApp {
             let still = self.focused_at(p.at) && self.look_at(p.at) == Some(p.look);
             if still {
                 lx_event!("HELPER_STRIP_KEYS", "the strip takes the keys", host = p.at.host);
-                self.take_strip_keys(Focus { at: p.at, selected: Pick::Row(0), provisional: Some(p.look) });
+                let seq = self.shown_at(p.at).map_or(0, Pane::grid_seq);
+                self.take_strip_keys(Focus { at: p.at, selected: Pick::Row(0), provisional: Some((p.look, seq)) });
             }
         }
         let Some(f) = &self.strips.keys.focus else { return };
-        let at = f.at;
-        let moved = f.provisional.is_some_and(|was| self.look_at(at) != Some(was));
+        let (at, provisional) = (f.at, f.provisional);
+        // a frame is looked at once
+        let seq = self.shown_at(at).map(Pane::grid_seq);
+        let moved = provisional.is_some_and(|(was, seen)| Some(seen) != seq && self.look_at(at) != Some(was));
         if moved || !self.focused_at(at) {
             self.leave_strip_keys();
+        } else if let (Some(f), Some(seq)) = (self.strips.keys.focus.as_mut(), seq) {
+            f.provisional = f.provisional.map(|(was, _)| (was, seq));
         }
     }
 

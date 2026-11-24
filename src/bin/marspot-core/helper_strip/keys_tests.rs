@@ -247,3 +247,19 @@ fn helper_strip_keys_go_back_when_the_setting_is_turned_off() {
     assert!(!has_keys(&app));
     assert_eq!(told_shell(&mut app), [false], "the shell lets x through no longer");
 }
+
+#[test]
+fn helper_strip_keys_taken_look_at_each_frame_once() {
+    let sb = Sandbox::new();
+    let (mut app, _s, _h) = under_claude(&sb, 1, &claude_screen(60, "", ""));
+    press(&mut app, DOWN);
+    after_probe(&mut app);
+    assert!(has_keys(&app));
+    let turns = super::alloc_tests::counted(|| {
+        for _ in 0..10 {
+            app.strip_keys_tick(Instant::now());
+        }
+    });
+    assert_eq!(turns, 0, "loop turns with no new frame read nothing");
+    assert!(has_keys(&app));
+}
