@@ -43,6 +43,7 @@ const CHROME: &[&str] = &[
     "text_input.rs",
     "toolbar_view.rs",
     "title_strip_view.rs",
+    "view_line.rs",
 ];
 
 /// Files that are tests or their kits.
