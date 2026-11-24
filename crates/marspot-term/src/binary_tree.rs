@@ -470,7 +470,7 @@ mod probe_bound_tests {
 
         // Long enough for the script to have written the pid of its
         // child before it is killed, on a busy host too.
-        let budget = std::time::Duration::from_millis(500);
+        let budget = std::time::Duration::from_secs(3);
         let t0 = std::time::Instant::now();
         let verdict = super::can_start_within(&script, budget);
         let took = t0.elapsed();
@@ -480,7 +480,7 @@ mod probe_bound_tests {
             "a candidate that does not answer is not startable"
         );
         assert!(
-            took < budget * 8,
+            took < budget * 4,
             "gave up after {took:?} against a {budget:?} budget — not a bound"
         );
 
