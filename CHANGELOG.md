@@ -4,6 +4,27 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.15.0
+
+- How many helpers can run at once now follows the machine's memory:
+  as many idle helpers as fit in a quarter of it, from 4 on an 8 GB
+  Mac to 24 on 48 GB or more (`control_shadows_total` in the settings
+  still overrides it).
+- The helper panel says on a helper's row when moving it to a window
+  failed, and a helper moved to a window gets back the title its
+  agent's plugin gave it.
+- A helper working for a plain shell shows as stopped once it stops,
+  instead of running until an agent starts in that pane.
+- Codex helpers notify once per approval prompt even when the
+  conversation above the prompt changes.
+- The list of helpers under a Claude Code pane keeps its right edge
+  when a task's own words look like a time or a status, and in narrow
+  panes.
+- Waiting for text in a pane is not fooled by long terminal-graphics
+  or clipboard sequences, nor by sequences the terminal ignores.
+- Closing panes no longer stalls the window while a session process
+  takes its time to exit.
+
 ## 0.14.0
 
 - The list of helpers under their pane is on by default. In a Claude
