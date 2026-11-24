@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.656"  # an input box says where it is
-core    = "0.12.662"  # keys a strip took for now look at each frame once
+core    = "0.12.663"  # a strip lets x past the input method only while x acts there
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it

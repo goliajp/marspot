@@ -8,12 +8,12 @@
 //! or `↑` on the first row go back to the input box; any other key goes
 //! back there too, and to the agent.
 
-use super::compose::{Pick, State};
+use super::compose::Pick;
 use super::native_list;
 use super::probe::{look, Look};
 use super::*;
 use marspot::input::{KeyState, LogicalKey, NamedKey};
-use marspot::shell_proto::{encode_strip_keys, StripAgent, StripKeys};
+use marspot::shell_proto::StripAgent;
 
 /// How long the agent has to show it took a key.
 pub(super) const PROBE: Duration = Duration::from_millis(100);
@@ -22,9 +22,9 @@ pub(super) const PROBE: Duration = Duration::from_millis(100);
 /// shows: what has the keys is only good while the same is in front.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct At {
-    window_id: u32,
-    host: u64,
-    shown: u64,
+    pub(super) window_id: u32,
+    pub(super) host: u64,
+    pub(super) shown: u64,
 }
 
 struct Probe {
@@ -34,7 +34,7 @@ struct Probe {
 }
 
 pub(super) struct Focus {
-    at: At,
+    pub(super) at: At,
     pub selected: Pick,
     /// How the screen was when the keys were taken, and the frame last
     /// looked at; none once a key came since.
@@ -46,7 +46,9 @@ pub(in super::super) struct Keys {
     probe: Option<Probe>,
     pub(super) focus: Option<Focus>,
     /// The shell lets a plain `x` through to the core as a key.
-    shell_takes_x: bool,
+    pub(super) shell_takes_x: bool,
+    /// The window the shell was last told lets its `x` through.
+    pub(super) x_told: Option<u32>,
 }
 
 impl Keys {
@@ -57,6 +59,15 @@ impl Keys {
     /// What is selected in the strip of `host` in window `window_id`.
     pub(super) fn selected(&self, window_id: u32, host: u64) -> Option<Pick> {
         self.focus.as_ref().filter(|f| (f.at.window_id, f.at.host) == (window_id, host)).map(|f| f.selected)
+    }
+}
+
+/// `selected` within `rows` rows, and a strip with no `main` of its own.
+fn clamped(selected: Pick, rows: usize, main: bool) -> Pick {
+    match selected {
+        Pick::Main if main => Pick::Main,
+        Pick::Main => Pick::Row(0),
+        Pick::Row(i) => Pick::Row(i.min(rows.saturating_sub(1))),
     }
 }
 
@@ -157,11 +168,18 @@ impl CoreApp {
         // a frame is looked at once
         let seq = self.shown_at(at).map(Pane::grid_seq);
         let moved = provisional.is_some_and(|(was, seen)| Some(seen) != seq && self.look_at(at) != Some(was));
-        if moved || !self.focused_at(at) {
+        let rows = self.strip_rows_at(at);
+        if moved || rows.is_none() || !self.focused_at(at) {
             self.leave_strip_keys();
-        } else if let (Some(f), Some(seq)) = (self.strips.keys.focus.as_mut(), seq) {
-            f.provisional = f.provisional.map(|(was, _)| (was, seq));
+            return;
         }
+        if let (Some(f), Some((rows, main))) = (self.strips.keys.focus.as_mut(), rows) {
+            f.selected = clamped(f.selected, rows, main);
+            if let Some(seq) = seq {
+                f.provisional = f.provisional.map(|(was, _)| (was, seq));
+            }
+        }
+        self.tell_shell_strip_x();
     }
 
     /// Whether `at` is what the focused slot of its window shows, with
@@ -172,24 +190,22 @@ impl CoreApp {
     }
 
     fn take_strip_keys(&mut self, f: Focus) {
-        self.tell_shell_strip_keys(f.at.window_id, true);
+        // keys held in another window go back there first
+        self.leave_strip_keys();
         self.strip_window_changed(f.at.window_id);
         self.strips.keys.focus = Some(f);
+        self.tell_shell_strip_x();
     }
 
     pub(in super::super) fn leave_strip_keys(&mut self) {
         self.strips.keys.probe = None;
         if let Some(f) = self.strips.keys.focus.take() {
-            self.tell_shell_strip_keys(f.at.window_id, false);
             self.strip_window_changed(f.at.window_id);
         }
+        self.tell_shell_strip_x();
     }
 
-    fn tell_shell_strip_keys(&mut self, window_id: u32, on: bool) {
-        self.pending_to_shell.push((MsgType::StripKeys, encode_strip_keys(&StripKeys { window_id, on })));
-    }
-
-    fn strip_window_changed(&mut self, window_id: u32) {
+    pub(super) fn strip_window_changed(&mut self, window_id: u32) {
         if let Some(w) = self.windows.iter_mut().find(|w| w.window_id == window_id) {
             w.needs_render = true;
         }
@@ -197,17 +213,24 @@ impl CoreApp {
 
     /// A key while the strip has the keys.
     fn focused_strip_key(&mut self, wi: usize, event: &MarspotKeyEvent, modifiers: Modifiers) -> bool {
+        let Some(at) = self.strips.keys.focus.as_ref().map(|f| f.at) else { return false };
+        // the focus moved since: the key is for what is focused now
+        if !self.focused_at(at) {
+            self.leave_strip_keys();
+            return false;
+        }
         let Some(f) = self.strips.keys.focus.as_mut() else { return false };
         f.provisional = None;
+        let was = f.selected;
         if event.repeat {
             // held since before, or held here: either way not the agent's
             return true;
         }
-        let (at, selected) = (f.at, f.selected);
         let Some((rows, main)) = self.strip_rows_at(at) else {
             self.leave_strip_keys();
             return false;
         };
+        let selected = clamped(was, rows, main);
         let last = rows.saturating_sub(1);
         let to = match (&event.logical, plain(modifiers)) {
             (LogicalKey::Named(NamedKey::ArrowUp), true) => match selected {
@@ -234,6 +257,7 @@ impl CoreApp {
                     f.selected = pick;
                 }
                 self.strip_window_changed(at.window_id);
+                self.tell_shell_strip_x();
             }
             None => self.leave_strip_keys(),
         }
@@ -242,7 +266,7 @@ impl CoreApp {
 
     /// How many helpers the strip of `at` lists, and whether it draws a
     /// `main` of its own.
-    fn strip_rows_at(&self, at: At) -> Option<(usize, bool)> {
+    pub(super) fn strip_rows_at(&self, at: At) -> Option<(usize, bool)> {
         let host = self.strips.hosts.get(&at.host)?;
         let record = self.pane_control.strips.of(at.host)?;
         let rows = host.shown_rows(record);
@@ -259,34 +283,6 @@ impl CoreApp {
         if helper != Some(at.shown) && (helper.is_some() || at.shown != at.host) {
             self.view_helper(at.host, helper);
         }
-        true
-    }
-
-    /// `x` on a helper at work stops it; on one that is not, clears its
-    /// row.  On the row of what is viewed it is a key like any other.
-    fn strip_x(&mut self, wi: usize, at: At, selected: Pick, event: &MarspotKeyEvent) -> bool {
-        let Pick::Row(i) = selected else {
-            self.leave_strip_keys();
-            return false;
-        };
-        let record = self.pane_control.strips.of(at.host);
-        let host = self.strips.hosts.get_mut(&at.host);
-        let found = record.zip(host).and_then(|(r, h)| h.sid_at(r, i).zip(h.state_at(r, i)));
-        let Some((sid, state)) = found.filter(|f| f.0 != at.shown) else {
-            self.leave_strip_keys();
-            return false;
-        };
-        self.pane_control.shadows.peeks.held.swallowed(&event.logical);
-        if matches!(state, State::Running | State::Awaiting) {
-            lx_event!("HELPER_STRIP_STOP", "x in the strip stops a helper", session = sid);
-            self.stop_helper(sid);
-        } else if let Some(host) = self.strips.hosts.get_mut(&at.host) {
-            host.hide(sid);
-            if let Some(f) = self.strips.keys.focus.as_mut() {
-                f.selected = Pick::Row(i.saturating_sub(1));
-            }
-        }
-        self.windows[wi].needs_render = true;
         true
     }
 

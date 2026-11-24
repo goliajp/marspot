@@ -8,12 +8,12 @@ use crate::boot_assembly_tests::Sandbox;
 use marspot::input::{KeyState, LogicalKey, NamedKey};
 use marspot::shell_proto::{decode_helper_panel_act, encode_strip_keys, PanelAct, StripKeys};
 
-const DOWN: LogicalKey = LogicalKey::Named(NamedKey::ArrowDown);
-const UP: LogicalKey = LogicalKey::Named(NamedKey::ArrowUp);
-const ENTER: LogicalKey = LogicalKey::Named(NamedKey::Enter);
+pub(super) const DOWN: LogicalKey = LogicalKey::Named(NamedKey::ArrowDown);
+pub(super) const UP: LogicalKey = LogicalKey::Named(NamedKey::ArrowUp);
+pub(super) const ENTER: LogicalKey = LogicalKey::Named(NamedKey::Enter);
 const ESC: LogicalKey = LogicalKey::Named(NamedKey::Escape);
 
-fn ev(logical: LogicalKey, state: KeyState, repeat: bool) -> MarspotKeyEvent {
+pub(super) fn ev(logical: LogicalKey, state: KeyState, repeat: bool) -> MarspotKeyEvent {
     let text = match &logical {
         LogicalKey::Char(c) => Some(c.to_string()),
         _ => None,
@@ -21,19 +21,19 @@ fn ev(logical: LogicalKey, state: KeyState, repeat: bool) -> MarspotKeyEvent {
     MarspotKeyEvent { state, logical, text, repeat, ..Default::default() }
 }
 
-fn press(app: &mut CoreApp, key: LogicalKey) {
+pub(super) fn press(app: &mut CoreApp, key: LogicalKey) {
     app.key(0, ev(key, KeyState::Pressed, false), Modifiers::default());
 }
 
 /// Claude Code's input box, empty, the cursor in it, and `below` under
 /// its footer.
-fn claude_screen(cols: u16, typed: &str, below: &str) -> String {
+pub(super) fn claude_screen(cols: u16, typed: &str, below: &str) -> String {
     let rule = "─".repeat(cols as usize);
     format!("{rule}\r\n❯ {typed}\r\n{rule}\r\n  ? for shortcuts{below}\x1b[2;{}H", 3 + typed.len())
 }
 
 /// A pane under Claude with `n` helpers, its screen `screen`.
-fn under_claude(sb: &Sandbox, n: usize, screen: &str) -> (CoreApp, Session, Vec<Session>) {
+pub(super) fn under_claude(sb: &Sandbox, n: usize, screen: &str) -> (CoreApp, Session, Vec<Session>) {
     let (mut app, mut s, helpers) = with_helpers(sb, n);
     frame(&mut app, &mut s, screen.as_bytes());
     app.pending_to_shell.clear();
@@ -45,7 +45,7 @@ fn cols(app: &CoreApp) -> u16 {
 }
 
 /// Wait out the probe and look, as the loop does after a pump.
-fn after_probe(app: &mut CoreApp) {
+pub(super) fn after_probe(app: &mut CoreApp) {
     std::thread::sleep(keys::PROBE + Duration::from_millis(10));
     app.windows[0].panes[0].pump();
     app.strips_tick();
@@ -57,7 +57,7 @@ fn told_shell(app: &mut CoreApp) -> Vec<bool> {
     frames.iter().filter(|f| f.0 == MsgType::StripKeys).map(|f| marspot::shell_proto::decode_strip_keys(&f.1).unwrap().on).collect()
 }
 
-fn has_keys(app: &CoreApp) -> bool {
+pub(super) fn has_keys(app: &CoreApp) -> bool {
     app.strips.keys.focus.is_some()
 }
 

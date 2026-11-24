@@ -150,6 +150,8 @@ impl CoreApp {
     /// Runs `command`.  False when the key that asked for it should
     /// carry on to the pane as a key.
     fn run_command(&mut self, wi: usize, command: Command, by_escape: bool) -> bool {
+        // a command is not a key the strip waits on or has
+        self.strip_keys_interrupted();
         match command {
             Command::Settings => self.toggle_panel(wi, SurfaceKind::Settings),
             Command::Layout => self.toggle_panel(wi, SurfaceKind::Layout),

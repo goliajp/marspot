@@ -20,6 +20,7 @@ mod figures;
 mod height;
 mod host;
 mod keys;
+mod keys_x;
 mod native_list;
 mod press;
 mod probe;
@@ -287,3 +288,5 @@ mod sizes_tests;
 mod view_tests;
 #[cfg(test)]
 mod keys_tests;
+#[cfg(test)]
+mod keys_focus_tests;
