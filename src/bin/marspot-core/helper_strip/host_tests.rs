@@ -264,14 +264,14 @@ fn a_shell_that_never_says_all_is_told_is_waited_for_five_seconds_from_the_cores
 }
 
 #[test]
-fn a_press_on_a_helper_opens_the_panel_and_one_on_main_does_not() {
+fn a_press_on_how_many_more_opens_the_panel_and_one_on_a_helper_gone_does_not() {
     let sb = Sandbox::new();
     let (mut app, mut s) = app(&sb);
     say(&mut app, s.sid, (4..10).map(|i| gone(i, true)).collect());
     assert_eq!(given(&app), 8);
     frame(&mut app, &mut s, b"$ ");
     assert_eq!(lines(&app, s.sid)[7], "  ↓ 1 more");
-    for (row, opens) in [(1, false), (2, false), (3, true), (8, true)] {
+    for (row, opens) in [(1, false), (2, false), (3, false), (8, true)] {
         let (x, y) = at_row(&app, row);
         app.mouse_down(0, x, y, Modifiers::default());
         app.mouse_up(0, 1, x, y);

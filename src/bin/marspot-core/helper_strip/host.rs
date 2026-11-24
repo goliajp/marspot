@@ -147,6 +147,16 @@ impl Host {
         n
     }
 
+    /// The helper listed `i`th of those `rows` lists.
+    pub(super) fn sid_at(&self, record: &HelperStrip, i: usize) -> Option<u64> {
+        record.rows.iter().filter(|r| self.shows(r.sid)).nth(i).map(|r| r.sid)
+    }
+
+    /// Where helper `sid` is listed of those `rows` lists.
+    pub(super) fn index_of(&self, record: &HelperStrip, sid: u64) -> Option<usize> {
+        record.rows.iter().filter(|r| self.shows(r.sid)).take(HELPER_STRIP_ROWS).position(|r| r.sid == sid)
+    }
+
     /// Whether what `record` lists changes by the second.
     pub(super) fn ticking(&self, record: &HelperStrip) -> bool {
         record.rows.iter().any(|r| self.shows(r.sid) && r.running_since_ms.is_some() && state(r) == State::Running)

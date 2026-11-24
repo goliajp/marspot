@@ -7,7 +7,7 @@
 
 use super::helper_strip_records::Records;
 use super::*;
-use compose::{Arrow, List, Pick, Row, Spot, State};
+use compose::{Arrow, List, Pick, Row, State};
 use marspot::frame_build::text_run::preedit_last_row;
 use marspot::layout::CellRect;
 use marspot::render::StripView;
@@ -20,6 +20,7 @@ mod figures;
 mod height;
 mod host;
 mod native_list;
+mod press;
 mod sizes;
 mod strip;
 mod theme;
@@ -128,21 +129,25 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Write what `record` says at `ms` into `strip`, if it lists anything.
-/// Nothing is allocated.
-fn list_into(
-    strip: &mut Strip,
-    host: &mut host::Host,
-    record: &marspot::shell_proto::HelperStrip,
-    screen: &marspot_term::grid::Grid,
+/// What a strip is listed for: the screen above it, which session that
+/// is and its frame, and whether it is a helper viewed in the pane's
+/// place, which draws a strip of its own.
+struct Under<'a> {
+    screen: &'a marspot_term::grid::Grid,
     of: (u64, u64),
     scrolled: bool,
-    ms: u64,
-) -> bool {
-    let (theme, native) = host.look(record.parent_agent, screen, of, scrolled);
+    viewing: bool,
+}
+
+/// Write what `record` says at `ms` into `strip`, if it lists anything.
+/// Nothing is allocated.
+fn list_into(strip: &mut Strip, host: &mut host::Host, record: &marspot::shell_proto::HelperStrip, under: Under, ms: u64) -> bool {
+    let (theme, native) = host.look(record.parent_agent, under.screen, under.of, under.scrolled);
+    let native = native.filter(|_| !under.viewing);
+    let viewed = if under.viewing { host.index_of(record, under.of.0).map_or(Pick::Main, Pick::Row) } else { Pick::Main };
     let mut rows = [NO_ROW; HELPER_STRIP_ROWS];
     let n = host.rows(record, ms, &mut rows);
-    host.drawn = compose::compose(strip, &List { rows: &rows[..n], selected: None, viewed: Pick::Main, theme, native });
+    host.drawn = compose::compose(strip, &List { rows: &rows[..n], selected: None, viewed, theme, native });
     n > 0
 }
 
@@ -176,6 +181,7 @@ impl CoreApp {
         for (i, (pane, cell)) in w.panes.iter().zip(&w.layout.cells).enumerate().filter(|(_, (_, c))| c.strip_rows > 0) {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let Some(strip) = strips.by_sid.get_mut(&sid) else { continue };
+            let viewing = pane.peek.is_some();
             let pane = shown::shown_of(pane, &self.shadows);
             let screen = pane.session().grid();
             if strips.dev.is_some() {
@@ -186,7 +192,8 @@ impl CoreApp {
                     strip.hide();
                     continue;
                 };
-                if !list_into(strip, host, record, screen, (sid, pane.grid_seq()), scrolled, ms) {
+                let of = (pane.shelld_session_id().unwrap_or(sid), pane.grid_seq());
+                if !list_into(strip, host, record, Under { screen, of, scrolled, viewing }, ms) {
                     strip.hide();
                     continue;
                 }
@@ -250,23 +257,6 @@ impl CoreApp {
         let (cw, ch) = self.renderer.cell_dims();
         win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
     }
-
-    /// Whether a press landed on a pane's strip.  It focuses the pane,
-    /// and drops the selection as a press off one does; on a helper it
-    /// opens the pane's helper panel.
-    pub(super) fn strip_press(&mut self, wi: usize, x_phys: f64, y_phys: f64) -> bool {
-        let Some((idx, line)) = self.strip_at(wi, x_phys, y_phys) else { return false };
-        let w = &mut win!(self, wi);
-        w.selection_dragging = false;
-        w.needs_render |= w.selection.take().is_some();
-        self.focus_pane(wi, idx);
-        let sid = win!(self, wi).panes.get(idx).and_then(|p| p.shelld_session_id());
-        let spot = sid.and_then(|sid| self.strips.hosts.get(&sid)).and_then(|h| h.drawn.at(line));
-        if let (Some(sid), Some(Spot::Row(_) | Spot::More)) = (sid, spot) {
-            self.open_helpers(wi, sid);
-        }
-        true
-    }
 }
 
 #[cfg(test)]
@@ -283,3 +273,5 @@ mod moving_tests;
 mod tests;
 #[cfg(test)]
 mod sizes_tests;
+#[cfg(test)]
+mod view_tests;
