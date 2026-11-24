@@ -92,6 +92,8 @@ echo hist >"$H/.codex/history.jsonl"
 echo id >"$H/.codex/installation_id"
 echo db >"$H/.codex/state_5.sqlite"
 echo roll >"$H/.codex/sessions/2026/r.jsonl"
+mkdir -p "$H/.codex/thread-writer-locks"
+: >"$H/.codex/thread-writer-locks/t1.lock"
 
 mkdir -p "$H/.gemini/tmp/app/chats" "$H/.gemini/skills" "$H/.gemini/history/app"
 echo '{}' >"$H/.gemini/settings.json"
@@ -163,13 +165,15 @@ has "$backup/commands/c.md" mine
 
 # codex: the login moves with account 1
 is_link_to "$H/.codex" "$H/.codex-profile-1"
-for e in AGENTS.md config.toml sessions skills cache plugins; do
+for e in AGENTS.md config.toml sessions skills cache plugins thread-writer-locks; do
   is_link_to "$H/.codex-profile-1/$e" "$H/.codex-shared/$e"
 done
 for f in auth.json history.jsonl installation_id state_5.sqlite; do
   is_real_file "$H/.codex-profile-1/$f"
 done
 has "$H/.codex/auth.json" token
+[ -f "$H/.codex-shared/thread-writer-locks/t1.lock" ] || fail "the writer locks did not move to the shared dir"
+ok
 is_real_dir "$H/.codex-profile-1/tmp"
 is_real_dir "$(echo "$H"/.codex.backup-*)"
 absent "$H/.codex-profile-1/models_cache.json"
@@ -216,6 +220,7 @@ absent "$H/.claude-profile-2/.claude.json"
 out="$(p add codex 5)"
 echo "$out" | grep -q "codex5 login" || fail "add codex 5 did not say how to log in"
 is_link_to "$H/.codex-profile-5/config.toml" "$H/.codex-shared/config.toml"
+is_link_to "$H/.codex-profile-5/thread-writer-locks" "$H/.codex-shared/thread-writer-locks"
 absent "$H/.codex-profile-5/auth.json"
 p add gemini >/dev/null
 is_link_to "$H/.gemini-profile-2/.gemini/tmp" "$H/.gemini-shared/tmp"
@@ -298,6 +303,13 @@ ok
 ln -s "$H/.codex-profile-1/auth.json" "$H/.codex-profile-5/auth.json"
 expect_problem "$H/.codex-profile-5/auth.json is a symlink"
 rm "$H/.codex-profile-5/auth.json"
+# an account that keeps its own writer locks on purpose is no problem
+rm "$H/.codex-profile-5/thread-writer-locks"
+mkdir "$H/.codex-profile-5/thread-writer-locks"
+expect_problem "$H/.codex-profile-5/thread-writer-locks is not a symlink"
+: >"$H/.codex-profile-5/.marspot-own-thread-writer-locks"
+p doctor >/dev/null || fail "doctor reports an account that keeps its own locks: $(p doctor || true)"
+ok
 
 mv "$H/.gemini-shared/tmp" "$H/.gemini-shared/tmp.gone"
 expect_problem "$H/.gemini-profile-2/.gemini/tmp is a dangling symlink"

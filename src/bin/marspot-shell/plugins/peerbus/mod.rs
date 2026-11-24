@@ -22,6 +22,7 @@ mod claude_hooks;
 mod clock;
 pub(crate) mod codex_approval;
 mod codex_config;
+mod codex_locks;
 mod daemon;
 mod deliver;
 #[cfg(test)]
@@ -83,6 +84,7 @@ pub(crate) fn publish_threads(views: HashMap<u64, ThreadView>) {
     *THREADS.lock().unwrap() = Some(views);
 }
 
+pub(crate) use codex_locks::cli_main as codex_locks_main;
 pub(crate) use kimi_bind::mail_waiting as kimi_mail_waiting;
 pub(in crate::plugins) use pair::{Conversation, conversation_of, conversation_of_agent, record_files};
 
