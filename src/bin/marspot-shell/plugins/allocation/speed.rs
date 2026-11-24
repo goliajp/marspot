@@ -16,7 +16,12 @@ pub(crate) const HALF_LIFE_S: f64 = 3.0 * 3600.0;
 /// How far back a speed looks and a restart rebuilds from, seconds.
 pub(crate) const WINDOW_S: i64 = 15 * 3600;
 
-/// Amounts kept per pane: a minute apart at most, fifteen hours.
+/// The shortest time a speed is averaged over, seconds: one large
+/// first reply is not read as a whole hour's worth a minute.
+pub(crate) const MIN_SPAN_S: i64 = 3600;
+
+/// Amounts kept per pane: fifteen hours of five-minute entries, one
+/// per model.
 pub(crate) const PER_PANE_CAP: usize = 1024;
 
 /// What one pane used, when.
@@ -68,17 +73,28 @@ impl PaneUse {
             .filter(|(at, c, _)| *at > from && *at <= now && *c == class)
             .map(|(at, _, a)| a * (-lambda * (now - at) as f64).exp())
             .sum();
-        // a steady speed over the whole window reads as itself
-        let full = 1.0 - (-lambda * WINDOW_S as f64).exp();
+        // a steady speed over the time watched reads as itself; a pane
+        // watched for minutes is not averaged over fifteen hours
+        let span = self.since.map_or(WINDOW_S, |s| now - s.max(from)).clamp(MIN_SPAN_S, WINDOW_S);
+        let full = 1.0 - (-lambda * span as f64).exp();
         Some(sum * lambda * 3600.0 / full)
     }
 
-    /// Both classes together, with `RHO0` when nothing is known.
-    pub(crate) fn rate_or_default(&self, now: i64) -> (f64, f64, bool) {
+    /// `(restricted, plain, measured)`; a pane with nothing known is
+    /// taken to use `RHO0` of its own class.
+    pub(crate) fn rate_or_default(&self, now: i64, class: Class) -> (f64, f64, bool) {
         match (self.rate(now, Class::Restricted), self.rate(now, Class::Plain)) {
             (Some(f), Some(n)) => (f, n, true),
-            _ => (0.0, RHO0, false),
+            _ => default_rate(class),
         }
+    }
+}
+
+/// What a pane nothing is known about is taken to use.
+pub(crate) fn default_rate(class: Class) -> (f64, f64, bool) {
+    match class {
+        Class::Restricted => (RHO0, 0.0, false),
+        Class::Plain => (0.0, RHO0, false),
     }
 }
 

@@ -94,6 +94,11 @@ impl Marks {
         self.dirty |= self.by_pane.len() != before;
     }
 
+    /// Each marked pane, with when it was marked.
+    pub(super) fn since_by_pane(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
+        self.by_pane.iter().map(|(sid, m)| (*sid, m.since))
+    }
+
     /// Is this pane to be judged as a Fable pane, whatever its model?
     pub(super) fn marked(&self, sid: u64) -> bool {
         self.by_pane.contains_key(&sid)
@@ -237,7 +242,7 @@ impl ClaudecodePlugin {
     }
 }
 
-const FILE: &str = "fable_need.tsv";
+pub(super) const FILE: &str = "fable_need.tsv";
 
 #[cfg(test)]
 mod tests {

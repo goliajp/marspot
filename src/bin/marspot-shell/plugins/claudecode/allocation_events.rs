@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// Days of files kept, today included.
 pub(super) const KEEP_DAYS: i64 = 15;
 
-const DAY: i64 = 86_400;
+pub(super) const DAY: i64 = 86_400;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Event {

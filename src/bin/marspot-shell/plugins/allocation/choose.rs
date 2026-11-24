@@ -34,9 +34,14 @@ pub(crate) struct Mover {
 /// `loads` are the other panes' speeds per account, in `accounts`'
 /// order, without this pane; `from` is the account it leaves.
 pub(crate) fn pick(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
+    pick_where(accounts, plan, loads, m, from, horizon_h, |_| true)
+}
+
+/// `pick` among the accounts that pass `allow` only.
+pub(crate) fn pick_where(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
     let mut best: Option<(Key, u8)> = None;
     for (i, q) in accounts.iter().enumerate() {
-        if Some(q.id) == from || !q.accepts(m.class) {
+        if Some(q.id) == from || !q.accepts(m.class) || !allow(q) {
             continue;
         }
         let k = key(q, plan, i, &loads[i], m, horizon_h);

@@ -1,11 +1,20 @@
 //! The 2026-11-24 14:30Z snapshot, row by row.
+//!
+//! The tables these rows come from were worked out with a Fable window
+//! worth 0.57 of a week, so the rows are checked at that value.
 
 use super::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of, pick};
 use super::plan::{Plan, plan};
 use super::rest::{Resting, RestMove, rest_move};
-use super::sim::world;
+use super::sim::world_at;
 use super::sim_policies::{old_helper_pick, old_pick, old_rest};
-use super::{Class, KAPPA_FABLE, Load, Quant, shortage};
+use super::{Class, Load, Quant, shortage};
+
+const KAPPA_SNAPSHOT: f64 = 0.57;
+
+fn world() -> Vec<Quant> {
+    world_at(KAPPA_SNAPSHOT)
+}
 
 const F_RATE: f64 = 0.035 / 3.0;
 const N_RATE: f64 = 0.035 / 9.0;
@@ -14,7 +23,7 @@ fn screenshot() -> Vec<Quant> {
     let mut a = world();
     let p6 = a.iter_mut().find(|q| q.id == 6).unwrap();
     p6.r = 0.96;
-    p6.f = KAPPA_FABLE * 0.92;
+    p6.f = KAPPA_SNAPSHOT * 0.92;
     a
 }
 
@@ -31,7 +40,7 @@ fn rate(c: Class) -> f64 {
 /// Place panes one after another with the must-move rule, the plan
 /// counting all of them.
 fn place(a: &[Quant], classes: &[Class], horizon: f64) -> Vec<u8> {
-    let p = plan(a, 0.035, 0.035, Some(KAPPA_FABLE));
+    let p = plan(a, 0.035, 0.035, Some(KAPPA_SNAPSHOT));
     let mut placed: Vec<(Option<u8>, Class, f64)> = Vec::new();
     for &c in classes {
         let loads = loads_of(a, &placed, None);
@@ -107,7 +116,7 @@ fn allocation_snapshot_placement_old_rule() {
 
 fn base() -> (Vec<Quant>, Plan) {
     let a = world();
-    let p = plan(&a, 0.035, 0.035, Some(KAPPA_FABLE));
+    let p = plan(&a, 0.035, 0.035, Some(KAPPA_SNAPSHOT));
     (a, p)
 }
 
@@ -120,7 +129,7 @@ fn allocation_snapshot_must_move_rows() {
         // (a) Fable refused: P6, then P4, then P3
         let fable = place(&a, &[Class::Restricted; 3], MUST_LAST_H);
         assert_eq!(first_seen(&fable), vec![6, 4, 3]);
-        let p = plan(&a, 0.035, 0.035, Some(KAPPA_FABLE));
+        let p = plan(&a, 0.035, 0.035, Some(KAPPA_SNAPSHOT));
         let none = vec![Load::default(); a.len()];
         for from in [1, 5, 8] {
             assert_eq!(pick(&a, &p, &none, Mover { class: Class::Plain, rate: N_RATE }, Some(from), MUST_LAST_H), Some(6));
@@ -175,7 +184,7 @@ fn allocation_snapshot_resting_rows() {
     let on7 = placed_loads(&a, 7);
     assert_eq!(rest_move(&a, &p, &resting(7, &on7, 0.07, false)), None);
     // with supply above demand the one on P3 goes to P6 or P4
-    let light = plan(&a, 0.005, 0.01, Some(KAPPA_FABLE));
+    let light = plan(&a, 0.005, 0.01, Some(KAPPA_SNAPSHOT));
     let few = loads_of(&a, &[(Some(3), Class::Plain, N_RATE), (Some(3), Class::Plain, N_RATE)], None);
     let mv = rest_move(&a, &light, &resting(3, &few, 0.008, false));
     assert!(matches!(mv, Some(RestMove::Band(6 | 4))), "{mv:?}");

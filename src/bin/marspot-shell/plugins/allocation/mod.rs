@@ -19,6 +19,7 @@
 pub(crate) mod choose;
 pub(crate) mod notice;
 pub(crate) mod plan;
+pub(crate) mod replay;
 pub(crate) mod rest;
 pub(crate) mod speed;
 
@@ -26,6 +27,8 @@ pub(crate) mod speed;
 mod sim;
 #[cfg(test)]
 mod sim_policies;
+#[cfg(test)]
+mod sim_gate;
 #[cfg(test)]
 mod sim_tests;
 #[cfg(test)]
@@ -35,14 +38,16 @@ mod core_tests;
 
 /// The share of a Claude week a full Fable window is worth.
 ///
-/// From the control plane's daily rises on Fable-heavy days (week
-/// rise over Fable rise: 0.56, 0.565, 0.59, 0.54); a snapshot of a
-/// spent Fable beside a week at 56% bounds it from above at 0.568.
-pub(crate) const KAPPA_FABLE: f64 = 0.57;
+/// A regression over 32 account-days (2026-11-17 to 11-24) of each
+/// day's week rise on its Fable rise plus its non-Fable dollars; left
+/// one day out at a time it stays within 0.512 to 0.537.  The plain
+/// ratio of the two rises reads higher (about 0.57), because it counts
+/// the same day's Opus use as Fable's.
+pub(crate) const KAPPA_FABLE: f64 = 0.528;
 
-/// A pane's speed when nothing has been measured: 0.6 points an hour,
-/// seven points an hour over about twelve panes.
-pub(crate) const RHO0: f64 = 0.006;
+/// A pane's speed when nothing has been measured: 0.67 points an hour,
+/// the control plane's use per busy pane over 2026-11-21 to 11-24.
+pub(crate) const RHO0: f64 = 0.0067;
 
 /// How far ahead the allocation looks, in hours.
 pub(crate) const HORIZON_H: usize = 168;

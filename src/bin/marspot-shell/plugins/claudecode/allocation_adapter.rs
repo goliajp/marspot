@@ -4,21 +4,30 @@
 //! Each scan it brings the per-pane facts up to date, writes a line to
 //! `alloc_events` for each that changed and none for the rest, and
 //! works out the plan and where each pane would go; the log gets
-//! `alloc.plan` when that answer changes.  Speeds are rebuilt from the
-//! last fifteen hours of events when the shell starts.
+//! `alloc.plan` when that answer changes.  When the shell starts, what
+//! it last knew of each pane is read back from every kept day of
+//! events, and the speeds from the last fifteen hours of them.
+//!
+//! A pane's use is written as the tokens each model used, never as
+//! weeks: the price of a token is a derivation, worked out again on
+//! every read.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use super::allocation_events::{Event, EventLog};
+use super::allocation_events::{DAY, Event, EventLog, KEEP_DAYS};
 use super::allocation_inputs::{PaneIn, Snapshot};
+use super::allocation_prices::{Tokens, class_of, weeks};
 use super::allocation_usage::Readers;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::notice::Told;
 use crate::plugins::allocation::speed::{PaneUse, Slope, WINDOW_S};
 
-/// A pane's use is written at most this often, summed.
-pub(super) const USED_EVERY_S: i64 = 60;
+/// A pane's use is written at most this often, summed per model.
+pub(super) const USED_EVERY_S: i64 = 300;
+
+/// Models remembered per pane between two writes.
+const MODELS_CAP: usize = 16;
 
 /// What was last written for one pane.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -33,8 +42,8 @@ pub(super) struct Last {
     pub would: Option<u8>,
 }
 
-/// Use read but not yet written: `(since, restricted, plain)`.
-type Pending = (i64, f64, f64);
+/// Use read but not yet written: since when, and the tokens per model.
+type Pending = (i64, Vec<(String, Tokens)>);
 
 pub(super) struct Allocation {
     pub(super) events: EventLog,
@@ -63,10 +72,6 @@ pub(super) fn class_word(c: Class) -> &'static str {
     }
 }
 
-fn class_of_word(w: &str) -> Class {
-    if w == "fable" { Class::Restricted } else { Class::Plain }
-}
-
 impl Allocation {
     pub(super) fn new(dir: PathBuf) -> Self {
         Allocation {
@@ -88,10 +93,9 @@ impl Allocation {
         let mut log = Vec::new();
         if !self.rebuilt {
             self.rebuild(snap.now);
-            self.rebuilt = true;
         }
         self.forget_gone(snap, &mut log);
-        let mut read = Vec::new();
+        let mut read = HashSet::new();
         for p in &snap.panes {
             self.facts(p, snap.now, &mut log);
             self.read_use(p, snap.now, &mut read, &mut log);
@@ -162,37 +166,42 @@ impl Allocation {
         self.last.insert(p.sid, next);
     }
 
-    fn read_use(&mut self, p: &PaneIn, now: i64, read: &mut Vec<PathBuf>, log: &mut Vec<(&'static str, String)>) {
-        let spent = p.transcript.as_deref().map(|t| self.readers.read(t, read)).unwrap_or_default();
-        let pend = self.pending.entry(p.sid).or_insert((now, 0.0, 0.0));
+    fn read_use(&mut self, p: &PaneIn, now: i64, read: &mut HashSet<PathBuf>, log: &mut Vec<(&'static str, String)>) {
+        let spent = match p.transcript.as_deref() {
+            Some(t) => {
+                read.insert(t.to_path_buf());
+                self.readers.read(t, now)
+            }
+            None => Vec::new(),
+        };
+        let pend = self.pending.entry(p.sid).or_insert((now, Vec::new()));
         for s in spent {
-            match s.class {
-                Class::Restricted => pend.1 += s.amount,
-                Class::Plain => pend.2 += s.amount,
+            match pend.1.iter().position(|(m, _)| *m == s.model) {
+                Some(k) => pend.1[k].1.add(&s.tokens),
+                None if pend.1.len() < MODELS_CAP => pend.1.push((s.model, s.tokens)),
+                None => {}
             }
         }
         if now - pend.0 < USED_EVERY_S {
             return;
         }
-        let (_, f, n) = *pend;
-        *pend = (now, 0.0, 0.0);
-        for (class, amount) in [(Class::Restricted, f), (Class::Plain, n)] {
-            if amount > 0.0 {
-                // written and kept as the same number, so a rebuild reads what running on had
-                let detail = format!("weeks={amount}");
-                self.event(now, p.sid, "used", Some(p.profile), class, detail, log);
-                self.used.entry(p.sid).or_default().add(now, class, amount);
-            }
+        let (_, models) = std::mem::replace(pend, (now, Vec::new()));
+        for (model, t) in models {
+            let class = class_of(&model);
+            self.event(now, p.sid, "used", Some(p.profile), class, format!("model={model} {}", t.words()), log);
+            self.used.entry(p.sid).or_default().add(now, class, weeks(&model, &t));
         }
         if let Some(u) = self.used.get_mut(&p.sid) {
             u.prune(now);
         }
     }
 
-    /// What the last fifteen hours of events say, as if the shell had
-    /// been running all along.
+    /// What every kept day of events says each pane was last, and what
+    /// the last fifteen hours say it used, as if the shell had been
+    /// running all along.
     pub(super) fn rebuild(&mut self, now: i64) {
-        for e in self.events.read_since(now - WINDOW_S, now) {
+        self.rebuilt = true;
+        for e in self.events.read_since(now - KEEP_DAYS * DAY, now) {
             if e.kind == "bound" && e.profile.is_none() {
                 self.last.remove(&e.sid);
                 self.used.remove(&e.sid);
@@ -206,18 +215,23 @@ impl Allocation {
                     }
                     l.profile = e.profile;
                     l.bound_at = Some(e.at);
-                    self.used.entry(e.sid).or_default().watched(e.at);
                 }
                 "rest" | "busy" => l.resting = Some(e.kind == "rest"),
                 "refused" => l.refused_at = at_of(&e.detail),
                 "marked" => l.marked_at = at_of(&e.detail),
-                "would_move" => l.would = e.detail.split_whitespace().find_map(|w| w.strip_prefix("to=P")).and_then(|p| p.parse().ok()),
-                "used" => {
-                    if let Some(w) = e.detail.strip_prefix("weeks=").and_then(|w| w.parse::<f64>().ok()) {
-                        self.used.entry(e.sid).or_default().add(e.at, class_of_word(&e.class), w);
+                "would_move" => l.would = e.detail.split(' ').find_map(|w| w.strip_prefix("to=P")).and_then(|p| p.parse().ok()),
+                "used" if e.at > now - WINDOW_S => {
+                    let model = e.detail.split(' ').find_map(|w| w.strip_prefix("model="));
+                    if let (Some(m), Some(t)) = (model, Tokens::parse(&e.detail)) {
+                        self.used.entry(e.sid).or_default().add(e.at, class_of(m), weeks(m, &t));
                     }
                 }
                 _ => {}
+            }
+        }
+        for (sid, l) in &self.last {
+            if let Some(at) = l.bound_at {
+                self.used.entry(*sid).or_default().watched(at);
             }
         }
         for u in self.used.values_mut() {

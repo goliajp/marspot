@@ -19,6 +19,33 @@ pub(super) fn say(a: &mut Allocation, log: &mut Vec<(&'static str, String)>, tag
     a.said.insert(tag, line);
 }
 
+/// Log `line` under `tag` when `key` differs from the last one, the
+/// first time included.
+pub(super) fn say_keyed(a: &mut Allocation, log: &mut Vec<(&'static str, String)>, tag: &'static str, key: String, line: String) {
+    if a.said.get(tag) == Some(&key) {
+        return;
+    }
+    log.push((tag, line));
+    a.said.insert(tag, key);
+}
+
+/// What `alloc.plan` is written for: shortage or not, how many panes of
+/// each class are on each account, which readings are stale, and where
+/// panes would go.  Speeds and targets move with every reply, so they
+/// are in the line but do not make one.
+pub(super) fn plan_key(accounts: &[Quant], table: &[(Option<u8>, Class, f64)], short: bool, moves: &[Option<String>]) -> String {
+    let mut key = String::from(if short { "shortage" } else { "surplus" });
+    for q in accounts {
+        let on = |c: Class| table.iter().filter(|(a, k, _)| *a == Some(q.id) && *k == c).count();
+        key.push_str(&format!(" P{}:{}+{}{}", q.id, on(Class::Restricted), on(Class::Plain), if q.stale { "s" } else { "" }));
+    }
+    for m in moves.iter().flatten() {
+        key.push(' ');
+        key.push_str(m);
+    }
+    key
+}
+
 /// The κ the readings allow: an account's week has gone up at least κ
 /// times what its Fable cap has.  Only noted, never adopted.
 pub(super) fn kappa_check(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'static str, String)>) {

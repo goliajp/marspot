@@ -13,7 +13,7 @@ use super::choose::{MUST_LAST_H, Mover, loads_of, pick as core_pick};
 use super::plan::{Plan, plan};
 use super::rest::{Resting, RestMove, is_keeper, rest_move};
 use super::sim::SimPane;
-use super::{Class, EPS, KAPPA_FABLE, Quant, lasts};
+use super::{Class, EPS, Quant, lasts};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Policy {
@@ -32,22 +32,22 @@ fn table(panes: &[SimPane], t: f64) -> Vec<(Option<u8>, Class, f64)> {
     panes.iter().map(|p| if p.live(t) { (p.on, p.class, p.est) } else { (None, p.class, 0.0) }).collect()
 }
 
-pub(super) fn targets(policy: Policy, a: &[Quant], panes: &[SimPane], t: f64) -> Option<Plan> {
+pub(super) fn targets(policy: Policy, a: &[Quant], panes: &[SimPane], t: f64, kappa: f64) -> Option<Plan> {
     if policy == Policy::Old {
         return None;
     }
     let live = || panes.iter().filter(|p| p.live(t));
     let b_f = live().filter(|p| p.class == Class::Restricted).map(|p| p.est).sum();
     let b_n = live().filter(|p| p.class == Class::Plain).map(|p| p.est).sum();
-    Some(plan(a, b_f, b_n, Some(KAPPA_FABLE)))
+    Some(plan(a, b_f, b_n, Some(kappa)))
 }
 
-pub(super) fn pick(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, from: Option<u8>, t: f64) -> Option<u8> {
+pub(super) fn pick(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, from: Option<u8>, t: f64, kappa: f64) -> Option<u8> {
     let class = panes[i].class;
     match policy {
         Policy::Old => old_pick(a, class, from),
         Policy::Plan => {
-            let p = targets(policy, a, panes, t)?;
+            let p = targets(policy, a, panes, t, kappa)?;
             let loads = loads_of(a, &table(panes, t), Some(i));
             core_pick(a, &p, &loads, Mover { class, rate: panes[i].est }, from, MUST_LAST_H)
         }

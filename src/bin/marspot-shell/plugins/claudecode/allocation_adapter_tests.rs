@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::plugins::allocation::Class;
-use crate::plugins::claudecode::allocation_inputs::{AccountIn, PaneIn, Snapshot};
+use crate::plugins::allocation::replay::replay;
+use crate::plugins::claudecode::allocation_inputs::{AccountIn, MarksFile, PaneIn, Snapshot};
+use crate::plugins::claudecode::fable_need::{Ask, Marks};
 
 const NOW: i64 = 1_795_530_644;
 
@@ -22,7 +24,7 @@ fn lines(d: &Path) -> Vec<String> {
 }
 
 fn account(profile: u8) -> AccountIn {
-    AccountIn { profile, week_used: 0.5, fable_used: Some(0.0), week_renews: NOW + 100 * 3600, fable_renews: NOW + 100 * 3600, open: true, measured_at: NOW }
+    AccountIn { profile, week_used: 0.5, fable_used: Some(0.0), fable_known: true, week_renews: NOW + 100 * 3600, fable_renews: NOW + 100 * 3600, open: true, measured_at: NOW }
 }
 
 fn pane(sid: u64, profile: u8, resting: bool) -> PaneIn {
@@ -56,6 +58,12 @@ fn allocation_events_one_line_per_change() {
         p
     };
     assert_eq!(step(&mut a, &d, &snap(NOW + 6, refused(), vec![1, 2])), ["refused", "would_move"]);
+    // the line carries every input: fed back, the same answer comes out
+    let would = lines(&d).into_iter().find(|l| l.split('\t').nth(3) == Some("would_move")).unwrap();
+    let detail = would.split('\t').nth(6).unwrap();
+    assert!(detail.starts_with("to=P2 why=out "), "{detail}");
+    let (to, why) = replay(detail).unwrap().unwrap();
+    assert_eq!((to, why.word()), (2, "out"));
     assert!(step(&mut a, &d, &snap(NOW + 8, refused(), vec![1, 2])).is_empty(), "the same refusal and target are not news");
     let mut moved = refused();
     moved[0].profile = 2;
@@ -95,15 +103,17 @@ fn allocation_events_use_rebuilds_the_same_speed() {
         std::io::Write::write_all(&mut f, s.as_bytes()).unwrap();
     };
     append(reply("m1", 3000, "2026-11-24T14:30:50Z"));
-    assert!(step(&mut a, &d, &snap(NOW + 10, vec![p.clone()], vec![1])).is_empty(), "held until a minute has passed");
+    assert!(step(&mut a, &d, &snap(NOW + 10, vec![p.clone()], vec![1])).is_empty(), "held until five minutes have passed");
     append(reply("m2", 4000, "2026-11-24T14:31:30Z"));
-    assert_eq!(step(&mut a, &d, &snap(NOW + 70, vec![p.clone()], vec![1])), ["used"], "one line for both replies");
-    assert!(step(&mut a, &d, &snap(NOW + 140, vec![p.clone()], vec![1])).is_empty(), "nothing used, nothing written");
+    assert_eq!(step(&mut a, &d, &snap(NOW + 310, vec![p.clone()], vec![1])), ["used"], "one line for both replies");
+    let used = lines(&d).pop().unwrap();
+    assert!(used.ends_with("\tplain\tmodel=claude-opus-5-5 in=10000 cc5m=0 cc1h=0 cr=0 out=7000"), "the tokens, not their price: {used}");
+    assert!(step(&mut a, &d, &snap(NOW + 640, vec![p.clone()], vec![1])).is_empty(), "nothing used, nothing written");
     let at = NOW + 3600;
     let running = a.used.get(&1).unwrap().rate(at, Class::Plain);
     assert!(running.is_some_and(|r| r > 0.0));
     let mut again = Allocation::new(d.clone());
-    again.rebuild(NOW + 200);
+    again.rebuild(NOW + 700);
     assert_eq!(again.used.get(&1).unwrap().rate(at, Class::Plain), running);
     fs::remove_dir_all(&d).unwrap();
     fs::remove_dir_all(&t).unwrap();
@@ -121,8 +131,55 @@ fn allocation_plan_is_logged_when_it_changes() {
     stale.feed_at = Some(NOW + 4 - 16 * 60);
     assert_eq!(tags(a.observe(&stale)), ["alloc.stale_feed"]);
     let both = vec![pane(1, 1, false), pane(2, 1, false)];
-    assert_eq!(tags(a.observe(&snap(NOW + 6, both, vec![1, 2]))), ["alloc.stale_feed", "alloc.plan"]);
+    assert_eq!(tags(a.observe(&snap(NOW + 6, both.clone(), vec![1, 2]))), ["alloc.stale_feed", "alloc.plan"]);
+    // readings that move the targets but not where panes are or would go
+    let mut moved = snap(NOW + 8, both, vec![1, 2]);
+    moved.accounts[0].week_used = 0.52;
+    assert!(a.observe(&moved).is_empty());
     fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn allocation_restart_reads_every_kept_day_for_what_panes_were() {
+    let d = dir("days");
+    let mut log = EventLog::new(d.clone());
+    let old = |at, kind: &str, profile, detail: &str| Event { at, sid: 4, kind: kind.into(), profile, class: "plain".into(), detail: detail.into() };
+    log.append(&old(NOW - 3 * DAY, "bound", Some(2), "")).unwrap();
+    log.append(&old(NOW - 3 * DAY + 5, "rest", Some(2), "")).unwrap();
+    log.append(&old(NOW - 2 * DAY, "refused", Some(2), "at=1795300000")).unwrap();
+    let mut a = Allocation::new(d.clone());
+    a.rebuild(NOW);
+    let l = a.last.get(&4).unwrap();
+    assert_eq!((l.profile, l.bound_at, l.resting, l.refused_at), (Some(2), Some(NOW - 3 * DAY), Some(true), Some(1_795_300_000)));
+    // nothing to say again on the first scan
+    let p = PaneIn { refused_at: Some(1_795_300_000), ..pane(4, 2, true) };
+    assert!(step(&mut a, &d, &snap(NOW, vec![p], vec![4])).is_empty(), "{:?}", lines(&d));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn allocation_reads_the_main_threads_fable_marks() {
+    let d = dir("marks");
+    fs::create_dir_all(&d).unwrap();
+    let mut marks = Marks::default();
+    marks.note(9, &Ask { at: NOW - 60, agent: None }, NOW - 30);
+    fs::write(d.join("fable_need.tsv"), marks.changed().unwrap()).unwrap();
+    let mut file = MarksFile::new(d.clone());
+    assert_eq!(file.read(NOW).get(&9), Some(&(NOW - 30)));
+    fs::remove_file(d.join("fable_need.tsv")).unwrap();
+    assert!(file.read(NOW).is_empty(), "gone with the file");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn allocation_unread_fable_cap_is_no_fable_target() {
+    let mut ac = account(1);
+    ac.fable_used = None;
+    ac.fable_known = false;
+    let q = ac.quant(NOW, 0.0);
+    assert!(!q.accepts(Class::Restricted) && q.accepts(Class::Plain), "{q:?}");
+    ac.fable_known = true;
+    assert!(ac.quant(NOW, 0.0).accepts(Class::Restricted), "no Fable cap listed: nothing holds Fable back");
 }
 
 #[test]

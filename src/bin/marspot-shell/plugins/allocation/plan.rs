@@ -77,6 +77,10 @@ struct Ahead {
 /// The hourly forward pass for the restricted model: first-hour
 /// targets, what it takes before each week renews, and what of the
 /// first hour nobody could take.
+///
+/// An account's restricted cap is `f / T_F`, but never more of the week
+/// than `R / min(T, T_F)`: when the week renews first, the week left
+/// now only has to last until then.
 fn restricted_pass(accounts: &[Quant], b_f: f64, kappa: Option<f64>) -> (Vec<f64>, Vec<f64>, f64) {
     let n = accounts.len();
     let mut s: Vec<Ahead> = accounts.iter().map(|q| Ahead { r: q.r, f: q.f, t: q.t, tf: q.tf, renewed: false }).collect();
@@ -90,8 +94,10 @@ fn restricted_pass(accounts: &[Quant], b_f: f64, kappa: Option<f64>) -> (Vec<f64
             if need <= 1e-12 {
                 break;
             }
-            let phi = s[i].f.min(s[i].r);
-            let x = (phi / s[i].tf.max(0.5)).min(need);
+            // what lasts until the restricted window renews, and no more of
+            // the week than lasts until whichever renews first
+            let cap = (s[i].f / s[i].tf.max(0.5)).min(s[i].r / s[i].t.min(s[i].tf).max(0.5));
+            let x = cap.min(need);
             s[i].f -= x;
             s[i].r -= x;
             need -= x;

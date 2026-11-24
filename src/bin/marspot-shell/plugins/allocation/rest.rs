@@ -10,9 +10,9 @@
 //! goes to one a whole pane short, if what it would use there before
 //! that account renews is worth the move.
 
-use super::choose::{MUST_LAST_H, Mover, pick};
+use super::choose::{MUST_LAST_H, Mover, pick_where};
 use super::plan::Plan;
-use super::{Class, Load, Quant, lasts, shortage};
+use super::{Class, EPS, Load, Quant, lasts, shortage};
 
 /// An account that will not last this long sends its resting panes away.
 pub(crate) const LEAVE_BELOW_H: f64 = 2.0;
@@ -43,7 +43,7 @@ pub(crate) enum RestMove {
 }
 
 /// One resting pane and what limits moving it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Resting<'a> {
     pub here: u8,
     pub mover: Mover,
@@ -77,7 +77,10 @@ pub(crate) fn rest_move(accounts: &[Quant], plan: &Plan, p: &Resting) -> Option<
         if p.keeper {
             return None;
         }
-        let to = pick(accounts, plan, &others, p.mover, Some(p.here), MUST_LAST_H)?;
+        // a resting move never targets a stale reading, nor sends a pane
+        // that uses the restricted model where that model is spent
+        let allow = |q: &Quant| !q.stale && !(p.keeps_restricted && class == Class::Plain && q.phi() <= EPS);
+        let to = pick_where(accounts, plan, &others, p.mover, Some(p.here), MUST_LAST_H, allow)?;
         let ti = accounts.iter().position(|q| q.id == to)?;
         return (lasts(&accounts[ti], &others[ti], class, p.mover.rate) >= MUST_LAST_H).then_some(RestMove::LeaveEarly(to));
     }
@@ -106,7 +109,7 @@ fn band_move(accounts: &[Quant], plan: &Plan, p: &Resting, hi: usize, others: &[
         if i == hi || !q.accepts(class) || q.stale || q.t < 1.0 || returning {
             continue;
         }
-        if p.keeps_restricted && class == Class::Plain && q.phi() <= super::EPS {
+        if p.keeps_restricted && class == Class::Plain && q.phi() <= EPS {
             continue;
         }
         let d = target(i) - p.loads[i].of(class);
@@ -116,7 +119,7 @@ fn band_move(accounts: &[Quant], plan: &Plan, p: &Resting, hi: usize, others: &[
         if d.min(p.mover.rate) * q.t < worth {
             continue;
         }
-        if best.is_none_or(|b| q.t < accounts[b].t) {
+        if best.is_none_or(|b| q.renews_in(class) < accounts[b].renews_in(class)) {
             best = Some(i);
         }
     }

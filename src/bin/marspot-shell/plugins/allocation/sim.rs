@@ -29,11 +29,12 @@ pub(super) const FEED: [(u8, f64, f64, i64); 8] = [
     (8, 1.00, 1.00, 1_795_582_799),
 ];
 
-pub(super) fn world() -> Vec<Quant> {
+/// The accounts at those readings, a Fable window worth `kappa` of a week.
+pub(super) fn world_at(kappa: f64) -> Vec<Quant> {
     FEED.iter()
         .map(|&(id, w, f, reset)| {
             let t = (reset - NOW) as f64 / 3600.0;
-            Quant { id, r: 1.0 - w, f: KAPPA_FABLE * (1.0 - f), t, tf: t, open: true, stale: false }
+            Quant { id, r: 1.0 - w, f: kappa * (1.0 - f), t, tf: t, open: true, stale: false }
         })
         .collect()
 }
@@ -101,11 +102,13 @@ pub(super) struct Case {
     /// Plain panes that stop at this hour, from the end of the list.
     pub leave: Option<(usize, f64)>,
     pub batches: Vec<Batch>,
+    /// What a Fable window is worth, for the world and the planners.
+    pub kappa: f64,
 }
 
 impl Case {
     pub(super) fn base(n_f: usize, n_n: usize, demand: f64) -> Self {
-        Case { n_f, n_n, demand, fable_share: 0.5, bias: 1.0, sigma: 0.0, p_rest: 0.4, move_cost: 0.0, leave: None, batches: Vec::new() }
+        Case { n_f, n_n, demand, fable_share: 0.5, bias: 1.0, sigma: 0.0, p_rest: 0.4, move_cost: 0.0, leave: None, batches: Vec::new(), kappa: KAPPA_FABLE }
     }
 }
 
@@ -159,7 +162,7 @@ fn charge(a: &mut [Quant], to: u8, class: Class, cost: f64) {
 
 pub(super) fn run(policy: Policy, c: &Case, seed: u64) -> Outcome {
     let mut rng = Rng::new(seed);
-    let mut a = world();
+    let mut a = world_at(c.kappa);
     let mut panes = panes_of(c, &mut rng);
     let mut o = Outcome::default();
     let mut hour: Vec<f64> = Vec::new();
@@ -169,7 +172,7 @@ pub(super) fn run(policy: Policy, c: &Case, seed: u64) -> Outcome {
             if q.t <= STEP / 2.0 {
                 o.waste += q.r.max(0.0);
                 q.r = 1.0;
-                q.f = KAPPA_FABLE;
+                q.f = c.kappa;
                 q.t += 168.0;
                 q.tf = q.t;
             }
@@ -205,7 +208,7 @@ fn place_and_force(policy: Policy, c: &Case, a: &mut [Quant], panes: &mut [SimPa
         if was.is_some() {
             o.refusals += 1;
         }
-        let Some(to) = pick(policy, a, panes, i, was, t) else {
+        let Some(to) = pick(policy, a, panes, i, was, t, c.kappa) else {
             panes[i].on = None;
             continue;
         };
@@ -226,7 +229,7 @@ fn place_and_force(policy: Policy, c: &Case, a: &mut [Quant], panes: &mut [SimPa
 
 #[allow(clippy::too_many_arguments)] // the step's whole state, each a separate piece
 fn rest_pass(policy: Policy, c: &Case, a: &mut [Quant], panes: &mut [SimPane], t: f64, rng: &mut Rng, hour: &mut Vec<f64>, o: &mut Outcome) {
-    let targets = super::sim_policies::targets(policy, a, panes, t);
+    let targets = super::sim_policies::targets(policy, a, panes, t, c.kappa);
     for i in 0..panes.len() {
         if panes[i].on.is_none() || !panes[i].live(t) || rng.next() > c.p_rest {
             continue;

@@ -63,6 +63,7 @@ mod allocation_decide;
 mod allocation_events;
 mod allocation_inputs;
 mod allocation_line;
+mod allocation_prices;
 mod allocation_usage;
 mod worker_loop;
 pub(in crate::plugins) mod with_helpers;

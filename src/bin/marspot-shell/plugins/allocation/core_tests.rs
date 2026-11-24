@@ -3,6 +3,7 @@
 use super::choose::{HELPER_LAST_H, Mover, loads_of, pick};
 use super::notice::{Stranded, Told, stranded};
 use super::plan::plan;
+use super::replay::{Inputs, Kind, Why, replay};
 use super::sim_policies::old_helper_pick;
 use super::speed::{PaneUse, Slope, WINDOW_S};
 use super::{Class, KAPPA_FABLE, Quant, RHO0, shortage};
@@ -141,8 +142,41 @@ fn allocation_speed_reads_a_steady_rate_as_itself_and_none_until_known() {
     }
     let r = u.rate(start + 15 * 3600, Class::Plain).unwrap();
     assert!((r - 0.006).abs() < 0.0002, "{r}");
-    assert!(u.rate_or_default(start + 15 * 3600).2);
-    assert_eq!(PaneUse::default().rate_or_default(0), (0.0, RHO0, false));
+    assert!(u.rate_or_default(start + 15 * 3600, Class::Plain).2);
+    assert_eq!(PaneUse::default().rate_or_default(0, Class::Plain), (0.0, RHO0, false));
+    assert_eq!(PaneUse::default().rate_or_default(0, Class::Restricted), (RHO0, 0.0, false), "a Fable pane is taken to use Fable");
+}
+
+#[test]
+fn allocation_speed_of_a_new_pane_is_not_spread_over_fifteen_hours() {
+    let start = 1_795_530_644;
+    let mut u = PaneUse::default();
+    u.watched(start);
+    // two hours watched at a steady 0.01 an hour
+    for k in 1..=120 {
+        u.add(start + k * 60, Class::Plain, 0.01 / 60.0);
+    }
+    let r = u.rate(start + 2 * 3600, Class::Plain).unwrap();
+    assert!((r - 0.01).abs() < 0.0005, "{r}");
+    // minutes watched: averaged over an hour, not over minutes
+    let mut v = PaneUse::default();
+    v.watched(start);
+    v.add(start + 120, Class::Plain, 0.002);
+    let r = v.rate(start + 180, Class::Plain).unwrap();
+    assert!(r > 0.0022 && r < 0.0023, "{r}");
+}
+
+#[test]
+fn allocation_restricted_cap_when_the_week_renews_first() {
+    // the week renews in 4 h, Fable in 40 h: the week left now only has to last 4 h
+    let mut q = acct(1, 0.1, 0.4, 4.0);
+    q.tf = 40.0;
+    let p = plan(&[q], 1.0, 0.0, Some(KAPPA_FABLE));
+    assert!((p.t_f[0] - 0.01).abs() < 1e-12, "min(0.4 / 40, 0.1 / 4): {}", p.t_f[0]);
+    let mut q = acct(1, 0.1, 0.4, 4.0);
+    q.tf = 8.0;
+    let p = plan(&[q], 1.0, 0.0, Some(KAPPA_FABLE));
+    assert!((p.t_f[0] - 0.025).abs() < 1e-12, "min(0.4 / 8, 0.1 / 4): {}", p.t_f[0]);
 }
 
 #[test]
@@ -158,4 +192,50 @@ fn allocation_account_slope_restarts_after_a_drop() {
     assert!((s.rate().unwrap() - 0.06).abs() < 1e-9);
     s.note(20_000, 0.08, 5400);
     assert_eq!(s.rate(), None, "older than the window is dropped");
+}
+
+fn resting_inputs(accounts: Vec<Quant>, keeps_restricted: bool) -> Inputs {
+    let tab = [(Some(1), Class::Plain, 0.01), (Some(1), Class::Plain, 0.02)];
+    let loads = loads_of(&accounts, &tab, None);
+    let kind = Kind::Rest {
+        keeper: false,
+        since_move_h: Some(0.25),
+        left: vec![(4, 7.5)],
+        band_last_hour: 1,
+        demand: 0.03,
+        stale_feed: false,
+        speed_known: true,
+        keeps_restricted,
+    };
+    Inputs { accounts, b_f: 0.0, b_n: 0.03, kappa: Some(KAPPA_FABLE), loads, mover: Mover { class: Class::Plain, rate: 0.02 }, here: 1, kind }
+}
+
+#[test]
+fn allocation_leave_early_skips_stale_and_fable_less_accounts() {
+    // P1 lasts under two hours; P2 is stale, P3 has no Fable left, P4 is fresh with Fable
+    let mut a = vec![acct(1, 0.03, 0.0, 50.0), acct(2, 0.9, 0.5, 60.0), acct(3, 0.9, 0.0, 70.0), acct(4, 0.5, 0.4, 80.0)];
+    a[1].stale = true;
+    let go = |a: &[Quant], keeps| {
+        let i = resting_inputs(a.to_vec(), keeps);
+        i.decide(&i.plan())
+    };
+    assert_eq!(go(&a, false), Some((3, Why::LeaveEarly)), "the stale P2 lasts longest but is no resting target");
+    assert_eq!(go(&a, true), Some((4, Why::LeaveEarly)), "a pane using Fable is not sent where Fable is spent");
+    a[3].stale = true;
+    assert_eq!(go(&a, true), None);
+}
+
+#[test]
+fn allocation_replay_reads_back_the_same_inputs_and_answer() {
+    let mut a = vec![acct(1, 0.03, 0.0, 50.0), acct(2, 0.9, 0.5, 60.0), acct(3, 0.9, 0.0, 70.0)];
+    a[2].tf = 12.345_678_9;
+    a[1].open = false;
+    let rest = resting_inputs(a.clone(), true);
+    let out = Inputs { kind: Kind::Out { horizon_h: HELPER_LAST_H }, kappa: None, ..rest.clone() };
+    for i in [rest, out] {
+        let line = format!("to=P9 why=x {}", i.encode());
+        assert_eq!(Inputs::decode(&line), Some(i.clone()), "{line}");
+        assert_eq!(replay(&line), Some(i.decide(&i.plan())));
+    }
+    assert_eq!(Inputs::decode("here=1 class=plain"), None);
 }

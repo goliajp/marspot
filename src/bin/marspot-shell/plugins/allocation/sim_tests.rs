@@ -1,107 +1,40 @@
-//! The simulator's pass conditions for the new rule.
+//! The simulator's pass conditions, as they stand.
 //!
-//! In every shortage case, refusals at most a third of today's rule's;
-//! at 0.15 points a move, no more unmet demand than today's rule; with
-//! the planners seeing true speeds, at most 0.01 of a week lapsed; and
-//! no pane moved while resting more than six times in the week.
+//! The verdict of every condition on every row is written down below:
+//! a change in the rules or the simulator that turns any of them, to
+//! pass or to fail, fails this test until the table is brought up to
+//! date.  The table also says why the new rule moves nothing yet.
 
-use super::RHO0;
-use super::sim::{Batch, Case, Outcome, run};
+use super::sim::{Case, run};
+use super::sim_gate::{CONDITIONS, line, mean, sigma, step4_gate};
 use super::sim_policies::Policy;
 
-const SEEDS: [u64; 3] = [1, 2, 3];
-
-/// Per pane per week, resting moves, on average over the panes.
-const REST_MOVES_PER_PANE: f64 = 6.0;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Mean {
-    unmet: f64,
-    unmet_restricted: f64,
-    refusals: f64,
-    rest: f64,
-    waste: f64,
-    most_rest: u32,
-}
-
-fn mean(policy: Policy, c: &Case) -> Mean {
-    let runs: Vec<Outcome> = SEEDS.iter().map(|s| run(policy, c, *s)).collect();
-    let n = runs.len() as f64;
-    Mean {
-        unmet: runs.iter().map(|o| o.unmet).sum::<f64>() / n,
-        unmet_restricted: runs.iter().map(|o| o.unmet_restricted).sum::<f64>() / n,
-        refusals: runs.iter().map(|o| f64::from(o.refusals)).sum::<f64>() / n,
-        rest: runs.iter().map(|o| f64::from(o.rest)).sum::<f64>() / n,
-        waste: runs.iter().map(|o| o.waste).sum::<f64>() / n,
-        most_rest: runs.iter().map(|o| o.most_rest_per_pane).max().unwrap_or(0),
-    }
-}
-
-fn panes(c: &Case) -> f64 {
-    (c.n_f + c.n_n + c.batches.iter().map(|b| b.n).sum::<usize>()) as f64
-}
-
-fn sigma(mut c: Case) -> Case {
-    c.sigma = 1.3;
-    c
-}
-
-/// `(name, case, planners see true speeds, one of the six rows the
-/// conditions are set for)`: the six shortage rows, then two with panes
-/// coming and going, which are reported and held to the move count only.
-fn shortage_cases() -> Vec<(&'static str, Case, bool, bool)> {
-    let base = Case::base(3, 9, 0.07);
-    let with = |f: &dyn Fn(&mut Case)| {
-        let mut c = sigma(base.clone());
-        f(&mut c);
-        c
-    };
-    let batches = vec![
-        Batch { n: 5, rate: RHO0, from: 24.0, until: 32.0 },
-        Batch { n: 8, rate: RHO0, from: 96.0, until: 100.0 },
-    ];
-    vec![
-        ("7 pts/h, same speeds", base.clone(), true, true),
-        ("7 pts/h, speeds differ", sigma(base.clone()), true, true),
-        ("believed x0.5", with(&|c| c.bias = 0.5), false, true),
-        ("believed x2", with(&|c| c.bias = 2.0), false, true),
-        ("0.15 pts a move", with(&|c| c.move_cost = 0.0015), true, true),
-        ("0.5 pts a move", with(&|c| c.move_cost = 0.005), true, true),
-        ("helper batches", with(&|c| c.batches = batches.clone()), true, false),
-        ("three panes stop at 72 h", with(&|c| c.leave = Some((3, 72.0))), true, false),
-    ]
-}
-
-fn line(name: &str, m: &Mean) -> String {
-    format!(
-        "{name:<26} unmet {:>6.1} (Fable {:>5.1}) refusals {:>5.1} rest {:>5.1} waste {:.3} most_rest {}",
-        m.unmet, m.unmet_restricted, m.refusals, m.rest, m.waste, m.most_rest
-    )
-}
+/// Per row, conditions 1 to 5 (see `sim_gate`): `None` where a
+/// condition is not set for the row.
+const EXPECTED: [(&str, [Option<bool>; CONDITIONS]); 10] = [
+    ("7 pts/h, same speeds", [Some(true), None, Some(true), Some(true), Some(false)]),
+    ("7 pts/h, speeds differ", [Some(true), None, Some(false), Some(true), Some(false)]),
+    ("believed x0.5", [Some(true), None, None, Some(false), Some(false)]),
+    ("believed x2", [Some(false), None, None, Some(true), Some(false)]),
+    ("0.136 pts a move", [Some(true), Some(true), Some(false), Some(true), Some(false)]),
+    ("0.5 pts a move", [Some(true), None, Some(false), Some(true), Some(true)]),
+    ("helper batches", [None, None, Some(true), Some(true), Some(false)]),
+    ("three panes stop at 72 h", [None, None, Some(false), Some(false), Some(false)]),
+    ("4 pts/h", [None, None, None, Some(true), Some(true)]),
+    ("2 pts/h, speeds differ", [None, None, None, Some(true), Some(true)]),
+];
 
 #[test]
-fn allocation_sim_pass_conditions() {
-    let mut failures = Vec::new();
-    for (name, c, true_speeds, held) in shortage_cases() {
-        let (old, new) = (mean(Policy::Old, &c), mean(Policy::Plan, &c));
-        eprintln!("{}\n{}", line(&format!("{name} / old"), &old), line(&format!("{name} / new"), &new));
-        if new.rest / panes(&c) > REST_MOVES_PER_PANE {
-            failures.push(format!("{name}: {} resting moves for {} panes", new.rest, panes(&c)));
-        }
-        if !held {
-            continue;
-        }
-        if new.refusals > old.refusals / 3.0 {
-            failures.push(format!("{name}: refusals {} > a third of {}", new.refusals, old.refusals));
-        }
-        if c.move_cost == 0.0015 && new.unmet > old.unmet {
-            failures.push(format!("{name}: unmet {} > {}", new.unmet, old.unmet));
-        }
-        if true_speeds && new.waste > 0.01 {
-            failures.push(format!("{name}: waste {} > 0.01", new.waste));
-        }
+fn allocation_sim_step4_gate() {
+    let gate = step4_gate();
+    eprintln!("conditions: 1 refusals <= old/3 | 2 unmet <= old at 0.136 pts a move | 3 waste <= 0.01 | 4 every pane <= 6 resting moves | 5 Fable unmet <= old");
+    for r in &gate.rows {
+        eprintln!("{}", line(r));
     }
-    assert!(failures.is_empty(), "{failures:#?}");
+    eprintln!("step 4 gate open: {}", gate.open);
+    let got: Vec<(&str, [Option<bool>; CONDITIONS])> = gate.rows.iter().map(|r| (r.name, r.holds)).collect();
+    assert_eq!(got, EXPECTED.to_vec(), "a verdict changed:\n{got:#?}");
+    assert!(!gate.open, "every condition holds: the table above is out of date");
 }
 
 #[test]
@@ -112,11 +45,25 @@ fn allocation_sim_surplus_rows() {
     two.fable_share = 1.0 / 3.0;
     for (name, c) in [("4 pts/h", four), ("2 pts/h, speeds differ", two)] {
         let (old, new) = (mean(Policy::Old, &c), mean(Policy::Plan, &c));
-        eprintln!("{}\n{}", line(&format!("{name} / old"), &old), line(&format!("{name} / new"), &new));
-        assert!(new.rest / panes(&c) <= REST_MOVES_PER_PANE, "{name}: {new:?}");
         assert!(new.refusals <= old.refusals, "{name}: {new:?} vs {old:?}");
         assert!(new.unmet <= old.unmet + 0.5, "{name}: {new:?} vs {old:?}");
     }
+}
+
+/// At the κ of the first measurements, three panes leaving at 72 h
+/// leave the Fable panes short in the last day: the plain panes have
+/// used what Fable could have, and the new rule does far worse than
+/// today's.
+#[test]
+fn allocation_sim_three_panes_stop_at_kappa_0_57() {
+    let mut c = sigma(Case::base(3, 9, 0.07));
+    c.leave = Some((3, 72.0));
+    c.kappa = 0.57;
+    let (old, new) = (mean(Policy::Old, &c), mean(Policy::Plan, &c));
+    eprintln!("kappa 0.57, three panes stop at 72 h: old {old:?}\nnew {new:?}");
+    let near = |x: f64, y: f64| (x - y).abs() < 0.1;
+    assert!(near(old.unmet, 8.5) && near(old.unmet_restricted, 5.2), "{old:?}");
+    assert!(near(new.unmet, 36.1) && near(new.unmet_restricted, 35.7), "{new:?}");
 }
 
 #[test]
