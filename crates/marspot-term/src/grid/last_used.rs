@@ -32,6 +32,7 @@ mod helper_strip_tests {
         assert_eq!(last(b"a\r\nb\r\n"), 2, "the cursor is under the text");
         assert_eq!(last(b"\x1b[7;1Hx\x1b[2;1H"), 6, "the text is under the cursor");
         assert_eq!(last(b"\x1b[10;20Hx\x1b[H"), 9, "the last cell of the screen");
+        assert_eq!(last(b"\x1b[2;1Hx\x1b[H"), 1, "right under the cursor");
     }
 
     #[test]
