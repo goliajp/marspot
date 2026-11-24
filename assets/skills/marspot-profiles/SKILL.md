@@ -104,9 +104,13 @@ account sets `GEMINI_API_KEY` for that account instead.
   is shared on purpose, so that `--resume` finds a session whichever account
   started it. Per account: `.claude.json`, the list of installed plugins,
   caches and statistics.
-- Codex: `AGENTS.md`, `config.toml`, sessions and their index, skills, rules,
-  plugins, packages, caches. Per account: `auth.json`, `history.jsonl`, the
-  local databases.
+- Codex: `AGENTS.md`, `config.toml`, sessions and their index, the per-thread
+  writer locks (`thread-writer-locks/`, so that two accounts never write one
+  session at once), skills, rules, plugins, packages, caches. Per account:
+  `auth.json`, `history.jsonl`, the local databases. marspot links the lock
+  directory of an existing account itself once none of its codex processes
+  runs; `marspot-shell --codex-locks restore <CODEX_HOME>` gives an account its
+  own directory again and keeps it that way.
 - Gemini: `GEMINI.md`, `settings.json`, commands, skills, agents, policies,
   extensions, sessions (`tmp/`) and checkpoints (`history/`). Per account:
   `oauth_creds.json`, `google_accounts.json`, the other token files,

@@ -47,20 +47,8 @@ pub(super) fn reconcile() -> Vec<String> {
 /// config, or a default home that is a link to a profile, would
 /// otherwise have it edited once per name.
 pub(super) fn config_files(home: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![home.join(".codex")];
-    if let Ok(rd) = std::fs::read_dir(home) {
-        let mut profiles: Vec<PathBuf> = rd
-            .flatten()
-            .filter(|e| {
-                e.file_name().to_str().and_then(|n| n.strip_prefix(".codex-profile-")).is_some_and(|n| n.parse::<u8>().is_ok())
-            })
-            .map(|e| e.path())
-            .collect();
-        profiles.sort();
-        dirs.extend(profiles);
-    }
     let mut out: Vec<PathBuf> = Vec::new();
-    for dir in dirs {
+    for dir in home_dirs(home) {
         // a home that does not exist is not created
         let Ok(real_dir) = dir.canonicalize() else { continue };
         if !real_dir.is_dir() {
@@ -78,6 +66,24 @@ pub(super) fn config_files(home: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// `~/.codex` and every `~/.codex-profile-N`, by name, whether or not
+/// they exist.
+pub(super) fn home_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![home.join(".codex")];
+    if let Ok(rd) = std::fs::read_dir(home) {
+        let mut profiles: Vec<PathBuf> = rd
+            .flatten()
+            .filter(|e| {
+                e.file_name().to_str().and_then(|n| n.strip_prefix(".codex-profile-")).is_some_and(|n| n.parse::<u8>().is_ok())
+            })
+            .map(|e| e.path())
+            .collect();
+        profiles.sort();
+        dirs.extend(profiles);
+    }
+    dirs
 }
 
 fn reconcile_file(path: &Path, bin: &str) -> Option<String> {

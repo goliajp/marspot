@@ -67,7 +67,7 @@ agent_vars() {
       LOGIN="run claude%s, then /login"
       ;;
     codex)
-      ENTRIES="AGENTS.md config.toml models_cache.json session_index.jsonl cache/ packages/ plugins/ rules/ sessions/ shell_snapshots/ skills/"
+      ENTRIES="AGENTS.md config.toml models_cache.json session_index.jsonl cache/ packages/ plugins/ rules/ sessions/ shell_snapshots/ skills/ thread-writer-locks/"
       ACCOUNT_FILES="auth.json history.jsonl"
       ENV_NAME=CODEX_HOME
       LOGIN="run 'codex%s login'"
@@ -398,6 +398,10 @@ doctor_profile() {
     name=${e%/}
     link="$cfg/$name"
     want="$SHARED/$name"
+    # an account given its own writer locks back on purpose
+    if [ "$AGENT" = codex ] && [ "$name" = thread-writer-locks ] && [ -e "$cfg/.marspot-own-thread-writer-locks" ]; then
+      continue
+    fi
     if [ -L "$link" ]; then
       if [ "$(readlink "$link")" != "$want" ]; then
         problem "$link points to $(readlink "$link"), expected $want"

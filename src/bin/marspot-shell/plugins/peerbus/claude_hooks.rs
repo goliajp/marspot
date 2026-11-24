@@ -21,6 +21,7 @@ impl super::worker::Worker {
     pub(super) fn reconcile_hooks(&mut self) {
         let mut notes = reconcile();
         notes.extend(super::codex_config::reconcile());
+        notes.extend(super::codex_locks::reconcile());
         notes.extend(super::gemini_config::reconcile());
         notes.extend(super::kimi_config::reconcile());
         if notes == self.hook_notes {

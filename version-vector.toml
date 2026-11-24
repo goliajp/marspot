@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.700"  # a codex switch counts its wait from the end of the TUI, under a steady stream of daemon events too
+shell   = "0.7.701"  # every codex home shares its thread writer locks once none of its codex processes runs
 core    = "0.12.686"  # the badge names the wait for the old codex account and why a switch did not happen
 session = "0.11.443"  # the text lane writes a lone character after a wide one in place

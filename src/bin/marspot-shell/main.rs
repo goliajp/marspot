@@ -136,8 +136,7 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some(identity::LS_REFRESH_ARG) {
         identity::ls_refresh_main();
     }
-    // RFC-004 D.1 — one-time Caches → Application Support state-root
-    // migration.  Must run before logx / any path computation.
+    // one-time Caches → Application Support move; before logx and any path
     marspot::paths::migrate_legacy_state_root();
     // The claudecode status-line hook dispatches before everything
     // else — before logx, before the redirect into current/.  Claude
@@ -147,10 +146,10 @@ fn main() {
     // above only so it computes the same state root the badge reads.
     match std::env::args().nth(1).as_deref() {
         Some("--cc-statusline") => std::process::exit(plugins::claudecode::statusline_ingest()),
-        // A pane's agent reporting that it submitted something, for the
-        // same reasons and with the same shape: stdin in, one socket out,
-        // no log stream and no window.  See `receipts`.
+        // a pane's agent reporting a submission, for the same reasons: stdin
+        // in, one socket out, no log stream and no window (`receipts`)
         Some("--submit-receipt") => std::process::exit(receipts::report_from_stdin()),
+        Some("--codex-locks") => std::process::exit(plugins::peerbus::codex_locks_main()),
         _ => {}
     }
     // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
