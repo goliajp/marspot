@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.647"  # a run ends at the command end its own status line prints
-core    = "0.12.645"  # the window layout's hit tests in a file of their own
+shell   = "0.7.648"  # finding an agent's input box is in a file of its own
+core    = "0.12.646"  # finding an agent's input box is in a file of its own
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it
