@@ -1,4 +1,4 @@
-use super::{prompt_of, prompt_sha};
+use super::{SCREEN_LINES, prompt_of, prompt_sha};
 
 /// codex 0.172's approval prompt, as its screen reads, below the turn
 /// that asked for it.
@@ -49,4 +49,24 @@ fn helpers_a_codex_approval_prompt_starts_at_its_question() {
 fn helpers_a_rule_below_the_question_wins() {
     let screen = format!("  Would you like to run it?\n{}\nRun make?\n❯ 1. Yes\n  2. No\n", "─".repeat(20));
     assert_eq!(prompt_of(&screen), "Run make?\n❯ 1. Yes\n  2. No");
+}
+
+/// A rule marks where a prompt starts wherever codex's question is.
+#[test]
+fn helpers_a_rule_above_the_question_wins_too() {
+    let screen = format!("{}\nRun make?\n  Would you like to run it?\n❯ 1. Yes\n  2. No\n", "─".repeat(20));
+    assert_eq!(prompt_of(&screen), "Run make?\n  Would you like to run it?\n❯ 1. Yes\n  2. No");
+}
+
+/// codex's question far up the transcript, or its words in a line that
+/// asks nothing, are not where a prompt drawn below with no rule starts.
+#[test]
+fn helpers_a_question_far_up_or_asking_nothing_is_not_codexs() {
+    let bottom = "Run make?\n❯ 1. Yes\n  2. No";
+    let question = CODEX_ASKS.lines().next().unwrap();
+    let far = format!("{question}\n{}{bottom}\n", "• it printed a line\n".repeat(SCREEN_LINES));
+    let rows: Vec<&str> = far.lines().collect();
+    assert_eq!(prompt_of(&far), rows[rows.len() - SCREEN_LINES..].join("\n"), "the rows that end at the choice");
+    let near = format!("• Done.\n  Would you like to run the following command, it said\n{bottom}\n");
+    assert_eq!(prompt_of(&near), near.trim_end(), "no question asked");
 }

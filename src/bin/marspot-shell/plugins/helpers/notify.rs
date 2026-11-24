@@ -125,17 +125,19 @@ pub(super) fn same_prompt(told: &str, screen: &str) -> bool {
 const CODEX_ASKS: &str = "Would you like to ";
 
 /// The prompt at the bottom of `screen`: from below the last rule drawn
-/// above its last choice, or from codex's question when that is lower,
-/// down to that choice.  What is above (the transcript, a status that
-/// changes) and the hints below are not it; with neither, the
-/// [`SCREEN_LINES`] rows that end at the choice.
+/// above its last choice down to that choice; with no rule, from codex's
+/// question among the [`SCREEN_LINES`] rows that end at the choice.
+/// What is above (the transcript, a status that changes) and the hints
+/// below are not it; with neither, those rows.
 pub(super) fn prompt_of(screen: &str) -> String {
     let rows: Vec<&str> = screen.lines().collect();
     let last = rows.iter().rposition(|r| is_choice(r)).or_else(|| rows.iter().rposition(|r| !r.trim().is_empty()));
     let end = last.map_or(0, |i| i + 1);
+    let near = end.saturating_sub(SCREEN_LINES);
     let below_rule = rows[..end].iter().rposition(|r| is_rule(r)).map(|i| i + 1);
-    let question = rows[..end].iter().rposition(|r| r.trim_start().starts_with(CODEX_ASKS));
-    let start = below_rule.max(question).unwrap_or(end.saturating_sub(SCREEN_LINES));
+    let asks = |r: &&str| r.trim_start().starts_with(CODEX_ASKS) && r.trim_end().ends_with('?');
+    let question = || rows[near..end].iter().rposition(asks).map(|i| near + i);
+    let start = below_rule.or_else(question).unwrap_or(near);
     rows[start..end].join("\n")
 }
 
