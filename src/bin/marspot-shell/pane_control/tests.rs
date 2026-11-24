@@ -146,7 +146,7 @@ fn externals_share_one_entry_and_closed_panes_leave() {
 #[test]
 fn counts_headroom_totals_and_nesting() {
     let cfg = Config::default();
-    let ok = SpawnCounts { live_sessions: 55, shadows_total: 23, shadows_under_root: 7, parent_depth: 1 };
+    let ok = SpawnCounts { live_sessions: 55, shadows_total: cfg.shadows_total - 1, shadows_under_root: 7, parent_depth: 1 };
     check_spawn(&cfg, &ok, true, 64).unwrap();
     let over = |f: fn(&mut SpawnCounts)| {
         let mut c = SpawnCounts { ..ok };
@@ -154,7 +154,7 @@ fn counts_headroom_totals_and_nesting() {
         check_spawn(&cfg, &c, true, 64).unwrap_err().code
     };
     assert_eq!(over(|c| c.live_sessions = 56), ErrorCode::LimitCount);
-    assert_eq!(over(|c| c.shadows_total = 24), ErrorCode::LimitCount);
+    assert_eq!(check_spawn(&cfg, &SpawnCounts { shadows_total: cfg.shadows_total, ..ok }, true, 64).unwrap_err().code, ErrorCode::LimitCount);
     assert_eq!(over(|c| c.shadows_under_root = 8), ErrorCode::LimitCount);
     // a third level of shadow panes
     assert_eq!(over(|c| c.parent_depth = 2), ErrorCode::LimitCount);
