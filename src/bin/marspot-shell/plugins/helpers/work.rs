@@ -38,6 +38,8 @@ pub(super) enum Job {
     Fact { sid: u64, at_ms: u64, ev: Box<Event> },
     /// Try an undelivered notice again.
     Redeliver { sid: u64 },
+    /// Tell the parent the result of a stop written before a restart.
+    Retell { sid: u64 },
 }
 
 impl Job {
@@ -45,7 +47,7 @@ impl Job {
     pub fn sid(&self) -> u64 {
         match self {
             Job::Wake | Job::Contexts => 0,
-            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Fact { sid, .. } | Job::Redeliver { sid } => *sid,
+            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Fact { sid, .. } | Job::Redeliver { sid } | Job::Retell { sid } => *sid,
         }
     }
 
@@ -60,6 +62,7 @@ impl Job {
             Job::Contexts => "contexts",
             Job::Fact { .. } => "fact",
             Job::Redeliver { .. } => "redeliver",
+            Job::Retell { .. } => "retell",
         }
     }
 }
@@ -172,6 +175,7 @@ fn handle(s: &Arc<Shared>, job: Job) {
                 s.record_seen(sid, at_ms, *ev);
             }
         }
+        Job::Retell { sid } => super::tell::retell(s, sid, &crate::observe::shared().fresh(crate::observe::INTERVAL)),
         Job::Redeliver { sid } => {
             let n = s.lock().undelivered.take(sid);
             if let Some(n) = n {
@@ -222,6 +226,14 @@ pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &
         Some(at) => marspot::lx_info!("helpers.notice", &format!("sid={sid}: not delivered, again at {at}: {e}")),
         None => marspot::lx_warn!("helpers.notice", &format!("sid={sid}: not delivered (try {}): {e}", n.tries)),
     }
+    if !hold(s, sid, n) {
+        marspot::lx_warn!("helpers.notice_dropped", &format!("sid={sid}: not delivered in {} tries", super::pending::TRIES));
+    }
+}
+
+/// Keep undelivered notice `n` of helper `sid`; false when it is
+/// dropped.
+pub(super) fn hold(s: &Shared, sid: u64, n: Notice) -> bool {
     let (kept, evicted) = s.lock().undelivered.keep_evicting(sid, n);
     // one put out is not tried again: its stop is a fact now
     if let Some((old, mut o)) = evicted {
@@ -234,9 +246,7 @@ pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &
     }
     // the worker of a later start may be the one to try it
     s.wake();
-    if !kept {
-        marspot::lx_warn!("helpers.notice_dropped", &format!("sid={sid}: not delivered in {} tries", super::pending::TRIES));
-    }
+    kept
 }
 
 /// Write the stop notice `n` of helper `sid` tells of, while it is a

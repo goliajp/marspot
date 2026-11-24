@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use marspot::pane_state::{BusyKind, PaneStatus};
@@ -10,7 +10,7 @@ use super::table::{Event, Helper};
 use super::tests::{feed, host_with, shared_at, started, temp};
 use super::tests_review::panes;
 use super::work::{self, Job};
-use super::{close, records, service, stop_all, tick, timers, turn};
+use super::{close, rebuild, records, service, stop_all, tell, tick, timers, turn};
 
 fn delivered(agent: AgentKind) -> Vec<Event> {
     vec![Event::Started(started(10, "shell", agent)), Event::TaskDelivered]
@@ -202,6 +202,36 @@ fn helpers_a_stop_a_parent_at_its_shell_prompt_refuses_shows_at_once() {
     // the result still waits, slow retries and all
     assert_eq!(st.undelivered.next_retry_ms(), Some(now + SLOW_MS[0]));
     assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1);
+    assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
+    drop(st);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_result_whose_stop_was_written_is_told_after_a_restart() {
+    let dir = temp("retell");
+    let (s, _rx) = shared_at(&dir);
+    let at_shell = panes(&[(10, 0)]);
+    let sha = notify::sha("done");
+    for (sid, agent) in [(1, AgentKind::Claude), (2, AgentKind::Codex)] {
+        feed(&s, sid, [delivered(agent), vec![Event::ResultChanged]].concat());
+        std::fs::create_dir_all(s.dir_of(sid)).unwrap();
+        std::fs::write(s.result_path(sid), "done").unwrap();
+        let n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
+        work::not_delivered(&s, sid, n, "no pane is named \"proj#10\"", &at_shell, records::now_ms());
+    }
+    // the shell starts again: what was held in memory is gone
+    let (again, rx) = shared_at(&dir);
+    rebuild::rebuild(&again, || HashSet::from([1, 2]));
+    let retold: Vec<u64> = rx.try_iter().filter_map(|j| if let Job::Retell { sid } = j { Some(sid) } else { None }).collect();
+    assert_eq!(retold, vec![1], "codex is told again by its screen");
+    for _ in 0..2 {
+        tell::retell(&again, 1, &at_shell);
+    }
+    let mut st = again.lock();
+    assert_eq!(st.undelivered.len(), 1);
+    assert_eq!(st.undelivered.next_retry_ms(), None, "no slow retries at the same shell");
+    assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1, "an agent there is told");
     assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
     drop(st);
     std::fs::remove_dir_all(&dir).unwrap();
