@@ -3,6 +3,12 @@
 use super::*;
 
 impl CoreApp {
+    /// Minimum pane width (in cell cols) below which Cmd+F is a no-op
+    /// per §6.7.  The search bar is 40 cols wide; a 24-col floor leaves
+    /// headroom for narrow PaneSession dialogs that legitimately use
+    /// the keyboard.
+    const SEARCH_MIN_PANE_COLS: u16 = 24;
+
     /// Cmd+F handler.  When search is closed → open + focus query.
     /// When already open → re-focus + select-all (browser convention
     /// per §6.9).  Narrow-pane fallback skips the open entirely.
@@ -187,5 +193,102 @@ impl CoreApp {
                 true
             }
         }
+    }
+
+    /// Realise a `JumpRequest::JumpToFocused`: compute view_offset +
+    /// HighlightSpan from the focused hit's WireSearchHit, store on
+    /// the pane, and forward GridScroll if needed.
+    pub(super) fn jump_to_focused_hit(&mut self, wi: usize, pane_idx: usize) {
+        let Some(pane) = win!(self, wi).panes.get_mut(pane_idx) else { return };
+        let Some(search) = pane.search.as_ref() else { return };
+        let Some(hit) = search.list.focused_hit() else { return };
+        let rows = pane.session().grid().rows();
+        // Live hit detection: B4 remap stamps live hits with
+        // logical_line_idx in [u64::MAX - rows + 1, u64::MAX].  Anything
+        // below that threshold is a scrollback hit.
+        let live_threshold = u64::MAX.saturating_sub(rows as u64);
+        let is_live = hit.logical_line_idx > live_threshold;
+        let hit_qid = search.bar.query_id;
+        let primary_row = hit
+            .spans
+            .iter()
+            .map(|s| s.phys_row_idx)
+            .next()
+            .unwrap_or(0);
+        let new_spans: Vec<marspot_term::render::HighlightSpan>;
+        let new_view_offset: u16;
+        if is_live {
+            // Live: span.phys_row_idx is already live-local (0..rows-1);
+            // view_offset = 0 puts the live grid bottom at viewport row
+            // rows-1, so view_row = phys_row_idx works as-is.
+            new_view_offset = 0;
+            new_spans = hit
+                .spans
+                .iter()
+                .filter(|s| (s.phys_row_idx as u16) < rows)
+                .map(|s| marspot_term::render::HighlightSpan {
+                    view_row: s.phys_row_idx as u16,
+                    col_start: s.col_start,
+                    col_end_inclusive: s.col_end_inclusive,
+                })
+                .collect();
+        } else {
+            // Scrollback hit: target the hit at viewport row rows/2.
+            // At view_offset = K, viewport row R shows
+            // scrollback[sb_len - K + R].  Solving for K so that
+            // R = target gives K = sb_len + target - primary_row.
+            let target_r: i64 = (rows as i64) / 2;
+            let sb_len = pane.session().l3_scrollback_len() as i64;
+            let raw_k = sb_len + target_r - primary_row as i64;
+            // Clamp to a sane view_offset range.
+            let max_k = (sb_len + rows as i64 - 1).max(0);
+            new_view_offset = raw_k.clamp(0, max_k) as u16;
+            new_spans = hit
+                .spans
+                .iter()
+                .map(|s| {
+                    // view_row = target_R + (S - primary_row).
+                    let vr = target_r + (s.phys_row_idx as i64 - primary_row as i64);
+                    (vr, s.col_start, s.col_end_inclusive)
+                })
+                .filter(|(vr, _, _)| *vr >= 0 && *vr < rows as i64)
+                .map(|(vr, cs, ce)| marspot_term::render::HighlightSpan {
+                    view_row: vr as u16,
+                    col_start: cs,
+                    col_end_inclusive: ce,
+                })
+                .collect();
+        }
+        pane.active_highlight = Some(marspot_term::render::ActiveHighlight {
+            query_id: hit_qid,
+            spans: new_spans,
+        });
+        // F1+4 — set + push without dedup gate.  Previous code
+        // checked `old_offset != new_view_offset` and silently
+        // skipped forward_scroll when equal, but `pane.view_offset`
+        // and the L3Conn-side `req_view_offset` could desync (e.g.
+        // L3 republished at 0 after some other path) which left the
+        // grid frozen at live even though L2 thought it was at K.
+        // Set the L2 side AND push the scroll; the L3Conn does its
+        // own req_view_offset dedup that handles the genuinely-no-op
+        // case.
+        let old_offset = pane.view_offset();
+        pane.set_view_offset(new_view_offset);
+        pane.session_mut().forward_scroll(new_view_offset);
+        lx_event!(
+            "L2_SEARCH_JUMP",
+            "jump to focused search hit",
+            pane_idx = pane_idx as u32,
+            is_live = if is_live { 1u32 } else { 0u32 },
+            primary_row = primary_row,
+            old_offset = old_offset as u32,
+            new_offset = new_view_offset as u32
+        );
+        // F1+5 — bar stays open per §6.7.  Closing on Enter (F1+4)
+        // made the immediate next keystroke hit the L3 forward
+        // path's snap_to_live and bounce view_offset back to 0
+        // before the user could see the hit.  Esc closes the overlay
+        // and clears the highlight in one shot.
+        win!(self, wi).needs_render = true;
     }
 }
