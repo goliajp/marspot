@@ -205,6 +205,7 @@ impl CoreApp {
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate().take(cell_count) {
             fading |= p.aim_scrim(i == focused, now);
         }
+        self.place_strips(wi);
         let views: Vec<SessionView> = win!(self, wi)
             .panes
             .iter()
@@ -250,6 +251,7 @@ impl CoreApp {
                 if i == focused && p.view_offset() == 0 && !win!(self, wi).panels.owns_pointer() {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
+                v.strip = self.strips.view(p.shelld_session_id());
                 v.selection = win!(self, wi)
                     .selection
                     .as_ref()

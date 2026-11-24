@@ -1,6 +1,6 @@
 //! From a point of the window to what is there, and back.
 
-use super::Layout;
+use super::{cell_grid, Layout};
 
 impl Layout {
     /// Hit-test a click at physical coords `(px, py)`.  Returns the
@@ -21,7 +21,8 @@ impl Layout {
     /// Map a click in the terminal-content area of a cell to its
     /// `(session_idx, col, row)` cell coordinates.  Returns `None`
     /// when the click is in the sidebar, the title strip, the
-    /// padding band, or outside the window.  Used by the selection
+    /// padding band, below the terminal's rows in a pane that gives
+    /// some up, or outside the window.  Used by the selection
     /// machinery to anchor / extend a selection on mouse drag.
     /// `cell_w` / `cell_h` are the per-glyph monospace metrics in
     /// physical pixels; the renderer is the source of truth for
@@ -43,22 +44,20 @@ impl Layout {
             // Inside the rect — discard hits in the title strip and
             // the surrounding padding so the selection only anchors
             // on actual terminal content.
-            let inner_x = c.x + self.padding;
-            let inner_y = c.y_top + self.cell_title_h + self.padding;
-            if py < inner_y {
+            let g = cell_grid(c, self.cell_title_h, self.padding, cell_w, cell_h);
+            if py < g.y || px < g.x {
                 return None;
             }
-            let dx = px - inner_x;
-            let dy = py - inner_y;
-            if dx < 0.0 {
-                return None;
-            }
-            let col = (dx / cell_w).floor().max(0.0) as u16;
-            let row = (dy / cell_h).floor().max(0.0) as u16;
+            let (col, row) = g.at(px, py);
             // Clamp to the cell's reported terminal dims so a
             // drag past the right / bottom edge doesn't escape.
-            let col = col.min(c.cols.saturating_sub(1));
-            let row = row.min(c.rows.saturating_sub(1));
+            // Rows given up at the bottom are nobody's: a point on
+            // them is not the last row's.
+            if c.strip_rows > 0 && row >= c.rows as i64 {
+                return None;
+            }
+            let col = (col as u16).min(c.cols.saturating_sub(1));
+            let row = (row as u16).min(c.rows.saturating_sub(1));
             return Some((i, col, row));
         }
         None
@@ -80,10 +79,28 @@ impl Layout {
         cell_h: f64,
     ) -> Option<(f64, f64, f64, f64)> {
         let c = self.cells.get(cell_idx)?;
-        let inner_x = c.x + self.padding;
-        let inner_y = c.y_top + self.cell_title_h + self.padding;
-        let x = inner_x + col as f64 * cell_w;
-        let y = inner_y + row as f64 * cell_h;
-        Some((x, y, cell_w, cell_h))
+        let g = cell_grid(c, self.cell_title_h, self.padding, cell_w, cell_h);
+        Some((g.x + col as f64 * g.w, g.y + row as f64 * g.h, g.w, g.h))
+    }
+
+    /// Which row of which pane's strip is at `(px, py)`.  `top_row` says
+    /// where a pane's strip is drawn, as a row of the pane counted from
+    /// its terminal's first, or `None` when it is not drawn.
+    pub fn hit_test_strip(
+        &self,
+        px: f64,
+        py: f64,
+        cell_w: f64,
+        cell_h: f64,
+        top_row: impl Fn(usize) -> Option<u16>,
+    ) -> Option<(usize, u16)> {
+        let i = self.hit_test(px, py)?;
+        let c = &self.cells[i];
+        if c.strip_rows == 0 {
+            return None;
+        }
+        let g = cell_grid(c, self.cell_title_h, self.padding, cell_w, cell_h);
+        let row = g.at(px, py).1 - top_row(i)? as i64;
+        (0..c.strip_rows as i64).contains(&row).then_some((i, row as u16))
     }
 }

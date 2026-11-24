@@ -523,6 +523,7 @@ mod window_state_tests {
             dev_drag: None,
             dev_panels: None,
             pane_control: Default::default(),
+            strips: Default::default(),
             layout_discarded: false,
             windows,
             shadows: Vec::new(),
@@ -1227,7 +1228,7 @@ mod window_state_tests {
     #[test]
     fn drop_zones_carve_the_pane_as_specified() {
         use marspot::layout::CellRect;
-        let r = CellRect { x: 0.0, y_top: 0.0, w: 400.0, h: 400.0, cols: 10, rows: 10 };
+        let r = CellRect { x: 0.0, y_top: 0.0, w: 400.0, h: 400.0, cols: 10, rows: 10, strip_rows: 0, term_bottom: 400.0 };
         assert_eq!(drop_zone_at(&r, 10.0, 200.0), DropZone::Left);
         assert_eq!(drop_zone_at(&r, 390.0, 200.0), DropZone::Right);
         assert_eq!(drop_zone_at(&r, 200.0, 10.0), DropZone::Top);
@@ -1238,7 +1239,7 @@ mod window_state_tests {
         assert_eq!(drop_zone_at(&r, 5.0, 30.0), DropZone::Left);
         // Slim pane: the 48 px floor keeps bands usable, the ⅓ cap
         // keeps a center alive.
-        let slim = CellRect { x: 0.0, y_top: 0.0, w: 90.0, h: 400.0, cols: 3, rows: 10 };
+        let slim = CellRect { x: 0.0, y_top: 0.0, w: 90.0, h: 400.0, cols: 3, rows: 10, strip_rows: 0, term_bottom: 400.0 };
         // floor lifts 22.5px→48, cap trims to w/3 = 30.
         assert_eq!(drop_zone_at(&slim, 29.0, 200.0), DropZone::Left, "inside the 30px band");
         assert_eq!(drop_zone_at(&slim, 31.0, 200.0), DropZone::Center, "cap = w/3 keeps a center");
@@ -2488,6 +2489,8 @@ mod layout_state;
 mod pane_forward;
 #[path = "marspot-core/panels.rs"]
 mod panels;
+#[path = "marspot-core/helper_strip/mod.rs"]
+mod helper_strip;
 #[path = "marspot-core/helper_panel.rs"]
 mod helper_panel;
 #[path = "marspot-core/process_panel.rs"]
@@ -2681,6 +2684,8 @@ struct CoreApp {
     /// Dev seam only (`MARSPOT_DEV_DRAG`): one scripted pane drag, and
     /// the earliest moment to perform it.
     dev_drag: Option<(DevDrag, Instant)>,
+    /// The rows panes give up at their bottoms, by session.
+    strips: helper_strip::Strips,
     /// Dev seam only (`MARSPOT_DEV_PANELS`): a script of panel input
     /// still being played.  See `dev_drive_panels`.
     dev_panels: Option<PanelScript>,
@@ -2695,22 +2700,6 @@ struct CoreApp {
     key_window: usize,
 }
 
-/// Each mask asked for in `list` (`symbol:point_px,...`), written to
-/// stdout as a length and an `IconMask` payload.
-fn draw_icons(list: &str) {
-    use std::io::Write;
-    let mut out = Vec::new();
-    for item in list.split(',') {
-        let Some((s, p)) = item.split_once(':') else { continue };
-        let (Ok(symbol), Ok(point_px)) = (s.parse::<u16>(), p.parse::<u16>()) else { continue };
-        let Some((side, mask)) = marspot::ui::system::macos::icons::draw_for_core(symbol, point_px) else { continue };
-        let payload = marspot::shell_proto::encode_icon_mask(symbol, point_px, side, &mask);
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(&payload);
-    }
-    let _ = std::io::stdout().write_all(&out);
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -2722,7 +2711,7 @@ fn main() {
     // this process with LaunchServices, which a core that runs windows
     // must not be; this one lives for the drawing only.
     if args.first().map(String::as_str) == Some("--draw-icons") {
-        draw_icons(args.get(1).map(String::as_str).unwrap_or(""));
+        probe_args::draw_icons(args.get(1).map(String::as_str).unwrap_or(""));
         return;
     }
 
@@ -2991,6 +2980,7 @@ fn main() {
             .map(|d| (d, Instant::now() + Duration::from_secs(3))),
         dev_panels: PanelScript::from_env(),
         pane_control: pane_control::PaneControl::from_env(),
+        strips: helper_strip::Strips::from_env(),
         layout_discarded: false,
         shadows: boot_shadows,
         windows: vec![{

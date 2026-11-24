@@ -149,6 +149,7 @@ fn frame_key(
     theme.hash(&mut h);
     // Which font draws a Han code point follows the interface language.
     marspot_term::language::version().hash(&mut h);
+    view.session.hash(&mut h);
     view.view_offset.hash(&mut h);
     view.top_fixed_h_cells.hash(&mut h);
     view.bot_fixed_h_cells.hash(&mut h);

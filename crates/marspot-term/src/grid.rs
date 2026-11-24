@@ -14,6 +14,7 @@
 //! phase; it will live behind the same `Grid` interface.
 
 mod cell;
+mod last_used;
 mod numbering;
 mod packed;
 mod packed_style;
@@ -31,7 +32,6 @@ pub use style::{PackedStyle, StyleTable};
 /// storage can change without them.
 pub type StoredCell = PackedCell;
 pub use width::{char_width, is_ambiguous_width, is_enclosed_alphanumeric};
-
 
 /// Default scrollback capacity — 10 000 lines.  At 80 cols × ~12 bytes/cell
 /// this is ~9 MB per terminal pre-allocated.  Tunable via

@@ -95,13 +95,13 @@ impl CoreApp {
             Some(c) => *c,
             None => return,
         };
-        let inner_x = cell.x + win!(self, wi).layout.padding;
-        let inner_y = cell.y_top + win!(self, wi).layout.cell_title_h + win!(self, wi).layout.padding;
+        let layout = &win!(self, wi).layout;
+        let at = marspot::layout::cell_grid(&cell, layout.cell_title_h, layout.padding, cw, ch);
+        let (raw_col, raw_row) = at.at(x_phys, y_phys);
 
         // Past-edge auto-scroll, NSTextView-style (see src/main.rs
         // for the rate-limit rationale).
         let max_row = cell.rows.saturating_sub(1) as i64;
-        let raw_row = ((y_phys - inner_y) / ch).floor() as i64;
         if raw_row < 0 || raw_row > max_row {
             // Same one-step-at-a-time gate as the wheel: a drag past
             // the edge delivers a mouse-moved event per frame of the
@@ -128,23 +128,8 @@ impl CoreApp {
             }
         }
 
-        let dx = (x_phys - inner_x).max(0.0);
-        let dy = (y_phys - inner_y).max(0.0);
-        let mut col = (dx / cw).floor() as i64;
-        let mut row = (dy / ch).floor() as i64;
-        if col < 0 {
-            col = 0;
-        }
-        if row < 0 {
-            row = 0;
-        }
-        let max_col = cell.cols.saturating_sub(1) as i64;
-        if col > max_col {
-            col = max_col;
-        }
-        if row > max_row {
-            row = max_row;
-        }
+        let col = raw_col.clamp(0, cell.cols.saturating_sub(1) as i64);
+        let row = raw_row.clamp(0, max_row);
 
         // Re-read view_offset AFTER any auto-scroll above.
         let pane = &win!(self, wi).panes[target_idx];
@@ -181,10 +166,8 @@ impl CoreApp {
         // the one the press reported.
         self.mouse_report_last_cell = None;
         if let Some((idx, press_c, press_r)) = self.mouse_report_press.take() {
-            let (cw, ch) = self.renderer.cell_dims();
-            let here = win!(self, wi)
-                .layout
-                .hit_test_cell_pos(drop_x, drop_y, cw, ch)
+            let here = self
+                .cell_pos_at(wi, drop_x, drop_y)
                 .filter(|(i, _, _)| *i == idx)
                 .map(|(_, c, r)| (c as u32 + 1, r as u32 + 1));
             let (c1, r1) = here.unwrap_or((press_c, press_r));

@@ -45,29 +45,6 @@ pub enum InputDisposition {
     HandledRequestRedraw,
 }
 
-/// C4 — viewport-row-keyed highlight span.  Renderer paints
-/// `HIGHLIGHT_BG` under `col_start..=col_end_inclusive` on
-/// viewport row `view_row`.  L2 main loop translates a focused
-/// search hit's `WirePhysicalSpan` into one or more of these by
-/// mapping the hit's row indices through the current `view_offset`
-/// (scrollback hit ⇒ row = scrollback_idx - (sb_len - view_offset),
-/// live hit ⇒ row = grid-local row offset).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct HighlightSpan {
-    pub view_row: u16,
-    pub col_start: u16,
-    pub col_end_inclusive: u16,
-}
-
-/// C4 — per-pane active-highlight slot.  `query_id` lets the
-/// renderer drop stale highlights when a fresh `SearchScrollback`
-/// supersedes the one whose hit is currently highlighted.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ActiveHighlight {
-    pub query_id: u32,
-    pub spans: Vec<HighlightSpan>,
-}
-
 /// C1 — pane attachment that owns per-pane interactive state above
 /// the terminal grid: search bar, result list, future tools.  The
 /// trait is intentionally minimal in C1 (no `render()` yet); C2 will
@@ -202,6 +179,11 @@ pub struct SessionView<'a> {
     /// mirror at offset 0 while showing the rows L3 published at the
     /// requested offset, and this is that requested offset.
     pub history: HistoryView,
+    /// The session whose grid this is.  A pane can be given another
+    /// session's, of the same size and at the same `seq`.
+    pub session: u64,
+    /// What is drawn in the rows the pane gives up at its bottom.
+    pub strip: Option<StripView<'a>>,
     /// F1+13 — content-freshness tag the renderer uses to short-
     /// circuit per-pane instance rebuilds.  Caller (`Pane::as_view`)
     /// supplies a monotonic-ish counter that bumps whenever the
@@ -212,7 +194,7 @@ pub struct SessionView<'a> {
 }
 
 mod view_parts;
-pub use view_parts::{HistoryView, SearchHitView, SearchOverlayView};
+pub use view_parts::{ActiveHighlight, HighlightSpan, HistoryView, SearchHitView, SearchOverlayView, StripView};
 
 #[derive(Copy, Clone, Debug)]
 pub struct SelectionView {

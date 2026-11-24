@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.648"  # finding an agent's input box is in a file of its own
-core    = "0.12.646"  # finding an agent's input box is in a file of its own
+core    = "0.12.647"  # a pane can give up rows at its bottom to a strip
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it

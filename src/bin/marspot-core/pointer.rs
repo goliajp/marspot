@@ -25,10 +25,8 @@ impl CoreApp {
             w.context_menu.is_some() || w.panels.owns_pointer()
         };
         let held = self.mouse_report_press.is_some();
-        let (cw, ch) = self.renderer.cell_dims();
         if !chrome_owns_pointer
-            && let Some((idx, col, row)) =
-                win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
+            && let Some((idx, col, row)) = self.cell_pos_at(wi, x_phys, y_phys)
             && win!(self, wi).panes.get(idx)
                 .map(|p| p.session().l3_mouse_motion_wanted(held))
                 .unwrap_or(false)
@@ -68,7 +66,7 @@ impl CoreApp {
         if on.is_some_and(ChromeTarget::acts_on_release) {
             return;
         }
-        if on.is_none() && self.scrollbar_press(wi, x_phys, y_phys) {
+        if on.is_none() && (self.strip_press(wi, x_phys, y_phys) || self.scrollbar_press(wi, x_phys, y_phys)) {
             return;
         }
         let title_hit = match on {
@@ -76,10 +74,8 @@ impl CoreApp {
             _ => None,
         };
         let sidebar_hit = on.and_then(ChromeTarget::row);
-        let layout = &win!(self, wi).layout;
-        let cell_hit = layout.hit_test(x_phys, y_phys);
-        let (cw, ch) = self.renderer.cell_dims();
-        let cell_pos_hit = layout.hit_test_cell_pos(x_phys, y_phys, cw, ch);
+        let cell_hit = win!(self, wi).layout.hit_test(x_phys, y_phys);
+        let cell_pos_hit = self.cell_pos_at(wi, x_phys, y_phys);
 
         // Title-strip press: could be a click (enter title edit) or
         // the start of a pane drag (RFC-005 step 5).  Arm the drag and

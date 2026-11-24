@@ -6,6 +6,7 @@
 pub mod glyph_resolve;
 pub mod text_run;
 pub mod session;
+pub mod strip;
 pub mod session_marks;
 pub mod frame;
 pub mod pane_cache;

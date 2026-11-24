@@ -106,6 +106,8 @@ pub mod frame_build;
 mod frame_alloc_tests;
 #[cfg(test)]
 mod frame_alloc_window_tests;
+#[cfg(test)]
+mod helper_strip_frame_tests;
 pub mod frame_scene;
 pub mod glyph_atlas;
 pub mod input;

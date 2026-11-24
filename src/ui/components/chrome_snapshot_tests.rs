@@ -37,6 +37,8 @@ struct PaneSpec {
     selection: Option<SelectionView>,
     hits: &'static [HighlightSpan],
     history: HistoryView,
+    /// Rows the pane gives up to a strip.
+    strip: u16,
 }
 
 fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
@@ -49,6 +51,7 @@ fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSp
         selection: None,
         hits: &[],
         history: HistoryView::default(),
+        strip: 0,
     }
 }
 
@@ -157,7 +160,13 @@ fn snapshot_on(
         cell_w,
         cell_h,
     )
-    .with_chrome(scale, panes.len(), None);
+    .with_chrome(scale, panes.len(), None)
+    .with_strips(&panes.iter().map(|p| p.strip).collect::<Vec<_>>(), cell_w, cell_h);
+    let strip_grids: Vec<Option<Grid>> = panes
+        .iter()
+        .zip(&layout.cells)
+        .map(|(p, c)| (p.strip > 0).then(|| super::helper_strip_tests::strip_scene(c.cols, p.strip)))
+        .collect();
 
     let grids: Vec<Grid> =
         (0..panes.len()).map(|i| (panes[i].content)(layout.cells[i].cols, layout.cells[i].rows)).collect();
@@ -183,7 +192,8 @@ fn snapshot_on(
             bot_fixed_h_cells: 0,
             highlight_spans: p.hits,
             search_overlay: p.search.clone(),
-            history: p.history,
+            history: p.history, session: 0,
+            strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_tests::strip_under(grid, strip)),
             seq: 1 + i as u64,
         })
         .collect();
@@ -402,7 +412,32 @@ pub(super) fn chrome_snapshot_scrollback() {
     snapshot("chrome_scrollback", (1200, 640), (2, 1), &panes, 0, |_, _, _| {});
 }
 
+/// A screen that ends a third of the way down.
+fn short_text(cols: u16, rows: u16) -> Grid {
+    let mut g = terminal_text(cols, rows);
+    for row in rows / 3..rows {
+        for col in 0..cols {
+            g.set_cell(col, row, Cell::default());
+        }
+    }
+    g
+}
+
+/// Panes that give up rows at the bottom: one whose screen is full, one
+/// whose screen is not, and one without.
+#[test]
+pub(super) fn chrome_snapshot_helper_strip() {
+    let panes = [
+        PaneSpec { strip: 5, ..pane("smix", "P1 3f9c2a1e", SessionState::Active) },
+        PaneSpec { strip: 5, content: short_text, ..pane("devops", "", SessionState::Idle) },
+        pane("alt", "", SessionState::Idle),
+        PaneSpec { strip: 3, content: short_text, ..pane("kevy", "", SessionState::Idle) },
+    ];
+    snapshot("chrome_helper_strip", (1600, 1000), (2, 2), &panes, 0, |_, _, _| {});
+}
+
 crate::snapshot_kit::snapshots_in_other_themes! {
+    chrome_snapshot_helper_strip_light, chrome_snapshot_helper_strip_contrast = chrome_snapshot_helper_strip;
     chrome_snapshot_window_light, chrome_snapshot_window_contrast = chrome_snapshot_window;
     chrome_snapshot_search_light, chrome_snapshot_search_contrast = chrome_snapshot_search;
     chrome_snapshot_menu_light, chrome_snapshot_menu_contrast = chrome_snapshot_menu;

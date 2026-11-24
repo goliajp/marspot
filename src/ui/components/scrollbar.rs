@@ -58,7 +58,7 @@ impl Scrollbar {
         let right = snap(cell.x + cell.w - inset);
         let left = right - snap(px(chrome_spec::SCROLLBAR_W));
         let top = snap(cell.y_top + title_h + inset);
-        let bottom = snap(cell.y_top + cell.h - inset);
+        let bottom = snap(cell.term_bottom - inset);
         if bottom <= top {
             return None;
         }
@@ -124,7 +124,7 @@ mod tests {
     use crate::ui::components::density_kit::at_scale;
 
     fn cell() -> CellRect {
-        CellRect { x: 100.0, y_top: 50.0, w: 800.0, h: 600.0, cols: 80, rows: 30 }
+        CellRect { x: 100.0, y_top: 50.0, w: 800.0, h: 600.0, cols: 80, rows: 30, strip_rows: 0, term_bottom: 650.0 }
     }
 
     fn back(offset: u16, len: u16) -> HistoryView {
@@ -169,7 +169,7 @@ mod tests {
     fn the_bar_is_twice_the_size_at_twice_the_density() {
         let at = |k: f64| {
             at_scale(k, || {
-                let c = CellRect { x: 100.0 * k, y_top: 50.0 * k, w: 800.0 * k, h: 600.0 * k, cols: 80, rows: 30 };
+                let c = CellRect { x: 100.0 * k, y_top: 50.0 * k, w: 800.0 * k, h: 600.0 * k, cols: 80, rows: 30, strip_rows: 0, term_bottom: 650.0 * k };
                 Scrollbar::of(&c, 44.0 * k, 30, back(250, 60000)).unwrap()
             })
         };
