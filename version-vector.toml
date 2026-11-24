@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.665"  # the hand-off menu rows live apart from the switch script
+shell   = "0.7.666"  # a shipped helpers skill, and HelperStart says when a helper beats a one-shot exec
 core    = "0.12.669"  # the helper strip is on by default
 session = "0.11.435"  # the socket the first image bound crosses the handoff; leaving unreachable is no abnormal drop

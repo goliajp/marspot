@@ -9,6 +9,10 @@ description: Use when running inside the marspot terminal and you need to see or
 A new pane is a shadow pane by default: it has no window, and it ends when the
 pane that opened it ends.
 
+Panes are for driving a terminal. To hand work to another agent (codex,
+gemini, kimi, another claude), start a helper instead: see the
+`marspot-helpers` skill.
+
 ## Naming a pane
 
 `PANE` is a session id, a pane name (`spg`, `spg#3381`, `claude:spg`), a window
