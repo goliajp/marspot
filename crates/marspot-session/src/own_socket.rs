@@ -7,8 +7,8 @@ use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct SocketId {
-    dev: u64,
-    ino: u64,
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
 }
 
 impl SocketId {
@@ -28,11 +28,20 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
 
+    struct Removed(std::path::PathBuf);
+
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     #[test]
     fn close_removes_only_the_socket_it_bound() {
         // not in a sandbox, whose path can be longer than a socket's may be
         let path = std::path::PathBuf::from(format!("/tmp/mso-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
+        let _left = Removed(path.clone());
         let _first = UnixListener::bind(&path).unwrap();
         let first = SocketId::of(&path);
         std::fs::remove_file(&path).unwrap();

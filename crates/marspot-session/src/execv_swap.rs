@@ -102,6 +102,7 @@ pub(crate) fn do_l3_execv_swap(
 
     clear_cloexec(master_fd)?;
     let listen_fd = listener.prepare_for_execv()?;
+    let socket = listener.socket_id();
 
     // Carry the adopted control stream across execv too, so L2's
     // reader doesn't see EOF.  `into_raw_fd` so the OwnedFd doesn't
@@ -117,7 +118,7 @@ pub(crate) fn do_l3_execv_swap(
 
     let manifest_path = handoff_manifest_path();
     let handoff = L3Handoff {
-        master_fd, child_pid, listen_fd, cols, rows, control_stream_fd, marks, shadow,
+        master_fd, child_pid, listen_fd, cols, rows, control_stream_fd, marks, shadow, socket,
     };
     write_handoff_manifest(&handoff, &manifest_path)?;
 

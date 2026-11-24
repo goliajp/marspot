@@ -125,5 +125,8 @@ fn close_by_a_new_owner_leaves_the_new_owners_socket() {
     write_session_entry(&entry).unwrap();
     wait(20.0, "the session's exit", || s.child.try_wait().unwrap().is_some());
     assert!(sock.exists(), "the new owner's socket is there");
+    let log = std::fs::read_to_string(sandbox.path().join("logs/marspot.log")).unwrap();
+    assert!(log.contains("\tSESSION_REGISTRY_GONE\t"), "it left as one nobody can reach");
+    assert!(!log.contains("abnormal_drop"), "which is no abnormal exit");
     regions.delete();
 }

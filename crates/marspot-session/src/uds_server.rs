@@ -170,7 +170,8 @@ impl SessionListener {
     }
 
     /// RFC-003 §6 Amendment 14 — adopt an inherited UDS listener fd
-    /// after an L3 execv handoff.  No `bind`, no `write_session_entry`:
+    /// after an L3 execv handoff; `socket_id` is the socket the first
+    /// image bound, as it found it.  No `bind`, no `write_session_entry`:
     /// the sock file is still on disk (the pre-execv image's
     /// `suppress_drop` keeps it intact), entry.toml's pid is still
     /// ours (PID is preserved across execv), so we just spawn a fresh
@@ -182,6 +183,7 @@ impl SessionListener {
         cols: u16,
         rows: u16,
         shadow_of: u64,
+        socket_id: Option<crate::own_socket::SocketId>,
         ev_tx: Sender<crate::SessionEvent>,
     ) -> io::Result<Self> {
         // SAFETY: caller asserts `raw_fd` is a live UnixListener fd
@@ -230,7 +232,7 @@ impl SessionListener {
             keep_listener: Some(listener),
             suppress_drop: false,
             ended: false,
-            socket_id: crate::own_socket::SocketId::of(&session_socket_path(id)),
+            socket_id,
             // RFC-004 A.3 — the pre-execv image's lock fd is still
             // open in this same process (CLOEXEC cleared before the
             // swap), so the flock is already ours; nothing to acquire.
@@ -294,6 +296,17 @@ impl SessionListener {
     pub fn take_dir(mut self) -> Option<std::path::PathBuf> {
         self.ended = true;
         crate::session_end::take_own_dir(self.id)
+    }
+
+    /// Nobody can reach the session any more: it leaves its directory
+    /// to whoever took it away, and its socket only if it is still there.
+    pub fn leave_unreachable(mut self) {
+        self.ended = true;
+        crate::own_socket::remove_if_ours(&session_socket_path(self.id), self.socket_id);
+    }
+
+    pub(crate) fn socket_id(&self) -> Option<crate::own_socket::SocketId> {
+        self.socket_id
     }
 }
 
