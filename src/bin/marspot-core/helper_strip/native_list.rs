@@ -3,7 +3,7 @@
 //! It is the last thing on the screen, under the input box: a rule, the
 //! footer, a blank row, `main`, and a row per subagent.
 
-use super::compose::{Pick, NAMES};
+use super::compose::{Pick, MARGIN, NAMES};
 use marspot_term::grid::Grid;
 
 /// Where a list has its columns: how wide the one of names is, and the
@@ -112,10 +112,15 @@ fn figures(g: &Grid, col: u16, row: u16) -> bool {
 
 /// The columns of rows `from..=to`.
 fn columns(g: &Grid, from: u16, to: u16) -> Option<Columns> {
-    let (mut names, mut task_at, mut butted, mut right) = (0, None::<u16>, None::<u16>, 0);
+    let (mut names, mut task_at, mut butted, mut right) = (0, None::<u16>, None::<u16>, None::<u16>);
     for row in from..=to {
         let (start, end) = piece(g, row, 4)?;
-        right = right.max((start..g.cols()).rev().find(|&c| !blank(g, c, row)).map_or(0, |c| c + 1));
+        // a row without figures (one waiting on its own work) ends where
+        // its task does, not at the column where figures end
+        if (start + 1..g.cols()).any(|c| blank(g, c - 1, row) && figures(g, c, row)) {
+            let ink = (start..g.cols()).rev().find(|&c| !blank(g, c, row)).map_or(0, |c| c + 1);
+            right = Some(right.map_or(ink, |r| r.max(ink)));
+        }
         // with no room for tasks the figures are one blank from the name
         match (start + 1..end).find(|&c| blank(g, c - 1, row) && figures(g, c, row)) {
             Some(c) => butted = Some(c),
@@ -132,5 +137,6 @@ fn columns(g: &Grid, from: u16, to: u16) -> Option<Columns> {
         (None, Some(at)) => at - 5,
         (None, None) => names,
     };
+    let right = right.unwrap_or(g.cols().saturating_sub(MARGIN));
     (from <= to).then_some(Columns { names: names.clamp(NAMES.0, NAMES.1), right })
 }

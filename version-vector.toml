@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.660"  # container helpers: early refusal only from codex's own line, -s forms, tokens swept without docker
-core    = "0.12.666"  # a closed session's slot is emptied in the saved layout before its close is finished; exiting l3s are reaped with a blocking wait
+core    = "0.12.667"  # a strip goes on from a claude row without figures at the right edge
 session = "0.11.435"  # the socket the first image bound crosses the handoff; leaving unreachable is no abnormal drop
