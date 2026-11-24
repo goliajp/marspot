@@ -67,3 +67,17 @@ pub(super) fn fill(strip: &mut Strip, screen: &Grid) {
         },
     );
 }
+
+impl CoreApp {
+    /// Dev seam (`MARSPOT_DEV_PANELS`): the middle of the first line of
+    /// the first pane's strip and the height of a line, for a script to
+    /// click.
+    pub(in super::super) fn dev_strip_spot(&self, wi: usize) -> Option<(f64, f64, f64)> {
+        let w = self.windows.get(wi)?;
+        let top = self.strips.top_row(w.panes.first()?.shelld_session_id())?;
+        let c = w.layout.cells.first()?;
+        let (cw, ch) = self.renderer.cell_dims();
+        let g = marspot::layout::cell_grid(c, w.layout.cell_title_h, w.layout.padding, cw, ch);
+        Some((g.x + 3.5 * g.w, g.row_top(top) + g.h * 0.5, g.h))
+    }
+}

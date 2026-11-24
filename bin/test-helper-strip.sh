@@ -22,7 +22,11 @@
 #      again; then the rows go back in one resize;
 #   6. with one that only waits for an answer nothing wakes the core;
 #   7. nothing is resized under the user's hands;
-#   8. claude on the main screen: every row at once, then none.
+#   8. claude on the main screen: every row at once, then none;
+#   9. a click on a helper's row views it and one on main comes back;
+#      down in the stand-in's empty input box takes the keys, enter
+#      views, x stops a helper, and keys the strip takes never reach
+#      the program while others do.
 #
 # Sandbox-only: MARSPOT_STATE_DIR and HOME are redirected and the
 # installed app is never touched.  Opens windows, so it runs on the
@@ -300,6 +304,44 @@ started codex "Two. FAKE-WORK=$SB/end7 FAKE-EXIT" >/dev/null || die "no helper"
 check "a second is listed" wait_strip 30 'One.' 'Two.'
 sleep 3
 check "and resizes nothing" test "$(sizes)" = "$n"
+
+echo "════ 9. viewing from the strip, and its keyboard ════"
+SETTING=true
+KEYS="$SB/keys.log"
+# each step waits for the file this script makes when it is time
+steps="until:go-click;click:strip-2;wait:1500;click:strip-1;wait:1500"
+steps+=";until:go-keys;key:down;wait:800;key:down;wait:400;key:enter;wait:1500;click:strip-1;wait:1500"
+steps+=";until:go-x;key:down;wait:800;key:x;wait:2000;key:esc;wait:600;key:down;wait:800;type:a;wait:800"
+start_app MARSPOT_DEV_PANELS="$steps"
+start_parent FAKE_ALT=1 FAKE_KEYS_LOG="$KEYS"
+rm -f "$SB"/end8 "$SB"/end9
+H8=$(started codex "Eight. FAKE-WORK=$SB/end8 FAKE-EXIT") || die "no helper"
+H9=$(started codex "Nine. FAKE-WORK=$SB/end9 FAKE-EXIT") || die "no helper"
+check "both are listed" wait_strip 30 'Eight.' 'Nine.'
+sleep 2
+viewed=$(count "$SD" PEEK_SHOWN) left=$(count "$SD" PEEK_LEFT)
+touch "$SD/go-click"
+check "a click on a helper views it in the pane's place" wait_count "$SD" PEEK_SHOWN "$viewed" 15
+check "its row has the filled circle" wait_strip 10 '◯ main' '⏺ codex'
+check "a click on main shows the pane again" wait_count "$SD" PEEK_LEFT "$left" 15
+check "and main has the circle back" wait_strip 10 '⏺ main'
+: > "$KEYS"
+viewed=$(count "$SD" PEEK_SHOWN) left=$(count "$SD" PEEK_LEFT) taken=$(count "$SD" HELPER_STRIP_KEYS)
+touch "$SD/go-keys"
+check "down in the empty box the agent did nothing with takes the keys" wait_count "$SD" HELPER_STRIP_KEYS "$taken" 15
+check "down then enter views the second helper" wait_count "$SD" PEEK_SHOWN "$viewed" 15
+check "the one viewed is the second" wait_strip 10 '◯ main' 'Nine.'
+check "and back to main by a click" wait_count "$SD" PEEK_LEFT "$left" 15
+sleep 1
+stops=$(count "$SD" HELPER_STRIP_STOP)
+touch "$SD/go-x"
+check "x stops the selected helper" wait_count "$SD" HELPER_STRIP_STOP "$stops" 20
+check "which is shown stopped" wait_strip 20 'stopped'
+for (( i = 0; i < 40; i++ )); do grep -qx 61 "$KEYS" && break; sleep 0.5; done
+echo "    keys the agent read: $(tr '\n' ' ' < "$KEYS")"
+check "the agent read each down that took the keys, and nothing the strip took" \
+  test "$(grep -c . "$KEYS")" = 4 -a "$(grep -cx 1b5b42 "$KEYS")" = 3
+check "a key that is not the strip's goes back to the agent" grep -qx 61 "$KEYS"
 
 check "the app is still up" alive "$(dev_shell_pid)"
 check "no panic in the log" bash -c "! grep -qa $'\tPANIC' $(printf '%q' "$LOG")"

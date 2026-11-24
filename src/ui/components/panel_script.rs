@@ -25,6 +25,7 @@
 //! | `click:helpers-mark` | clicks the `+N` after the first pane's title |
 //! | `click:helpers-view`, `-move`, `-close`, `-close-all`, `-control` | clicks the first such button of the open helper panel |
 //! | `click:pane` | clicks in the first pane |
+//! | `click:strip-<n>` | clicks line n of the first pane's strip of helpers |
 //! | `shift-click:<target>` | any of those clicks with shift held, the click a program that asked for mouse reports is sent |
 //! | `move:<target>` | moves the pointer there, pressing nothing |
 //! | `pointer-exit` | moves the pointer out of the window |
@@ -61,6 +62,8 @@ pub enum Target {
     /// The first pane's `+N`, then the first button of each kind on the
     /// helper panel: `Scene::helpers`, by place.
     Helpers(u8),
+    /// A line of the first pane's strip.
+    Strip(u16),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +112,9 @@ pub struct Scene<'a> {
     pub cell: (f64, f64),
     /// Where `Target::Helpers` are.
     pub helpers: [Option<(f64, f64)>; 6],
+    /// The middle of the first line of the first pane's strip, and the
+    /// height of a line.
+    pub strip: Option<(f64, f64, f64)>,
 }
 
 pub fn parse(script: &str) -> Result<Vec<Step>, String> {
@@ -197,7 +203,7 @@ fn parse_target(text: &str) -> Option<Target> {
         "helpers-close-all" => Target::Helpers(3),
         "helpers-control" => Target::Helpers(4),
         "helpers-view" => Target::Helpers(5),
-        _ => return None,
+        t => Target::Strip(t.strip_prefix("strip-")?.parse().ok()?),
     })
 }
 
@@ -278,6 +284,7 @@ impl Scene<'_> {
                 .flatten()
                 .ok_or_else(|| "no such spot of the helpers".to_string()),
             Target::Pane => self.pane_point(|_, _| true).ok_or_else(|| "no pane".to_string()),
+            Target::Strip(line) => self.strip.map(|(x, y, h)| (x, y + line as f64 * h)).ok_or_else(|| "no strip".to_string()),
         }
     }
 
