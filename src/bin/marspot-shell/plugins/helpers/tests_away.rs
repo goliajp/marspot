@@ -127,11 +127,12 @@ fn helpers_a_notice_says_a_directory_name_without_control_characters() {
 }
 
 #[test]
-fn helpers_a_stop_a_shell_parent_cannot_be_told_shows_once_the_slow_retries_are_used_up() {
+fn helpers_a_stop_a_parent_cannot_be_told_shows_once_the_slow_retries_are_used_up() {
     let dir = temp("shell_parent");
     let (s, _rx) = shared_at(&dir);
     feed(&s, 1, [delivered(AgentKind::Codex), vec![Event::ResultChanged]].concat());
-    let shell = panes(&[(10, 55)]);
+    // a program in front that has no inbox: it may still register one
+    let front = panes(&[(10, 55)]);
     let sha = "cd".repeat(32);
     let mut now = records::now_ms();
     let mut n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
@@ -139,12 +140,13 @@ fn helpers_a_stop_a_shell_parent_cannot_be_told_shows_once_the_slow_retries_are_
     // the wait for an inbox, then the slow retries
     for wait in [30_000, SLOW_MS[0], SLOW_MS[1], SLOW_MS[2]] {
         assert_eq!(service::state_of(&s.table().map[&1]), "running");
-        work::not_delivered(&s, 1, n, no_pane, &shell, now);
+        work::not_delivered(&s, 1, n, no_pane, &front, now);
         now += wait;
         n = s.lock().undelivered.take(1).unwrap();
+        // what `send` counts; a slow retry hands it back in `failed`
         n.tries += 1;
     }
-    work::not_delivered(&s, 1, n, no_pane, &shell, now);
+    work::not_delivered(&s, 1, n, no_pane, &front, now);
     let h = s.table().map[&1].clone();
     assert_eq!(service::state_of(&h), "stopped");
     assert!(h.result_new, "the result is still to be delivered");
@@ -180,5 +182,27 @@ fn helpers_a_stop_notice_put_out_past_the_cap_shows_as_stopped() {
     assert!(t.map[&100].result_new);
     assert!((101..100 + CAP as u64).all(|sid| service::state_of(&t.map[&sid]) == "running"), "the others still wait");
     assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *t, "the record says the same");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_stop_a_parent_at_its_shell_prompt_refuses_shows_at_once() {
+    let dir = temp("at_shell");
+    let (s, _rx) = shared_at(&dir);
+    feed(&s, 1, [delivered(AgentKind::Claude), vec![Event::ResultChanged]].concat());
+    let sha = "a1".repeat(32);
+    let n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
+    let now = records::now_ms();
+    work::not_delivered(&s, 1, n, "no pane is named \"proj#10\"", &panes(&[(10, 0)]), now);
+    let h = s.table().map[&1].clone();
+    assert_eq!(service::state_of(&h), "stopped", "after the first refusal");
+    assert!(h.result_new);
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *s.table(), "the record says the same");
+    let mut st = s.lock();
+    // the result still waits, slow retries and all
+    assert_eq!(st.undelivered.next_retry_ms(), Some(now + SLOW_MS[0]));
+    assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1);
+    assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
+    drop(st);
     std::fs::remove_dir_all(&dir).unwrap();
 }

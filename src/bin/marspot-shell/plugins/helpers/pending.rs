@@ -5,8 +5,9 @@
 //! facts the notice stands for are written only once it is delivered,
 //! so a helper's new result stays new until then.  A notice with no
 //! retry left before a new program (a parent at a shell has no inbox)
-//! or none left at all writes its stop at once: the helper shows as
-//! stopped, and only its result waits for the delivery.
+//! or none left at all, or one refused by a parent at its shell prompt,
+//! writes its stop at once: the helper shows as stopped, and only its
+//! result waits for the delivery.
 //!
 //! An agent in front of the parent that has not registered its inbox
 //! yet is on its way: that failure spends no try, and the notice goes
@@ -91,7 +92,10 @@ impl Notice {
     }
 
     /// The facts of the stop it tells of, taken out; what is left is
-    /// written when it is delivered.
+    /// written when it is delivered.  They are written at the time they
+    /// are taken, which counts as a notice that went (`noticed_at`): it
+    /// takes a place in the rate's window, and the strip says the parent
+    /// was told, though nothing reached it.
     pub fn take_stop(&mut self) -> Vec<Event> {
         let (result, stop) = std::mem::take(&mut self.events).into_iter().partition(|e| matches!(e, Event::ResultDelivered { .. }));
         self.events = result;

@@ -140,7 +140,7 @@ pub(super) fn sooner(a: TickDue, b: TickDue) -> TickDue {
 }
 
 /// The parent's own shell holds its terminal in `obs`.
-fn shell_in_front(obs: &Observation, parent: u64) -> bool {
+pub(super) fn shell_in_front(obs: &Observation, parent: u64) -> bool {
     obs.session(parent).is_some_and(|x| x.shell.is_some() && x.front_pgid == 0)
 }
 

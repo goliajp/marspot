@@ -213,7 +213,9 @@ pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &
     let front = front_of(obs, n.parent);
     let registering = front.is_some_and(|pgid| pgid != 0) && super::pending::not_ready(e);
     n.failed(registering, front, now_ms);
-    if n.out_of_retries() {
+    // a shell has no inbox: what waits is the next program, and that may
+    // be never
+    if n.out_of_retries() || super::tick::shell_in_front(obs, n.parent) {
         record_stop(s, sid, &mut n);
     }
     match n.retry_ms {
