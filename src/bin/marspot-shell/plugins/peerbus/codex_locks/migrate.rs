@@ -13,6 +13,13 @@
 //! link, and one already waiting on the old coordination lock opens its
 //! thread's file by name, through the link too.  Each lock is let go
 //! once its file has its place, the coordination lock last.
+//!
+//! This rests on codex making no file in the lock directory without
+//! holding the coordination lock.  A file that comes anyway, after the
+//! entries were read, is not lost: the old directory is then kept as a
+//! leftover directory.  A pass that stopped half way (a crash, a
+//! failed move) leaves the old directory under its moving name; the
+//! next pass finishes it.
 
 use super::{COORD, DIR, LEFT, Outcome};
 use std::ffi::{CString, OsStr, OsString};
@@ -63,14 +70,14 @@ pub(super) fn move_into_seen(home: &Path, target: &Path, exists: bool, seen: &mu
             Err(e) => Outcome::Failed(format!("{}: {e}", dir.display())),
         };
     }
-    let (coord, entries) = match lock_all(&dir) {
+    let (coord, entries) = match lock_all(&dir, true) {
         Ok(v) => v,
         Err(o) => return o,
     };
     seen(Step::Locked);
     // the link is made under a name of its own and swapped in, so the
     // directory's name is never missing; the name then is the old one's
-    let old = home.join(format!(".{DIR}.moving-{}", std::process::id()));
+    let old = home.join(format!("{}{}", moving_prefix(), std::process::id()));
     if let Err(e) = symlink(target, &old) {
         return Outcome::Failed(format!("{}: {e}", old.display()));
     }
@@ -79,29 +86,93 @@ pub(super) fn move_into_seen(home: &Path, target: &Path, exists: bool, seen: &mu
         return Outcome::Failed(format!("{}: {e}", dir.display()));
     }
     seen(Step::Linked);
+    match finish(home, &old, target, entries, coord, seen) {
+        Ok((moved, duplicates, left)) => Outcome::Shared { moved, duplicates, left },
+        Err(o) => o,
+    }
+}
+
+type Entries = Vec<(OsString, Option<File>)>;
+
+/// Place every entry of `old`, the coordination lock last, then remove
+/// `old` or keep it as the next leftover directory.
+fn finish(
+    home: &Path,
+    old: &Path,
+    target: &Path,
+    entries: Entries,
+    coord: Option<File>,
+    seen: &mut dyn FnMut(Step<'_>),
+) -> Result<(usize, usize, usize), Outcome> {
     let mut counts = (0, 0, 0);
-    for (name, lock) in entries.into_iter().chain([(OsString::from(COORD), Some(coord))]) {
+    for (name, lock) in entries.into_iter().chain(coord.map(|c| (OsString::from(COORD), Some(c)))) {
         if let Err(e) = place(&old.join(&name), &target.join(&name), &mut counts) {
-            return Outcome::Failed(format!("{}: {e}; the rest is in {}", name.display(), old.display()));
+            return Err(Outcome::Failed(format!("{}: {e}; the rest is in {}", name.display(), old.display())));
         }
         drop(lock);
         seen(Step::Placed(&name));
     }
-    let (moved, duplicates, left) = counts;
-    let gone = if left == 0 { std::fs::remove_dir(&old) } else { std::fs::rename(&old, leftover_dir(home)) };
-    match gone {
-        Ok(()) => Outcome::Shared { moved, duplicates, left },
-        Err(e) => Outcome::Failed(format!("{}: {e}", old.display())),
+    let failed = |e: std::io::Error| Outcome::Failed(format!("{}: {e}", old.display()));
+    if counts.2 == 0 {
+        match std::fs::remove_dir(old) {
+            Ok(()) => return Ok(counts),
+            // made after the entries were read, by something that did
+            // not take the coordination lock
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                counts.2 = std::fs::read_dir(old).map_or(1, |rd| rd.count());
+            }
+            Err(e) => return Err(failed(e)),
+        }
     }
+    std::fs::rename(old, leftover_dir(home)).map_err(failed)?;
+    Ok(counts)
 }
 
-/// The coordination lock and every other entry of `dir`, each regular
-/// file locked.
-fn lock_all(dir: &Path) -> Result<(File, Vec<(OsString, Option<File>)>), Outcome> {
+/// What an earlier pass left under the moving name: the old directory
+/// when it stopped after the swap, the link when it stopped before.
+/// The link is removed; the directory's entries are placed again by
+/// the same rules.  `None` when there was nothing.
+pub(super) fn recover(home: &Path, target: &Path) -> Result<Option<(usize, usize, usize)>, Outcome> {
+    let mut sum: Option<(usize, usize, usize)> = None;
+    for p in moving(home) {
+        let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+        if m.file_type().is_symlink() {
+            std::fs::remove_file(&p).map_err(|e| Outcome::Failed(format!("{}: {e}", p.display())))?;
+        } else if m.is_dir() {
+            let (coord, entries) = lock_all(&p, false)?;
+            let (a, b, c) = finish(home, &p, target, entries, coord, &mut |_| {})?;
+            let s = sum.get_or_insert((0, 0, 0));
+            *s = (s.0 + a, s.1 + b, s.2 + c);
+        }
+    }
+    Ok(sum)
+}
+
+fn moving_prefix() -> String {
+    format!(".{DIR}.moving-")
+}
+
+/// Every entry of `home` under the moving name.
+fn moving(home: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(home) else { return Vec::new() };
+    let prefix = moving_prefix();
+    let mut v: Vec<PathBuf> =
+        rd.flatten().filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix))).map(|e| e.path()).collect();
+    v.sort();
+    v
+}
+
+/// The coordination lock (made when `make` and missing) and every other
+/// entry of `dir`, each regular file locked.
+fn lock_all(dir: &Path, make: bool) -> Result<(Option<File>, Entries), Outcome> {
     let coord = dir.join(COORD);
-    let c = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&coord);
-    let c = c.map_err(|e| Outcome::Failed(format!("{}: {e}", coord.display())))?;
-    if !try_lock(&c) {
+    let c = std::fs::OpenOptions::new().read(true).write(true).create(make).truncate(false).open(&coord);
+    let c = match c {
+        Ok(c) => Some(c),
+        Err(e) if !make && e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Outcome::Failed(format!("{}: {e}", coord.display()))),
+    };
+    if c.as_ref().is_some_and(|c| !try_lock(c)) {
         return Err(Outcome::Busy(format!("{} is held", coord.display())));
     }
     let rd = std::fs::read_dir(dir).map_err(|e| Outcome::Failed(format!("{}: {e}", dir.display())))?;
@@ -163,11 +234,12 @@ fn leftover_dir(home: &Path) -> PathBuf {
     }
 }
 
-/// Every `LEFT` directory in `home`, by number.
+/// Every `LEFT` directory in `home`, by number, then whatever is under
+/// the moving name.
 pub(super) fn leftovers(home: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(home) else { return Vec::new() };
     let mut v: Vec<(usize, PathBuf)> =
         rd.flatten().filter_map(|e| left_number(&e.file_name()).map(|n| (n, e.path()))).collect();
     v.sort();
-    v.into_iter().map(|(_, p)| p).collect()
+    v.into_iter().map(|(_, p)| p).chain(moving(home)).collect()
 }
