@@ -129,6 +129,19 @@ fn rebalance_a_stale_feed_has_no_speed() {
     assert!(t.changed().is_some_and(|text| text.is_empty()), "aged out and written as such");
 }
 
+/// A carried model limit can be older than the lookback while the
+/// feed is live: reading it again every scan writes nothing.
+#[test]
+fn rebalance_a_reading_already_stale_is_not_taken_again_and_again() {
+    let reset = NOW + 3 * 86_400;
+    let mut t = Trends::default();
+    let old = row(0.91, 0.10, NOW, reset);
+    t.note(std::slice::from_ref(&old), NOW + LOOKBACK_S + 60);
+    t.changed();
+    t.note(std::slice::from_ref(&old), NOW + LOOKBACK_S + 62);
+    assert_eq!(t.changed(), None, "a stale reading starts no series");
+}
+
 /// The feed leaves an account out for a while: its readings stay, and
 /// the speed is there when it is back.
 #[test]

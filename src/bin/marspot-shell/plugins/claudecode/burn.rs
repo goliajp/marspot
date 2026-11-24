@@ -86,14 +86,14 @@ impl Trends {
     pub(super) fn note(&mut self, accounts: &[CcAccount], now: i64) {
         for a in accounts {
             if let Some(u) = a.util_7d {
-                self.add(&a.email, "7d", a.collected_at, u);
+                self.add(&a.email, "7d", a.collected_at, u, now);
             }
             if let Some(u) = a.util_5h {
-                self.add(&a.email, "5h", a.collected_at, u);
+                self.add(&a.email, "5h", a.collected_at, u, now);
             }
             for m in &a.model_limits {
                 if let Some(u) = m.util {
-                    self.add(&a.email, &m.label.to_ascii_lowercase(), a.limits_as_of.unwrap_or(a.collected_at), u);
+                    self.add(&a.email, &m.label.to_ascii_lowercase(), a.limits_as_of.unwrap_or(a.collected_at), u, now);
                 }
             }
         }
@@ -102,7 +102,12 @@ impl Trends {
         self.changed |= self.series.len() != before;
     }
 
-    fn add(&mut self, mail: &str, label: &str, at: i64, util: f64) {
+    /// A reading already past `LOOKBACK_S` at `now` is not taken: it
+    /// would start a series that ages out at once, every scan.
+    fn add(&mut self, mail: &str, label: &str, at: i64, util: f64, now: i64) {
+        if at < now - LOOKBACK_S {
+            return;
+        }
         let key = (mail.to_string(), label.to_string());
         self.changed |= self.series.entry(key).or_default().add(at, util);
     }
@@ -134,7 +139,7 @@ impl Trends {
             if let [mail, label, at, u] = f[..]
                 && let (Ok(at), Ok(u)) = (at.parse(), u.parse())
             {
-                t.add(mail, label, at, u);
+                t.add(mail, label, at, u, at);
             }
         }
         t.changed = false;
