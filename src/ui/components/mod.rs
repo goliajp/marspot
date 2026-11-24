@@ -73,7 +73,7 @@ mod helper_strip_view_tests;
 #[cfg(test)]
 mod settings_view_tests;
 #[cfg(test)]
-mod settings_rows_tests;
+mod settings_rows_view_tests;
 #[cfg(test)]
 mod shortcuts_view_tests;
 #[cfg(test)]
