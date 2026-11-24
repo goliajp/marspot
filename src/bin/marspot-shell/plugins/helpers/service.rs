@@ -8,7 +8,7 @@ use std::time::Duration;
 use marspot_peer::control::{AgentKind, ErrorCode, HelperStartArgs, HelperStop, Isolation, Reject, sha256};
 use marspot_peer::json::{Value, obj};
 
-use super::table::{Event, Started};
+use super::table::{Event, Helper, Started};
 use super::{Shared, caller_kind, container, launch, records, settle, stop_all};
 use crate::pane_control::helpers_port::{HelperService, Port};
 
@@ -46,6 +46,19 @@ pub(super) fn quiet_ms(sid: u64, now_ms: u64) -> Option<u64> {
     // the segments of one log: the one in use was written last
     let at = logs.filter_map(|e| e.metadata().ok()?.modified().ok()).max()?;
     Some(now_ms.saturating_sub(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64))
+}
+
+/// What `helper.list` says `h` is doing.
+pub(super) fn state_of(h: &Helper) -> &'static str {
+    if h.preparing {
+        "preparing"
+    } else if h.delivered_ms.is_none() {
+        "starting"
+    } else if h.noticed {
+        "stopped"
+    } else {
+        "running"
+    }
 }
 
 fn first_line(task: &str) -> String {
@@ -175,15 +188,7 @@ impl HelperService for Service {
             .filter(|h| all || Some(h.started.parent) == caller)
             .map(|h| {
                 let secs = |ms: u64| Value::from((ms / 1000) as i64);
-                let state = if h.preparing {
-                    "preparing"
-                } else if h.delivered_ms.is_none() {
-                    "starting"
-                } else if h.noticed {
-                    "stopped"
-                } else {
-                    "running"
-                };
+                let state = state_of(h);
                 obj([
                     ("name", crate::pane_control::names::full_name_or_entry(h.sid, &obs).into()),
                     ("id", (h.sid as i64).into()),

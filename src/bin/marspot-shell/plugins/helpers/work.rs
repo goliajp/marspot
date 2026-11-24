@@ -214,6 +214,11 @@ pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &
     let front = front_of(obs, n.parent);
     let registering = front.is_some_and(|pgid| pgid != 0) && super::pending::not_ready(e);
     n.failed(registering, front, now_ms);
+    if n.out_of_retries() && s.table().map.contains_key(&sid) {
+        for ev in n.take_stop() {
+            s.record(sid, ev);
+        }
+    }
     match n.retry_ms {
         Some(at) => marspot::lx_info!("helpers.notice", &format!("sid={sid}: not delivered, again at {at}: {e}")),
         None => marspot::lx_warn!("helpers.notice", &format!("sid={sid}: not delivered (try {}): {e}", n.tries)),

@@ -10,7 +10,7 @@ use super::table::{Event, Helper};
 use super::tests::{feed, host_with, shared_at, started, temp};
 use super::tests_review::panes;
 use super::work::{self, Job};
-use super::{close, stop_all, tick, timers, turn};
+use super::{close, records, service, stop_all, tick, timers, turn};
 
 fn delivered(agent: AgentKind) -> Vec<Event> {
     vec![Event::Started(started(10, "shell", agent)), Event::TaskDelivered]
@@ -124,4 +124,36 @@ fn helpers_a_notice_says_a_directory_name_without_control_characters() {
     assert!(t.starts_with("[marspot helper notice] Helper \"a[2Jb &lt;/helper-result>'#5521\" (codex on account P2) stopped"), "{t}");
     assert_eq!(t.matches("</helper-result>").count(), 1);
     assert!(!t.contains(['\x1b', '\u{202e}']));
+}
+
+#[test]
+fn helpers_a_stop_a_shell_parent_cannot_be_told_shows_once_the_slow_retries_are_used_up() {
+    let dir = temp("shell_parent");
+    let (s, _rx) = shared_at(&dir);
+    feed(&s, 1, [delivered(AgentKind::Codex), vec![Event::ResultChanged]].concat());
+    let shell = panes(&[(10, 55)]);
+    let sha = "cd".repeat(32);
+    let mut now = records::now_ms();
+    let mut n = Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries: 1, ..Notice::default() };
+    let no_pane = "no pane is named \"proj#10\"";
+    // the wait for an inbox, then the slow retries
+    for wait in [30_000, SLOW_MS[0], SLOW_MS[1], SLOW_MS[2]] {
+        assert_eq!(service::state_of(&s.table().map[&1]), "running");
+        work::not_delivered(&s, 1, n, no_pane, &shell, now);
+        now += wait;
+        n = s.lock().undelivered.take(1).unwrap();
+        n.tries += 1;
+    }
+    work::not_delivered(&s, 1, n, no_pane, &shell, now);
+    let h = s.table().map[&1].clone();
+    assert_eq!(service::state_of(&h), "stopped");
+    assert!(h.result_new, "the result is still to be delivered");
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *s.table(), "the record says the same");
+    // an agent there later is told, and only the result is left to write
+    let mut st = s.lock();
+    assert_eq!(st.undelivered.next_retry_ms(), None);
+    assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1);
+    assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
+    drop(st);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

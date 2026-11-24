@@ -3,7 +3,10 @@
 //! is tried again when the program in front of its parent pane changes
 //! (an agent started there has an inbox), at most [`TRIES`] times; the
 //! facts the notice stands for are written only once it is delivered,
-//! so a helper's new result stays new until then.
+//! so a helper's new result stays new until then.  A notice with no
+//! retry left before a new program (a parent at a shell has no inbox)
+//! or none left at all writes its stop at once: the helper shows as
+//! stopped, and only its result waits for the delivery.
 //!
 //! An agent in front of the parent that has not registered its inbox
 //! yet is on its way: that failure spends no try, and the notice goes
@@ -80,6 +83,19 @@ impl Notice {
             self.retry_ms = Some(now_ms + wait);
             self.slow += 1;
         }
+    }
+
+    /// Whether nothing will try it again with this program in front.
+    pub fn out_of_retries(&self) -> bool {
+        self.retry_ms.is_none() || self.tries >= TRIES
+    }
+
+    /// The facts of the stop it tells of, taken out; what is left is
+    /// written when it is delivered.
+    pub fn take_stop(&mut self) -> Vec<Event> {
+        let (result, stop) = std::mem::take(&mut self.events).into_iter().partition(|e| matches!(e, Event::ResultDelivered { .. }));
+        self.events = result;
+        stop
     }
 }
 
