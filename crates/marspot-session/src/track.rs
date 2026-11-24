@@ -179,7 +179,10 @@ impl Track {
         let (from, main) = (self.last_at(), self.main);
         // the main screen's, kept while the alternate one is on: a
         // watch younger than the batch that entered it does not read
-        // those rows
+        // those rows.  A resize meanwhile reflows the main screen and
+        // these numbers are off by what it moved, as is `main`; they
+        // are kept, as they are read only for a text the bytes held
+        // whole, and forgetting them would miss it
         let reach = session.terminal_mut().take_cursor_reach();
         let (reach, before) = if session.terminal().in_alt_screen() {
             self.held = Reach::join(self.held, reach);

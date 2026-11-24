@@ -42,21 +42,26 @@ impl Private {
 }
 
 /// Where bytes that are not read leave the screen: the last switch in
-/// them, if any.  One cut by the chunk's end is not seen; the next ask
-/// says where the grid is.
+/// them, a full reset included, if any.  One cut by the chunk's end is
+/// not seen; the next ask says where the grid is.
 pub(super) fn last_switch(bytes: &[u8]) -> Option<bool> {
-    if !super::super::has_byte(bytes, b'?') {
-        return None;
-    }
     let mut on = None;
-    let mut rest = bytes;
-    while let Some(at) = rest.windows(3).position(|w| w == b"\x1b[?") {
-        rest = &rest[at + 3..];
-        let mut p = Private::default();
-        let end = rest.iter().position(|&b| !(0x20..0x40).contains(&b)).unwrap_or(rest.len());
-        rest[..end].iter().for_each(|&b| p.byte(b));
-        if let Some(&f) = rest.get(end) {
-            on = p.end(f).or(on);
+    let mut at = 0;
+    while let Some(esc) = super::super::find_byte(&bytes[at..], 0x1b) {
+        at += esc + 1;
+        match &bytes[at..] {
+            [b'c', ..] => on = Some(false),
+            [b'[', b'?', rest @ ..] => {
+                let end = rest.iter().position(|&b| !(0x20..0x40).contains(&b)).unwrap_or(rest.len());
+                let mut p = Private::default();
+                rest[..end].iter().for_each(|&b| p.byte(b));
+                if let Some(&f) = rest.get(end) {
+                    on = p.end(f).or(on);
+                }
+                // an escape that ends it is the next one looked at
+                at += 2 + end;
+            }
+            _ => {}
         }
     }
     on

@@ -32,6 +32,25 @@ fn output(bytes: usize) -> Vec<u8> {
     out
 }
 
+/// A full-screen program's frames on the alternate screen: each drawn
+/// with the cursor hidden, rows addressed, colour, no line feed.  No
+/// `@` in them, so a chunk is skipped but for its last escape.
+fn frames(bytes: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes + 4096);
+    out.extend_from_slice(b"\x1b[?1049h");
+    let mut n = 0u64;
+    while out.len() < bytes {
+        out.extend_from_slice(b"\x1b[?25l");
+        for row in 1..=40 {
+            let line = format!("\x1b[{row};1H\x1b[38;5;{}m frame {n:06} row {row:02} status ok\x1b[0m\x1b[K", (n + row) % 256);
+            out.extend_from_slice(line.as_bytes());
+        }
+        out.extend_from_slice(b"\x1b[?25h");
+        n += 1;
+    }
+    out
+}
+
 /// How a text watch is checked, for comparing the two ways.
 #[derive(Clone, Copy)]
 enum Check {
@@ -157,4 +176,18 @@ fn watch_pending_text_keeps_the_parse_within_five_percent() {
     }
     assert!(ratio >= 0.95, "with a waiting text watch {:.1}% of the instructions are the parse's", ratio * 100.0);
     assert!(stream >= 0.5, "in the worst case {:.1}% of the instructions are the parse's", stream * 100.0);
+}
+
+/// The same for a full-screen program's frames, whose chunks are
+/// skipped: what is looked for in them is where the screen switches.
+#[test]
+fn watch_pending_text_on_a_full_screen_program_keeps_the_parse_within_five_percent() {
+    let out = frames(if cfg!(debug_assertions) { 4 } else { 32 } * 1024 * 1024);
+    eprintln!("watch perf: frames, {} MiB, best of {ROUNDS}", out.len() >> 20);
+    let ratio = line("frames, text never printed", out.len(), least(&out, "@never printed@", Check::Stream));
+    if instructions() == 0 {
+        eprintln!("skipping the assertion on a waiting text watch's cost: this host does not count instructions");
+        return;
+    }
+    assert!(ratio >= 0.95, "with a waiting text watch {:.1}% of the instructions are the parse's", ratio * 100.0);
 }

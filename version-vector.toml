@@ -30,4 +30,4 @@
 
 shell   = "0.7.657"  # a pane read once waits for a frame being published
 core    = "0.12.664"  # a pane read once waits for a frame being published
-session = "0.11.432"  # a text watch keeps the rows and texts of the batch that entered the alternate screen
+session = "0.11.433"  # a text watch follows the screen from when it is set and ends sequences where the parser does

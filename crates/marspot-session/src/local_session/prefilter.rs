@@ -48,7 +48,6 @@ enum Mode {
     Private,
     /// OSC, DCS, APC, PM, SOS: until BEL or `ESC \`.
     Str,
-    StrEsc,
 }
 
 pub(crate) struct Prefilter {
@@ -119,6 +118,12 @@ impl Prefilter {
         self.forget();
     }
 
+    /// The bytes from now on draw on the alternate screen: for the
+    /// first text set, as the bytes are not followed while none is.
+    pub(crate) fn starts_on(&mut self, alt: bool) {
+        self.alt = alt;
+    }
+
     pub(crate) fn active(&self) -> bool {
         !self.texts.is_empty()
     }
@@ -149,7 +154,9 @@ impl Prefilter {
         // no match ends here, but one can start in the last line: that
         // line is read when it is short, so a chunk cut before a line's
         // last byte leaves a known state
-        let tail = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |at| at + 1);
+        // only as far back as a line that is read can start
+        let near = bytes.len().saturating_sub(TAIL_READ + 1);
+        let tail = bytes[near..].iter().rposition(|&b| b == b'\n').map_or(near, |at| near + at + 1);
         if bytes.len() - tail > TAIL_READ {
             self.skip(bytes);
             // an escape the chunk ends in is read, so that the rest of
@@ -218,6 +225,9 @@ impl Prefilter {
                         i = plain::end(&self.firsts, &self.stops, bytes, i);
                     }
                 }
+                // as in the parser: an escape starts anew in any sequence,
+                // CAN and SUB end it
+                _ if is_abort(b) => self.abort(b),
                 Mode::Esc => self.esc_byte(b),
                 Mode::EscInter => {
                     if (0x30..=0x7e).contains(&b) {
@@ -238,15 +248,16 @@ impl Prefilter {
                     }
                     if (0x40..=0x7e).contains(&b) {
                         self.csi_end(b);
+                    } else if is_abort(b) {
+                        self.abort(b);
                     }
                 }
                 Mode::Private => self.private_byte(b),
-                Mode::Str => match b {
-                    0x07 => self.mode = Mode::Text,
-                    0x1b => self.mode = Mode::StrEsc,
-                    _ => {}
-                },
-                Mode::StrEsc => self.mode = if b == b'\\' { Mode::Text } else { Mode::Str },
+                Mode::Str => {
+                    if b == 0x07 {
+                        self.mode = Mode::Text;
+                    }
+                }
             }
         }
     }
@@ -259,6 +270,10 @@ impl Prefilter {
         if !b"mKJXnctqp".contains(&b) {
             self.moved();
         }
+    }
+
+    fn abort(&mut self, b: u8) {
+        self.mode = if b == 0x1b { Mode::Esc } else { Mode::Text };
     }
 
     fn private_byte(&mut self, b: u8) {
@@ -316,6 +331,17 @@ impl Prefilter {
             }
         };
     }
+}
+
+/// Whether output that leaves a grid on `alt`, then `chunks` not yet
+/// parsed into it, draws on the alternate screen.
+pub(super) fn screen_after(alt: bool, chunks: &[Vec<u8>]) -> bool {
+    chunks.iter().rev().find_map(|c| screen::last_switch(c)).unwrap_or(alt)
+}
+
+/// ESC, CAN and SUB, which end any sequence being read.
+fn is_abort(b: u8) -> bool {
+    matches!(b, 0x1b | 0x18 | 0x1a)
 }
 
 #[cfg(test)]
@@ -421,6 +447,43 @@ mod tests {
         p.took(cut.as_bytes());
         p.took(b"1mNE");
         assert_eq!(p.take(false).1, 1, "unread bytes that end in an escape");
+    }
+
+    #[test]
+    fn watch_prefilter_ends_a_sequence_where_the_parser_does() {
+        let held = |chunk: &str| {
+            let mut p = set("DONE");
+            p.took(chunk.as_bytes());
+            p.take(false).1
+        };
+        // in order: an escape in a private mode sequence, in a sequence's
+        // parameters, CAN, SUB, an escape in a title
+        let chunks = [
+            "\x1b[?\x1b[?1049hDONE\x1b[?1049l",
+            "\x1b[1\x1b[?1049hDONE\x1b[?1049l",
+            "\x1b[?1\x18049hDONE",
+            "\x1b[?1\x1a049hDONE",
+            "\x1b]0;title\x1b[1mDONE\r\n",
+        ];
+        assert_eq!(chunks.map(held), [0, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn watch_prefilter_leaves_the_alternate_screen_on_a_full_reset() {
+        // read, in bytes not read, and the last switch in them counting
+        let mut p = set("DONE");
+        let mut held = |unread: &str, read: &str| {
+            p.took(unread.as_bytes());
+            p.took(read.as_bytes());
+            p.take(false).1
+        };
+        let long = "y".repeat(TAIL_READ + 1);
+        let seen = [
+            held("", "\x1b[?1049h\x1bcDONE"),
+            held(&format!("\x1b[?1049hy\x1bc{long}"), "\r\nDONE"),
+            held(&format!("\x1bc\x1b[?1049h\x1b[?25l{long}"), "\r\nDONE"),
+        ];
+        assert_eq!(seen, [1, 1, 0]);
     }
 
     /// How fast build-like output is read when every line has the

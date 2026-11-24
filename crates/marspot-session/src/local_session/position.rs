@@ -31,8 +31,13 @@ impl Output {
 }
 
 pub(super) fn has_byte(bytes: &[u8], b: u8) -> bool {
+    find_byte(bytes, b).is_some()
+}
+
+pub(super) fn find_byte(bytes: &[u8], b: u8) -> Option<usize> {
     // SAFETY: reads `bytes.len()` bytes of a live slice
-    !unsafe { libc::memchr(bytes.as_ptr().cast(), libc::c_int::from(b), bytes.len()) }.is_null()
+    let at = unsafe { libc::memchr(bytes.as_ptr().cast(), libc::c_int::from(b), bytes.len()) };
+    (!at.is_null()).then(|| at.addr() - bytes.as_ptr().addr())
 }
 
 impl LocalSession {
@@ -44,6 +49,10 @@ impl LocalSession {
     /// Look for these texts, each with an id under 8, in what is taken
     /// in from now on; none stops looking.
     pub(crate) fn look_for_texts(&mut self, texts: &[(usize, &[u8])]) {
+        if !self.out.texts.active() {
+            // held output went past the prefilter but not into the grid
+            self.out.texts.starts_on(prefilter::screen_after(self.terminal.in_alt_screen(), &self.held));
+        }
         self.out.texts.set(texts);
     }
 

@@ -215,3 +215,47 @@ fn watch_text_split_by_an_escape_that_unread_bytes_end_in_matches() {
     p.turn_in(&[&first, "1mz\r\n\x1b[5;1H% "]);
     assert_eq!(p.ctl.met(), Some(Some(0)));
 }
+
+/// Text drawn on the alternate screen, which is then left and the
+/// cursor moved up over old text.
+const DRAWN_ON_ALT: &str = "\x1b[Hneedle-xyz\x1b[?1049l\x1b[3A\x1b[3B";
+
+#[test]
+fn watch_set_while_on_the_alternate_screen_does_not_count_text_drawn_there() {
+    let mut p = Pane::new();
+    p.turn(OLD);
+    p.turn("\x1b[?1049h");
+    let since = p.pos();
+    p.watch(since, "needle-xyz");
+    p.turn(DRAWN_ON_ALT);
+    assert_eq!(p.ctl.met(), None);
+}
+
+#[test]
+fn watch_set_while_held_output_enters_the_alternate_screen_does_not_count_text_drawn_there() {
+    let mut p = Pane::new();
+    p.turn(OLD);
+    crate::pane_ctl::local_mut(&mut p.session).hold_grid(true);
+    p.turn("\x1b[?1049h");
+    let since = p.pos();
+    p.watch(since, "needle-xyz");
+    p.turn(DRAWN_ON_ALT);
+    crate::pane_ctl::local_mut(&mut p.session).hold_grid(false);
+    p.ctl.after_turn(&mut p.session, None, false, None);
+    assert_eq!(p.ctl.met(), None);
+}
+
+/// A resize on the alternate screen reflows the main one, so the rows
+/// kept for it are off by what the reflow moved; they still cover the
+/// text printed above, which forgetting them would miss.
+#[test]
+fn watch_text_printed_before_the_alternate_screen_matches_when_it_is_left_after_a_resize() {
+    let mut p = Pane::new();
+    p.turn(FOUR);
+    let since = p.pos();
+    p.watch(since, "needle-xyz");
+    p.turn(&format!("\x1b[H\x1b[2J{}\r\nneedle-xyz\r\n\x1b[?1049h\x1b[Hup here", "x".repeat(30)));
+    crate::pane_ctl::local_mut(&mut p.session).resize(20, 10).expect("resize");
+    p.turn("\x1b[?1049l\r\n% ");
+    assert_eq!(p.ctl.met(), Some(Some(2)));
+}
