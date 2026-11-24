@@ -5,7 +5,7 @@ use marspot::pane_state::{BusyKind, PaneStatus};
 use marspot_peer::control::{AgentKind, ErrorCode, Reject};
 
 use super::notify::{self, Stop};
-use super::pending::{Notice, SLOW_MS, Undelivered};
+use super::pending::{CAP, Notice, SLOW_MS, Undelivered};
 use super::table::{Event, Helper};
 use super::tests::{feed, host_with, shared_at, started, temp};
 use super::tests_review::panes;
@@ -155,5 +155,30 @@ fn helpers_a_stop_a_shell_parent_cannot_be_told_shows_once_the_slow_retries_are_
     assert_eq!(st.undelivered.due(&panes(&[(10, 66)])).len(), 1);
     assert_eq!(st.undelivered.take(1).unwrap().events, vec![Event::ResultDelivered { sha }]);
     drop(st);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_a_stop_notice_put_out_past_the_cap_shows_as_stopped() {
+    let dir = temp("cap");
+    let (s, _rx) = shared_at(&dir);
+    let sha = "ef".repeat(32);
+    let waiting = |tries| Notice { parent: 10, body: "x".into(), events: vec![Event::IdleNoticed, Event::ResultDelivered { sha: sha.clone() }], tries, retry_ms: Some(u64::MAX), ..Notice::default() };
+    for sid in 100..100 + CAP as u64 {
+        feed(&s, sid, [delivered(AgentKind::Codex), vec![Event::ResultChanged]].concat());
+        // the most tried goes first
+        assert!(s.lock().undelivered.keep(sid, waiting(if sid == 100 { 4 } else { 1 })));
+    }
+    feed(&s, 1, delivered(AgentKind::Codex));
+    let n = Notice { parent: 10, body: "y".into(), tries: 1, ..Notice::default() };
+    work::not_delivered(&s, 1, n, "connection refused", &panes(&[(10, 55)]), records::now_ms());
+    let st = s.lock();
+    assert!(!st.undelivered.holds(100) && st.undelivered.holds(1) && st.undelivered.len() == CAP);
+    drop(st);
+    let t = s.table();
+    assert_eq!(service::state_of(&t.map[&100]), "stopped", "put out, never to be tried again");
+    assert!(t.map[&100].result_new);
+    assert!((101..100 + CAP as u64).all(|sid| service::state_of(&t.map[&sid]) == "running"), "the others still wait");
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *t, "the record says the same");
     std::fs::remove_dir_all(&dir).unwrap();
 }

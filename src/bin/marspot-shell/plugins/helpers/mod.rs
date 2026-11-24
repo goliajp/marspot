@@ -49,6 +49,7 @@ mod settle;
 mod stop_all;
 pub(crate) mod strip;
 mod table;
+mod tell;
 mod tick;
 pub(crate) mod titles;
 mod timers;
