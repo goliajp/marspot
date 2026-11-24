@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.686"  # codex's approval question is looked for only near the choice, as a question, and only with no rule above
+shell   = "0.7.687"  # a container restart whose login hand-over failed drops what it wrote when the helper was stopped meanwhile
 core    = "0.12.679"  # the deny list's new content is created with the list's mode instead of chmod-ed to it
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound

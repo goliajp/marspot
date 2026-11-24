@@ -185,6 +185,38 @@ fn container_codex_helper_stopped_while_its_token_is_written_loses_it() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Stopped while its token was being written, and the writing failed
+/// part way: what was written goes all the same.
+#[test]
+fn container_codex_helper_stopped_while_its_token_failed_to_be_written_loses_it() {
+    let dir = temp("container-codex-again-failed");
+    let fd = dir.join("fake");
+    std::fs::create_dir_all(&fd).unwrap();
+    let d = super::tests_away::fake(&fd);
+    std::fs::write(fd.join("rm-s"), "1").unwrap();
+    account(&dir.join(".codex"));
+    let mut env = marspot_term::test_env::EnvGuard::new();
+    env.set("HOME", dir.display().to_string());
+    let (s, _rx) = shared_at(&dir.join("helpers"));
+    s.record(41, Event::Started(super::super::tests::started(1, "claude", AgentKind::Codex)));
+    std::fs::create_dir_all(s.dir_of(41).join("home")).unwrap();
+    // the token's end cannot be written: a directory is in its place
+    std::fs::create_dir_all(s.dir_of(41).join("expires")).unwrap();
+    let me = std::sync::Arc::clone(&s);
+    let run = std::thread::spawn(move || expired::again(&me, 41, AgentKind::Codex, "codex", Some(d)));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(fd.join("log")).unwrap_or_default().lines().any(|l| l.starts_with("rm ")) {
+        assert!(std::time::Instant::now() < until, "docker rm was not asked");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    s.record(41, Event::Stopped { exited: false });
+    let e = run.join().unwrap().unwrap_err();
+    assert!(e.contains("stopped"), "{e}");
+    assert!(!s.dir_of(41).join("home/auth.json").exists(), "what was written is taken away");
+    drop(env);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn container_codex_stopped_helper_is_not_started_again() {
     let dir = temp("container-codex-again");
