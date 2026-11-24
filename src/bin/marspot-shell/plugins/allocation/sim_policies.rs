@@ -6,14 +6,16 @@
 //! then the earliest week renewal, then the least left; a resting pane
 //! moves at most every 30 minutes, one per pass, when its account is
 //! nearly out, when that leaves Fable to Fable panes, or when the
-//! other week renews six hours sooner.  `Plan` is this core: `pick`
-//! for every forced move and `rest_move` for resting panes.
+//! other week renews six hours sooner.  `Plan` is this core, through
+//! the same `Inputs::decide` the shell logs its would-moves with: (a)
+//! for every forced move and (b) for resting panes.
 
-use super::choose::{MUST_LAST_H, Mover, loads_of, pick as core_pick};
+use super::choose::{MUST_LAST_H, Mover, loads_of};
 use super::plan::{Plan, plan};
-use super::rest::{Resting, RestMove, is_keeper, rest_move};
+use super::replay::{Inputs, Kind, Why};
+use super::rest::is_keeper;
 use super::sim::SimPane;
-use super::{Class, EPS, Quant, lasts};
+use super::{Class, EPS, Quant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Policy {
@@ -36,10 +38,32 @@ pub(super) fn targets(policy: Policy, a: &[Quant], panes: &[SimPane], t: f64, ka
     if policy == Policy::Old {
         return None;
     }
+    let (b_f, b_n) = demand(panes, t);
+    Some(plan(a, b_f, b_n, Some(kappa)))
+}
+
+/// What the core reads about pane `i`, as the shell hands it over.
+fn inputs(a: &[Quant], panes: &[SimPane], i: usize, t: f64, kappa: f64, skip_self: bool, kind: Kind) -> Inputs {
+    let tab = table(panes, t);
+    let (b_f, b_n) = demand(panes, t);
+    Inputs {
+        accounts: a.to_vec(),
+        b_f,
+        b_n,
+        kappa: Some(kappa),
+        loads: loads_of(a, &tab, skip_self.then_some(i)),
+        mover: Mover { class: panes[i].class, rate: panes[i].est },
+        // a pane not on any account leaves none: no account is numbered 0
+        here: panes[i].on.unwrap_or(0),
+        kind,
+    }
+}
+
+fn demand(panes: &[SimPane], t: f64) -> (f64, f64) {
     let live = || panes.iter().filter(|p| p.live(t));
     let b_f = live().filter(|p| p.class == Class::Restricted).map(|p| p.est).sum();
     let b_n = live().filter(|p| p.class == Class::Plain).map(|p| p.est).sum();
-    Some(plan(a, b_f, b_n, Some(kappa)))
+    (b_f, b_n)
 }
 
 pub(super) fn pick(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, from: Option<u8>, t: f64, kappa: f64) -> Option<u8> {
@@ -48,8 +72,8 @@ pub(super) fn pick(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, fro
         Policy::Old => old_pick(a, class, from),
         Policy::Plan => {
             let p = targets(policy, a, panes, t, kappa)?;
-            let loads = loads_of(a, &table(panes, t), Some(i));
-            core_pick(a, &p, &loads, Mover { class, rate: panes[i].est }, from, MUST_LAST_H)
+            let x = inputs(a, panes, i, t, kappa, true, Kind::Out { horizon_h: MUST_LAST_H });
+            x.decide(&p).map(|(to, _)| to)
         }
     }
 }
@@ -98,40 +122,31 @@ pub(super) fn old_rest(a: &[Quant], class: Class, here: u8, since_h: Option<f64>
 }
 
 /// A resting move and whether it was urgent (exempt from the hourly cap).
-pub(super) fn rest(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, t: f64, plan: Option<&Plan>, hour: usize) -> Option<(u8, bool)> {
+pub(super) fn rest(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, t: f64, plan: Option<&Plan>, hour: usize, kappa: f64) -> Option<(u8, bool)> {
     let me = &panes[i];
     let here = me.on?;
     let since_h = me.last.map(|l| t - l).filter(|h| h.is_finite());
-    let hi = a.iter().position(|q| q.id == here)?;
-    let tab = table(panes, t);
-    let loads = loads_of(a, &tab, None);
-    let urgent = match policy {
-        Policy::Old => room(&a[hi], me.class) <= 0.01,
-        Policy::Plan => lasts(&a[hi], &loads[hi], me.class, 0.0) < super::rest::LEAVE_BELOW_H,
-    };
-    if !urgent && hour >= super::rest::BAND_PER_HOUR {
-        return None;
-    }
     if policy == Policy::Old {
+        let hi = a.iter().position(|q| q.id == here)?;
+        let urgent = room(&a[hi], me.class) <= 0.01;
+        if !urgent && hour >= super::rest::BAND_PER_HOUR {
+            return None;
+        }
         return old_rest(a, me.class, here, since_h).map(|y| (y, urgent));
     }
-    let same = tab.iter().enumerate().filter(|(j, (on, _, _))| *j != i && *on == Some(here)).map(|(j, (_, _, r))| (j as u64, *r));
-    let left: Vec<(u8, f64)> = me.left.iter().map(|(id, at)| (*id, t - at)).collect();
-    let p = Resting {
-        here,
-        mover: Mover { class: me.class, rate: me.est },
-        loads: &loads,
+    let tab = table(panes, t);
+    let same = tab.iter().enumerate().filter(|(j, (on, c, _))| *j != i && *on == Some(here) && *c == me.class).map(|(j, (_, _, r))| (j as u64, *r));
+    let kind = Kind::Rest {
         keeper: is_keeper((i as u64, me.est), same),
         since_move_h: since_h,
-        left: &left,
+        left: me.left.iter().map(|(id, at)| (*id, t - at)).collect(),
         band_last_hour: hour,
         demand: tab.iter().map(|(_, _, r)| r).sum(),
         stale_feed: false,
         speed_known: true,
         keeps_restricted: false,
+        moves_week: me.rest_moves as usize,
     };
-    match rest_move(a, plan?, &p)? {
-        RestMove::LeaveEarly(y) => Some((y, true)),
-        RestMove::Band(y) => Some((y, false)),
-    }
+    let (to, why) = inputs(a, panes, i, t, kappa, false, kind).decide(plan?)?;
+    Some((to, why == Why::LeaveEarly))
 }

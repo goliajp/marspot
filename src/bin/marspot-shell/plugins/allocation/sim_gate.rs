@@ -37,6 +37,8 @@ pub(super) struct Mean {
     pub rest: f64,
     pub waste: f64,
     pub most_rest: u32,
+    pub restricted_eaten: f64,
+    pub restricted_lapsed: f64,
 }
 
 pub(super) fn mean(policy: Policy, c: &Case) -> Mean {
@@ -49,6 +51,8 @@ pub(super) fn mean(policy: Policy, c: &Case) -> Mean {
         rest: runs.iter().map(|o| f64::from(o.rest)).sum::<f64>() / n,
         waste: runs.iter().map(|o| o.waste).sum::<f64>() / n,
         most_rest: runs.iter().map(|o| o.most_rest_per_pane).max().unwrap_or(0),
+        restricted_eaten: runs.iter().map(|o| o.restricted_eaten).sum::<f64>() / n,
+        restricted_lapsed: runs.iter().map(|o| o.restricted_lapsed).sum::<f64>() / n,
     }
 }
 
@@ -91,6 +95,9 @@ pub(super) fn situations() -> Vec<Situation> {
         s("0.5 pts a move", with(&|c| c.move_cost = 0.005), true, true, true),
         s("helper batches", with(&|c| c.batches = batches.clone()), false, true, true),
         s("three panes stop at 72 h", with(&|c| c.leave = Some((3, 72.0))), false, true, true),
+        // no reading so far has had them apart: P3 and P6 renew Fable
+        // first, P4 after its week
+        s("Fable renews apart", with(&|c| c.tf_shift = vec![(3, -60.0), (4, 60.0), (6, -40.0)]), false, true, true),
         s("4 pts/h", four, false, false, true),
         s("2 pts/h, speeds differ", two, false, false, true),
     ]
@@ -143,8 +150,8 @@ fn mark(h: Option<bool>) -> &'static str {
 pub(super) fn line(r: &GateRow) -> String {
     let m = |w: &str, x: &Mean| {
         format!(
-            "{w} unmet {:>6.1} (Fable {:>5.1}) refusals {:>5.1} rest {:>5.1} waste {:.3} most_rest {:>2}",
-            x.unmet, x.unmet_restricted, x.refusals, x.rest, x.waste, x.most_rest
+            "{w} unmet {:>6.1} (Fable {:>5.1}) refusals {:>5.1} rest {:>5.1} waste {:.3} most_rest {:>2} Fable's eaten {:>5.1} lapsed {:>4.1}",
+            x.unmet, x.unmet_restricted, x.refusals, x.rest, x.waste, x.most_rest, x.restricted_eaten, x.restricted_lapsed
         )
     };
     let marks: String = r.holds.iter().map(|h| mark(*h)).collect();

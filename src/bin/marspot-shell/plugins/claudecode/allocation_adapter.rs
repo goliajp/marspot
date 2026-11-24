@@ -21,6 +21,8 @@ use super::allocation_prices::{Tokens, class_of, weeks};
 use super::allocation_usage::Readers;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::notice::Told;
+use crate::plugins::allocation::replay::Why;
+use crate::plugins::allocation::rest::MOVES_PER_WEEK;
 use crate::plugins::allocation::speed::{PaneUse, Slope, WINDOW_S};
 
 /// A pane's use is written at most this often, summed per model.
@@ -40,7 +42,22 @@ pub(super) struct Last {
     pub refused_at: Option<i64>,
     pub marked_at: Option<i64>,
     pub would: Option<u8>,
+    /// When its resting would-moves were written in the last week,
+    /// oldest first; no more than the weekly limit are needed.
+    pub rest_moves: VecDeque<i64>,
 }
+
+impl Last {
+    pub(super) fn rest_moved(&mut self, at: i64) {
+        while self.rest_moves.front().is_some_and(|t| at - t >= WEEK_S) || self.rest_moves.len() >= MOVES_PER_WEEK {
+            self.rest_moves.pop_front();
+        }
+        self.rest_moves.push_back(at);
+    }
+}
+
+/// The span the resting-move limit counts over.
+pub(super) const WEEK_S: i64 = 7 * DAY;
 
 /// Use read but not yet written: since when, and the tokens per model.
 type Pending = (i64, Vec<(String, Tokens)>);
@@ -148,6 +165,7 @@ impl Allocation {
             next.left = last.profile.map(|f| (f, now));
             next.profile = Some(p.profile);
             next.bound_at = Some(now);
+            next.would = None;
             self.used.entry(p.sid).or_default().watched(now);
         }
         if last.resting != Some(p.resting) {
@@ -215,11 +233,17 @@ impl Allocation {
                     }
                     l.profile = e.profile;
                     l.bound_at = Some(e.at);
+                    l.would = None;
                 }
                 "rest" | "busy" => l.resting = Some(e.kind == "rest"),
                 "refused" => l.refused_at = at_of(&e.detail),
                 "marked" => l.marked_at = at_of(&e.detail),
-                "would_move" => l.would = e.detail.split(' ').find_map(|w| w.strip_prefix("to=P")).and_then(|p| p.parse().ok()),
+                "would_move" => {
+                    l.would = e.detail.split(' ').find_map(|w| w.strip_prefix("to=P")).and_then(|p| p.parse().ok());
+                    if e.detail.split(' ').find_map(|w| w.strip_prefix("why=")).and_then(Why::from_word).is_some_and(Why::resting) {
+                        l.rest_moved(e.at);
+                    }
+                }
                 "used" if e.at > now - WINDOW_S => {
                     let model = e.detail.split(' ').find_map(|w| w.strip_prefix("model="));
                     if let (Some(m), Some(t)) = (model, Tokens::parse(&e.detail)) {

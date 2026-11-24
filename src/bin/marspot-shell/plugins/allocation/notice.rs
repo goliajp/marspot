@@ -17,6 +17,9 @@ pub(crate) enum Stranded {
     /// Only the restricted model is out everywhere; back in this many
     /// hours.  The pane keeps its model.
     RestrictedOut { back_in_h: f64 },
+    /// A plain pane waits rather than take what the restricted panes are
+    /// short of; it would have gone to this account.
+    HeldBack { would: u8 },
 }
 
 /// Why a pane of `class` has nowhere to go, when it has not.

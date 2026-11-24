@@ -206,6 +206,7 @@ fn resting_inputs(accounts: Vec<Quant>, keeps_restricted: bool) -> Inputs {
         stale_feed: false,
         speed_known: true,
         keeps_restricted,
+        moves_week: 2,
     };
     Inputs { accounts, b_f: 0.0, b_n: 0.03, kappa: Some(KAPPA_FABLE), loads, mover: Mover { class: Class::Plain, rate: 0.02 }, here: 1, kind }
 }

@@ -4,11 +4,11 @@
 //! Each would-move is written with every input the pure decision read
 //! (`allocation::replay`), so the log can be fed back to it.
 
-use super::allocation_adapter::Allocation;
+use super::allocation_adapter::{Allocation, WEEK_S};
 use super::allocation_inputs::{PaneIn, Snapshot};
 use super::allocation_line::{kappa_check, plan_key, plan_line, say, say_keyed};
 use super::fable_need::MARK_FOR;
-use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of};
+use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, held_back, loads_of};
 use crate::plugins::allocation::notice::{Stranded, stranded};
 use crate::plugins::allocation::plan::Plan;
 use crate::plugins::allocation::replay::{Inputs, Kind, Why};
@@ -113,7 +113,8 @@ fn inputs(a: &Allocation, s: &Scene, i: usize) -> Option<Inputs> {
     let hours = |at: i64| (s.now - at) as f64 / 3600.0;
     let last = a.last.get(&x.p.sid);
     let left: Vec<(u8, f64)> = last.and_then(|l| l.left).map(|(id, at)| (id, hours(at))).into_iter().collect();
-    let same = s.panes.iter().filter(|y| y.p.sid != x.p.sid && y.p.profile == x.p.profile).map(|y| (y.p.sid, y.rate()));
+    // the pane that stays when an account runs low is the slowest of its class
+    let same = s.panes.iter().filter(|y| y.p.sid != x.p.sid && y.p.profile == x.p.profile && y.p.class == x.p.class).map(|y| (y.p.sid, y.rate()));
     // marked now, or the mark ended under a day ago
     let marked_since = x.p.marked_at.or(last.and_then(|l| l.marked_at));
     let marked = marked_since.is_some_and(|at| s.now - at < MARK_FOR.as_secs() as i64 + KEEP_MARKED_S);
@@ -126,12 +127,14 @@ fn inputs(a: &Allocation, s: &Scene, i: usize) -> Option<Inputs> {
         stale_feed: s.stale_feed,
         speed_known: x.known,
         keeps_restricted: marked || x.f > RESTRICTED_USER,
+        moves_week: last.map_or(0, |l| l.rest_moves.iter().filter(|at| s.now - **at < WEEK_S).count()),
     };
     Some(base(loads_of(&s.accounts, &s.table, None), kind))
 }
 
 /// One line when a pane's would-be target changes to a new account,
-/// with every input that chose it; one notice per stretch with nowhere to go.
+/// with every input that chose it, counted against the limits once;
+/// one notice per stretch with nowhere to go.
 fn note_move(a: &mut Allocation, s: &Scene, i: usize, to: Option<(u8, Why)>, inputs: Option<&Inputs>, log: &mut Vec<(&'static str, String)>) {
     let x = &s.panes[i];
     let sid = x.p.sid;
@@ -141,19 +144,36 @@ fn note_move(a: &mut Allocation, s: &Scene, i: usize, to: Option<(u8, Why)>, inp
     {
         let detail = format!("to=P{t} why={} {}", why.word(), inputs.encode());
         a.event(s.now, sid, "would_move", Some(x.p.profile), x.p.class, detail, log);
-        if why == Why::Plan {
+        // these count against the hourly cap on moves nothing forced
+        if matches!(why, Why::Plan | Why::Rescue | Why::UOut) {
             a.band_moves.push_back(s.now);
         }
+        if why.resting()
+            && let Some(l) = a.last.get_mut(&sid)
+        {
+            l.rest_moved(s.now);
+        }
     }
-    if let Some(l) = a.last.get_mut(&sid) {
-        l.would = to.map(|(t, _)| t);
+    // the target stands until the pane binds or another account is
+    // chosen: a pane going busy, or U jittering it out of a move, and
+    // back is the same would-move, written and counted once
+    if let (Some((t, _)), Some(l)) = (to, a.last.get_mut(&sid)) {
+        l.would = Some(t);
     }
-    let stuck = if x.p.out && to.is_none() { stranded(&s.accounts, x.p.class) } else { None };
+    let stuck = if x.p.out && to.is_none() { stranded(&s.accounts, x.p.class).or_else(|| held(&s.plan, inputs)) } else { None };
     if let Some(st) = a.told.tell(sid, stuck) {
         let line = match st {
             Stranded::AllOut { back_in_h } => format!("sid={sid}: every account is out, the first back in {back_in_h:.1} h"),
             Stranded::RestrictedOut { back_in_h } => format!("sid={sid}: Fable is out on every account, back in {back_in_h:.1} h; the model stays"),
+            Stranded::HeldBack { would } => format!("sid={sid}: waits rather than take what the Fable panes are short of on P{would}"),
         };
         log.push(("alloc.notice", line));
     }
+}
+
+/// A plain pane with nowhere to go only because Fable is short.
+fn held(plan: &Plan, inputs: Option<&Inputs>) -> Option<Stranded> {
+    let x = inputs?;
+    let Kind::Out { horizon_h } = x.kind else { return None };
+    held_back(&x.accounts, plan, &x.loads, x.mover, Some(x.here), horizon_h).map(|would| Stranded::HeldBack { would })
 }

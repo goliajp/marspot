@@ -171,15 +171,18 @@ fn resting<'a>(here: u8, loads: &'a [Load], demand: f64, keeper: bool) -> Restin
         stale_feed: false,
         speed_known: true,
         keeps_restricted: false,
+        moves_week: 0,
     }
 }
 
 #[test]
 fn allocation_snapshot_resting_rows() {
     let (a, p) = base();
-    // (b) resting plain pane on P3 in a shortage: not moved by the plan
+    // (b) resting plain pane on P3 in a shortage: P3's U is nothing (all
+    // of its R is Fable's), so it leaves for P7, where only plain panes
+    // can use what is left
     let on3 = placed_loads(&a, 3);
-    assert_eq!(rest_move(&a, &p, &resting(3, &on3, 0.07, false)), None);
+    assert_eq!(rest_move(&a, &p, &resting(3, &on3, 0.07, false)), Some(RestMove::UOut(7)));
     // ... and on P7: stays
     let on7 = placed_loads(&a, 7);
     assert_eq!(rest_move(&a, &p, &resting(7, &on7, 0.07, false)), None);
@@ -196,9 +199,10 @@ fn allocation_snapshot_resting_rows() {
 #[test]
 fn allocation_snapshot_busy_and_low_rows() {
     let (mut a, p) = base();
-    // P3 nearly spent: lasts under two hours with its panes on it
+    // P3 nearly spent: lasts under two hours with its panes on it, and
+    // what is left is not Fable's (that a plain pane leaves at once)
     a.iter_mut().find(|q| q.id == 3).unwrap().r = 0.0005;
-    a.iter_mut().find(|q| q.id == 3).unwrap().f = 0.0005;
+    a.iter_mut().find(|q| q.id == 3).unwrap().f = 0.0;
     let on3 = placed_loads(&a, 3);
     let mv = rest_move(&a, &p, &resting(3, &on3, 0.07, false));
     assert!(matches!(mv, Some(RestMove::LeaveEarly(_))), "{mv:?}");
