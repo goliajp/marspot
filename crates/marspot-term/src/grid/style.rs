@@ -93,12 +93,13 @@ fn recent_slot(s: PackedStyle) -> usize {
 /// Two rounds of mixing, then the top bits: a value's low byte is the
 /// same for every colour of a kind and a background alone leaves the
 /// low half zero, so one product's low or middle bits pile counted-up
-/// colours onto a few slots.  Only a miss in `recent` pays for it.
+/// colours onto a few slots.  Only the slow path pays for it: a miss
+/// in `recent`, growing the index, a sweep.
 #[inline(always)]
 fn slot_of(s: PackedStyle, mask: usize) -> usize {
     let h = s.0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let h = (h ^ h >> 32).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    h.rotate_left(mask.count_ones()) as usize & mask
+    h.rotate_left(mask.trailing_ones()) as usize & mask
 }
 
 impl StyleTable {

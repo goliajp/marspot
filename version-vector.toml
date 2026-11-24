@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.691"  # a one-shot frame read takes its deadline as an argument, for tests
-core    = "0.12.682"  # the style index hashes counted-up colours over all its slots
-session = "0.11.440"  # the style index hashes counted-up colours over all its slots
+core    = "0.12.683"  # the style index takes its top bits by trailing ones
+session = "0.11.441"  # the style index takes its top bits by trailing ones
