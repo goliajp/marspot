@@ -72,6 +72,11 @@ fn adversarial() -> Vec<Vec<u8>> {
     s("中 文\r\n🚀 \x1b[31m✨ 🎉\x1b[0m 🌏 x");
     s("\x1b[44m🚀 ✨ 🎉 🌏 🌙 ⭐ 🔥 💫 🌈\x1b[0m");
     s("中<中>中 <u>中</u> 🚀<🚀");
+    // the same character followed by a combining mark, a repeat, or
+    // written over cells that had colour
+    s("🚀a\u{0301}✨ \u{FE0F}🎉 ");
+    s("🚀 \x1b[3b✨x\x1b[2b");
+    s("\x1b[41mxxxxxx\x1b[0m\r中 文 ");
     // wide runs long enough to be classified sixteen at a time, with
     // something else in every position of a block
     s(&"漢字かなカナ한글ＡＢ、。「」ー".repeat(5));
