@@ -38,6 +38,7 @@ mod records;
 mod reply;
 #[cfg(test)]
 mod live_tests;
+mod title;
 mod worker;
 
 use std::collections::HashMap;
@@ -204,7 +205,7 @@ impl Plugin for PeerbusPlugin {
                     sid: s.entry.id,
                     codex: p.row.id(),
                     argv: p.argv.as_deref().map(<[String]>::to_vec).unwrap_or_default(),
-                    title_thread: title.as_deref().and_then(bind::thread_in_title),
+                    title_thread: title.as_deref().and_then(title::thread_in_title),
                 })
             })
             .collect();

@@ -134,8 +134,11 @@ pub(crate) struct Worker {
     /// `bindings`.
     pub(super) gemini: HashMap<u64, super::gemini_bind::GeminiBinding>,
     pub(super) wants: Vec<Want>,
-    /// Each wanted pane's title since its process was first seen.
-    pub(super) titles: HashMap<u64, super::bind::TitleWatch<pidtree::ProcId>>,
+    pub(super) titles: super::title::Titles,
+    /// `titles` as last written to its file.
+    pub(super) titles_saved: super::title::Titles,
+    /// When a pane that waits for its title is next looked at.
+    pub(super) titles_at: Option<Instant>,
     /// The Codex processes there have been, in panes or not.
     pub(super) codexes: super::others::Codexes,
     /// Which processes are a gemini, for the gemini plugin's look.
@@ -180,6 +183,8 @@ impl Worker {
             gemini: HashMap::new(),
             wants: Vec::new(),
             titles: HashMap::new(),
+            titles_saved: HashMap::new(),
+            titles_at: None,
             codexes: Default::default(),
             geminis: Default::default(),
             gemini_waiting: Vec::new(),
@@ -225,6 +230,7 @@ impl Worker {
 
     pub fn run(mut self) {
         self.clear_leftovers();
+        self.load_titles();
         // a sandbox shares the developer's HOME and writes none of this
         if std::env::var_os("MARSPOT_DEV_SANDBOX").is_none()
             && let Some(home) = std::env::var_os("HOME")
@@ -270,6 +276,7 @@ impl Worker {
                     // who runs beside the panes is only known from
                     // having looked while they were there
                     self.look_at_processes(crate::observe::INTERVAL);
+                    self.titles_due();
                     self.rename_pass();
                     self.names_passes += 1;
                     // a file the watch could not follow is still

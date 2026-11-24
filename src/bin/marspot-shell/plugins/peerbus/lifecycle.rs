@@ -23,17 +23,6 @@ use super::others;
 use super::records::private_dir;
 use super::worker::{now_ms, write_record, Binding, Worker, RETRY_MIN};
 
-/// Whether this Codex shows its thread id in the window title: what
-/// its command line sets (`-c tui.terminal_title=…`), else its home's
-/// `config.toml`.
-fn title_expected(home: &Path, argv: &[String]) -> bool {
-    let set = argv.iter().find_map(|a| a.strip_prefix("--config=").unwrap_or(a.as_str()).strip_prefix("tui.terminal_title="));
-    match set {
-        Some(list) => bind::title_shows_thread(&format!("tui.terminal_title={list}")),
-        None => std::fs::read_to_string(home.join("config.toml")).is_ok_and(|t| bind::title_shows_thread(&t)),
-    }
-}
-
 /// How old a view of the process table a binding may be decided on.
 const LOOK_AGE: Duration = Duration::from_millis(250);
 
@@ -63,11 +52,7 @@ impl Worker {
         self.look_at_processes(LOOK_AGE);
         let mut panes = Vec::new();
         let mut procs: HashMap<u64, (pidtree::ProcId, Vec<String>)> = HashMap::new();
-        let mut titles = HashMap::new();
-        for w in &self.wants {
-            titles.insert(w.sid, bind::TitleWatch::seen(self.titles.remove(&w.sid), w.codex, &w.title_thread));
-        }
-        self.titles = titles;
+        self.follow_titles();
         for w in &self.wants {
             // the observation may be two seconds old
             if pidtree::proc_id(w.codex.pid) != Some(w.codex) {
@@ -83,7 +68,7 @@ impl Worker {
             let started_ms = w.codex.start_us / 1000;
             panes.push(Pane {
                 sid: w.sid,
-                title_expected: title_expected(&home, &w.argv),
+                title_expected: super::title::title_expected(&home, &w.argv),
                 home,
                 alone: self.codexes.alone(w.codex, &cwd, started_ms),
                 cwd,
@@ -91,6 +76,7 @@ impl Worker {
                 title_thread: w.title_thread.clone(),
                 title_moved: self.titles[&w.sid].moved,
                 started_ms,
+                up_ms: (now_ms() as u64).saturating_sub(started_ms),
             });
             procs.insert(w.sid, (w.codex, w.argv.clone()));
         }
@@ -119,6 +105,7 @@ impl Worker {
             .map(|(sid, b)| (*sid, b.thread.clone()))
             .collect();
         let plan = bind::assign(&panes, &threads, &current);
+        self.wait_for_titles(panes.iter().filter(|p| plan.get(&p.sid) == Some(&Err(bind::Unbound::AwaitingTitle))));
 
         let sids: Vec<u64> = self.bindings.keys().copied().collect();
         for sid in sids {
