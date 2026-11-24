@@ -66,6 +66,12 @@ fn adversarial() -> Vec<Vec<u8>> {
     s("ab🚀cd🎉ef✨gh⭐");
     s("🚀🚀🚀🚀🚀🚀🚀🚀");
     s("x🚀 ✨ 🎉 🌏 🌙 ⭐");
+    // one character between wide ones: at the margin, before a control,
+    // at the end of the input, in colour, and a `<` where tags are read
+    s("🚀a🎉b✨c⭐d🌏e🌙f🔥g💫");
+    s("中 文\r\n🚀 \x1b[31m✨ 🎉\x1b[0m 🌏 x");
+    s("\x1b[44m🚀 ✨ 🎉 🌏 🌙 ⭐ 🔥 💫 🌈\x1b[0m");
+    s("中<中>中 <u>中</u> 🚀<🚀");
     // wide runs long enough to be classified sixteen at a time, with
     // something else in every position of a block
     s(&"漢字かなカナ한글ＡＢ、。「」ー".repeat(5));

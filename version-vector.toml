@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.691"  # a one-shot frame read takes its deadline as an argument, for tests
-core    = "0.12.683"  # the style index takes its top bits by trailing ones
-session = "0.11.442"  # the throughput probe reports the bytes handed to the kernel to write
+shell   = "0.7.692"  # the text lane writes a lone character after a wide one in place
+core    = "0.12.684"  # the text lane writes a lone character after a wide one in place
+session = "0.11.443"  # the text lane writes a lone character after a wide one in place

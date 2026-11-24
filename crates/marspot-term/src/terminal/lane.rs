@@ -11,6 +11,9 @@ use super::wide_class::wide_at;
 use crate::grid::StoredCell;
 use crate::parser::scan::printable_run_len;
 
+#[path = "lane_row.rs"]
+mod row;
+
 /// The fast-path class for `Handler::print`: codepoints that can
 /// never open, extend, or join a multi-codepoint cluster — GBP=Other,
 /// not Extended_Pictographic, InCB=None — with their cell width.  Two
@@ -259,46 +262,7 @@ impl<'a> Handler<'a> {
             // (the scan stopped short of it) and not a wide character
             let ends = n == bytes.len() || bytes[n] < 0x20 || bytes[n] == 0x7F || (tags && bytes[n] == b'<');
             if n <= room && ends {
-                let to = col + n;
-                let (cells, mark) = self.grid.row_and_mark_mut(row);
-                if plain && col >= mark.end as usize {
-                    if n < 8 {
-                        // too short to be worth a call
-                        for (cell, &b) in cells[col..to].iter_mut().zip(bytes) {
-                            *cell = StoredCell::byte(b, 0);
-                        }
-                    } else {
-                        write_chars(&mut cells[col..to], bytes);
-                    }
-                } else {
-                    write_cells(&mut cells[col..to], bytes, pen);
-                    if !plain && to > mark.plain_from as usize {
-                        mark.plain_from = to as u16;
-                    }
-                    if notes {
-                        mark.styles.note(pen);
-                    }
-                }
-                if to > mark.end as usize {
-                    mark.end = to as u16;
-                }
-                if to < cols {
-                    self.grid.set_cursor(to as u16, row);
-                } else {
-                    self.grid.set_cursor((cols - 1) as u16, row);
-                    *self.pending_wrap = true;
-                }
-                let last = bytes[n - 1];
-                let ch = last as char;
-                self.cluster_buf.clear();
-                // the run is printable ASCII: its last byte is a whole
-                // character, pushed without `String::push`'s encoder,
-                // which LLVM may leave out of line here
-                // SAFETY: a byte below 0x80 is valid UTF-8 on its own
-                unsafe { self.cluster_buf.as_mut_vec().push(last) };
-                *self.cluster_fast = Some((ch, 1));
-                *self.cluster_anchor = Some(((to - 1) as u16, row, 1));
-                *self.seg_synced = false;
+                self.ascii_in_row(bytes, n, (col, row), cols, plain, notes, pen);
                 return n;
             }
             measured = n;
@@ -382,6 +346,20 @@ impl<'a> Handler<'a> {
                     last_wide = c;
                     col += 2;
                     idx += len;
+                    // one character after it and no more text, the
+                    // space in `🚀 ✨`: written here, without the scan
+                    // and the call a longer run is worth
+                    if let Some(&s) = bytes.get(idx)
+                        && s.wrapping_sub(0x20) < 0x5F
+                        && col < cols
+                        && !bytes.get(idx + 1).is_some_and(|b| b.wrapping_sub(0x20) < 0x5F)
+                        && !(tags && s == b'<')
+                    {
+                        cells[col] = StoredCell::byte(s, pen);
+                        (last_at, last_w, last_col) = (idx, 1, col as u16);
+                        col += 1;
+                        idx += 1;
+                    }
                 } else {
                     break 0;
                 }
