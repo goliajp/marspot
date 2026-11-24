@@ -184,13 +184,18 @@ mod tests {
     #[test]
     fn a_record_made_before_the_agent_started_is_not_its() {
         let dir = temp_dir("reused");
+        // not this process: the table is the whole test binary's, and the
+        // test above files a record under this pid
         let me = marspot::pidtree::proc_id(std::process::id() as i32).unwrap();
+        let agent = marspot::pidtree::ProcId { pid: i32::MAX - 7, start_us: me.start_us };
         let relay = std::os::unix::process::parent_id() as i32;
-        let earlier = (me.start_us / 1000) as i64 - 1;
-        let r = ours(relay, me.pid, earlier);
+        let earlier = (agent.start_us / 1000) as i64 - 1;
+        let r = ours(relay, agent.pid, earlier);
         super::super::records::write_record(std::slice::from_ref(&dir), &r);
-        assert_eq!(record_files(&dir, me), vec![registry::record_path(&dir, me.pid)]);
-        assert_eq!(conversation_of_agent(std::slice::from_ref(&dir), me), None);
+        assert_eq!(record_files(&dir, agent), vec![registry::record_path(&dir, agent.pid)]);
+        assert_eq!(conversation_of_agent(std::slice::from_ref(&dir), agent), None);
+        let before = ProcId { start_us: agent.start_us - 1000, ..agent };
+        assert_eq!(record_files(&dir, before), vec![registry::record_path(&dir, agent.pid), registry::record_path(&dir, relay)], "of one started before it was made");
         super::super::records::unfile(&r);
         std::fs::remove_dir_all(&dir).unwrap();
     }
