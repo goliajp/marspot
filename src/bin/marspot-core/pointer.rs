@@ -4,6 +4,7 @@ use super::*;
 
 impl CoreApp {
     pub(super) fn mouse_moved(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
+        self.strips.pointer_at(win!(self, wi).window_id, x_phys, y_phys);
         if self.pointer_left(wi, x_phys, y_phys) {
             return;
         }

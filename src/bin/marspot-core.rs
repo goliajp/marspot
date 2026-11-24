@@ -3209,10 +3209,8 @@ fn main() {
         app.dev_drive_close_panes();
         // Dev seam (`MARSPOT_DEV_OPEN_SETTINGS=1`): open the settings
         // panel once, shortly after boot, so a sandbox run can be
-        // screenshotted.  How a panel *looks* has no test — the only
-        // check is to look at it, and driving the toolbar click from a
-        // script needs accessibility permission the sandbox has not
-        // got.  Unset in the installed app.
+        // screenshotted: a script has no accessibility permission to
+        // click the toolbar with.  Unset in the installed app.
         app.dev_drive_open_settings();
         // Dev seam (`MARSPOT_DEV_DRAG=split-right|new-window`): one pane
         // drag through the same handlers the mouse drives.  A script
@@ -3222,6 +3220,7 @@ fn main() {
         app.dev_drive_drag();
         app.dev_drive_panels();
         app.pane_control_tick();
+        app.strips_tick();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)

@@ -5,8 +5,8 @@ use crate::font_cache::FontCache;
 use crate::frame_alloc_tests::counted;
 use crate::frame_build::frame::{build_instances, BuildStats, FrameKeep};
 use crate::glyph_atlas::GlyphAtlas;
-use crate::layout::Layout;
-use crate::render::{SessionView, StripView};
+use crate::layout::{cell_grid, Layout};
+use crate::render::{SelectionView, SessionView, StripView};
 use crate::render_metal::{new_atlas, system_default_device};
 use crate::terminal::Terminal;
 use crate::ui::components::density_kit::at_scale;
@@ -125,6 +125,45 @@ fn helper_strip_tick_leaves_the_pane_as_it_was_and_allocates_nothing() {
     });
 }
 
+/// Where in `cells` the ground of the strip at row `top` is.
+fn ground(b: &Bench, cells: &[RectInstance], top: u16) -> usize {
+    let c = b.layout.cells[0];
+    let at = cell_grid(&c, b.layout.cell_title_h, b.layout.padding, b.font.cell_w, b.font.cell_h);
+    let origin = [at.x as f32, at.row_top(top) as f32];
+    let size = [(c.cols as f64 * at.w) as f32, (STRIP as f64 * at.h) as f32];
+    cells.iter().position(|r| r.origin == origin && r.size == size).expect("the strip's ground")
+}
+
+/// What the pane paints where its strip is does not show through, and
+/// the ground is the pane's own.
+#[test]
+fn helper_strip_covers_a_selection_under_it() {
+    at_scale(1.0, || {
+        let Some(mut b) = Bench::new(STRIP) else { return };
+        let term = pane(&b);
+        let strip = Grid::with_scrollback(b.layout.cells[0].cols, STRIP, 0);
+        let selection = crate::ui::theme::terminal::TermColors::current().selection;
+        let mut grounds = Vec::new();
+        for focused in [true, false, true] {
+            b.frame(SessionView {
+                seq: 1,
+                focused,
+                selection: Some(SelectionView { anchor: (0, 0), focus: (9, 8), blockwise: true }),
+                strip: Some(StripView { grid: &strip, seq: 1, top_row: 3 }),
+                ..SessionView::plain(term.grid())
+            });
+            let cells = &b.lists.cells;
+            let at = ground(&b, cells, 3);
+            let last = cells.iter().rposition(|r| r.color == selection).expect("a selection");
+            assert!(last < at, "the ground is over it");
+            assert_eq!(cells[at].color, cells[0].color, "the pane's own ground");
+            grounds.push(cells[at].color);
+        }
+        assert_ne!(grounds[0], grounds[1], "which says whether the pane is in use");
+        assert_eq!(grounds[0], grounds[2]);
+    });
+}
+
 /// A row of a strip is drawn exactly as the same row of a terminal.
 #[test]
 fn helper_strip_is_drawn_as_the_terminal_draws() {
@@ -151,7 +190,8 @@ fn helper_strip_is_drawn_as_the_terminal_draws() {
                 strip: Some(StripView { grid: &strip, seq: 1, top_row: top }),
                 ..SessionView::plain(blank.grid())
             });
-            let (cells, glyphs) = (b.lists.cells.clone(), b.lists.glyphs.clone());
+            let (mut cells, glyphs) = (b.lists.cells.clone(), b.lists.glyphs.clone());
+            cells.remove(ground(&b, &cells, top));
             let mut own = Grid::with_scrollback(c.cols, c.rows + STRIP, 0);
             fill(&mut own, top);
             b.frame(SessionView { seq: 2, ..SessionView::plain(&own) });

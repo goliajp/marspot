@@ -6,15 +6,15 @@ use marspot_term::grid::{Cell, CellAttrs, Grid};
 use marspot_term::session_registry as reg;
 use marspot_term::terminal::Terminal;
 
-fn dim() -> CellAttrs {
+pub(super) fn dim() -> CellAttrs {
     CellAttrs { dim: true, ..CellAttrs::default() }
 }
 
-fn run(col: u16, text: &str) -> Run<'_> {
+pub(super) fn run(col: u16, text: &str) -> Run<'_> {
     Run { col, text, attrs: dim() }
 }
 
-fn text(g: &Grid, row: u16) -> String {
+pub(super) fn text(g: &Grid, row: u16) -> String {
     (0..g.cols()).map(|c| g.cell(c, row).ch).filter(|c| *c != '\0').collect()
 }
 
@@ -24,9 +24,13 @@ fn screen(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
     t
 }
 
+fn over(screen: &Grid, shown: u64, seq: u64, scrolled: bool) -> Over<'_> {
+    Over { screen, shown, seq, scrolled, rows: 10, preedit_end: None, now: Instant::now() }
+}
+
 /// A window of one pane that gives up `rows` rows, laid out and placed
 /// as a frame would.
-fn app_with_strip(sb: &Sandbox, rows: u16) -> (CoreApp, u64) {
+pub(super) fn app_with_strip(sb: &Sandbox, rows: u16) -> (CoreApp, u64) {
     let sid = reg::allocate_next_session_id().unwrap();
     let mut app = app_in(sb.dir(), vec![win(1, vec![Pane::new_vacant(sid, 60, 16)])]);
     app.strips.set_rows(sid, rows);
@@ -36,7 +40,7 @@ fn app_with_strip(sb: &Sandbox, rows: u16) -> (CoreApp, u64) {
 }
 
 /// The middle of column 3 of row `row` of the only pane.
-fn at_row(app: &CoreApp, row: u16) -> (f64, f64) {
+pub(super) fn at_row(app: &CoreApp, row: u16) -> (f64, f64) {
     let l = &app.windows[0].layout;
     let (cw, ch) = app.renderer.cell_dims();
     let g = marspot::layout::cell_grid(&l.cells[0], l.cell_title_h, l.padding, cw, ch);
@@ -121,19 +125,21 @@ fn a_press_on_the_strip_selects_nothing_and_opens_no_menu() {
 }
 
 #[test]
-fn a_drag_into_the_strip_ends_on_the_terminals_last_row() {
+fn a_drag_into_the_strip_ends_on_the_row_above_it() {
     let sb = Sandbox::new();
     let (mut app, _) = app_with_strip(&sb, 4);
     let rows = app.windows[0].layout.cells[0].rows;
     let none = Modifiers::default();
     let (x, y) = at_row(&app, 0);
     app.mouse_down(0, x, y, none);
-    let (x, y) = at_row(&app, rows - 2);
+    let (x, y) = at_row(&app, 1);
     app.mouse_drag(0, x, y, 1, x, y);
-    assert_eq!(app.windows[0].selection.unwrap().focus, (3, 1));
-    let (x, y) = at_row(&app, rows + 2);
-    app.mouse_drag(0, x, y, 1, x, y);
-    assert_eq!(app.windows[0].selection.unwrap().focus, (3, 0), "counted from the bottom row");
+    assert_eq!(app.windows[0].selection.unwrap().focus, (3, rows as u32 - 2), "counted from the bottom row");
+    for row in [2, 4, rows - 2, rows + 2] {
+        let (x, y) = at_row(&app, row);
+        app.mouse_drag(0, x, y, 1, x, y);
+        assert_eq!(app.windows[0].selection.unwrap().focus, (3, rows as u32 - 2), "row {row}: the strip is at row 2");
+    }
 }
 
 #[test]
@@ -141,13 +147,13 @@ fn it_follows_the_screens_last_row_and_stops_at_the_terminals_end() {
     let mut s = One::new(3);
     s.fit(20, 3);
     let place = |s: &mut One, bytes: &[u8], seq: u64, scrolled: bool| {
-        s.place(screen(20, 10, bytes).grid(), 1, seq, scrolled, 10);
+        s.place(over(screen(20, 10, bytes).grid(), 1, seq, scrolled));
         s.top_row()
     };
     assert_eq!(place(&mut s, b"a\r\nb", 1, false), Some(2));
     assert_eq!(place(&mut s, b"\x1b[10;1Hx\x1b[H", 2, false), Some(10), "a full screen: under its last row");
     assert_eq!(place(&mut s, b"a", 3, true), Some(10), "history: under the last row");
-    s.place(screen(20, 12, b"a").grid(), 1, 4, false, 10);
+    s.place(over(screen(20, 12, b"a").grid(), 1, 4, false));
     assert_eq!(s.top_row(), None, "a screen not yet cut down to size has rows there");
     assert!(s.view().is_none());
 }
@@ -156,13 +162,13 @@ fn it_follows_the_screens_last_row_and_stops_at_the_terminals_end() {
 fn a_screen_is_gone_through_once_per_frame_of_it() {
     let mut s = One::new(3);
     let (short, long) = (screen(20, 10, b"a"), screen(20, 10, b"a\r\nb\r\nc"));
-    s.place(short.grid(), 1, 7, false, 10);
-    s.place(long.grid(), 1, 7, false, 10);
+    s.place(over(short.grid(), 1, 7, false));
+    s.place(over(long.grid(), 1, 7, false));
     assert_eq!(s.top_row(), Some(1), "the same frame: not looked at again");
-    s.place(long.grid(), 2, 7, false, 10);
+    s.place(over(long.grid(), 2, 7, false));
     assert_eq!(s.top_row(), Some(3), "another session at the same frame");
-    s.place(short.grid(), 2, 8, false, 10);
-    assert_eq!(s.top_row(), Some(1), "another frame");
+    s.place(over(short.grid(), 1, 8, false));
+    assert_eq!(s.top_row(), Some(1), "another session's, where it is at once");
 }
 
 #[test]

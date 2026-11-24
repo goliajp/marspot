@@ -8,10 +8,12 @@
 use std::hash::{Hash, Hasher};
 
 use crate::font_cache::FontCache;
+use crate::frame_build::color::rgba8_of_f32;
 use crate::frame_build::session::{paint_row, PaneGeom, PaneOut};
 use crate::glyph_atlas::GlyphAtlas;
 use crate::layout::{cell_grid, CellRect, Layout};
 use crate::render::{SessionView, StripView};
+use crate::ui::components::panel_palette as palette;
 use crate::ui::theme::terminal::TermColors;
 use golia_ui_core::scene::{GlyphInstance, RectInstance as CellInstance};
 use marspot_term::fast_hash::FxHasher;
@@ -34,12 +36,14 @@ fn strip_key(
     layout: &Layout,
     font: &FontCache,
     colors: &TermColors,
+    ground: [f32; 4],
     atlases: [&GlyphAtlas; 2],
 ) -> u64 {
     let mut h = FxHasher::default();
     (view.session, strip.seq, strip.top_row, strip.grid.cols(), strip.grid.rows()).hash(&mut h);
     colors.id.hash(&mut h);
     marspot_term::language::version().hash(&mut h);
+    ground.map(f32::to_bits).hash(&mut h);
     for v in [rect.x, rect.y_top, layout.cell_title_h, layout.padding, font.cell_w, font.cell_h, font.ascent] {
         v.to_bits().hash(&mut h);
     }
@@ -55,6 +59,7 @@ fn strip_key(
 pub(crate) fn push_strips(
     layout: &Layout,
     views: &[SessionView],
+    window_focused: bool,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -70,9 +75,11 @@ pub(crate) fn push_strips(
         }
         let cache = &mut caches[i];
         let colors = TermColors::current();
-        let key = strip_key(view, strip, rect, layout, font, &colors, [atlas, color_atlas]);
+        // the pane under it may be painting a selection there
+        let ground = palette::pane_bg(view.focused && window_focused);
+        let key = strip_key(view, strip, rect, layout, font, &colors, ground, [atlas, color_atlas]);
         if cache.key != Some(key) {
-            lay_out(cache, strip, rect, layout, colors, font, atlas, color_atlas);
+            lay_out(cache, strip, rect, layout, colors, ground, font, atlas, color_atlas);
             cache.key = Some(key);
         }
         cells.extend_from_slice(&cache.cells);
@@ -87,6 +94,7 @@ fn lay_out(
     rect: &CellRect,
     layout: &Layout,
     colors: TermColors,
+    ground: [f32; 4],
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -117,6 +125,11 @@ fn lay_out(
     cells.clear();
     glyphs.clear();
     color_glyphs.clear();
+    cells.push(CellInstance {
+        origin: [at.x as f32, at.row_top(strip.top_row) as f32],
+        size: [(strip.grid.cols() as f64 * at.w) as f32, (strip.grid.rows() as f64 * at.h) as f32],
+        color: rgba8_of_f32(ground),
+    });
     let mut o = PaneOut { font, atlas, color_atlas, cells, glyphs, color_glyphs };
     for r in 0..strip.grid.rows() {
         paint_row(&g, &mut o, r, row_clusters);

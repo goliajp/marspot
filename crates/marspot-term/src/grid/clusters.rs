@@ -63,6 +63,26 @@ impl Grid {
         Cell { ch: as_char, attrs }
     }
 
+    /// Make the cell at (`col`, `row`) say `cluster`, rewriting the pool
+    /// entry it points at if it has one.  False when it already did.
+    pub fn put_cluster(&mut self, col: u16, row: u16, cluster: &str, attrs: CellAttrs) -> bool {
+        let was = self.cell(col, row);
+        let Some(slot) = was.cluster_index().and_then(|i| self.clusters.get_mut(i as usize)) else {
+            let cell = self.cluster_cell(cluster, attrs);
+            self.set_cell(col, row, cell);
+            return true;
+        };
+        let mut attrs = attrs;
+        attrs._pad[0] |= FLAG_CLUSTER;
+        if slot == cluster && was.attrs == attrs {
+            return false;
+        }
+        slot.clear();
+        slot.push_str(cluster);
+        self.set_cell(col, row, Cell { ch: was.ch, attrs });
+        true
+    }
+
     /// What a cell says, as text.
     ///
     /// One codepoint for an ordinary cell; the whole cluster for one

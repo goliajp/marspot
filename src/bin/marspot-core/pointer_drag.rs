@@ -129,7 +129,8 @@ impl CoreApp {
         }
 
         let col = raw_col.clamp(0, cell.cols.saturating_sub(1) as i64);
-        let row = raw_row.clamp(0, max_row);
+        let floor = self.selection_floor(wi, target_idx, cell.rows.saturating_sub(1));
+        let row = raw_row.clamp(0, floor as i64);
 
         // Re-read view_offset AFTER any auto-scroll above.
         let pane = &win!(self, wi).panes[target_idx];
@@ -162,15 +163,16 @@ impl CoreApp {
             return;
         }
         // Release the button the program was told about, at whatever
-        // cell the pointer is over now — or, if it left the pane, at
-        // the one the press reported.
-        self.mouse_report_last_cell = None;
-        if let Some((idx, press_c, press_r)) = self.mouse_report_press.take() {
+        // cell the pointer is over now — or, if that is none of the
+        // pane's, at the last one it heard of.
+        let last = self.mouse_report_last_cell.take();
+        self.strips.pointer_at(drop_window_id, drop_x, drop_y);
+        if let Some(press @ (idx, _, _)) = self.mouse_report_press.take() {
             let here = self
                 .cell_pos_at(wi, drop_x, drop_y)
                 .filter(|(i, _, _)| *i == idx)
                 .map(|(_, c, r)| (c as u32 + 1, r as u32 + 1));
-            let (c1, r1) = here.unwrap_or((press_c, press_r));
+            let (c1, r1) = here.unwrap_or_else(|| last_heard(press, last));
             if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
                 pane.session_mut().l3_inject_mouse_button(0, false, c1, r1);
             }
@@ -251,4 +253,12 @@ impl CoreApp {
                 }
         }
     }
+}
+
+/// The cell the program in a pane last heard the pointer was at: of the
+/// travel reported since the press if any was in its pane, else of the
+/// press.
+pub(super) fn last_heard(press: (usize, u32, u32), last: Option<(usize, u32, u32)>) -> (u32, u32) {
+    let (_, c, r) = last.filter(|l| l.0 == press.0).unwrap_or(press);
+    (c, r)
 }

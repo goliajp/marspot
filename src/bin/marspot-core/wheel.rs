@@ -31,6 +31,9 @@ impl CoreApp {
             return;
         }
         let idx = win!(self, wi).focused_idx;
+        if self.strip_takes_wheel(wi, idx) {
+            return;
+        }
         // A mouse-tracking TUI (claudecode etc.) owns its own scroll: the
         // wheel is injected to the app, which redraws the whole screen in
         // place — marspot only ever sees the new grid and cannot re-anchor

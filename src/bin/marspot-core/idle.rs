@@ -132,6 +132,7 @@ impl super::CoreApp {
             }
         }
         wait = sooner(wait, self.pane_control.wait());
+        wait = sooner(wait, self.strips.wait(now));
         // the dev seams act on a clock of their own; none is set in the
         // installed app
         if self.dev_close_panes > 0 {

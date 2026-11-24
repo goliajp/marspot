@@ -163,7 +163,7 @@ pub(crate) fn build_frame(
         layout, views, window_focused, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
         font, atlas, color_atlas, cells, glyphs, color_glyphs, ui_rects, &mut kept.panes, inline_panes,
     );
-    push_strips(layout, views, font, atlas, color_atlas, cells, glyphs, color_glyphs, &mut kept.strips);
+    push_strips(layout, views, window_focused, font, atlas, color_atlas, cells, glyphs, color_glyphs, &mut kept.strips);
 
     // Everything after the panes in the main layers goes through one
     // painter: seams and focus ring, empty seats, sidebar, toolbar,

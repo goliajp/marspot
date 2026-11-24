@@ -216,6 +216,7 @@ impl CoreApp {
                 pane.session_mut().l3_inject_mouse_button(0, true, c1, r1);
             }
             self.mouse_report_press = Some((idx, c1, r1));
+            self.mouse_report_last_cell = Some((idx, c1, r1));
             return true;
         }
         false
