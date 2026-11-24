@@ -330,7 +330,7 @@ mod tests {
         let text = text_of("marspot-helpers", "SKILL.md");
         assert!(text.len() <= 4096, "{} bytes", text.len());
         let description = text.lines().find(|l| l.starts_with("description: ")).expect("a description");
-        for phrase in ["use codex / gemini / kimi / another claude", "have codex draw", "in parallel", "ask another agent", "codex exec"] {
+        for phrase in ["Use before running `codex exec`", "gemini -p", "use codex / gemini / kimi / another claude", "have codex draw", "in parallel", "ask another agent", "用 codex"] {
             assert!(description.contains(phrase), "{phrase}");
         }
         let usage = marspot_peer::control::cli_helper::USAGE;

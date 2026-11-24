@@ -1,13 +1,13 @@
 ---
 name: marspot-helpers
-description: Use when running inside the marspot terminal and the user wants another agent to do some of the work — "use codex / gemini / kimi / another claude to do …", "have codex draw / review / write / fix …", "ask another agent", "get a second opinion from gemini", "run this in parallel", "hand this off". Covers starting a marspot helper (an agent in a background pane under yours) with the HelperStart / Helpers / HelperStop tools or `marspot-peer helper`, how its result comes back, and when a one-shot `codex exec` / `claude -p` / `gemini -p` is enough instead.
+description: Use before running `codex exec`, `claude -p` or `gemini -p` in a shell, or otherwise handing work to another agent inside the marspot terminal — "use codex / gemini / kimi / another claude to …", "have codex draw / review / write / fix …", "ask another agent", "run this in parallel", "用 codex 做…", "让 gemini 帮我…". Work of over a minute or two goes to a marspot helper (HelperStart / Helpers / HelperStop, or `marspot-peer helper`), not a shell exec; a one-shot exec is only for an answer of a few seconds. Covers starting a helper, how its result comes back, checking on and stopping it.
 ---
 
 # marspot-helpers
 
 A helper is another agent (claude, codex, gemini or kimi) that marspot starts
-on a task in a windowless pane under yours, closed when yours closes. It shows in the helper list at the bottom of your pane, with
-its running time and tokens.
+on a task in a windowless pane under yours, closed when yours closes. It is
+listed at the bottom of your pane with its running time and tokens.
 
 ## Helper or one-shot exec
 
@@ -18,7 +18,7 @@ Start a helper when any of these holds:
 - you may want to ask it follow-up questions
 - the user should be able to watch it
 
-A helper does not block your shell or your turn. marspot picks its account:
+A helper does not block you. marspot picks its account:
 for claude, codex and kimi the one with the most quota left, for gemini the
 next in turn. A claude or kimi helper whose account runs out is moved to
 another account and goes on. The result comes to you when it stops.

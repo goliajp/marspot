@@ -70,3 +70,23 @@ fn the_lists_do_not_wait_for_a_binding() {
     hang_up.join().unwrap().unwrap();
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+/// Every client is offered the helper tools, so every `initialize`
+/// answer says when to start a helper; only Claude Code is told how
+/// to load a deferred tool.
+#[test]
+fn mcp_initialize_says_when_to_start_a_helper() {
+    for (client, deferred) in [("claude-code", true), ("codex-mcp-client", false), ("gemini-cli-mcp-client", false), ("kimi", false)] {
+        let mut s = server();
+        let line = format!(r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"clientInfo":{{"name":"{client}"}}}}}}"#);
+        let r = s.handle(&line, 0).unwrap();
+        let text = r.at(&["result", "instructions"]).and_then(Value::str).expect("instructions");
+        for phrase in ["HelperStart", "`codex exec`", "`claude -p`", "`gemini -p`", "more than a minute or two", "a few seconds"] {
+            assert!(text.contains(phrase), "{client}: {phrase}");
+        }
+        assert_eq!(text.contains("ToolSearch"), deferred, "{client}");
+        assert!(text.len() < 1024, "{client}: {} bytes", text.len());
+        let listed = s.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, 0).unwrap();
+        assert!(names(&listed).iter().any(|n| n == "HelperStart"), "{client}");
+    }
+}

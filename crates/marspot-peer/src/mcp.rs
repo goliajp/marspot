@@ -156,6 +156,7 @@ impl Server {
                     ("protocolVersion", Value::from(version)),
                     ("capabilities", obj([("tools", obj([]))])),
                     ("serverInfo", obj([("name", Value::from("marspot")), ("version", Value::from(env!("CARGO_PKG_VERSION")))])),
+                    ("instructions", Value::from(crate::mcp_panes::instructions(self.is_claude()))),
                 ])
             }
             "ping" => obj([]),

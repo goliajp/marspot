@@ -31,6 +31,17 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("HelperStop", "Stop a helper by name, or all:true for all of yours."),
 ];
 
+/// The `instructions` of the `initialize` answer.  Clients that put
+/// server instructions into the model's context (Claude Code, Gemini CLI)
+/// show it there, so the rule reaches a model that never loads the
+/// helpers skill or a deferred tool's description.
+pub fn instructions(claude: bool) -> String {
+    let deferred = if claude { " If HelperStart is a deferred tool, load it first with ToolSearch (select:mcp__marspot__HelperStart)." } else { "" };
+    format!(
+        "To have another agent (codex, gemini, kimi or another claude) do work that takes more than a minute or two, runs in parallel, needs follow-ups or should be watched by the user, call HelperStart instead of running `codex exec`, `claude -p` or `gemini -p` in a shell, in the foreground or the background. A helper runs in a background pane under yours, does not block you, and its result reaches you when it stops.{deferred} A one-shot exec is fine for an answer of a few seconds."
+    )
+}
+
 /// The longest wait, in seconds, a client named `client` lets one tool
 /// call take, less five seconds.  `configured_s` is the deadline marspot
 /// wrote into that client's server entry, when it wrote one.
