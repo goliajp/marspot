@@ -21,8 +21,9 @@
 //! - The script checks that the working directory's path still leads to
 //!   the directory that was looked at; docker opens it again a moment
 //!   later, by which time a program on the host may have changed it.
-//! - The login itself: claude's access token; gemini's and kimi's whole
-//!   login, refresh token included, which the container may use or spoil.
+//! - The login itself: claude's and codex's access token; gemini's and
+//!   kimi's whole login, refresh token included, which the container may
+//!   use or spoil.
 //!   Of kimi's, what is no regular file in `credentials/` and `oauth/` is
 //!   moved beside them when the helper ends (`pending`).  Regular files
 //!   stay whatever they hold and are called, hard links between them and
@@ -41,6 +42,7 @@ use super::table::Helper;
 use super::{Shared, records};
 
 mod cleanup;
+mod codex_auth;
 mod creds;
 mod docker;
 mod expired;
@@ -55,6 +57,8 @@ mod script;
 mod tests;
 #[cfg(test)]
 mod tests_away;
+#[cfg(test)]
+mod tests_codex;
 #[cfg(test)]
 mod tests_gone;
 
@@ -88,14 +92,13 @@ pub(super) fn check(a: &HelperStartArgs, cwd: &str) -> Result<Ready, Reject> {
         let why = "a helper in a container cannot go on with a conversation of the host; leave `resume` out, or use isolation host";
         return Err(Reject::new(ErrorCode::NotSupported, why));
     }
-    creds::supported(a.agent)?;
     let until = Instant::now() + CHECKS;
     let cwd = guard::cwd(Path::new(cwd))?;
     script::mountable(&cwd)?;
     let docker = docker::up(until)?;
     let (account, login, binds) = match a.agent {
-        AgentKind::Claude => {
-            let (account, login) = login::pick(a.profile, a.model.as_deref(), a.budget_minutes, until)?;
+        AgentKind::Claude | AgentKind::Codex => {
+            let (account, login) = login::pick(a.agent, a.profile, a.model.as_deref(), a.budget_minutes, until)?;
             (account, Some(login), Vec::new())
         }
         agent => {
@@ -130,7 +133,7 @@ fn write_files(dir: &Path, sid: u64, a: &HelperStartArgs, parent: &str, mode: &s
     image::name_in(dir).map_err(io)?;
     if let Some(l) = &r.login {
         std::fs::write(dir.join("resume.sh"), script::run(&spec, true)?).map_err(io)?;
-        login::write_env(dir, l)?;
+        login::hand_over(dir, l)?;
     }
     let result = Path::new(SHARE).join("result.md");
     // it has no SendMessage: its questions go by the result file

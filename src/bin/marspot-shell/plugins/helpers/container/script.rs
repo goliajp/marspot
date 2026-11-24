@@ -76,7 +76,9 @@ fn mode_flags(agent: AgentKind, mode: &str) -> Vec<String> {
         (AgentKind::Claude, "auto") => vec!["--permission-mode", "bypassPermissions"],
         (AgentKind::Gemini, "auto") => vec!["--approval-mode", "yolo"],
         (AgentKind::Kimi, "auto") => vec!["--auto"],
-        (AgentKind::Codex, "auto") | (_, "ask") => Vec::new(),
+        // codex's own sandbox cannot start under docker's seccomp: the container is the sandbox
+        (AgentKind::Codex, "auto") => vec!["-a", "never", "-s", "danger-full-access"],
+        (_, "ask") => Vec::new(),
         (_, custom) => custom.split_whitespace().collect(),
     };
     let more: &[&str] = match agent {
@@ -91,7 +93,8 @@ fn agent_words(s: &Spec, again: bool) -> Result<Vec<String>, Reject> {
     let mut w = vec![s.agent.as_str().to_string()];
     if again {
         // the home is this helper's own: its last conversation is the one
-        w.push("--continue".into());
+        let go_on: &[&str] = if s.agent == AgentKind::Codex { &["resume", "--last"] } else { &["--continue"] };
+        w.extend(go_on.iter().map(|g| (*g).to_string()));
     }
     if let Some(m) = s.model {
         let flag = if s.agent == AgentKind::Claude { "--model" } else { "-m" };

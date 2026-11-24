@@ -8,7 +8,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --no-fund --no-audit \
-      @anthropic-ai/claude-code@2.1.330 @google/gemini-cli@0.70.0
+      @anthropic-ai/claude-code@2.1.330 @google/gemini-cli@0.70.0 @openai/codex@0.172.0
 
 # the vendor's installer puts kimi under ~/.kimi-code, where an account's
 # home is mounted at run time
@@ -25,5 +25,5 @@ RUN install -d -o node -g node /work /marspot /claude
 USER node
 WORKDIR /work
 ENV DISABLE_AUTOUPDATER=1
-RUN claude --version && gemini --version && kimi --version \
- && rm -rf /home/node/.claude /home/node/.claude.json /home/node/.gemini /home/node/.kimi-code
+RUN claude --version && gemini --version && kimi --version && codex --version \
+ && rm -rf /home/node/.claude /home/node/.claude.json /home/node/.gemini /home/node/.kimi-code /home/node/.codex

@@ -8,7 +8,8 @@
 # runtime.  It starts one session and one small container at a time,
 # with a stand-in agent: no account, no token and no model are used.
 #
-# For claude (token by env file), gemini and kimi (credentials mounted):
+# For claude (token by env file), codex (token in a login file of its
+# own home), gemini and kimi (credentials mounted):
 #   - the working directory, the result directory, the helper's own home
 #     and the credentials are mounted where the agent looks for them, and
 #     nothing else is, what the account's links lead to among it;
@@ -122,6 +123,11 @@ cat > "$SB/image/agent" <<'AGENT'
     echo renewed > $K/credentials/t.json.tmp.1 && mv $K/credentials/t.json.tmp.1 $K/credentials/kimi-code.json && echo "replaced"
     mkdir $K/oauth/kimi-code.lock && rmdir $K/oauth/kimi-code.lock && echo "locked"
   fi
+  C=/home/node/.codex
+  if [ -f $C/auth.json ]; then
+    echo "codex login $(grep -o '"refresh_token":"[^"]*"' $C/auth.json) $(grep -c ACCESS-SIG-0123 $C/auth.json)"
+    echo codex home $(ls -A $C)
+  fi
   echo "host $(ls -d /Users/*/.ssh /Users/*/Library 2>/dev/null | wc -l | tr -d ' ')"
   [ -t 0 ] && [ -t 2 ] && echo "terminal"
 } > /marspot/result.md
@@ -137,7 +143,8 @@ RUN adduser -D -u 1000 node
 COPY agent /usr/local/bin/claude
 COPY agent /usr/local/bin/gemini
 COPY agent /usr/local/bin/kimi
-RUN chmod 755 /usr/local/bin/claude /usr/local/bin/gemini /usr/local/bin/kimi
+COPY agent /usr/local/bin/codex
+RUN chmod 755 /usr/local/bin/claude /usr/local/bin/gemini /usr/local/bin/kimi /usr/local/bin/codex
 USER node
 DOCKERFILE
 limit 180 "$DOCKER" build -q -t "$TAG" "$SB/image" >/dev/null || { echo "FAIL: the test image did not build" >&2; exit 1; }
@@ -160,7 +167,7 @@ ln -s "$SB/elsewhere" "$SB/account/.gemini/linked"
 export CONTAINER_DOCKER="$DOCKER" CONTAINER_IMAGE="$TAG" CONTAINER_CWD="$SB/work" CONTAINER_HOME="$SB/account"
 
 sid=$(( $$ % 100000 * 10 + 900000 ))
-for run in claude:hangup claude:kill gemini:hangup kimi:kill; do
+for run in claude:hangup claude:kill codex:hangup gemini:hangup kimi:kill; do
   agent=${run%%:*}
   sid=$((sid + 1))
   echo "════ $agent, ended by a ${run#*:} ════"
@@ -195,6 +202,11 @@ for run in claude:hangup claude:kill gemini:hangup kimi:kill; do
     check "inside: its config directory is there" grep -qx "config there" "$R"
     check "the token is on no command line" bash -c "! grep -q TOKEN-0123 '$SB/$sid/run.sh' && grep -q TOKEN-0123 '$SB/$sid/env'"
     check "the env file is private" test "$(stat -f %Lp "$SB/$sid/env")" = 600
+  elif [[ $agent == codex ]]; then
+    check "inside: its access token and no refresh token" grep -qxF 'codex login "refresh_token":"" 1' "$R"
+    check "inside: its own home and nothing of the account" grep -qxF "codex home auth.json config.toml" "$R"
+    check "the login file is private" test "$(stat -f %Lp "$SB/$sid/home/auth.json")" = 600
+    check "the token is on no command line" bash -c "! grep -q ACCESS-SIG //run.sh //resume.sh"
   else
     check "inside: its login and nothing beside it" grep -qx "login a-login 0" "$R"
     creds="$SB/account/credentials/kimi-code.json" how="replaced"
@@ -211,7 +223,7 @@ done
 echo "════ clean up ════"
 dk image rm -f "$TAG" >/dev/null 2>&1
 [[ $base_was_there == no ]] && dk image rm "$BASE" >/dev/null 2>&1
-for (( n = sid - 3; n <= sid; n++ )); do
+for (( n = sid - 4; n <= sid; n++ )); do
   check "no container of this test is left ($n)" none_of "$n"
 done
 check "its image is gone" no_image "$TAG"

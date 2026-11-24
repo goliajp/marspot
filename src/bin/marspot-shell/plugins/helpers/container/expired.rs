@@ -1,6 +1,7 @@
-//! A claude container whose token ran out while it worked.  The token in
-//! it cannot be renewed from here; once claude on the host has renewed
-//! the account's own, the container is started again with that.
+//! A claude or codex container whose token ran out while it worked.  The
+//! token in it cannot be renewed from here; once the agent on the host
+//! has renewed the account's own, the container is started again with
+//! that.
 
 use std::sync::Arc;
 
@@ -16,10 +17,21 @@ pub(in super::super) struct Over {
     pub renewed: bool,
 }
 
-/// claude's own words for a login that is no longer taken.
+/// claude's and codex's own words for a login that is no longer taken.
 pub(super) fn refused(screen: &str) -> bool {
     let s = screen.to_ascii_lowercase();
-    ["token has expired", "please run /login", "api error: 401", "authentication_error", "invalid bearer token"].iter().any(|w| s.contains(w))
+    const WORDS: [&str; 9] = [
+        "token has expired",
+        "please run /login",
+        "api error: 401",
+        "authentication_error",
+        "invalid bearer token",
+        "unauthorized (401)",
+        "401 unauthorized",
+        "failed to refresh token",
+        "try signing in again",
+    ];
+    WORDS.iter().any(|w| s.contains(w))
 }
 
 /// Judge a stop at `now`: the token in the container ended at `expires`,
@@ -44,25 +56,26 @@ pub(super) fn judge(expires: i64, newer: Option<i64>, screen: &str, now: i64) ->
 /// What is to be said of `h`'s login at `stop`, `screen` being the
 /// bottom of its screen.
 pub(in super::super) fn at_stop(s: &Shared, h: &Helper, stop: Stop, screen: Option<&str>) -> Option<Over> {
-    if !h.contained() || h.started.agent != AgentKind::Claude || stop.is_last() || h.result_new {
+    let agent = h.started.agent;
+    if !h.contained() || !matches!(agent, AgentKind::Claude | AgentKind::Codex) || stop.is_last() || h.result_new {
         return None;
     }
     let (expires, now) = (login::expires_ms(&s.dir_of(h.sid))?, records::now_ms() as i64);
-    let newer = || login::of_label(&h.account).and_then(|l| l.expires_at);
+    let newer = || login::of_label(agent, &h.account).and_then(|l| l.expires_at());
     judge(expires, (expires <= now).then(newer).flatten(), screen.unwrap_or_default(), now)
 }
 
 /// Start helper `sid`'s container again with the login `account` has
 /// now.  A start that fails leaves the pane at its shell, which its
 /// watch tells of.
-pub(in super::super) fn restart(s: &Arc<Shared>, sid: u64, account: String) {
+pub(in super::super) fn restart(s: &Arc<Shared>, sid: u64, agent: AgentKind, account: String) {
     let me = Arc::clone(s);
     let again = move || {
         let dir = me.dir_of(sid);
-        let l = login::of_label(&account).ok_or("its login cannot be read")?;
+        let l = login::of_label(agent, &account).ok_or("its login cannot be read")?;
         let d = docker::find().ok_or("there is no docker command")?;
         docker::remove(&d, &docker::container_name(sid))?;
-        login::write_env(&dir, &l).map_err(|r| r.message)?;
+        login::hand_over(&dir, &l).map_err(|r| r.message)?;
         prepare::type_line(&me, sid, &prepare::resume_line(&dir))?;
         me.record(sid, Event::InputSeen);
         Ok::<(), String>(())

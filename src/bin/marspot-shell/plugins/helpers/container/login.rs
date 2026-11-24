@@ -1,21 +1,37 @@
-//! claude's login for a container: the account's access token, read and
-//! never refreshed, handed over in a file only this user can read.  A
-//! refresh from outside the command line would log the account out, so
-//! only an account whose token outlives the helper's budget is taken.
+//! claude's and codex's login for a container: the account's access
+//! token, read and never refreshed, handed over in a file only this user
+//! can read.  A refresh from outside the command line would log the
+//! account out, so only an account whose token outlives the helper's
+//! budget is taken.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use marspot_peer::control::{ErrorCode, Reject};
+use marspot_peer::control::{AgentKind, ErrorCode, Reject};
 
-use super::super::launch::Account;
-use super::records;
-use crate::plugins::handoff::{self, Agent};
+use super::super::launch::{Account, agent_of};
+use super::{codex_auth, records};
+use crate::plugins::handoff;
 use crate::plugins::usage::for_helpers::{self, Pick};
 
-pub(super) use crate::plugins::usage::for_helpers::Login;
+pub(super) use crate::plugins::usage::for_helpers::Login as ClaudeLogin;
+
+/// What a container is handed of an account.
+pub(super) enum Login {
+    Claude(ClaudeLogin),
+    Codex(codex_auth::Auth),
+}
+
+impl Login {
+    pub fn expires_at(&self) -> Option<i64> {
+        match self {
+            Login::Claude(l) => l.expires_at,
+            Login::Codex(a) => a.expires_at,
+        }
+    }
+}
 
 /// What a token has to have left past the budget.
 const MARGIN_S: i64 = 10 * 60;
@@ -43,7 +59,7 @@ pub(super) fn lasts(left: Option<i64>, budget_min: u32) -> bool {
 }
 
 /// Why none will do, with what each has left.
-pub(super) fn none_text(left: &Left, budget_min: u32) -> String {
+pub(super) fn none_text(agent: AgentKind, left: &Left, budget_min: u32) -> String {
     let one = |(n, l): &(u8, Option<i64>)| {
         let name = if *n == 0 { "default".to_string() } else { format!("P{n}") };
         match l {
@@ -52,47 +68,55 @@ pub(super) fn none_text(left: &Left, budget_min: u32) -> String {
             Some(s) => format!("{name} has {} min left", s / 60),
         }
     };
-    let each = if left.is_empty() { "there is no claude account".to_string() } else { left.iter().map(one).collect::<Vec<_>>().join(", ") };
+    let name = agent.as_str();
+    let each = if left.is_empty() { format!("there is no {name} account") } else { left.iter().map(one).collect::<Vec<_>>().join(", ") };
     let min = budget_min + 10;
     format!(
-        "a claude helper in a container needs an account whose login lasts {min} min (the budget and 10 min): {each}. \
-         A login is renewed when claude runs on that account on the host; or use isolation host, or another agent"
+        "a {name} helper in a container needs an account whose login lasts {min} min (the budget and 10 min): {each}. \
+         A login is renewed when {name} runs on that account on the host; or use isolation host, or another agent"
     )
 }
 
-fn homes() -> Vec<(u8, PathBuf)> {
-    let homes = handoff::profiles(Agent::Claude);
-    if homes.is_empty() { vec![(0, crate::plugins::claudecode::config_dir_or_default(None))] } else { homes }
+fn homes(agent: AgentKind) -> Vec<(u8, PathBuf)> {
+    let homes = handoff::profiles(agent_of(agent));
+    if homes.is_empty() && agent == AgentKind::Claude { vec![(0, crate::plugins::claudecode::config_dir_or_default(None))] } else { homes }
 }
 
-/// The account for a helper of `budget_min` on `model`, and its login.
-pub(super) fn pick(asked: Option<u8>, model: Option<&str>, budget_min: u32, until: Instant) -> Result<(Account, Login), Reject> {
-    let mut homes = homes();
+fn read(agent: AgentKind, home: &Path, within: Duration) -> Option<Login> {
+    match agent {
+        AgentKind::Codex => codex_auth::read(home).map(Login::Codex),
+        _ => for_helpers::claude_login(home, within).map(Login::Claude),
+    }
+}
+
+/// The account for a helper of `agent` (claude or codex) of `budget_min`
+/// on `model`, and its login.
+pub(super) fn pick(agent: AgentKind, asked: Option<u8>, model: Option<&str>, budget_min: u32, until: Instant) -> Result<(Account, Login), Reject> {
+    let name = agent.as_str();
+    let mut homes = homes(agent);
     if let Some(n) = asked {
         homes.retain(|(p, _)| *p == n);
         if homes.is_empty() {
-            return Err(Reject::new(ErrorCode::NoAccount, format!("claude has no account P{n} on this machine")));
+            return Err(Reject::new(ErrorCode::NoAccount, format!("{name} has no account P{n} on this machine")));
         }
     }
     let now = records::now_ms();
-    let mut logins: Vec<(u8, Option<Login>)> = homes
-        .iter()
-        .map(|(n, home)| (*n, for_helpers::claude_login(home, KEYCHAIN.min(until.saturating_duration_since(Instant::now())))))
-        .collect();
+    let mut logins: Vec<(u8, Option<Login>)> =
+        homes.iter().map(|(n, home)| (*n, read(agent, home, KEYCHAIN.min(until.saturating_duration_since(Instant::now()))))).collect();
     // those after the one that took all of the time were not asked
-    let late = if Instant::now() >= until { " (the keychain did not answer in time: it may be locked)" } else { "" };
-    let left: Left = logins.iter().map(|(n, l)| (*n, l.as_ref().and_then(|l| left_s(l.expires_at, now, cap())))).collect();
-    let none = || Reject::new(ErrorCode::NoAccount, none_text(&left, budget_min) + late);
+    let late = if agent == AgentKind::Claude && Instant::now() >= until { " (the keychain did not answer in time: it may be locked)" } else { "" };
+    let left: Left = logins.iter().map(|(n, l)| (*n, l.as_ref().and_then(|l| left_s(l.expires_at(), now, cap())))).collect();
+    let none = || Reject::new(ErrorCode::NoAccount, none_text(agent, &left, budget_min) + late);
     homes.retain(|(n, _)| left.iter().any(|(m, l)| m == n && lasts(*l, budget_min)));
     let account = match homes.first() {
         None => return Err(none()),
         Some((n, home)) if asked.is_some() || *n == 0 => Account { n: *n, home: home.clone() },
-        Some(_) => match for_helpers::pick_among(Agent::Claude, homes, model) {
+        Some(_) => match for_helpers::pick_among(agent_of(agent), homes, model) {
             Pick::Account(a) => Account { n: a.number, home: a.dir },
             Pick::NoAccount(r) => {
                 let what = model.unwrap_or("the default model");
                 let when = for_helpers::recoveries_text(&r);
-                return Err(Reject::new(ErrorCode::NoAccount, format!("every claude account whose login lasts refuses {what}; they take work again: {when}")));
+                return Err(Reject::new(ErrorCode::NoAccount, format!("every {name} account whose login lasts refuses {what}; they take work again: {when}")));
             }
         },
     };
@@ -100,14 +124,27 @@ pub(super) fn pick(asked: Option<u8>, model: Option<&str>, budget_min: u32, unti
     logins.swap_remove(at).1.map(|l| (account, l)).ok_or_else(none)
 }
 
-/// The login of the account a helper recorded as `label` is on.
-pub(super) fn of_label(label: &str) -> Option<Login> {
+/// The login of the account a helper of `agent` recorded as `label` is
+/// on.
+pub(super) fn of_label(agent: AgentKind, label: &str) -> Option<Login> {
     let n: u8 = label.strip_prefix('P').map_or(Some(0), |n| n.parse().ok())?;
-    homes().into_iter().find(|(p, _)| *p == n).and_then(|(_, home)| for_helpers::claude_login(&home, KEYCHAIN))
+    homes(agent).into_iter().find(|(p, _)| *p == n).and_then(|(_, home)| read(agent, &home, KEYCHAIN))
+}
+
+/// Hand `l` to the helper at `dir`: claude's in its env file, codex's in
+/// its home; and write down when it ends.
+pub(super) fn hand_over(dir: &Path, l: &Login) -> Result<(), Reject> {
+    match l {
+        Login::Claude(l) => write_env(dir, l),
+        Login::Codex(a) => {
+            let wrote = codex_auth::write(&dir.join("home"), a).and_then(|()| std::fs::write(dir.join("expires"), a.expires_at.unwrap_or(0).to_string()));
+            wrote.map_err(|e| Reject::new(ErrorCode::Internal, format!("the login file: {e}")))
+        }
+    }
 }
 
 /// Write `l` where `docker run --env-file` reads it, and when it ends.
-pub(super) fn write_env(dir: &Path, l: &Login) -> Result<(), Reject> {
+pub(super) fn write_env(dir: &Path, l: &ClaudeLogin) -> Result<(), Reject> {
     let internal = |m: String| Reject::new(ErrorCode::Internal, m);
     if l.token.is_empty() || !l.token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(internal("the account's login cannot go into an env file".into()));

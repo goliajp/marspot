@@ -309,6 +309,6 @@ fn tell(s: &Arc<Shared>, h: &Helper, stop: Stop) {
     }
     send(s, sid, Notice { parent: h.started.parent, body, events, ..Notice::default() });
     if over.is_some_and(|o| o.renewed) {
-        super::container::restart(s, sid, h.account.clone());
+        super::container::restart(s, sid, h.started.agent, h.account.clone());
     }
 }
