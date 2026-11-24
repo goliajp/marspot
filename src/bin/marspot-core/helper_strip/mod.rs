@@ -277,6 +277,8 @@ mod host_tests;
 #[cfg(test)]
 mod compose_tests;
 #[cfg(test)]
+mod native_list_tests;
+#[cfg(test)]
 mod row_tests;
 #[cfg(test)]
 mod moving_tests;
