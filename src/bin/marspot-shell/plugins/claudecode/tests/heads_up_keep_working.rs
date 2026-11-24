@@ -24,7 +24,7 @@ fn confirmed(uuid: &str) {
 
 fn rebalance_on() {
     marspot::settings::set_for_test(marspot::settings::Settings {
-        cc_rebalance: marspot::settings::Rebalance::On,
+        cc_rebalance: marspot::settings::Rebalance::Live,
         ..Default::default()
     });
 }

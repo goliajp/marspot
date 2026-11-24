@@ -2,28 +2,14 @@
 //! used, and not a full one.
 
 use super::super::heads_up::nearly_out;
-use super::super::rebalance::{better_home, Why};
+use super::super::allocation_inputs::{AccountIn, PaneIn, Snapshot};
+use super::super::allocation_view::{self as view, View};
 use super::*;
+use crate::plugins::allocation::Class;
 
 /// 2026-11-05 05:33 UTC.
 const NOW: i64 = 1_793_856_780;
 const DAY: i64 = 86_400;
-
-fn situation(rooms: &[(u8, Room)]) -> Situation<'_> {
-    Situation {
-        needs_model: None,
-        rooms,
-        current: 1,
-        tool_executing: false,
-        work_running: false,
-        moves_this_episode: 0,
-        since_last_move: None,
-        last_target: None,
-        stranded_for: None,
-        warned: false,
-        background_refused: None,
-    }
-}
 
 /// Rows as the feed writes them: `(status, utilization_7d, reset_7d,
 /// Fable's utilization)`, account `n` under the address `p<n>`.
@@ -85,51 +71,68 @@ fn an_account_whose_week_is_not_read_is_neither_out_nor_nearly_out() {
     assert!(spent[0].1.refused_for(Some("fable-5-1")) && !spent[0].1.refused_for(Some("opus-5-5")));
 }
 
-/// Not empty: a refused pane goes to every account known to have room
-/// first, whatever its renewal, and to the unread one before staying
-/// on an account that is out.
+/// Not empty: a refused Claude pane goes to every account known to have
+/// room first, whatever its renewal, and to the unread one before
+/// staying on an account that is out; a badge click the same.
 #[test]
 fn a_refused_pane_goes_to_an_unread_week_only_after_every_known_one() {
-    let r = rooms(&[
-        ("rejected", "1", &soon(), "0"),
-        ("allowed", "null", "null", "0"),
-        ("allowed", "0.3", "null", "0"),
-    ]);
-    assert_eq!(best_profile(&r, 1, None), Some(3), "a week read beats one not read");
-    assert_eq!(next_move(&situation(&r)), Move::To(3));
+    let (v, r) = view_of(&[("rejected", "1", &soon(), "0"), ("allowed", "null", "null", "0"), ("allowed", "0.3", &late(), "0")], Class::Plain);
+    let (to, inputs) = v.must_move(&r, 1, 1, Class::Plain);
+    assert_eq!(to, Move::To(3), "a week read beats one not read");
+    assert!(inputs.is_some(), "the core chose it");
 
-    let only = rooms(&[("rejected", "1", &soon(), "0"), ("allowed", "null", "null", "0"), ("rejected", "1", &late(), "0")]);
-    assert_eq!(next_move(&situation(&only)), Move::To(2), "ahead of the refused");
+    let only = [("rejected", "1", &soon() as &str, "0"), ("allowed", "null", "null", "0"), ("rejected", "1", &late(), "0")];
+    let (v, r) = view_of(&only, Class::Plain);
+    let (to, inputs) = v.must_move(&r, 1, 1, Class::Plain);
+    assert_eq!(to, Move::To(2), "ahead of the refused");
+    assert!(inputs.is_none(), "no reading chose it");
+    assert_eq!(v.by_hand(&r, 1, 1, Class::Plain).map(|(t, i)| (t, i.is_none())), Some((2, true)));
 
-    // among accounts known to have room, an Opus pane prefers the one
-    // whose Fable is spent; an unread week does not get that place
-    let fable = rooms(&[
-        ("rejected", "1", &soon(), "0"),
-        ("rejected", "null", "null", "1"),
-        ("allowed", "0.5", &late(), "0"),
-    ]);
-    assert_eq!(best_profile(&fable, 1, Some("opus-5-5")), Some(3));
+    // an unread week that has refused is no place either
+    let shut = [("rejected", "1", &soon() as &str, "0"), ("rejected", "null", "null", "0")];
+    let (v, r) = view_of(&shut, Class::Plain);
+    assert_eq!(v.must_move(&r, 1, 1, Class::Plain).0, Move::Hold(view::NOWHERE));
 }
 
-/// A resting pane is moved for a difference worth a restart, and a
-/// week that is not read is no figure to measure one by.
-#[test]
-fn no_resting_pane_is_moved_to_or_from_an_unread_week_by_its_renewal() {
-    let to_unread = rooms(&[("allowed", "0.1", &late(), "0"), ("allowed", "null", "null", "0")]);
-    assert_eq!(better_home(&to_unread, 1, None), None);
-    let to_unread_fable = rooms(&[("allowed", "0.1", &late(), "0"), ("rejected", "null", "null", "1")]);
-    assert_eq!(better_home(&to_unread_fable, 1, Some("opus-5-5")), None, "its week may have nothing left");
+/// The allocation's view of the same rows, with pane 1 of `class` on P1.
+fn view_of(rows: &[(&str, &str, &str, &str)], class: Class) -> (View, Vec<(u8, Room)>) {
+    let r = rooms(rows);
+    let accounts = r
+        .iter()
+        .filter_map(|(p, room)| {
+            let Room::Known { util_7d: Some(w), reset_7d, models, measured_at, .. } = room else { return None };
+            let fable_used = models.first().and_then(|(_, u)| *u);
+            Some(AccountIn {
+                profile: *p,
+                week_used: *w,
+                fable_used,
+                fable_known: room.known_for(Some("fable")),
+                week_renews: *reset_7d,
+                fable_renews: *reset_7d,
+                open: !room.refused_for(None),
+                measured_at: (*measured_at).min(NOW),
+            })
+        })
+        .collect();
+    let pane = PaneIn { sid: 1, profile: 1, class, marked_at: None, refused_at: None, resting: true, helper: false, out: false, transcript: None };
+    let snap = Snapshot { now: NOW, feed_at: Some(NOW), accounts, panes: vec![pane], live: vec![1] };
+    (View::of_defaults(&snap), r)
+}
 
-    // the unread week is ranked a whole week ahead; that is a place in
-    // a list, not a renewal time to leave it for
-    let from_unread = rooms(&[("allowed", "null", "null", "0"), ("allowed", "0.5", &soon(), "0")]);
-    assert_eq!(better_home(&from_unread, 1, None), None);
-    // a week read as not started has that renewal, and is left
-    let from_fresh = rooms(&[("allowed", "0", "null", "0"), ("allowed", "0.5", &soon(), "0")]);
-    assert_eq!(better_home(&from_fresh, 1, None), Some((2, Why::RenewsSooner { hours: 144 })));
-    // leaving Fable to the panes that need it rests on readings alone
-    let keeps = rooms(&[("allowed", "null", "null", "0"), ("rejected", "0.5", &late(), "1")]);
-    assert_eq!(better_home(&keeps, 1, Some("opus-5-5")), Some((2, Why::KeepsFable)));
+/// A week that is not read is no account to the allocation: no resting
+/// pane is sent there and nothing is measured by it.  A refused pane
+/// with nowhere read to go goes there.
+#[test]
+fn an_unread_week_is_no_account_to_the_allocation() {
+    let ids = |v: &View| v.accounts.iter().map(|q| q.id).collect::<Vec<_>>();
+    let (to_unread, r) = view_of(&[("allowed", "0.1", &late(), "0"), ("allowed", "null", "null", "0")], Class::Plain);
+    assert_eq!(ids(&to_unread), [1]);
+    assert_eq!(to_unread.must_move(&r, 1, 1, Class::Plain).0, Move::To(2), "the last place for a refused pane");
+    let (from_unread, _) = view_of(&[("allowed", "null", "null", "0"), ("allowed", "0.5", &soon(), "0")], Class::Plain);
+    assert_eq!(ids(&from_unread), [2], "a pane on an unread week has no resting move");
+    // a week read as not started is a reading
+    let (from_fresh, _) = view_of(&[("allowed", "0", "null", "0"), ("allowed", "0.5", &soon(), "0")], Class::Plain);
+    assert_eq!(ids(&from_fresh), [1, 2]);
 }
 
 /// A reset that has passed says the week it was given for is over,
@@ -159,9 +162,15 @@ fn a_cap_with_no_reading_is_neither_full_nor_room_for_its_model() {
     assert_eq!(best_profile(&r, 1, fable), Some(3), "a cap read beats one not read");
     assert_eq!(best_profile(&r, 1, opus), Some(2));
 
-    let only = rooms(&[("rejected", "1", &soon(), "0"), ("allowed", "0.2", &soon(), "null")]);
-    assert_eq!(next_move(&Situation { needs_model: fable, ..situation(&only) }), Move::To(2), "ahead of staying");
+    // a Fable pane goes where the cap is not read before staying
+    let only = [("rejected", "1", &soon() as &str, "0"), ("allowed", "0.2", &soon(), "null")];
+    let (v, r) = view_of(&only, Class::Restricted);
+    assert_eq!(v.must_move(&r, 1, 1, Class::Restricted).0, Move::To(2), "ahead of staying");
 
-    assert_eq!(better_home(&r, 3, fable), None, "no restart for a guess");
-    assert_eq!(better_home(&r, 3, opus), Some((2, Why::RenewsSooner { hours: 96 })));
+    // the allocation: a Fable pane goes only where the cap is read
+    let rows = [("rejected", "1", &soon() as &str, "0"), ("allowed", "0.2", &soon(), "null"), ("allowed", "0.5", &late(), "0.5")];
+    let (v, r) = view_of(&rows, Class::Restricted);
+    assert_eq!(v.must_move(&r, 1, 1, Class::Restricted).0, Move::To(3), "no move for a guess");
+    let (v, r) = view_of(&rows, Class::Plain);
+    assert_eq!(v.must_move(&r, 1, 1, Class::Plain).0, Move::To(2));
 }

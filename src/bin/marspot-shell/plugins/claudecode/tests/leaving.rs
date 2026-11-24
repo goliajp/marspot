@@ -137,6 +137,16 @@ fn rebalance_resting_panes_leave_an_account_with_an_hour_and_a_half_left_but_the
     assert!(logged.iter().any(|(e, l)| e == "quota.short" && l.contains("P1 lasts 1.5h") && l.contains("sid=202 stays")), "{logged:?}");
     assert_eq!(logged.iter().filter(|(e, _)| e == "quota.leaving").count(), 2, "{logged:?}");
     assert!(!logged.iter().any(|(e, _)| e.starts_with("rebalance.")), "not an ordinary move: {logged:?}");
+    // each move is a fact with the inputs that ranked it and the
+    // accounts it was ranked among
+    let dir = super::super::allocation_adapter::events_dir(&marspot::paths::state_root());
+    let text: String = fs::read_dir(&dir).unwrap().map(|e| fs::read_to_string(e.unwrap().path()).unwrap()).collect();
+    let details: Vec<&str> = text.lines().filter(|l| l.split('\t').nth(3) == Some("moved")).filter_map(|l| l.split('\t').nth(6)).collect();
+    assert_eq!(details.len(), 2, "{text}");
+    for d in details {
+        assert!(d.starts_with("from=P1 why=leave_early among=P2 here=1 "), "{d}");
+        assert!(crate::plugins::allocation::replay::replay(d).is_some(), "the inputs read back: {d}");
+    }
 }
 
 /// Ordinary moves switched off do not hold it either.

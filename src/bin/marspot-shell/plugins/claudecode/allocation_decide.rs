@@ -7,6 +7,7 @@
 use super::allocation_adapter::{Allocation, WEEK_S};
 use super::allocation_inputs::{PaneIn, Snapshot};
 use super::allocation_line::{kappa_check, plan_key, plan_line, say, say_keyed};
+use super::allocation_view::View;
 use super::fable_need::MARK_FOR;
 use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, held_back, loads_of};
 use crate::plugins::allocation::notice::{Stranded, stranded};
@@ -47,16 +48,20 @@ struct Scene<'a> {
     table: Vec<(Option<u8>, Class, f64)>,
     panes: Vec<Pane<'a>>,
     stale_feed: bool,
+    view: View,
 }
 
-pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'static str, String)>) {
-    let Some(feed_at) = snap.feed_at else { return };
+/// Works out the plan and each pane's move, writes down what changed,
+/// and hands back the view the main thread chooses by, with the resting
+/// moves decided this scan; `None` when there is no feed.
+pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'static str, String)>) -> Option<View> {
+    let feed_at = snap.feed_at?;
     let now = snap.now;
     let stale_feed = now - feed_at > STALE_FEED_S;
     let word = if stale_feed { "the feed is over 15 min old: no plan-following moves" } else { "the feed is current" }.to_string();
     say(a, log, "alloc.stale_feed", word, stale_feed);
     kappa_check(a, snap, log);
-    let s = scene(a, snap, stale_feed);
+    let mut s = scene(a, snap, stale_feed);
     let short = shortage(&s.accounts, s.b_f + s.b_n);
     a.band_moves.retain(|t| now - t < 3600);
     let mut moves = Vec::new();
@@ -65,10 +70,16 @@ pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'stati
         let to = inputs.as_ref().and_then(|x| x.decide(&s.plan));
         moves.push(to.map(|(t, why)| format!("{}→P{t}({})", s.panes[i].p.sid, why.word())));
         note_move(a, &s, i, to, inputs.as_ref(), log);
+        if let (Some((t, why)), Some(inputs)) = (to, inputs)
+            && why.resting()
+        {
+            s.view.rest.insert(s.panes[i].p.sid, (t, why, inputs));
+        }
     }
     let key = plan_key(&s.accounts, &s.table, short, &moves);
     let line = plan_line(&s.accounts, &s.plan, &s.table, short, &moves);
     say_keyed(a, log, "alloc.plan", key, line);
+    Some(s.view)
 }
 
 fn scene<'a>(a: &Allocation, snap: &'a Snapshot, stale_feed: bool) -> Scene<'a> {
@@ -81,20 +92,12 @@ fn scene<'a>(a: &Allocation, snap: &'a Snapshot, stale_feed: bool) -> Scene<'a> 
             Pane { p, f, n, known }
         })
         .collect();
-    let accounts: Vec<Quant> = snap
-        .accounts
-        .iter()
-        .map(|ac| ac.quant(now, panes.iter().filter(|x| x.p.profile == ac.profile).map(Pane::rate).sum()))
-        .collect();
-    // every pane's Fable, a plain pane's agents' too; the Fable readings
-    // also see what nothing here measured
-    let pane_f: f64 = panes.iter().map(|x| x.f).sum();
+    let rates: Vec<(f64, f64)> = panes.iter().map(|x| (x.f, x.n)).collect();
     let slope_f: f64 = a.slopes.values().filter_map(|s| s.1.rate()).map(|r| r.max(0.0) * KAPPA_FABLE).sum();
-    let b_f = pane_f.max(slope_f);
-    let b_n: f64 = panes.iter().map(|x| x.n).sum();
-    let plan = crate::plugins::allocation::plan::plan(&accounts, b_f, b_n, Some(KAPPA_FABLE));
+    let view = View::from_rates(snap, &rates, slope_f);
+    let plan = crate::plugins::allocation::plan::plan(&view.accounts, view.b_f, view.b_n, Some(KAPPA_FABLE));
     let table = panes.iter().map(|x| (Some(x.p.profile), x.p.class, x.rate())).collect();
-    Scene { now, accounts, b_f, b_n, plan, table, panes, stale_feed }
+    Scene { now, accounts: view.accounts.clone(), b_f: view.b_f, b_n: view.b_n, plan, table, panes, stale_feed, view }
 }
 
 /// What the decision about pane `i` reads, or `None` when there is none
@@ -144,14 +147,10 @@ fn note_move(a: &mut Allocation, s: &Scene, i: usize, to: Option<(u8, Why)>, inp
     {
         let detail = format!("to=P{t} why={} {}", why.word(), inputs.encode());
         a.event(s.now, sid, "would_move", Some(x.p.profile), x.p.class, detail, log);
-        // these count against the hourly cap on moves nothing forced
-        if matches!(why, Why::Plan | Why::Rescue | Why::UOut) {
-            a.band_moves.push_back(s.now);
-        }
-        if why.resting()
-            && let Some(l) = a.last.get_mut(&sid)
-        {
-            l.rest_moved(s.now);
+        // in a dry run what live would have done counts against the
+        // limits; live, the move made does
+        if !a.live {
+            a.count_move(s.now, sid, why);
         }
     }
     // the target stands until the pane binds or another account is

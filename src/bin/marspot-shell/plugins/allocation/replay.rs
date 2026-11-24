@@ -11,7 +11,6 @@
 
 use super::choose::{Mover, pick};
 use super::plan::Plan;
-#[cfg(test)]
 use super::plan::plan;
 use super::rest::{RestMove, Resting, rest_move};
 use super::{Class, Load, Quant};
@@ -85,7 +84,6 @@ pub(crate) struct Inputs {
 }
 
 impl Inputs {
-    #[cfg(test)]
     pub(crate) fn plan(&self) -> Plan {
         plan(&self.accounts, self.b_f, self.b_n, self.kappa)
     }

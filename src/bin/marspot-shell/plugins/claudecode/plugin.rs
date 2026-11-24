@@ -363,7 +363,7 @@ impl Plugin for ClaudecodePlugin {
             ),
         );
         // A menu pick is someone who is right here.
-        self.switch_by_hand(host, shelld_session_id, meta, target);
+        let _ = self.switch_by_hand(host, shelld_session_id, meta, target);
     }
 
     fn stop(&mut self, host: &dyn PluginHost) {

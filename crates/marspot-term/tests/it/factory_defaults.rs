@@ -59,9 +59,9 @@ fn the_status_line_hook_is_on() {
 }
 
 #[test]
-fn idle_panes_follow_the_quota_by_default() {
-    // asked for on 2026-11-05: spend the quota that is about to lapse
-    assert_eq!(Settings::default().cc_rebalance, marspot_term::settings::Rebalance::On);
+fn resting_moves_by_the_plan_start_as_a_dry_run() {
+    // the allocation's moves of resting panes are logged before any is made
+    assert_eq!(Settings::default().cc_rebalance, marspot_term::settings::Rebalance::DryRun);
 }
 
 /// Never is expressible two ways and they have to agree.

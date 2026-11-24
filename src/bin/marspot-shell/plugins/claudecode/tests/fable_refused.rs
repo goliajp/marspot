@@ -140,13 +140,25 @@ fn a_pane_refused_fable_is_not_moved_off_to_leave_fable_to_others() {
     let mut plugin = stranded_plugin(on_p2, sid);
     host.set_status(sid, idle_view(Duration::from_secs(600)));
 
-    sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
-    let lines = lines_about(&host, sid);
-    assert!(lines.iter().any(|(_, l)| l.contains("leaves Fable to the panes that need it")), "{lines:?}");
-
     plugin.fable_need.note(sid, &Ask { at: now(), agent: None }, now());
+    // the allocation, told of the mark, judges it a Fable pane and has
+    // no move for it onto P1, whose Fable is spent
+    let mut result = scan_of(sid, CcActivity::AwaitingUser);
+    for (s, m) in &plugin.last_meta {
+        result.new_meta.insert(*s, m.clone());
+    }
+    (result.usage, result.choices) = quota_inputs(&result.new_meta);
+    let marks: HashMap<u64, i64> = plugin.fable_need.since_by_pane().collect();
+    let mut alloc = super::super::allocation_adapter::Allocation::new(super::super::allocation_adapter::events_dir(&marspot::paths::state_root()));
+    for at in [now() - 9000, now()] {
+        alloc.observe(&super::super::allocation_inputs::snapshot(&result, &HashMap::new(), &marks, at));
+    }
+    let view = alloc.view.take().unwrap();
+    assert_eq!(view.panes.iter().find(|p| p.0 == sid).map(|p| p.2), Some(crate::plugins::allocation::Class::Restricted));
+    assert!(view.rest.get(&sid).is_none_or(|(to, _, _)| *to != 1), "{:?}", view.rest);
+    result.alloc = Some(view);
     host.logged.lock().unwrap().clear();
-    sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
+    plugin.sweep_unusable_profiles(&host, &result);
     assert!(lines_about(&host, sid).is_empty(), "{:?}", lines_about(&host, sid));
     assert!(!plugin.rebalance_said.contains_key(&sid));
     assert!(host.submitted.lock().unwrap().is_empty());

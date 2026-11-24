@@ -1,7 +1,7 @@
 //! The rules the simulator compares.
 //!
-//! `Old` is today's ordering (`best_profile` and `better_home`) as
-//! closely as a few lines can say it: an account at 1% or less counts
+//! `Old` is the ordering before the allocation (`best_profile` and the
+//! old idle-pane rule) as closely as a few lines can say it: an account at 1% or less counts
 //! as nearly out; plain panes prefer accounts whose Fable is spent,
 //! then the earliest week renewal, then the least left; a resting pane
 //! moves at most every 30 minutes, one per pass, when its account is
