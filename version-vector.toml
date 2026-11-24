@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.656"  # an input box says where it is
-core    = "0.12.663"  # a strip lets x past the input method only while x acts there
-session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it
+shell   = "0.7.657"  # a pane read once waits for a frame being published
+core    = "0.12.664"  # a pane read once waits for a frame being published
+session = "0.11.431"  # its examples read a frame being published once it is done

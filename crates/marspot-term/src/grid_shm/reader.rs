@@ -121,6 +121,18 @@ impl GridShmReader {
         Some(snap)
     }
 
+    /// [`Self::read`], for a caller that reads once and is not poked
+    /// for the next publish: a writer caught inside a publish is waited
+    /// for -- see [`super::settle`].
+    pub fn read_settled(&self, cells_out: &mut Vec<Cell>, wrapped_out: &mut Vec<bool>) -> Option<GridSnapshot> {
+        super::settle::settled(|| self.seq(), || self.read(cells_out, wrapped_out))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn base_for_tests(&self) -> *const u8 {
+        self.base
+    }
+
     /// Read the text of each frame's clusters from now on -- see
     /// [`clusters`].
     pub fn attach_clusters(&mut self, table: ClusterTableReader) {

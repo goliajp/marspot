@@ -101,10 +101,27 @@ pub struct Frame {
 /// Mapped read-only, like [`peek`]; one frame is copied under the
 /// seqlock.
 pub fn peek_frame(regions: &SessionRegions) -> io::Result<Option<Frame>> {
+    peek_frame_within(regions, true)
+}
+
+/// [`peek_frame`] that gives up as soon as a read spins out, for a
+/// caller on a thread that must not wait and that looks again later.
+pub fn peek_frame_now(regions: &SessionRegions) -> io::Result<Option<Frame>> {
+    peek_frame_within(regions, false)
+}
+
+fn peek_frame_within(regions: &SessionRegions, wait: bool) -> io::Result<Option<Frame>> {
     let map = ReadOnly::of(regions)?;
     // no region is a session from before clusters were published
     let clusters = ClusterTableReader::open(regions).ok();
-    unsafe { read_frame(map.base, clusters.as_ref()) }
+    let h = map.base as *const Header;
+    if unsafe { std::ptr::read_volatile(&(*h).magic) } != MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a readable grid region"));
+    }
+    // read once for a client: a writer caught inside a publish is waited for
+    let seq = || unsafe { (*h).seq.load(Ordering::Acquire) };
+    let read = || unsafe { read_frame(map.base, clusters.as_ref()) };
+    Ok(if wait { super::settle::settled(seq, read) } else { read() })
 }
 
 /// # Safety
@@ -112,19 +129,14 @@ pub fn peek_frame(regions: &SessionRegions) -> io::Result<Option<Frame>> {
 unsafe fn read_frame(
     base: *const u8,
     clusters: Option<&ClusterTableReader>,
-) -> io::Result<Option<Frame>> {
+) -> Option<Frame> {
     let h = base as *const Header;
-    unsafe {
-        if std::ptr::read_volatile(&(*h).magic) != MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a readable grid region"));
-        }
-    }
     let mut buf = FrameBuf::default();
     let mut table = ClusterTable::default();
     for _ in 0..1024 {
         let s1 = unsafe { (*h).seq.load(Ordering::Acquire) };
         if s1 == 0 {
-            return Ok(None);
+            return None;
         }
         let (cols, rows) = unsafe { ((*h).cols as u16, (*h).rows as u16) };
         if s1 & 1 != 0 || cols == 0 || rows == 0 || !fits_capacity(cols, rows) {
@@ -148,10 +160,10 @@ unsafe fn read_frame(
             buf.settle();
             let cells = if buf.is_packed { buf.expanded() } else { std::mem::take(&mut buf.wide) };
             let clusters = table.iter().map(|(c, r, t)| (c, r, t.to_string())).collect();
-            return Ok(Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, scroll_push_count, cells, clusters }));
+            return Some(Frame { cols, rows, cursor_col, cursor_row, view_offset, scroll_push_count, cells, clusters });
         }
     }
-    Ok(None)
+    None
 }
 
 #[cfg(test)]

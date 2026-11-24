@@ -260,18 +260,18 @@ impl Session {
     /// the selection probe flake inside the suite while passing alone.
     /// The screen and the cursor of one published frame, or `None`
     /// while there is none to read (an image that just took over has not
-    /// published yet).
+    /// published yet).  A session caught inside a publish is waited for,
+    /// as a client's read of the pane waits: the screen read right after
+    /// a watch's report is what that client is answered with.
     pub fn try_screen_and_cursor(&self, cols: u16, rows: u16) -> Option<(Vec<String>, (u16, u16))> {
         let mut buf = Vec::new();
-        let f = self.reader.read(&mut buf, &mut Vec::new())?;
+        let f = self.reader.read_settled(&mut buf, &mut Vec::new())?;
         let cursor = (f.cursor_col, f.cursor_row);
         Some((rows_of(&buf, cols, rows), cursor))
     }
 
     pub fn try_screen(&self, cols: u16, rows: u16) -> Option<Vec<String>> {
-        let mut buf = Vec::new();
-        self.reader.read(&mut buf, &mut Vec::new())?;
-        Some(rows_of(&buf, cols, rows))
+        self.try_screen_and_cursor(cols, rows).map(|(screen, _)| screen)
     }
 
     /// Where the cursor is in the most recent published frame; waits
