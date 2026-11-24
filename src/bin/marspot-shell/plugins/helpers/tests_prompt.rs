@@ -70,3 +70,12 @@ fn helpers_a_question_far_up_or_asking_nothing_is_not_codexs() {
     let near = format!("• Done.\n  Would you like to run the following command, it said\n{bottom}\n");
     assert_eq!(prompt_of(&near), near.trim_end(), "no question asked");
 }
+
+/// A rule far up the transcript (a markdown `---`, a banner's edge) is
+/// not where a prompt drawn below it starts.
+#[test]
+fn helpers_a_rule_far_up_is_not_the_prompts() {
+    let bottom = "  Would you like to run it?\n❯ 1. Yes\n  2. No";
+    let far = format!("{}\n{}{bottom}\n", "─".repeat(20), "• it printed a line\n".repeat(SCREEN_LINES));
+    assert_eq!(prompt_of(&far), bottom);
+}
