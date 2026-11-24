@@ -130,8 +130,7 @@ impl CoreApp {
     /// same oracle, and nothing checks that they agree.  When they
     /// drift the user sees an underline that does nothing.
     pub(super) fn link_miss_report(&self, wi: usize, x_phys: f64, y_phys: f64) -> Option<String> {
-        let (cw, ch) = self.renderer.cell_dims();
-        let (idx, col, row) = win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
+        let (idx, col, row) = self.cell_pos_at(wi, x_phys, y_phys)?;
         let focused = win!(self, wi).focused_idx == idx;
         let pane = win!(self, wi).panes.get(idx)?;
         let view_offset = pane.render_view_offset(focused);
@@ -184,8 +183,7 @@ impl CoreApp {
         x_phys: f64,
         y_phys: f64,
     ) -> Option<LinkContext> {
-        let (cw, ch) = self.renderer.cell_dims();
-        let (idx, col, row) = win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
+        let (idx, col, row) = self.cell_pos_at(wi, x_phys, y_phys)?;
         let (link, declared) = self.hit_test_pane_link(wi, idx, col, row)?;
         Some(LinkContext { text: link.text, target: link.target, kind: link.kind, declared })
     }

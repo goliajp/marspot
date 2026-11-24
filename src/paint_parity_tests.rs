@@ -74,7 +74,7 @@ pub(crate) fn render_with(
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq: 1,
     };
     *TEST_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) = paint;

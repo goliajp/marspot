@@ -115,7 +115,7 @@ fn a_terminal_frame_allocates_nothing_once_warm() {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq,
     };
     let (mut cells, mut glyphs, mut color_glyphs) = (Vec::new(), Vec::new(), Vec::new());

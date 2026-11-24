@@ -189,7 +189,7 @@ pub(crate) fn deliver(scene: &str, renderer: &MetalRenderer, wr: &crate::render_
                 ((c.y_top + layout.cell_title_h + layout.padding) as f32).round() as f64,
             ),
             cell: (cw, ch),
-            extent: (c.cols as f64 * cw, c.rows as f64 * ch),
+            extent: (c.cols as f64 * cw, (c.rows + c.strip_rows) as f64 * ch),
         })
         .collect();
     let capture = Capture {

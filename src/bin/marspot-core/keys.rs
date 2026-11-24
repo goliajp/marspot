@@ -6,6 +6,13 @@ use marspot::commands::{self, Command};
 use super::*;
 
 impl CoreApp {
+    pub(super) fn preedit(&mut self, wi: usize, text: String) {
+        if win!(self, wi).ime_preedit != text {
+            win!(self, wi).ime_preedit = text;
+            win!(self, wi).needs_render = true;
+        }
+    }
+
     pub(super) fn key(&mut self, wi: usize, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
         let pressed = event.state == KeyState::Pressed;

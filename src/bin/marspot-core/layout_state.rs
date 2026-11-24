@@ -45,6 +45,7 @@ impl CoreApp {
             win!(self, wi).panes.len(),
             win!(self, wi).lights_right_phys,
         );
+        let layout = self.take_strip_rows(wi, layout);
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);

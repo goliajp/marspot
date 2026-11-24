@@ -361,10 +361,29 @@ pub(crate) fn preedit_placements(
     cols: u16,
     rows: u16,
 ) -> Vec<(u16, u16, u16, &str)> {
-    let (col, row) = cursor;
     let mut out = Vec::new();
+    place_preedit(preedit, cursor, cols, rows, |p| out.push(p));
+    out
+}
+
+/// The last row a composition at `grid`'s cursor takes; `None` for an
+/// empty one.
+pub fn preedit_last_row(preedit: &str, grid: &marspot_term::grid::Grid) -> Option<u16> {
+    let mut last = None;
+    place_preedit(preedit, grid.cursor(), grid.cols(), grid.rows(), |p| last = Some(p.0));
+    last
+}
+
+fn place_preedit<'a>(
+    preedit: &'a str,
+    cursor: (u16, u16),
+    cols: u16,
+    rows: u16,
+    mut put: impl FnMut((u16, u16, u16, &'a str)),
+) {
+    let (col, row) = cursor;
     if cols == 0 || rows == 0 {
-        return out;
+        return;
     }
     let (mut c, mut r) = (col as u32, row as u32);
     for cluster in crate::grapheme::graphemes(preedit) {
@@ -386,8 +405,7 @@ pub(crate) fn preedit_placements(
                 break;
             }
         }
-        out.push((r as u16, c as u16, n_cells as u16, cluster));
+        put((r as u16, c as u16, n_cells as u16, cluster));
         c += n_cells;
     }
-    out
 }

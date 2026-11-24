@@ -91,7 +91,7 @@ fn a_composition_hides_the_cells_it_covers() {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq: 0,
     };
     let mut run = |v: &SessionView| -> Vec<GlyphInstance> {
@@ -179,7 +179,7 @@ fn build_instances_emits_cells_and_glyphs() {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq: 0,
     };
 
@@ -293,7 +293,7 @@ fn build_instances_routes_color_emoji() {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq: 0,
     };
 

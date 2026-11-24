@@ -26,6 +26,10 @@ impl CoreApp {
         // ahead of the link / region paths so `P<n>` never opens the
         // generic pane menu.
         let on = self.chrome_at(wi, x_phys, y_phys);
+        // a strip is not the terminal its menu is about
+        if on.is_none() && self.strip_at(wi, x_phys, y_phys).is_some() {
+            return;
+        }
         if let Some(ChromeTarget::Badge(i)) = on {
             if let Some(sid) = win!(self, wi).panes.get(i).and_then(|p| p.shelld_session_id()) {
                 let payload = marspot::shell_proto::encode_pane_badge_menu_request(

@@ -13,13 +13,18 @@
 //! that file can build one. What can be checked is the ordering that
 //! broke, which is the whole of the bug.
 
-const CORE: &str = include_str!("../../src/bin/marspot-core.rs");
+const CORE: &str = concat!(
+    include_str!("../../src/bin/marspot-core/pointer.rs"),
+    include_str!("../../src/bin/marspot-core/pointer_press.rs"),
+    include_str!("../../src/bin/marspot-core/wheel.rs"),
+    include_str!("../../src/bin/marspot-core/helper_strip/mod.rs"),
+);
 
-/// The body of a free-standing `fn` in that file, by name.
+/// The body of a `fn` in those files, by name.
 fn body_of(name: &str) -> &'static str {
     let at = CORE
         .find(&format!("fn {name}("))
-        .unwrap_or_else(|| panic!("{name} is gone from marspot-core.rs"));
+        .unwrap_or_else(|| panic!("{name} is gone from the pointer code"));
     let open = at + CORE[at..].find('{').expect("a body");
     let mut depth = 0usize;
     for (i, c) in CORE[open..].char_indices() {
@@ -44,7 +49,8 @@ fn the_extractor_finds_a_body_at_all() {
     // being obeyed.
     let b = body_of("mouse_moved");
     assert!(b.len() > 200, "mouse_moved's body came back {} bytes", b.len());
-    assert!(b.contains("hit_test_cell_pos"), "and it should mention the cell hit test");
+    assert!(b.contains("cell_pos_at"), "and it should mention the cell hit test");
+    assert!(body_of("cell_pos_at").contains("hit_test_cell_pos"), "which is the layout's");
 }
 
 #[test]
@@ -54,7 +60,7 @@ fn motion_asks_about_floating_chrome_before_the_program() {
         .find("chrome_owns_pointer")
         .expect("mouse_moved no longer asks whether chrome owns the pointer");
     let forward = b
-        .find("hit_test_cell_pos")
+        .find("cell_pos_at")
         .expect("mouse_moved no longer forwards motion");
     assert!(
         chrome < forward,
@@ -66,7 +72,7 @@ fn motion_asks_about_floating_chrome_before_the_program() {
 #[test]
 fn the_forwarding_is_actually_guarded_by_it() {
     let b = body_of("mouse_moved");
-    let forward = b.find("hit_test_cell_pos").expect("the forward");
+    let forward = b.find("cell_pos_at").expect("the forward");
     // The guard has to be part of the same condition, not merely
     // earlier in the function.
     let window = &b[forward.saturating_sub(200)..forward];
@@ -83,8 +89,9 @@ fn the_forwarding_is_actually_guarded_by_it() {
 fn the_wheel_asks_the_same_question_first() {
     let b = body_of("scroll");
     let panel = b
-        .find("panels.open()")
+        .find("panel_takes_wheel")
         .expect("scroll no longer asks which panel is open");
+    assert!(body_of("panel_takes_wheel").contains("panels.open()"));
     let forward = b.find("focused_pane_active_session").unwrap_or(usize::MAX);
     assert!(
         panel < forward,
@@ -103,10 +110,11 @@ fn the_wheel_asks_the_same_question_first() {
 /// can't select text in a pane any more" within a day.
 #[test]
 fn a_plain_click_selects_and_shift_gives_it_to_the_program() {
-    let b = body_of("mouse_down");
+    assert!(body_of("mouse_down").contains("reported_press"), "mouse_down no longer forwards a press");
+    let b = body_of("reported_press");
     let at = b
         .find("l3_inject_mouse_button")
-        .expect("mouse_down no longer forwards a press");
+        .expect("reported_press no longer forwards a press");
     let guard = &b[at.saturating_sub(600)..at];
     assert!(
         guard.contains("&& modifiers.shift"),
@@ -124,7 +132,8 @@ fn a_plain_click_selects_and_shift_gives_it_to_the_program() {
 #[test]
 fn a_click_asks_the_same_question_first() {
     let b = body_of("mouse_down");
-    let menu = b.find("context_menu").expect("mouse_down no longer checks the menu");
-    let cell = b.find("hit_test_cell").unwrap_or(usize::MAX);
+    let menu = b.find("menu_takes_press").expect("mouse_down no longer checks the menu");
+    assert!(body_of("menu_takes_press").contains("context_menu"));
+    let cell = b.find("cell_pos_at").expect("mouse_down no longer looks for a cell");
     assert!(menu < cell, "a click reaches a pane before it reaches an open menu");
 }

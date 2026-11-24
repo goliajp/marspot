@@ -7,7 +7,7 @@ use crate::ui::theme::terminal::TermColors;
 use crate::frame_build::text_run::preedit_placements;
 use crate::glyph_atlas::{GlyphAtlas, SlotMetrics};
 use crate::grid::Grid;
-use crate::layout::CellRect;
+use crate::layout::{cell_grid, CellRect};
 use crate::render::SessionView;
 use crate::frame_build::color::rgba8_of_f32;
 use crate::ui::components::panel_palette as palette;
@@ -144,9 +144,8 @@ pub(crate) fn pane_geom<'a>(
     // (col 1 advances by 8, col 2 by 9) while the atlas slot is
     // a fixed width, leaving 1-px seam gaps every few columns in
     // horizontal box-drawing runs.
-    let cell_w = cell_w.round();
-    let cell_h = cell_h.round();
-    let inner_x = (rect.x as f32 + padding).round();
+    let at = cell_grid(rect, title_h as f64, padding as f64, cell_w as f64, cell_h as f64);
+    let (cell_w, cell_h, inner_x) = (at.w as f32, at.h as f32, at.x as f32);
     // C1 — `TopFixed` tools (search bar etc.) push the grid's
     // top edge down by `top_fixed_h_cells * cell_h`.  Empty
     // `tools` ⇒ `top_fixed_h_cells == 0` ⇒ render byte-identical
@@ -155,7 +154,7 @@ pub(crate) fn pane_geom<'a>(
     // (no `BottomFixed` consumer until a future tool needs it);
     // the L3 already sizes its grid so renderable rows fit.
     let top_fixed_h = view.top_fixed_h_cells as f32 * cell_h;
-    let inner_y = (rect.y_top as f32 + title_h + padding + top_fixed_h).round();
+    let inner_y = at.y as f32 + top_fixed_h;
 
     // F1++ — overlay glyph mask.  Metal renders BG and FG in two
     // separate passes (BG first, then glyphs).  Without this mask

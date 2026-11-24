@@ -20,129 +20,12 @@
 //! (font cell metrics) so each session knows how many terminal
 //! columns / rows actually fit in its physical sub-rect.
 
-/// A simple physical-pixel rectangle.  Used for non-cell UI chrome
-/// elements (layout-picker button, picker option icons, sidebar
-/// close-buttons, sidebar add-button).  Distinct from `CellRect`
-/// because those carry terminal cols/rows; these are pure UI.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f64,
-    pub y_top: f64,
-    pub w: f64,
-    pub h: f64,
-}
+mod hit;
+mod rect;
+mod strip;
 
-impl Rect {
-    pub fn contains(&self, px: f64, py: f64) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y_top && py < self.y_top + self.h
-    }
-    pub const ZERO: Rect = Rect {
-        x: 0.0,
-        y_top: 0.0,
-        w: 0.0,
-        h: 0.0,
-    };
-
-    /// F3+3.4 — uniform inset on all four sides.  `padding > 0`
-    /// shrinks the rect inward; negative input clamps to 0.  When
-    /// padding > half the rect's smaller axis, returns a zero-size
-    /// rect at the rect's center so callers can no-op-paint
-    /// without panicking on negative w/h.
-    pub fn inset(self, padding: f64) -> Rect {
-        let p = padding.max(0.0);
-        let w = (self.w - 2.0 * p).max(0.0);
-        let h = (self.h - 2.0 * p).max(0.0);
-        // If padding ate the whole rect, recentre to a zero-size box
-        // at the rect's centre so `place` still returns a sensible point.
-        if w == 0.0 || h == 0.0 {
-            return Rect {
-                x: self.x + self.w * 0.5,
-                y_top: self.y_top + self.h * 0.5,
-                w: 0.0,
-                h: 0.0,
-            };
-        }
-        Rect {
-            x: self.x + p,
-            y_top: self.y_top + p,
-            w,
-            h,
-        }
-    }
-
-    /// F3+3.4 — anchor a `(w, h)`-sized child inside this rect at
-    /// the given alignment.  Resulting rect is clamped to fit
-    /// inside `self` (if child larger than self, child overflows
-    /// from the anchor edge / center, NOT clipped).  Pure
-    /// positioning helper — caller still has to draw the box.
-    pub fn place(self, w: f64, h: f64, align: Alignment) -> Rect {
-        let (hx, vy) = align.factors();
-        let x = self.x + (self.w - w) * hx;
-        let y_top = self.y_top + (self.h - h) * vy;
-        Rect { x, y_top, w, h }
-    }
-}
-
-/// F3+3.4 — nine-anchor alignment, the standard React Native /
-/// CSS box model knob.  Used by `Rect::place` to position a child
-/// box inside a parent rect, and by `ViewPainter::text_in` to
-/// position a text run inside a chrome label area.
-///
-/// Naming follows the CSS convention: vertical first, horizontal
-/// second.  Variants:
-///
-/// | TopLeft     | TopCenter    | TopRight     |
-/// | CenterLeft  | Center       | CenterRight  |
-/// | BottomLeft  | BottomCenter | BottomRight  |
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Alignment {
-    TopLeft,
-    TopCenter,
-    TopRight,
-    CenterLeft,
-    Center,
-    CenterRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight,
-}
-
-impl Alignment {
-    /// (horizontal, vertical) fractions, each ∈ {0.0, 0.5, 1.0}.
-    /// Returned tuple is `(hx, vy)` where 0 = top/left, 0.5 =
-    /// center, 1.0 = bottom/right.  `Rect::place` multiplies these
-    /// against `(parent.w - child.w, parent.h - child.h)` to
-    /// compute the placement offset.
-    pub fn factors(self) -> (f64, f64) {
-        let hx = match self {
-            Self::TopLeft | Self::CenterLeft | Self::BottomLeft => 0.0,
-            Self::TopCenter | Self::Center | Self::BottomCenter => 0.5,
-            Self::TopRight | Self::CenterRight | Self::BottomRight => 1.0,
-        };
-        let vy = match self {
-            Self::TopLeft | Self::TopCenter | Self::TopRight => 0.0,
-            Self::CenterLeft | Self::Center | Self::CenterRight => 0.5,
-            Self::BottomLeft | Self::BottomCenter | Self::BottomRight => 1.0,
-        };
-        (hx, vy)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CellRect {
-    /// Physical-pixel x of the rect's left edge.
-    pub x: f64,
-    /// Physical-pixel y of the rect's TOP edge (y-down).  The renderer
-    /// flips to y-up when computing baselines.
-    pub y_top: f64,
-    pub w: f64,
-    pub h: f64,
-    /// Terminal column count that fits in this rect at the configured
-    /// font cell width.
-    pub cols: u16,
-    /// Terminal row count that fits.
-    pub rows: u16,
-}
+pub use rect::{Alignment, CellRect, Rect};
+pub use strip::{cell_grid, CellGrid, STRIP_MIN_TOTAL_ROWS};
 
 #[derive(Clone, Debug)]
 pub struct Layout {
@@ -372,6 +255,8 @@ impl Layout {
                     h: cell_phys_h,
                     cols,
                     rows,
+                    strip_rows: 0,
+                    term_bottom: y_top + cell_phys_h,
                 });
             }
         }
@@ -563,91 +448,6 @@ impl Layout {
             self.settings_button_rect,
         ]
     }
-
-    /// Hit-test a click at physical coords `(px, py)`.  Returns the
-    /// session index when the click landed inside one of the grid
-    /// cells, else `None` (sidebar hit, or outside the window).
-    pub fn hit_test(&self, px: f64, py: f64) -> Option<usize> {
-        if px < self.sidebar_w {
-            return None;
-        }
-        for (i, c) in self.cells.iter().enumerate() {
-            if px >= c.x && px < c.x + c.w && py >= c.y_top && py < c.y_top + c.h {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Map a click in the terminal-content area of a cell to its
-    /// `(session_idx, col, row)` cell coordinates.  Returns `None`
-    /// when the click is in the sidebar, the title strip, the
-    /// padding band, or outside the window.  Used by the selection
-    /// machinery to anchor / extend a selection on mouse drag.
-    /// `cell_w` / `cell_h` are the per-glyph monospace metrics in
-    /// physical pixels; the renderer is the source of truth for
-    /// these so the caller passes them through.
-    pub fn hit_test_cell_pos(
-        &self,
-        px: f64,
-        py: f64,
-        cell_w: f64,
-        cell_h: f64,
-    ) -> Option<(usize, u16, u16)> {
-        if px < self.sidebar_w {
-            return None;
-        }
-        for (i, c) in self.cells.iter().enumerate() {
-            if px < c.x || px >= c.x + c.w || py < c.y_top || py >= c.y_top + c.h {
-                continue;
-            }
-            // Inside the rect — discard hits in the title strip and
-            // the surrounding padding so the selection only anchors
-            // on actual terminal content.
-            let inner_x = c.x + self.padding;
-            let inner_y = c.y_top + self.cell_title_h + self.padding;
-            if py < inner_y {
-                return None;
-            }
-            let dx = px - inner_x;
-            let dy = py - inner_y;
-            if dx < 0.0 {
-                return None;
-            }
-            let col = (dx / cell_w).floor().max(0.0) as u16;
-            let row = (dy / cell_h).floor().max(0.0) as u16;
-            // Clamp to the cell's reported terminal dims so a
-            // drag past the right / bottom edge doesn't escape.
-            let col = col.min(c.cols.saturating_sub(1));
-            let row = row.min(c.rows.saturating_sub(1));
-            return Some((i, col, row));
-        }
-        None
-    }
-
-    /// Inverse of `hit_test_cell_pos`: given a cell index + `(col,
-    /// row)` inside that cell's terminal grid, return the physical-pixel
-    /// rect that one character cell occupies in view-local top-left
-    /// coordinates (y-down — same space the renderer paints in).
-    /// Returns `None` when `cell_idx` is out of range.  Used to
-    /// publish the focused caret to the IME
-    /// (`MarspotAppCtx::set_caret_rect_phys`).
-    pub fn caret_view_phys_rect(
-        &self,
-        cell_idx: usize,
-        col: u16,
-        row: u16,
-        cell_w: f64,
-        cell_h: f64,
-    ) -> Option<(f64, f64, f64, f64)> {
-        let c = self.cells.get(cell_idx)?;
-        let inner_x = c.x + self.padding;
-        let inner_y = c.y_top + self.cell_title_h + self.padding;
-        let x = inner_x + col as f64 * cell_w;
-        let y = inner_y + row as f64 * cell_h;
-        Some((x, y, cell_w, cell_h))
-    }
-
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@
 use crate::font_cache::FontCache;
 use crate::frame_build::chrome::{paint_chrome, ChromeState};
 use crate::frame_build::pane_cache::{push_panes, PaneInstanceCache};
+use crate::frame_build::strip::{push_strips, StripCache};
 use crate::glyph_atlas::GlyphAtlas;
 use crate::layout::Layout;
 use crate::render::{SessionView, SidebarEntry};
@@ -27,6 +28,7 @@ use crate::ui::components::title_strip_view::TitleStrips;
 #[derive(Default)]
 pub(crate) struct FrameKeep {
     pub(crate) panes: Vec<PaneInstanceCache>,
+    pub(crate) strips: Vec<StripCache>,
     pub(crate) chrome: crate::frame_build::chrome::ChromeSurfaces,
 }
 
@@ -161,6 +163,7 @@ pub(crate) fn build_frame(
         layout, views, window_focused, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
         font, atlas, color_atlas, cells, glyphs, color_glyphs, ui_rects, &mut kept.panes, inline_panes,
     );
+    push_strips(layout, views, window_focused, font, atlas, color_atlas, cells, glyphs, color_glyphs, &mut kept.strips);
 
     // Everything after the panes in the main layers goes through one
     // painter: seams and focus ring, empty seats, sidebar, toolbar,

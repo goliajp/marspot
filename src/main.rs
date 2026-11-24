@@ -164,7 +164,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: search,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq: 0,
     };
 
@@ -1020,7 +1020,7 @@ fn bench_first_frame(arg: &str) {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
-            history: Default::default(),
+            history: Default::default(), session: 0, strip: None,
             seq: 0,
         })
         .collect();
@@ -1135,7 +1135,7 @@ fn bench_metal_render(arg: &str) {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(),
+        history: Default::default(), session: 0, strip: None,
         seq: 0,
     };
     let views = std::slice::from_ref(&view);
