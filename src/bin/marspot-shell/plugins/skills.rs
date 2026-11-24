@@ -5,7 +5,9 @@
 //! plus one directory per account, which is the layout the profile
 //! switch in the claudecode and codex plugins needs.  `marspot-panes`:
 //! the `marspot-peer pane` command line, for a session the user started
-//! by hand and so has no pane tools over MCP.  Their files are compiled
+//! by hand and so has no pane tools over MCP.  `marspot-helpers`: when to
+//! hand work to a helper rather than a one-shot `exec`, over either the
+//! MCP tools or `marspot-peer helper`.  Their files are compiled
 //! in and written wherever they are missing or differ, so an update of
 //! marspot updates the skills.
 //!
@@ -29,6 +31,7 @@ const SKILLS: &[Skill] = &[
         ],
     ),
     ("marspot-panes", &[("SKILL.md", include_str!("../../../../assets/skills/marspot-panes/SKILL.md"), 0o644)]),
+    ("marspot-helpers", &[("SKILL.md", include_str!("../../../../assets/skills/marspot-helpers/SKILL.md"), 0o644)]),
 ];
 
 /// Every file of every skill, under its skill's directory name.
@@ -163,7 +166,7 @@ mod tests {
         let h = home();
         fs::create_dir_all(h.join(".claude")).unwrap();
         let notes = install_into(&skills_dirs(&h, None));
-        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert_eq!(notes.len(), 4, "{notes:?}");
         let (md, sh) = installed(&h.join(".claude/skills"));
         assert_eq!(fs::read_to_string(&md).unwrap(), text_of(PROFILES, "SKILL.md"));
         assert_eq!(fs::read_to_string(&sh).unwrap(), text_of(PROFILES, "profiles.sh"));
@@ -232,7 +235,7 @@ mod tests {
         std::os::unix::fs::symlink(h.join(".codex-profile-1"), h.join(".codex")).unwrap();
         let dirs = skills_dirs(&h, None);
         assert_eq!(dirs, vec![h.join(".claude-shared/skills"), h.join(".codex-profile-1/skills")]);
-        assert_eq!(install_into(&dirs).len(), 6);
+        assert_eq!(install_into(&dirs).len(), 8);
         // reached through either profile, and still a symlink
         assert!(h.join(".claude-profile-2/skills").join(PROFILES).join("profiles.sh").is_file());
         assert!(h.join(".claude-profile-1/skills").symlink_metadata().unwrap().file_type().is_symlink());
@@ -299,6 +302,55 @@ mod tests {
             assert!(text.contains(&format!("marspot-peer pane {sub}")), "{sub}");
             assert!(marspot_peer::control::cli::USAGE.contains(&format!("marspot-peer pane {sub}")), "{sub}");
         }
-        assert!(!text.contains("marspot-peer helper"), "helpers are not on the command line yet");
+        // handing work to another agent is the helpers skill's
+        assert!(text.contains("`marspot-helpers` skill"));
+    }
+
+    /// The helpers skill goes to all four agents beside the other two.
+    #[test]
+    fn skills_include_marspot_helpers_for_all_four_agents() {
+        let h = home();
+        for d in [".claude", ".codex", ".gemini", ".kimi-code"] {
+            fs::create_dir_all(h.join(d)).unwrap();
+        }
+        install_into(&skills_dirs(&h, None));
+        for skills in [".claude/skills", ".codex/skills", ".gemini/skills", ".kimi-code/skills"] {
+            let text = fs::read_to_string(h.join(skills).join("marspot-helpers/SKILL.md")).unwrap();
+            assert_eq!(text, text_of("marspot-helpers", "SKILL.md"));
+            assert!(text.starts_with("---\nname: marspot-helpers\n"), "{text}");
+            assert!(h.join(skills).join("marspot-panes/SKILL.md").is_file());
+        }
+        fs::remove_dir_all(&h).unwrap();
+    }
+
+    /// Its description is what makes an agent load it, and its body
+    /// documents only what the command line and the MCP tools accept.
+    #[test]
+    fn skills_marspot_helpers_triggers_and_names_real_arguments() {
+        let text = text_of("marspot-helpers", "SKILL.md");
+        assert!(text.len() <= 4096, "{} bytes", text.len());
+        let description = text.lines().find(|l| l.starts_with("description: ")).expect("a description");
+        for phrase in ["use codex / gemini / kimi / another claude", "have codex draw", "in parallel", "ask another agent", "codex exec"] {
+            assert!(description.contains(phrase), "{phrase}");
+        }
+        let usage = marspot_peer::control::cli_helper::USAGE;
+        for sub in ["start --agent", "list [--all]", "stop"] {
+            assert!(text.contains(&format!("marspot-peer helper {sub}")), "{sub}");
+            assert!(usage.contains(&format!("marspot-peer helper {sub}")), "{sub}");
+        }
+        for flag in ["--model", "--cwd", "--profile", "--mode", "--resume", "--budget", "--name", "--container"] {
+            assert!(text.contains(flag) && usage.contains(flag), "{flag}");
+        }
+        for tool in ["HelperStart", "Helpers", "HelperStop"] {
+            assert!(text.contains(tool), "{tool}");
+            assert!(marspot_peer::mcp_panes::TOOLS.iter().any(|(n, _)| *n == tool), "{tool}");
+        }
+        for arg in ["agent", "task", "cwd", "model", "profile", "mode", "resume", "budget_minutes", "name", "isolation"] {
+            assert!(text.contains(&format!("`{arg}")), "{arg}");
+        }
+        // the answer fields it tells the caller to read
+        for field in ["result_path", "others_in_cwd"] {
+            assert!(text.contains(field), "{field}");
+        }
     }
 }

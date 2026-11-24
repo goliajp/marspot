@@ -26,7 +26,7 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("PaneRun", "Run one command at a pane's shell prompt and wait for it: exit_status and the screen. On reason:timeout, wait on with PaneRead wait:{command_end:true} since:pos."),
     ("PaneRead", "Read a pane's screen, history_lines more above it. wait: first wait, after since (a pos), for one of {text}, {quiet_ms}, {command_end:true}, {prompt:true}, {change:true}, {exit:true}; reason says what ended it."),
     ("PaneSet", "Change a pane: cols+rows resize a shadow pane; where moves it (window, shadow) or shows it in its parent's place (peek, unpeek); close:true closes it."),
-    ("HelperStart", "Start an agent (claude, codex, gemini, kimi) on a task in a shadow pane under yours; its result reaches your inbox when it stops. Optional: cwd, model, profile, mode (auto/ask), resume:\"last\", budget_minutes (30). If others_in_cwd names a session there, SendMessage it first."),
+    ("HelperStart", "Start an agent (claude, codex, gemini, kimi) on a task in a shadow pane under yours; its result reaches your inbox when it stops. Use it, not codex exec / claude -p in your shell, for work of over a minute or two, in parallel, with follow-ups or for the user to watch: it does not block you, gets its own account, shows under your pane. A one-shot exec suits a few-second answer. Optional: cwd, model, profile, mode (auto/ask), resume:\"last\", budget_minutes (30). If others_in_cwd names a session there, SendMessage it first."),
     ("Helpers", "List your helpers (all:true: every one): name, agent, account, state, time left, result_path."),
     ("HelperStop", "Stop a helper by name, or all:true for all of yours."),
 ];
