@@ -1,7 +1,8 @@
 //! The codex process behind a pane: which profile directory it runs
 //! under, and how to move it to another one.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::looks_like_codex;
@@ -122,16 +123,26 @@ pub(crate) struct PaneCodex {
 /// shell at that moment.  Setting the variable IS what the alias
 /// expands to.  The thread by id: `--last` picks the newest thread a
 /// home has registered for the directory, and a directory can hold two.
-/// Nothing is started before `released` says the old home has let go.
-pub(super) fn profile_switch_op(
-    pane: &PaneCodex,
-    profile: u8,
-    dir: &std::path::Path,
-    thread: &str,
-    cwd: Option<String>,
-    released: std::sync::Arc<pty_op::Job>,
-) -> Option<pty_op::PtyOp> {
-    resume_op("codex.profile_switch", format!("→ P{profile}"), pane, dir, thread, cwd, Some(released))
+/// Nothing is started before `carry.release` says the old home has let go.
+pub(super) fn profile_switch_op(pane: &PaneCodex, profile: u8, dir: &Path, thread: &str, cwd: Option<String>, carry: Carry) -> Option<pty_op::PtyOp> {
+    resume_op("codex.profile_switch", format!("→ P{profile}"), pane, dir, thread, cwd, carry)
+}
+
+/// What a resume brings across besides the thread.
+pub(super) struct Carry {
+    /// The composer's unsent text: taken by this op, or by an earlier
+    /// one that ended the TUI when `taken`.
+    pub held: Arc<pty_op::Job>,
+    pub taken: bool,
+    /// A switch: called once the TUI is gone, then waited on until the
+    /// old home has let go.
+    pub release: Option<(pty_op::CallFn, Arc<pty_op::Job>)>,
+}
+
+impl Carry {
+    pub(super) fn fresh() -> Carry {
+        Carry { held: pty_op::Job::new(), taken: false, release: None }
+    }
 }
 
 /// Take an outdated codex TUI down and bring the same thread back
@@ -141,28 +152,14 @@ pub(super) fn profile_switch_op(
 /// current release.  The daemon keeps the thread and anything it is
 /// running while no TUI is attached, so nothing but the screen is
 /// redrawn.
-pub(super) fn refresh_op(
-    pane: &PaneCodex,
-    home: &std::path::Path,
-    thread: &str,
-    cwd: Option<String>,
-    to: super::update::Release,
-) -> Option<pty_op::PtyOp> {
-    resume_op("codex.refresh", format!("↻ {to}"), pane, home, thread, cwd, None)
+pub(super) fn refresh_op(pane: &PaneCodex, home: &Path, thread: &str, cwd: Option<String>, to: super::update::Release) -> Option<pty_op::PtyOp> {
+    resume_op("codex.refresh", format!("↻ {to}"), pane, home, thread, cwd, Carry::fresh())
 }
 
 /// End the TUI and start `codex resume <thread>` under `home`, with
 /// what was in the composer put back once the new one has drawn; in
-/// between, wait for `released` when there is one.
-pub(super) fn resume_op(
-    name: &'static str,
-    badge: String,
-    pane: &PaneCodex,
-    home: &std::path::Path,
-    thread: &str,
-    cwd: Option<String>,
-    released: Option<std::sync::Arc<pty_op::Job>>,
-) -> Option<pty_op::PtyOp> {
+/// between, wait for the old home's release when there is one.
+pub(super) fn resume_op(name: &'static str, badge: String, pane: &PaneCodex, home: &Path, thread: &str, cwd: Option<String>, carry: Carry) -> Option<pty_op::PtyOp> {
     let line = pty_op::PtyCommand::new("codex")
         .env("CODEX_HOME", home.to_str()?)
         .arg("resume")
@@ -170,20 +167,18 @@ pub(super) fn resume_op(
         .in_dir(cwd)
         .clear_screen_first(true)
         .to_bytes()?;
-    let held = pty_op::Job::new();
-    let mut op = pty_op::PtyOp::new(name)
-        .hold_screen(true)
-        .badge(badge)
-        .step(pty_op::Step::capture_composer(std::sync::Arc::clone(&held)))
+    let mut op = pty_op::PtyOp::new(name).hold_screen(true).badge(badge);
+    if !carry.taken {
+        op = op.step(pty_op::Step::capture_composer(Arc::clone(&carry.held)));
+    }
+    op = op
         .step(pty_op::Step::settle(Duration::from_millis(250)).named("hold_settle"))
-        .step(
-            pty_op::Step::terminate(pane.codex, libc::SIGTERM)
-                .escalate_after(Duration::from_secs(3), libc::SIGKILL),
-        );
-    if let Some(job) = released {
-        // the worker decides at its own deadline; this one only backs it up
+        .step(pty_op::Step::terminate(pane.codex, libc::SIGTERM).escalate_after(Duration::from_secs(3), libc::SIGKILL));
+    if let Some((gone, job)) = carry.release {
+        // the worker decides at its own deadline, counted from the call;
+        // this one only backs it up
         let wait = crate::plugins::peerbus::moving::RELEASE_WAIT + Duration::from_secs(10);
-        op = op.step(pty_op::Step::await_job(job).timeout(wait).named(RELEASED));
+        op = op.step(pty_op::Step::call(gone).named(RELEASE_CLOCK)).step(pty_op::Step::await_job(job).timeout(wait).named(RELEASED));
     }
     Some(
         op.shell_line(pane.shell_pid, line, "resume")
@@ -194,17 +189,23 @@ pub(super) fn resume_op(
                     .named("first_frame"),
             )
             .step(pty_op::Step::await_process(pane.shell_pid, looks_like_codex).timeout(Duration::from_secs(5)))
-            .step(pty_op::Step::restore_composer(held)),
+            .step(pty_op::Step::restore_composer(carry.held)),
     )
 }
 
-/// The step of a switch that waits for the old home to let go.
+/// The steps of a switch that start and await the old home's release.
+pub(super) const RELEASE_CLOCK: &str = "release_clock";
 pub(super) const RELEASED: &str = "old_home_released";
 
 #[cfg(test)]
 mod profile_menu_tests {
-    use super::{profile_switch_op, PaneCodex, CODEX_PROFILE_PREFIX};
+    use super::{profile_switch_op, Carry, PaneCodex, CODEX_PROFILE_PREFIX};
     use std::path::Path;
+    use std::sync::Arc;
+
+    fn switching() -> Carry {
+        Carry { release: Some((Arc::new(|| Ok(())), super::pty_op::Job::new())), ..Carry::fresh() }
+    }
 
     fn pane(profile: u8) -> PaneCodex {
         PaneCodex {
@@ -233,7 +234,7 @@ mod profile_menu_tests {
         // depend on the user's rc file still defining it, in that
         // shell, at that moment.  What it expands to is a variable,
         // and that is what goes on the line.
-        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"), THREAD, Some("/Users/x/work".into()), super::pty_op::Job::new())
+        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"), THREAD, Some("/Users/x/work".into()), switching())
             .expect("op builds");
         let line = line_of(&op);
         assert!(line.contains("CODEX_HOME='/Users/x/.codex-profile-2'"), "{line}");
@@ -250,7 +251,9 @@ mod profile_menu_tests {
         let at = |l: &str| kinds.iter().position(|k| *k == l).unwrap_or_else(|| panic!("{l} in {kinds:?}"));
         assert!(at("capture_composer") < at("resume") && at("first_frame") < at("restore_composer"), "{kinds:?}");
         // the new home loads the thread only once the old one has let go
-        assert!(at("terminate") < at(super::RELEASED) && at(super::RELEASED) < at("resume"), "{kinds:?}");
+        // and its wait starts once the TUI is gone
+        assert!(at("terminate") < at(super::RELEASE_CLOCK) && at(super::RELEASE_CLOCK) < at(super::RELEASED), "{kinds:?}");
+        assert!(at(super::RELEASED) < at("resume"), "{kinds:?}");
         assert_eq!(op.badge.as_deref(), Some("→ P2"));
     }
 
@@ -258,8 +261,7 @@ mod profile_menu_tests {
     fn codex_is_signalled_not_typed_at() {
         // A `/quit` typed through the PTY echoes into the grid; a
         // signal does not.  Same rule the claudecode plugin follows.
-        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"), THREAD, None, super::pty_op::Job::new())
-            .expect("op builds");
+        let op = profile_switch_op(&pane(1), 2, Path::new("/Users/x/.codex-profile-2"), THREAD, None, switching()).expect("op builds");
         assert!(
             op.steps.iter().any(|s| matches!(
                 &s.kind,

@@ -23,6 +23,10 @@ pub(super) struct State {
     pub page: Option<usize>,
     /// Every request's method, in the order they came.
     pub asked: Vec<String>,
+    /// Methods answered with an error.
+    pub refused: Vec<&'static str>,
+    /// How long each answer takes.
+    pub delay: std::time::Duration,
 }
 
 pub(super) struct Daemon {
@@ -79,6 +83,8 @@ fn serve(mut c: UnixStream, state: &Mutex<State>) {
         let (Some(id), Some(method)) = (req.get("id").cloned(), req.str_at("method").map(str::to_string)) else {
             continue; // a notification
         };
+        let delay = state.lock().unwrap().delay;
+        std::thread::sleep(delay);
         let answer = answer(state, &method, req.get("params"));
         let msg = match answer {
             Ok(result) => obj([("jsonrpc", Value::from("2.0")), ("id", id), ("result", result)]),
@@ -93,6 +99,9 @@ fn serve(mut c: UnixStream, state: &Mutex<State>) {
 fn answer(state: &Mutex<State>, method: &str, params: Option<&Value>) -> Result<Value, String> {
     let mut s = state.lock().unwrap();
     s.asked.push(method.to_string());
+    if s.refused.contains(&method) {
+        return Err(format!("{method}: refused here"));
+    }
     let id = params.and_then(|p| p.str_at("threadId")).unwrap_or_default().to_string();
     match method {
         "initialize" => Ok(obj([("userAgent", Value::from("codex-tui/0.172.0 (fake)"))])),

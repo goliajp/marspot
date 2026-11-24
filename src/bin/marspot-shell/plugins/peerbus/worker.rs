@@ -3,9 +3,10 @@
 //! `CODEX_HOME`.
 //!
 //! Event-driven: it wakes when the set of Codex panes changes, when a
-//! message arrives, or when a daemon reports something.  Two timers:
-//! a retry after a daemon could not be reached, and the short wait of
-//! an idle subscription placed while the session was idle (`idle`).
+//! message arrives, or when a daemon reports something.  Timers
+//! (`clock`): a retry after a daemon could not be reached, the short
+//! wait of an idle subscription placed while the session was idle
+//! (`idle`), and a move's mark and wait for the old home (`moving`).
 //! The names check (`NAMES_EVERY`) is asked for by the plugin's tick,
 //! since a pane is renamed by a `cd` or a move that nothing here is
 //! told about.
@@ -244,32 +245,21 @@ impl Worker {
             self.config_watch = Some(changes::Watch::of_home(home.into(), changes::note));
         }
         self.reconcile_config();
+        self.serve();
+        self.teardown();
+        super::publish_threads(HashMap::new());
+    }
+
+    /// Handle events until told to stop or the channel closes.
+    pub(super) fn serve(&mut self) {
         loop {
-            let ev = match self.stash.pop_front() {
-                Some(e) => e,
-                None => {
-                    // with nothing owed on a clock, until the next event
-                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min(), self.moves.due()].into_iter().flatten().min();
-                    let got = match due {
-                        Some(due) => self.rx.recv_timeout(due.saturating_duration_since(Instant::now())),
-                        None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-                    };
-                    match got {
-                        Ok(e) => e,
-                        Err(RecvTimeoutError::Timeout) => {
-                            let now = Instant::now();
-                            if self.retry_at.is_some_and(|t| t <= now) {
-                                self.retry_at = None;
-                                self.refresh();
-                                self.publish();
-                            }
-                            self.idle_checks_due(now);
-                            self.moves_due(now);
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+            let ev = match self.stash.pop_front().map_or_else(|| self.next_event(), Ok) {
+                Ok(e) => e,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.timers_due();
+                    continue;
                 }
+                Err(RecvTimeoutError::Disconnected) => break,
             };
             match ev {
                 Event::Want(w) => {
@@ -317,10 +307,10 @@ impl Worker {
                 Event::Stop => break,
             }
             self.take_ends();
+            // a steady stream of events never lets the wait time out
+            self.timers_due();
             self.publish();
         }
-        self.teardown();
-        super::publish_threads(HashMap::new());
     }
 
     /// What other plugins may read of the bindings: see `ThreadView`.
@@ -338,7 +328,7 @@ impl Worker {
 
     // ── daemon notifications ──────────────────────────────────────
 
-    fn on_note(&mut self, home: &Path, msg: &Value) {
+    pub(super) fn on_note(&mut self, home: &Path, msg: &Value) {
         let Some(method) = msg.str_at("method") else { return }; // stale answers
         if msg.get("id").is_some() {
             return; // a request meant for the TUI; the TUI answers it
@@ -356,8 +346,9 @@ impl Worker {
                 }
                 let Some(new) = status.and_then(super::daemon::status_of) else { return };
                 let Some(sid) = self.find(home, &thread) else { return };
-                // a thread that has now run a turn can be subscribed
-                if new == Status::Idle && !self.bindings[&sid].subscribed {
+                // a thread that has now run a turn can be subscribed,
+                // unless it is leaving this home
+                if new == Status::Idle && !self.bindings[&sid].subscribed && !self.moving(sid) {
                     let b = &self.bindings[&sid];
                     let (cwd, argv) = (b.record.cwd.clone(), b.argv.clone());
                     let (class, subscribed) = self.class_for(home, &thread, &cwd, &argv);

@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use marspot_peer::json::{obj, Value};
@@ -172,15 +173,25 @@ pub(super) fn sqlite3_with(bin: &str, opts: &[&str], db: &Path, query: &str, lim
         .spawn()
         .map_err(|e| format!("sqlite3: {e}"))?;
     let pid = child.id() as i32;
+    // set, under the lock, before the waiting thread reaps the child:
+    // while it is false the pid cannot have been given to another
+    let exited = Arc::new(Mutex::new(false));
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let flag = Arc::clone(&exited);
     std::thread::spawn(move || {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // waits for the exit and leaves the child unreaped
+        unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
+        *flag.lock().unwrap() = true;
         let _ = tx.send(child.wait_with_output());
     });
     match rx.recv_timeout(limit) {
         Ok(r) => r.map_err(|e| format!("sqlite3: {e}")),
         Err(_) => {
-            // the waiting thread has not reaped it, so the pid is still ours
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            let exited = exited.lock().unwrap();
+            if !*exited {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
             Err(format!("sqlite3 did not finish within {limit:?}"))
         }
     }

@@ -10,16 +10,17 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use marspot::pidtree::{self, ProcId};
 use marspot_term::{lx_info, lx_warn};
 
-pub(crate) use super::moving_release::RELEASE_WAIT;
+#[cfg(test)]
+pub(crate) use super::moving_release::test_turn;
+pub(crate) use super::moving_release::{Released, RELEASE_WAIT};
 use super::moving_release::Release;
 use super::worker::{Binding, Event, Worker};
-use crate::plugins::pty_op::Job;
 
 /// What the codex plugin asks of the worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +29,11 @@ pub(crate) enum Ask {
     Begin { sid: u64, codex: ProcId },
     /// The move did not happen; the old process may still be there.
     End { sid: u64, codex: ProcId },
+    /// The switch op is submitted: it ends with an end or with the
+    /// move done, however long it waits for its turn.
+    Submitted { sid: u64, codex: ProcId },
+    /// The op has ended the TUI: the wait for the old home starts now.
+    Terminated { sid: u64, codex: ProcId },
 }
 
 /// Why a session may not move now.
@@ -41,25 +47,6 @@ pub(crate) enum Held {
     Unknown,
 }
 
-/// Finished by the worker once the old home's daemon no longer has the
-/// session loaded, or with an error when it still has at the deadline.
-#[derive(Clone)]
-pub(crate) struct Released(pub Arc<Job>);
-
-impl PartialEq for Released {
-    fn eq(&self, o: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &o.0)
-    }
-}
-
-impl Eq for Released {}
-
-impl std::fmt::Debug for Released {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Released")
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Go { thread: String, home: PathBuf, released: Released },
@@ -68,21 +55,22 @@ pub(crate) enum Verdict {
 
 /// Verdicts not yet taken; one per ask, and asks come from clicks.
 const MAX_VERDICTS: usize = 64;
-/// Ends not yet taken, for the same reason.
-const MAX_ENDS: usize = 64;
+/// Asks other than `Begin` not yet taken, for the same reason.
+const MAX_LATER: usize = 64;
 /// How long after a move the next binding of its pane is still the
 /// moved session's, owed the sentence that it may go on.
 const GO_ON_WITHIN: Duration = Duration::from_secs(120);
-/// A mark whose process is still there this long after it was set
-/// belongs to a move that never happened: the TUI is ended within
-/// seconds of the verdict.
-const MARK_FOR: Duration = Duration::from_secs(120);
+/// A mark whose process is still there this long after it was set,
+/// with no switch op submitted for it, belongs to a move that never
+/// happened: the op is submitted on the tick after the verdict.
+pub(super) const MARK_FOR: Duration = Duration::from_secs(120);
 
 static ASKS: Mutex<Option<SyncSender<Event>>> = Mutex::new(None);
 static VERDICTS: Mutex<Vec<(u64, ProcId, Verdict)>> = Mutex::new(Vec::new());
-/// Ends wait here rather than in the worker's channel, which drops what
-/// does not fit: a lost end leaves the pane refusing mail.
-static ENDS: Mutex<Vec<Ask>> = Mutex::new(Vec::new());
+/// Every ask but `Begin` waits here rather than in the worker's
+/// channel, which drops what does not fit: a lost end leaves the pane
+/// refusing mail, a lost start leaves a switch waiting for nothing.
+static LATER: Mutex<Vec<Ask>> = Mutex::new(Vec::new());
 
 pub(crate) fn connect(tx: Option<SyncSender<Event>>) {
     *ASKS.lock().unwrap() = tx;
@@ -92,17 +80,17 @@ pub(crate) fn connect(tx: Option<SyncSender<Event>>) {
 pub(crate) fn ask(a: Ask) -> bool {
     let tx = ASKS.lock().unwrap();
     let Some(tx) = tx.as_ref() else { return false };
-    if let Ask::End { .. } = a {
-        let mut q = ENDS.lock().unwrap();
-        if q.len() == MAX_ENDS {
-            q.remove(0);
-        }
-        q.push(a);
-        // only a wake-up: the worker takes the ends after every event
-        let _ = tx.try_send(Event::MoveEnded);
-        return true;
+    if let Ask::Begin { .. } = a {
+        return tx.try_send(Event::Move(a)).is_ok();
     }
-    tx.try_send(Event::Move(a)).is_ok()
+    let mut q = LATER.lock().unwrap();
+    if q.len() == MAX_LATER {
+        q.remove(0);
+    }
+    q.push(a);
+    // only a wake-up: the worker takes these after every event
+    let _ = tx.try_send(Event::MoveEnded);
+    true
 }
 
 /// A stand-in for the worker, for tests on the asking side: takes
@@ -116,7 +104,7 @@ impl Listener {
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         connect(Some(tx));
         verdicts();
-        ENDS.lock().unwrap().clear();
+        LATER.lock().unwrap().clear();
         Listener(rx)
     }
 
@@ -127,7 +115,7 @@ impl Listener {
                 return Some(a);
             }
         }
-        let mut q = ENDS.lock().unwrap();
+        let mut q = LATER.lock().unwrap();
         (!q.is_empty()).then(|| q.remove(0))
     }
 }
@@ -165,8 +153,14 @@ pub(crate) struct Moves {
 impl Moves {
     /// When the worker next has something to look at here.
     pub(super) fn due(&self) -> Option<Instant> {
-        let marks = self.marked.values().map(|m| m.at + MARK_FOR);
-        marks.chain(self.releases.values().map(|r| r.next)).min()
+        let marks = self.marked.iter().filter(|(sid, _)| !self.in_flight(**sid)).map(|(_, m)| m.at + MARK_FOR);
+        marks.chain(self.releases.values().filter_map(|r| r.next)).min()
+    }
+
+    /// A switch op for `sid` is submitted and has not ended: its mark
+    /// stays until it does.
+    pub(super) fn in_flight(&self, sid: u64) -> bool {
+        self.releases.get(&sid).is_some_and(|r| r.submitted)
     }
 }
 
@@ -183,12 +177,14 @@ impl Worker {
                 post(sid, codex, v);
             }
             Ask::End { sid, codex } => self.end_move(sid, codex),
+            Ask::Submitted { sid, codex } => self.release_submitted(sid, codex),
+            Ask::Terminated { sid, codex } => self.release_clock(sid, codex),
         }
     }
 
-    /// Take the ends the codex plugin left; called after every event.
+    /// Take the asks the codex plugin left; called after every event.
     pub(super) fn take_ends(&mut self) {
-        let ends = std::mem::take(&mut *ENDS.lock().unwrap());
+        let ends = std::mem::take(&mut *LATER.lock().unwrap());
         for a in ends {
             self.on_move(a);
         }
@@ -247,8 +243,12 @@ impl Worker {
     /// Clear the marks of moves that never happened and look at the
     /// old homes being watched.
     pub(super) fn moves_due(&mut self, now: Instant) {
-        let late: Vec<u64> = self.moves.marked.iter().filter(|(_, m)| m.at + MARK_FOR <= now).map(|(s, _)| *s).collect();
+        let late: Vec<u64> =
+            self.moves.marked.iter().filter(|(s, m)| m.at + MARK_FOR <= now && !self.moves.in_flight(**s)).map(|(s, _)| *s).collect();
         for sid in late {
+            if let Some(r) = self.moves.releases.remove(&sid) {
+                r.job.finish(Err("the switch never began".into()));
+            }
             let codex = self.moves.marked[&sid].codex;
             let bound = self.bindings.get(&sid).is_some_and(|b| b.codex == codex);
             if alive(codex) || !bound {

@@ -34,6 +34,8 @@ pub(super) struct Rig {
     pub codex: ProcId,
     pub w: Worker,
     _env: EnvGuard,
+    /// Last, so it is let go after everything else.
+    _turn: std::sync::MutexGuard<'static, ()>,
 }
 
 /// A process the way the worker sees a codex TUI: its `CODEX_HOME` and
@@ -58,6 +60,7 @@ fn seen(pid: i32) -> ProcId {
 /// Socket paths have a 104-byte ceiling, which the system temp
 /// directory leaves no room under.
 pub(super) fn rig() -> Rig {
+    let turn = moving::test_turn();
     let root = PathBuf::from(format!("/tmp/pbm-{}", marspot_peer::rand::hex(6)));
     std::fs::create_dir_all(&root).unwrap();
     let root = root.canonicalize().unwrap();
@@ -76,15 +79,19 @@ pub(super) fn rig() -> Rig {
     let (tx, rx) = sync_channel(CHANNEL);
     let mut w = Worker::new(tx, rx, root.to_string_lossy().into_owned());
     bind(&mut w, &home, &cwd, codex);
-    Rig { root, home, cwd, daemon, tui, codex, w, _env: env }
+    Rig { root, home, cwd, daemon, tui, codex, w, _env: env, _turn: turn }
 }
 
 pub(super) fn bind(w: &mut Worker, home: &Path, cwd: &str, codex: ProcId) {
+    bind_as(w, SID, T, home, cwd, codex);
+}
+
+pub(super) fn bind_as(w: &mut Worker, sid: u64, thread: &str, home: &Path, cwd: &str, codex: ProcId) {
     let pane = Pane {
-        sid: SID,
+        sid,
         home: home.to_path_buf(),
         cwd: cwd.to_string(),
-        argv_thread: Some(T.into()),
+        argv_thread: Some(thread.into()),
         title_thread: None,
         title_moved: false,
         title_expected: false,
@@ -92,7 +99,7 @@ pub(super) fn bind(w: &mut Worker, home: &Path, cwd: &str, codex: ProcId) {
         up_ms: 0,
         alone: true,
     };
-    w.bind(&pane, T, codex, &["codex".into()]).expect("bound");
+    w.bind(&pane, thread, codex, &["codex".into()]).expect("bound");
 }
 
 impl Rig {

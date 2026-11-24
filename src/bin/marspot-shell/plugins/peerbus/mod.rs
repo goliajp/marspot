@@ -19,6 +19,7 @@
 mod bind;
 pub(crate) mod claude_mcp;
 mod claude_hooks;
+mod clock;
 pub(crate) mod codex_approval;
 mod codex_config;
 mod daemon;
@@ -52,8 +53,7 @@ mod worker;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
-use std::sync::Mutex;
+use std::sync::{mpsc::{sync_channel, SyncSender, TrySendError}, Mutex};
 use std::thread::JoinHandle;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};

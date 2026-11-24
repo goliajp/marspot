@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use super::pane::{PaneCodex, RELEASED};
+use super::pane::{PaneCodex, RELEASED, RELEASE_CLOCK};
 use super::CodexPlugin;
 use crate::plugins::handoff::{self, Agent};
 use crate::plugins::peerbus::moving::{self, Ask, Held, Listener, Released, Verdict};
@@ -56,6 +56,8 @@ struct World {
     plugin: CodexPlugin,
     host: Recorder,
     asks: Listener,
+    /// Last, so it is let go after everything else.
+    _turn: std::sync::MutexGuard<'static, ()>,
 }
 
 const SID: u64 = 31;
@@ -64,6 +66,7 @@ const CODEX: ProcId = ProcId { pid: i32::MAX, start_us: 1 };
 /// A codex pane on profile 1, peerbus bound to its thread when `bound`,
 /// and a worker that takes asks without answering them.
 fn world(argv: &[&str], bound: bool) -> World {
+    let turn = moving::test_turn();
     let home = TempDir::new("codex-switch");
     for d in [".codex-profile-1", ".codex-profile-2"] {
         std::fs::create_dir_all(home.path().join(d)).unwrap();
@@ -71,6 +74,7 @@ fn world(argv: &[&str], bound: bool) -> World {
     let mut env = EnvGuard::new();
     env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", home.join("state"));
     let mut plugin = CodexPlugin::new();
+    plugin.switches.screen = |_| None;
     let argv = Some(argv.iter().map(|a| a.to_string()).collect());
     plugin.panes.insert(SID, PaneCodex { codex: CODEX, shell_pid: i32::MAX, profile: Some(1), argv });
     let mut views = HashMap::new();
@@ -80,7 +84,7 @@ fn world(argv: &[&str], bound: bool) -> World {
     }
     publish_threads(views);
     let asks = Listener::connect();
-    World { _home: home, _env: env, plugin, host: Recorder::default(), asks }
+    World { _home: home, _env: env, plugin, host: Recorder::default(), asks, _turn: turn }
 }
 
 fn go(home: PathBuf) -> Verdict {
@@ -102,11 +106,24 @@ impl World {
         assert_eq!(self.asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }));
         moving::post(SID, CODEX, go(self.old_home()));
         self.plugin.follow_switches(&self.host);
+        assert_eq!(self.asks.next(), Some(Ask::Submitted { sid: SID, codex: CODEX }), "the mark lasts while the op waits its turn");
         let ops = self.host.submitted.lock().unwrap();
         assert_eq!(ops.iter().map(|(_, o)| o.name).collect::<Vec<_>>(), ["codex.profile_switch"]);
         ops[0].1.on_end.clone().expect("the switch hears how it ended")
     }
 }
+
+/// The composer job of the op's capture step, or of its restore step.
+fn job_of(op: &pty_op::PtyOp, capture: bool) -> Option<std::sync::Arc<pty_op::Job>> {
+    op.steps.iter().find_map(|s| match &s.kind {
+        pty_op::StepKind::CaptureComposer { job, .. } if capture => Some(std::sync::Arc::clone(job)),
+        pty_op::StepKind::RestoreComposer(job) if !capture => Some(std::sync::Arc::clone(job)),
+        _ => None,
+    })
+}
+
+/// codex 0.172's approval prompt, at the bottom of its screen.
+const ASKING: &str = "• Running make\n\n  Would you like to run the following command?\n\n  $ make\n\n› 1. Yes, proceed (y)\n  2. No (esc)\n";
 
 fn line_of(op: &pty_op::PtyOp) -> String {
     op.steps
@@ -174,6 +191,17 @@ fn a_thread_peerbus_does_not_know_is_handed_off_never_resumed_by_last() {
 }
 
 #[test]
+fn a_codex_waiting_on_an_approval_is_not_handed_off() {
+    let mut w = world(&["codex"], false);
+    *w.host.quiet.lock().unwrap() = Some(Duration::from_secs(60));
+    w.plugin.switches.screen = |_| Some(ASKING.into());
+    w.pick_p2();
+    assert_eq!(w.host.names(), Vec::<&str>::new(), "quiet, and not done");
+    assert_eq!(w.plugin.hint_for(SID), Some(Msg::BadgeCodexTerminalBusy));
+    assert!(!super::switch::asks_approval("  Would you like to know more? I asked earlier.\n› "), "no question at the row's end");
+}
+
+#[test]
 fn a_thread_peerbus_does_not_know_is_not_handed_off_mid_turn() {
     let mut w = world(&["codex"], false);
     w.pick_p2();
@@ -193,6 +221,11 @@ fn a_session_that_may_move_is_resumed_by_id_under_the_new_home() {
     assert!(line.contains(&format!("codex resume {THREAD}")) && !line.contains("--last"), "{line}");
     assert!(line.contains(".codex-profile-2'"), "{line}");
     assert!(ops[0].1.steps.iter().any(|s| s.label == RELEASED), "waits for the old home");
+    // the wait is counted from the TUI's end, which the op reports
+    let clock = ops[0].1.steps.iter().find(|s| s.label == RELEASE_CLOCK).expect("a clock step");
+    let pty_op::StepKind::Call(f) = &clock.kind else { panic!("a call") };
+    assert_eq!(f(), Ok(()));
+    assert_eq!(w.asks.next(), Some(Ask::Terminated { sid: SID, codex: CODEX }));
     drop(ops);
     // a second go for the switch under way does nothing
     moving::post(SID, CODEX, go(PathBuf::from("/x")));
@@ -262,6 +295,10 @@ fn an_old_home_that_keeps_the_session_gets_the_tui_back() {
     let line = line_of(&ops[1].1);
     assert!(line.contains(&format!("codex resume {THREAD}")) && line.contains(".codex-profile-1'"), "{line}");
     assert!(!ops[1].1.steps.iter().any(|s| s.label == RELEASED), "the same home has nothing to let go of");
+    // what was unsent in the TUI the switch ended comes back in this one
+    assert!(job_of(&ops[1].1, true).is_none(), "a shell prompt has no composer to take");
+    let (took, gives) = (job_of(&ops[0].1, true).unwrap(), job_of(&ops[1].1, false).unwrap());
+    assert!(std::sync::Arc::ptr_eq(&took, &gives));
     drop(ops);
     assert_eq!(w.plugin.hint_for(SID), Some(Msg::BadgeCodexStillLoaded));
 }

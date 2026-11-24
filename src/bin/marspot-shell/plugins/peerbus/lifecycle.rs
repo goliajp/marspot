@@ -297,10 +297,9 @@ impl Worker {
     }
 
     /// Drop this connection's subscription.  Codex unloads a thread
-    /// only once it has had no subscriber for half an hour; a
-    /// subscription left behind would keep a quit TUI's thread loaded
-    /// for as long as marspot runs, and leave its directory ambiguous
-    /// for the next Codex started there.
+    /// about a minute after its last subscriber lets go (0.172.0, idle
+    /// threads); one left behind keeps a quit TUI's thread loaded while
+    /// marspot runs, and its directory ambiguous for the next Codex.
     pub(super) fn unsubscribe(&mut self, home: &Path, thread: &str) {
         if !self.conns.contains_key(home) {
             return; // the connection is gone, and its subscriptions with it

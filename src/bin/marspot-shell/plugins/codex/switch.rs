@@ -16,16 +16,23 @@ use marspot::pane_state::{BusyKind, PaneStatus};
 use marspot::pidtree::ProcId;
 use marspot::ui::strings::{t, Msg};
 
-use super::pane::{is_thread_id, profile_switch_op, resume_op, PaneCodex, RELEASED};
+use super::pane::{is_thread_id, profile_switch_op, resume_op, Carry, PaneCodex, RELEASED};
 use super::{update, CodexPlugin};
 use crate::plugins::peerbus::moving::{self, Ask, Held, Verdict};
 use crate::plugins::{handoff, pidtree, pty_op, LogLevel, PluginHost};
 
 /// How long a reason not to switch stays beside the badge.
 const HINT_FOR: Duration = Duration::from_secs(6);
-/// A codex at work redraws its spinner many times a second; a terminal
-/// this long without output has none running.
+/// How long a pane must have counted as quiet.  It counts so only once
+/// its terminal has had no output for `PTY_QUIET_AFTER` (30 s), so the
+/// wait is that and this; a codex at work redraws its spinner many
+/// times a second and never gets there.
 const QUIET_FOR: Duration = Duration::from_secs(3);
+/// How codex's approval prompt begins.  A codex waiting on one prints
+/// nothing, and looks as quiet as one that is done.
+const CODEX_ASKS: &str = "Would you like to ";
+/// Rows at the bottom of the screen the prompt is looked for in.
+const ASK_ROWS: usize = 24;
 
 /// A switch asked for and not over yet.
 pub(super) struct Move {
@@ -34,19 +41,36 @@ pub(super) struct Move {
     dir: PathBuf,
     /// Its op has been submitted.
     started: bool,
-    /// Where it came from, to go back to when the old home kept the
-    /// session: the pane, the home, the thread and its directory.
-    back: Option<(PaneCodex, PathBuf, String, Option<String>)>,
+    back: Option<Back>,
+}
+
+/// Where a switch came from, to go back to when the old home kept the
+/// session: the pane, the home, the thread and its directory, and what
+/// was unsent in the composer of the TUI the switch ended.
+struct Back {
+    pane: PaneCodex,
+    home: PathBuf,
+    thread: String,
+    cwd: Option<String>,
+    held: Arc<pty_op::Job>,
 }
 
 /// What the switch keeps between ticks.
-#[derive(Default)]
 pub(super) struct Switches {
     moves: HashMap<u64, Move>,
     hints: HashMap<u64, (Msg, Instant)>,
     /// Panes whose op has ended, told from the op's own thread, and
     /// whether it ended because the old home kept the session.
     ended: Arc<Mutex<Vec<(u64, bool)>>>,
+    /// A pane's screen, as text.
+    pub(super) screen: fn(u64) -> Option<String>,
+}
+
+impl Default for Switches {
+    fn default() -> Switches {
+        let screen: fn(u64) -> Option<String> = |sid| marspot::pane_read::screen(sid, 0).ok();
+        Switches { moves: HashMap::new(), hints: HashMap::new(), ended: Arc::default(), screen }
+    }
 }
 
 /// `codex` or `codex resume <id>`: a command line the resume line can
@@ -67,9 +91,17 @@ fn hint_of(h: Held) -> Msg {
 }
 
 /// The pane's terminal has been quiet long enough that no turn is
-/// drawing in it.
-fn terminal_quiet(host: &dyn PluginHost, sid: u64) -> bool {
-    matches!(host.pane_status(sid), Ok(Some(v)) if v.status == PaneStatus::Busy(BusyKind::ForegroundJob) && v.held >= QUIET_FOR)
+/// drawing in it, and it is not showing codex's approval prompt.
+fn terminal_settled(host: &dyn PluginHost, screen: fn(u64) -> Option<String>, sid: u64) -> bool {
+    let quiet = matches!(host.pane_status(sid), Ok(Some(v)) if v.status == PaneStatus::Busy(BusyKind::ForegroundJob) && v.held >= QUIET_FOR);
+    quiet && !screen(sid).is_some_and(|s| asks_approval(&s))
+}
+
+/// A row near the bottom of `screen` is codex asking for approval.
+pub(super) fn asks_approval(screen: &str) -> bool {
+    let rows: Vec<&str> = screen.lines().filter(|r| !r.trim().is_empty()).collect();
+    let near = &rows[rows.len().saturating_sub(ASK_ROWS)..];
+    near.iter().any(|r| r.trim_start().starts_with(CODEX_ASKS) && r.trim_end().ends_with('?'))
 }
 
 impl CodexPlugin {
@@ -91,7 +123,7 @@ impl CodexPlugin {
         if !crate::plugins::peerbus::threads().get(&sid).is_some_and(|v| v.codex == pane.codex) {
             // no daemon to ask whether a turn is running: the terminal
             // is the only witness
-            if !terminal_quiet(host, sid) {
+            if !terminal_settled(host, self.switches.screen, sid) {
                 return self.hint(host, sid, Msg::BadgeCodexTerminalBusy);
             }
             // no thread id to resume by, and `--last` can pick another
@@ -156,7 +188,13 @@ impl CodexPlugin {
             return;
         };
         let cwd = pidtree::proc_cwd(codex.pid).map(|c| c.to_string_lossy().into_owned());
-        let Some(op) = profile_switch_op(&pane, m.profile, &m.dir, thread, cwd.clone(), released) else {
+        let held = pty_op::Job::new();
+        let gone: pty_op::CallFn = Arc::new(move || {
+            moving::ask(Ask::Terminated { sid, codex });
+            Ok(())
+        });
+        let carry = Carry { held: Arc::clone(&held), taken: false, release: Some((gone, released)) };
+        let Some(op) = profile_switch_op(&pane, m.profile, &m.dir, thread, cwd.clone(), carry) else {
             host.log(LogLevel::Warn, "switch.no_command", &format!("pane {sid}: cannot build the resume line"));
             self.switches.moves.remove(&sid);
             moving::ask(Ask::End { sid, codex });
@@ -172,6 +210,8 @@ impl CodexPlugin {
             ended.lock().unwrap().push((sid, kept));
         }));
         host.log(LogLevel::Info, "switch.start", &format!("pane {sid}: thread {thread} {} → {to}", home.display()));
+        // before the op can end: its end comes after this
+        moving::ask(Ask::Submitted { sid, codex });
         if let Err(e) = host.submit_pty_op(sid, op) {
             host.log(LogLevel::Warn, "cycle.submit_failed", &format!("shelld_session={sid}: {e}"));
             self.switches.moves.remove(&sid);
@@ -180,16 +220,17 @@ impl CodexPlugin {
         }
         if let Some(m) = self.switches.moves.get_mut(&sid) {
             m.started = true;
-            m.back = Some((pane, home.to_path_buf(), thread.to_string(), cwd));
+            m.back = Some(Back { pane, home: home.to_path_buf(), thread: thread.to_string(), cwd, held });
         }
     }
 
     /// The old home did not let go in time: the TUI is gone, so put it
-    /// back where the session still is.
+    /// back where the session still is, with the composer the switch took.
     fn switch_back(&mut self, host: &dyn PluginHost, sid: u64, m: Move) {
         self.hint(host, sid, Msg::BadgeCodexStillLoaded);
-        let Some((pane, home, thread, cwd)) = m.back else { return };
-        let Some(op) = resume_op("codex.switch_back", "↩".into(), &pane, &home, &thread, cwd, None) else { return };
+        let Some(Back { pane, home, thread, cwd, held }) = m.back else { return };
+        let carry = Carry { held, taken: true, release: None };
+        let Some(op) = resume_op("codex.switch_back", "↩".into(), &pane, &home, &thread, cwd, carry) else { return };
         host.log(LogLevel::Warn, "switch.back", &format!("pane {sid}: {} kept thread {thread}; resuming there", home.display()));
         if let Err(e) = host.submit_pty_op(sid, op) {
             host.log(LogLevel::Warn, "cycle.submit_failed", &format!("shelld_session={sid}: {e}"));
