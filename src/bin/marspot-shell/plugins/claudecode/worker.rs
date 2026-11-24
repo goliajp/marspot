@@ -736,6 +736,7 @@ impl WorkerCtx {
                 let has_young_child = turns::young_child(path, f.claude.pid, &obs.table);
                 new_activity.insert(f.shelld_sid, activity_of(tail.as_deref(), has_young_child));
             }
+            self.note_context(f.shelld_sid, bound_by, jsonl_path.as_deref());
             turn_looks.extend(turns::look_in(bound_by, tail.as_deref()).map(|l| (f.shelld_sid, l)));
             // a read failure is an empty window, which every check below
             // takes as "no evidence"
@@ -798,11 +799,8 @@ impl WorkerCtx {
                     }),
                 },
             );
-            // No log line here on purpose — `session.bound` is
-            // transition-only.  Main side diffs `result.new_mapping`
-            // against `self.last_mapping` and only logs the deltas;
-            // otherwise we'd write 12 lines per 2 s tick in steady
-            // state and drown the file.
+            // no log line here: the main side logs what differs from its
+            // last mapping
         }
 
         turns::publish(turn_looks);

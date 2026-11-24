@@ -47,6 +47,7 @@ impl Shared {
         drop(st);
         *self.jobs.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
         self.wake_queued.store(false, Ordering::Release);
+        self.contexts_queued.store(false, Ordering::Release);
         self.parked.store(false, Ordering::Release);
         epoch
     }

@@ -115,6 +115,10 @@ impl Undelivered {
         self.map.remove(&sid)
     }
 
+    pub fn get(&self, sid: u64) -> Option<&Notice> {
+        self.map.get(&sid)
+    }
+
     /// Whether a notice for `sid` is kept.
     pub fn holds(&self, sid: u64) -> bool {
         self.map.contains_key(&sid)

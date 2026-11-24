@@ -16,6 +16,7 @@
 
 mod badge;
 mod pane;
+pub(in crate::plugins) mod context;
 mod hand_off;
 mod refresh;
 mod rollout;
@@ -408,6 +409,7 @@ impl Plugin for CodexPlugin {
             }
         }
         self.refresh_stale(host, &codex_panes);
+        super::helpers::used::look_at_codex();
     }
 }
 

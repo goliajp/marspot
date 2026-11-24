@@ -97,6 +97,7 @@ mod tests {
                 task_sha: String::new(),
                 label: String::new(),
                 conv: None,
+                root: None,
             },
             0,
         );

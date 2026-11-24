@@ -25,12 +25,17 @@ pub(super) fn of(port: &Port) -> &'static str {
 pub(super) fn among(chain: &[ProcRow]) -> Option<&'static str> {
     chain.iter().find_map(|row| {
         let p = Proc { row: row.clone(), argv: pidtree::proc_argv(row.pid).map(Arc::from) };
-        match p.name() {
-            "claude" => Some("claude"),
-            "codex" => Some("codex"),
-            _ if crate::plugins::gemini::is_gemini(&p) => Some("gemini"),
-            _ if crate::plugins::kimi::looks_like_kimi(row) => Some("kimi"),
-            _ => None,
-        }
+        agent_of(&p)
     })
+}
+
+/// The agent `p` is.
+pub(super) fn agent_of(p: &Proc) -> Option<&'static str> {
+    match p.name() {
+        "claude" => Some("claude"),
+        "codex" => Some("codex"),
+        _ if crate::plugins::gemini::is_gemini(p) => Some("gemini"),
+        _ if crate::plugins::kimi::looks_like_kimi(&p.row) => Some("kimi"),
+        _ => None,
+    }
 }

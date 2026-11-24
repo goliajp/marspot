@@ -106,8 +106,8 @@ fn helpers_a_result_is_not_told_again_for_a_notice_about_another_helper() {
     h.takes(Turn::by_marspot(NOTICE).says("Not a helper of mine; nothing to do."));
     h.takes(Turn::by_marspot(NOTICE).says("Nor is that one."));
     assert_eq!(h.in_turn[&1], turn::Turn::Idle);
-    feed(&h.s, 2, vec![Event::Stopped]);
-    feed(&h.s, 3, vec![Event::Stopped]);
+    feed(&h.s, 2, vec![Event::Stopped { exited: false }]);
+    feed(&h.s, 3, vec![Event::Stopped { exited: false }]);
     *h.s.lock().child_gone.get_mut(&1).unwrap() -= turn::AFTER_HELPERS_MS;
 
     // it works: told, and by the order nothing was before
@@ -147,7 +147,7 @@ fn helpers_the_turn_after_a_held_end_is_told_whatever_it_did() {
     feed(&h.s, 2, vec![Event::Started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
     h.takes(Turn::by_text("and this").with(TOOL).with(TOOL_RESULT).says("Started one."));
     assert_eq!(h.in_turn[&1], turn::Turn::Held);
-    feed(&h.s, 2, vec![Event::Stopped]);
+    feed(&h.s, 2, vec![Event::Stopped { exited: false }]);
     *h.s.lock().child_gone.get_mut(&1).unwrap() -= turn::AFTER_HELPERS_MS;
     h.takes(Turn::by_marspot(NOTICE).says("It is 391."));
     assert!(h.told().contains("unchanged"));

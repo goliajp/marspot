@@ -1813,6 +1813,7 @@ enum CoreEvent {
     L3Says(u64, Frame),
     /// L1 asked for something of a pane; session `.0` reported on such a request.
     ShellPaneControl(Frame),
+    HelperStrip(marspot::shell_proto::HelperStrip),
     PaneReport(u64, Frame),
     /// A background reconnect finished.  `Some(stream)` swaps the
     /// pane's control onto it; `None` means every attempt failed and
@@ -2444,6 +2445,8 @@ mod l3_reader;
 mod shell_reader;
 #[path = "marspot-core/pane_control.rs"]
 mod pane_control;
+#[path = "marspot-core/helper_strip_records.rs"]
+mod helper_strip_records;
 #[path = "marspot-core/pane_reports.rs"]
 mod pane_reports;
 #[path = "marspot-core/shadows.rs"]
@@ -3457,6 +3460,7 @@ fn main() {
                 }
                 CoreEvent::L3Says(sid, frame) => app.session_says(sid, &frame),
                 CoreEvent::ShellPaneControl(f) => drop(app.route_pane_control(f)),
+                CoreEvent::HelperStrip(m) => app.pane_control.strips.take(m),
                 CoreEvent::PaneReport(sid, f) => app.report_to_shell(sid, f),
                 CoreEvent::L3ControlReconnected(sid, stream) => {
                     app.reconnecting.remove(&sid);
@@ -3551,15 +3555,9 @@ fn main() {
                         app.open_pane_badge_menu(wi, sid, x, y, items);
                     }
                 }
-                CoreEvent::PaneTitle(sid, text) => {
-                    app.set_pane_title(sid, text);
-                }
-                CoreEvent::PaneSessionBegin(sid, caps) => {
-                    app.pane_session_begin(sid, caps);
-                }
-                CoreEvent::PaneSessionEnd(sid) => {
-                    app.pane_session_end(sid);
-                }
+                CoreEvent::PaneTitle(sid, text) => app.set_pane_title(sid, text),
+                CoreEvent::PaneSessionBegin(sid, caps) => app.pane_session_begin(sid, caps),
+                CoreEvent::PaneSessionEnd(sid) => app.pane_session_end(sid),
                 CoreEvent::InjectInput(sid, bytes) => {
                     app.inject_input(sid, &bytes);
                 }

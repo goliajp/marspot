@@ -38,16 +38,26 @@ pub(super) enum Turn {
     BlockedBefore,
 }
 
+/// Whether the table says `h` is in a turn that began after its last
+/// stop was told: given to it some other way than as input seen here.
+pub(super) fn in_later_turn(h: &Helper) -> bool {
+    let told = h.notices.last().copied();
+    turn_reported(h) && h.clock.since_ms.is_some_and(|since| told.is_some_and(|t| t < since))
+}
+
 /// The turns a start begins with.  A helper whose task went in and
 /// whose last stop was not told may have ended its turn while no plugin
 /// ran, or had its stop lost with the queue: it counts as working, so
 /// that its wait for input is told.  One with a stop held back by the
 /// rate is told of that one.  One last told of at an approval prompt
-/// may still be at it.
+/// may still be at it.  One in a turn after the stop that was told is
+/// in it until it is seen to have ended.
 pub(super) fn turns_at_start(t: &Table) -> HashMap<u64, Turn> {
-    let untold = t.map.values().filter(|h| turn_reported(h) && h.delivered_ms.is_some() && !h.noticed && h.suppressed == 0);
-    let blocked = t.map.values().filter(|h| turn_reported(h) && h.blocked_told);
-    untold.map(|h| (h.sid, Turn::Working)).chain(blocked.map(|h| (h.sid, Turn::BlockedBefore))).collect()
+    let turn = |h: &Helper| {
+        let untold = h.delivered_ms.is_some() && !h.noticed && h.suppressed == 0;
+        if untold || in_later_turn(h) { Some(Turn::Working) } else { h.blocked_told.then_some(Turn::BlockedBefore) }
+    };
+    t.map.values().filter(|h| turn_reported(h)).filter_map(|h| Some((h.sid, turn(h)?))).collect()
 }
 
 /// Whether `ev` is something given to `h` after a stop of its that was
@@ -86,6 +96,15 @@ impl Shared {
         *self.lock().turn_told.entry(h.sid).or_insert_with(|| Told { at: first(), by_state: false })
     }
 
+    pub(super) fn at_work(&self, sid: u64, yes: bool) {
+        let mut st = self.lock();
+        let changed = if yes { st.at_work.insert(sid) } else { st.at_work.remove(&sid) };
+        drop(st);
+        if changed {
+            self.strip_changed();
+        }
+    }
+
     /// Whether `h`, with nothing new to show, waits for helpers of its
     /// own: one still runs, or the last was told of or went a moment ago
     /// (a notice starts `h`'s next turn once it is read).
@@ -113,6 +132,10 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
     let Ok(Some(v)) = host.pane_status(h.sid) else { return };
     // in a turn, not only printing
     let at_work = matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval));
+    let claude = h.started.agent == AgentKind::Claude;
+    let look = if claude && v.status != PaneStatus::Empty { turns::look(h.sid) } else { None };
+    // over by its own record, it is not, whatever it still draws
+    s.at_work(h.sid, at_work && !matches!(look, Some(Look::Over { .. })));
     if at_work {
         let mut st = s.lock();
         st.turned.insert(h.sid);
@@ -122,8 +145,6 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
         }
     }
     let seen = in_turn.entry(h.sid).or_default();
-    let claude = h.started.agent == AgentKind::Claude;
-    let look = if claude && v.status != PaneStatus::Empty { turns::look(h.sid) } else { None };
     if let Some(Look::Over { began, at, quiet_after }) = look {
         if at > h.started_ms {
             s.lock().turned.insert(h.sid);

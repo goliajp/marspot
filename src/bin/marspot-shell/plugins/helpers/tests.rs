@@ -32,6 +32,7 @@ pub(super) fn started(parent: u64, caller: &str, agent: AgentKind) -> Started {
         task_sha: "ab".repeat(32),
         label: String::new(),
         conv: None,
+        root: None,
     }
 }
 
@@ -50,9 +51,13 @@ fn helpers_every_event_reads_back_from_its_line() {
     h.notices = vec![5, 6];
     h.suppressed = 2;
     h.result_new = true;
+    h.exited = true;
+    h.root = Some(3);
+    h.clock.end(1500);
     h.result_sha = "ef".repeat(32);
     for ev in [
         Event::Started(started(3, "shell", AgentKind::Kimi)),
+        Event::Started(Started { root: Some(2), ..started(3, "shell", AgentKind::Kimi) }),
         Event::Preparing,
         Event::TaskDelivered,
         Event::ResultChanged,
@@ -68,8 +73,12 @@ fn helpers_every_event_reads_back_from_its_line() {
         Event::NoticeSuppressed { blocked: false },
         Event::NoticeSuppressed { blocked: true },
         Event::AccountChanged("P5".into()),
+        Event::TurnBegan,
+        Event::TurnEnded,
+        Event::Rooted(9),
         Event::BudgetExpired,
-        Event::Stopped,
+        Event::Stopped { exited: false },
+        Event::Stopped { exited: true },
         Event::Carried(Box::new(h.clone())),
     ] {
         let l = records::line(9, 8, 7, &ev);
@@ -93,9 +102,9 @@ fn helpers_replay_gives_the_table_and_survives_rotation() {
     let (s, _rx) = shared_at(&dir);
     feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered, Event::ResultChanged, Event::IdleNoticed]);
     feed(&s, 2, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered, Event::AccountChanged("P4".into())]);
-    feed(&s, 3, vec![Event::Started(started(11, "codex", AgentKind::Gemini)), Event::TaskDelivered, Event::Stopped]);
+    feed(&s, 3, vec![Event::Started(started(11, "codex", AgentKind::Gemini)), Event::TaskDelivered, Event::Stopped { exited: false }]);
     let before = s.table();
-    assert_eq!(records::replay(&s.log).unwrap().table, *before);
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *before);
     assert_eq!(before.map.len(), 2);
     assert_eq!(before.map[&2].account, "P4");
     assert!(before.map[&1].noticed && before.map[&1].result_new);
@@ -105,7 +114,7 @@ fn helpers_replay_gives_the_table_and_survives_rotation() {
     let size = std::fs::metadata(&s.log).unwrap().len();
     std::fs::copy(&s.log, &log2).unwrap();
     records::append(&log2, size, &before, 1, records::now_ms(), &Event::InputSeen);
-    let after = records::replay(&log2).unwrap().table;
+    let after = records::replay(&log2, &|_| None).unwrap().table;
     let mut expect = (*before).clone();
     expect.apply(1, 0, &Event::InputSeen);
     assert_eq!(after, expect, "the rotated log replays to the same table");

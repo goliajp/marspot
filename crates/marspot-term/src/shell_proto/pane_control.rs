@@ -25,6 +25,8 @@ pub const CAP_TYPE_AND_WATCH: u32 = 1;
 pub const CAP_SHADOWS: u32 = 1 << 1;
 pub const CAP_PEEK: u32 = 1 << 2;
 pub const CAP_HELPER_PANEL: u32 = 1 << 3;
+/// Takes `HelperStrip`, and sizes a shadow pane opened 0×0 by its top pane.
+pub const CAP_HELPER_STRIP: u32 = 1 << 4;
 
 macro_rules! wire_enum {
     ($(#[$m:meta])* $name:ident { $($var:ident = $v:literal),* $(,)? }) => {
@@ -51,6 +53,9 @@ macro_rules! wire_enum {
         }
     };
 }
+
+mod helper_strip;
+pub use helper_strip::*;
 
 wire_enum!(WatchKind { Cancel = 0, Text = 1, Quiet = 2, Prompt = 3, Exit = 4, Change = 5, CommandEnd = 6 });
 wire_enum!(WatchReason { Met = 1, SessionEnded = 2, Restarting = 3 });

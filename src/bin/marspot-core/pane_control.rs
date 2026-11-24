@@ -34,6 +34,7 @@ pub(super) struct PaneControl {
     pub(super) reports: Reports,
     caps_sent: bool,
     pub(super) shadows: super::shadows::Shadows,
+    pub(super) strips: super::helper_strip_records::Records,
     /// Dev seam only (`MARSPOT_DEV_PANE_CONTROL`): when to play one
     /// `PaneType` and one `PaneWatch` for the first session pane.
     dev_at: Option<Instant>,

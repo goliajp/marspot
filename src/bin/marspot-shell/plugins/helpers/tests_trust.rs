@@ -202,7 +202,7 @@ fn helpers_a_turn_counts_only_as_the_plugin_reports_it() {
     assert!(s.lock().turned.is_empty());
     see(BusyKind::Working);
     assert!(s.lock().turned.contains(&1));
-    feed(&s, 1, vec![Event::Stopped]);
+    feed(&s, 1, vec![Event::Stopped { exited: false }]);
     assert!(s.lock().turned.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
 }

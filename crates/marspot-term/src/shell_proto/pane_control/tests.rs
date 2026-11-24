@@ -1,6 +1,7 @@
 use super::*;
 use crate::shell_proto::MsgType;
 
+mod helper_strip;
 mod limits;
 
 pub(super) fn watch(text: &str) -> WatchBody {
@@ -175,11 +176,16 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
             }),
             |p| shown(decode_helper_panel_act(p)),
         ),
+        s(
+            MsgType::HelperStrip,
+            encode_helper_strip(&helper_strip::strip(2)).unwrap(),
+            |p| shown(decode_helper_strip(p)),
+        ),
     ]
 }
 
 #[test]
-fn pane_control_type_numbers_are_130_to_143() {
+fn pane_control_type_numbers_are_130_to_144() {
     let names = [
         MsgType::PaneSpawn,
         MsgType::PaneSpawned,
@@ -195,6 +201,7 @@ fn pane_control_type_numbers_are_130_to_143() {
         MsgType::PaneControlCaps,
         MsgType::SessionReadsPaneControl,
         MsgType::HelperPanelAct,
+        MsgType::HelperStrip,
     ];
     for (i, t) in names.into_iter().enumerate() {
         assert_eq!(t as u32, 130 + i as u32);
@@ -350,6 +357,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
         7 + 3,
         4,
         10,
+        19 + 2 * (2 + 53 + 6 + 11 + 4 + "看 parser".len()),
     ];
     assert_eq!(sizes, expected);
 }

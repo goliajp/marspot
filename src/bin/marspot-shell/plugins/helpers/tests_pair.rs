@@ -32,7 +32,7 @@ fn helpers_only_a_helper_and_its_parent_are_a_pair() {
     for (a, b) in [(10, 11), (20, 1), (10, 2), (30, 1), (1, 2), (10, 10), (7, 8)] {
         assert!(!pair(a, b) && !pair(b, a), "{a} {b}");
     }
-    feed(&s, 10, vec![Event::Stopped]);
+    feed(&s, 10, vec![Event::Stopped { exited: false }]);
     assert!(!pair(10, 1), "a helper that went is none");
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -82,7 +82,7 @@ fn helpers_follow_their_parent_to_the_agent_it_is_handed_to() {
     let m = Moved { pane: 1, from: Some("two".into()), left: NEW, resumed: Some("one".into()) };
     parent_moved(&s, &m, None);
     assert!(pair(10, OLD, "one") && !pair(10, NEW, "two"));
-    assert_eq!(records::replay(&s.log).unwrap().table, *s.table());
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *s.table());
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

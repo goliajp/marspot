@@ -51,7 +51,7 @@ fn helpers_a_start_removes_the_directory_of_one_that_ended_and_still_runs() {
     let dir = temp("ended");
     let (s, _rx) = shared_at(&dir);
     feed(&s, 1, begun(AgentKind::Codex));
-    feed(&s, 2, [begun(AgentKind::Codex), vec![Event::Stopped]].concat());
+    feed(&s, 2, [begun(AgentKind::Codex), vec![Event::Stopped { exited: false }]].concat());
     for sid in [1, 2, 3] {
         make(&s.dir_of(sid));
     }

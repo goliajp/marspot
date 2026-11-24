@@ -100,6 +100,8 @@ pub(super) fn tick(s: &Arc<Shared>, host: &dyn PluginHost, in_turn: &mut HashMap
             turn::turn(s, host, &t, h, now_ms, in_turn);
         }
     }
+    s.publish_turns(in_turn);
+    s.expire_strips(now_ms);
     reclaim(s, host, &t, now_ms, &obs, parked);
     let again = s.lock().undelivered.due(&obs);
     for (sid, was) in again {
@@ -121,6 +123,11 @@ pub(super) fn gone_due(t: &Table, closing: &HashSet<u64>, obs: &Observation, now
         Some(at) => TickDue::At(Instant::now() + Duration::from_millis(at - now_ms)),
         None => TickDue::Event,
     }
+}
+
+/// At `at_ms`, with now `now_ms`.
+pub(super) fn at(at_ms: u64, now_ms: u64) -> TickDue {
+    TickDue::At(Instant::now() + Duration::from_millis(at_ms.saturating_sub(now_ms)))
 }
 
 /// The sooner of two.
@@ -187,7 +194,7 @@ pub(super) fn due(t: &Table, noted: &HashSet<u64>, parked: &Parked, obs: &Observ
         return TickDue::Cadence;
     }
     match parked.map.values().filter(|x| x.parked).filter_map(|x| x.recheck).min() {
-        Some(at) => TickDue::At(Instant::now() + Duration::from_millis(at.saturating_sub(now_ms))),
+        Some(at_ms) => at(at_ms, now_ms),
         None => TickDue::Event,
     }
 }

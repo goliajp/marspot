@@ -213,6 +213,7 @@ impl ShellApp {
             self.pane_look.titles.declare(upd.shelld_session_id, upd.text);
         }
         plugins::helpers::titles::declare(&mut self.pane_look.titles);
+        self.pane_look.strips_known |= plugins::helpers::strip::declare(&mut self.pane_look.strips);
         for (s, p, side, mask) in self.core_icons.drawn() {
             self.send(MsgType::IconMask, marspot::shell_proto::encode_icon_mask(s, p, side, &mask));
             self.draw_core_icons();

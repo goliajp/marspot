@@ -85,7 +85,7 @@ fn container_directory_goes_after_the_container() {
     pending::add(&s.root(), 41, &[]).unwrap();
     std::fs::create_dir_all(s.dir_of(41)).unwrap();
     std::fs::write(s.dir_of(41).join("env"), "x").unwrap();
-    s.record(41, Event::Stopped);
+    s.record(41, Event::Stopped { exited: false });
     let asked = || std::fs::read_to_string(dir.join("log")).is_ok_and(|l| l.contains("rm -f"));
     wait("docker is asked", asked);
     s.sweep_dirs_where(|_| true);

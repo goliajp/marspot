@@ -78,7 +78,7 @@ impl Service {
     /// Undo a start that failed after its pane opened.
     fn abandon(&self, port: &mut Port, sid: u64, r: Reject) -> Reject {
         let _ = port.close(sid);
-        self.0.record(sid, Event::Stopped);
+        self.0.record(sid, Event::Stopped { exited: false });
         self.0.sweep_dirs();
         r
     }
@@ -125,6 +125,7 @@ impl HelperService for Service {
             task_sha: sha256::digest(a.task.as_bytes()).iter().map(|b| format!("{b:02x}")).collect(),
             label: a.name.clone().unwrap_or_default(),
             conv: crate::plugins::peerbus::conversation_of(parent).map(|c| c.id),
+            root: Some(self.0.root_over(parent)),
         };
         // written before anything runs in the pane: a shell started over
         // between the two would otherwise find an agent nobody accounts for

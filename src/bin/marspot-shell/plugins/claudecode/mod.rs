@@ -40,6 +40,7 @@ mod transcript;
 mod profiles;
 mod argv;
 mod records;
+mod context;
 mod continued;
 mod wake;
 mod monitors;

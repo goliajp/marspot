@@ -132,7 +132,7 @@ fn pane_control_frames_stay_aligned_with_their_neighbours() {
     let mut pings = Vec::new();
     while let Some(next) = Frame::read_next(&mut cur).unwrap() {
         match next {
-            Next::Frame(f) if (130..=143).contains(&(f.msg_type as u32)) => {}
+            Next::Frame(f) if (130..=144).contains(&(f.msg_type as u32)) => {}
             Next::Frame(f) => pings.push(decode_ping(&f.payload).unwrap()),
             Next::Unknown(t) => panic!("type {t} is known to this build"),
         }

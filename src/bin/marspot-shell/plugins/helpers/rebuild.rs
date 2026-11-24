@@ -1,12 +1,14 @@
 //! The table at the shell's start: from the log and the sessions still
 //! running.
 
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::Shared;
 use super::table::Event;
 use super::work::Job;
+use crate::observe::Observation;
 
 /// The shadow panes running now.
 pub(super) fn live_shadows() -> HashSet<u64> {
@@ -21,12 +23,13 @@ pub(super) fn live_shadows() -> HashSet<u64> {
 /// among them is gone.  The worker may close one before this is done:
 /// it counts as carried over all the same.
 pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> usize {
-    let known = reload(s);
+    let known = reload(s, &|| crate::observe::shared().fresh(crate::observe::INTERVAL));
     let sids: Vec<u64> = s.table().map.keys().copied().collect();
     let live = live();
     let carried = sids.iter().filter(|sid| live.contains(sid)).count();
     for sid in sids.into_iter().filter(|sid| !live.contains(sid)) {
-        s.record(sid, Event::Stopped);
+        // gone while no shell ran: nobody stopped it
+        s.record(sid, Event::Stopped { exited: true });
     }
     if known {
         s.sweep_dirs_where(|sid| !live.contains(&sid));
@@ -51,15 +54,18 @@ pub(super) fn rebuild(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> u
 }
 
 /// Take the table and who stopped from the log; false when it cannot be
-/// read, with the table as it was.
-fn reload(s: &Shared) -> bool {
+/// read, with the table as it was.  `look` waits for a walk: it is asked
+/// only for a helper whose top pane the log does not say.
+pub(super) fn reload(s: &Shared, look: &dyn Fn() -> Arc<Observation>) -> bool {
     // a fact written between the read and the swap would be lost
     let _w = s.writing.lock().unwrap_or_else(|p| p.into_inner());
-    let replayed = super::records::replay(&s.log);
+    let obs = OnceCell::new();
+    let replayed = super::records::replay(&s.log, &|sid| super::strip::above(obs.get_or_init(look), sid));
     let mut st = s.lock();
     let known = match replayed {
         Ok(r) => {
             st.table = r.table;
+            st.batches = r.batches;
             st.stopped.extend(r.stopped);
             true
         }
@@ -68,7 +74,8 @@ fn reload(s: &Shared) -> bool {
             false
         }
     };
-    st.poked = super::turn::poked_at_start(&st.table, super::records::now_ms());
+    st.began_ms = super::records::now_ms();
+    st.poked = super::turn::poked_at_start(&st.table, st.began_ms);
     *s.published.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(st.table.clone());
     known
 }

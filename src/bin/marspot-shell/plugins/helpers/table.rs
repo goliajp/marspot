@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use marspot::pidtree::ProcId;
 use marspot_peer::control::{AgentKind, Isolation};
 
+use super::strip::clock::Clock;
+use super::turn::turn_reported;
+
 /// How far back the notice rate looks.
 pub(super) const NOTICE_WINDOW_MS: u64 = 10 * 60 * 1000;
 /// Notices one helper sends within the window at most.
@@ -30,6 +33,9 @@ pub(super) struct Started {
     /// The conversation in the parent pane when it was started; None:
     /// not known then, or an older build started it.
     pub conv: Option<String>,
+    /// The pane at the top of its chain of parents; None: an older
+    /// build started it.
+    pub root: Option<u64>,
 }
 
 impl Started {
@@ -74,12 +80,18 @@ pub(super) struct Helper {
     pub suppressed: u32,
     /// One of them was a stop at a prompt: the held notice says so.
     pub held_blocked: bool,
+    /// Its program left the pane, and that was told.
+    pub exited: bool,
+    /// The pane at the top now, by what was last known.
+    pub root: Option<u64>,
+    /// How long it has been at work.
+    pub clock: Clock,
 }
 
 impl Helper {
     pub fn new(sid: u64, started: Started, at_ms: u64) -> Self {
         let account = started.account.clone();
-        let conv = started.conv.clone();
+        let (conv, root) = (started.conv.clone(), started.root);
         Helper {
             sid,
             started,
@@ -98,6 +110,9 @@ impl Helper {
             notices: Vec::new(),
             suppressed: 0,
             held_blocked: false,
+            exited: false,
+            root,
+            clock: Clock::started(at_ms),
         }
     }
 
@@ -114,6 +129,14 @@ impl Helper {
     /// When the window frees a place, if it is full at `now_ms`.
     pub fn window_opens_ms(&self, now_ms: u64) -> Option<u64> {
         (!self.may_notify(now_ms)).then(|| self.notices.iter().min().map_or(now_ms, |t| t + NOTICE_WINDOW_MS))
+    }
+
+    /// Given something, or wrote its result: judged from its screen, it
+    /// is taken to be at work until it is seen to have stopped.
+    fn prodded(&mut self, at_ms: u64) {
+        if !turn_reported(self) {
+            self.clock.begin(at_ms);
+        }
     }
 
     fn noticed_at(&mut self, at_ms: u64) {
@@ -145,8 +168,14 @@ pub(super) enum Event {
     ParentAgent(ProcId),
     /// Its parent conversation goes on as this one.
     ConversationChanged(String),
+    /// Seen at work again after it had finished, and the other way.
+    TurnBegan,
+    TurnEnded,
+    /// It is under this pane now.
+    Rooted(u64),
     BudgetExpired,
-    Stopped,
+    /// `exited`: its session was gone; nobody closed it.
+    Stopped { exited: bool },
     /// Everything the events before a rotation said, in one line.
     Carried(Box<Helper>),
 }
@@ -167,8 +196,11 @@ impl Event {
             Event::AccountChanged(_) => "account_changed",
             Event::ParentAgent(_) => "parent_agent",
             Event::ConversationChanged(_) => "conversation_changed",
+            Event::TurnBegan => "turn_began",
+            Event::TurnEnded => "turn_ended",
+            Event::Rooted(_) => "rooted",
             Event::BudgetExpired => "budget_expired",
-            Event::Stopped => "stopped",
+            Event::Stopped { .. } => "stopped",
             Event::Carried(_) => "carried",
         }
     }
@@ -193,7 +225,7 @@ impl Table {
                 self.map.insert(sid, Helper { sid, ..(**h).clone() });
                 return;
             }
-            Event::Stopped => {
+            Event::Stopped { .. } => {
                 self.map.remove(&sid);
                 return;
             }
@@ -210,6 +242,7 @@ impl Table {
                 h.result_new = true;
                 h.noticed = false;
                 h.blocked_told = false;
+                h.prodded(at_ms);
             }
             Event::ResultDelivered { sha } => {
                 // told again as unchanged: no other result
@@ -222,14 +255,19 @@ impl Table {
             Event::InputSeen => {
                 h.noticed = false;
                 h.blocked_told = false;
+                h.prodded(at_ms);
             }
             Event::IdleNoticed | Event::BlockedNoticed { .. } | Event::ExitedNoticed => {
                 h.noticed = true;
                 h.blocked_told = matches!(ev, Event::BlockedNoticed { .. });
+                h.exited = matches!(ev, Event::ExitedNoticed);
                 if let Event::BlockedNoticed { prompt } = ev {
                     h.blocked_prompt.clone_from(prompt);
                 }
                 h.noticed_at(at_ms);
+                if h.exited {
+                    h.clock.end(at_ms);
+                }
             }
             Event::NoticeSuppressed { blocked } => {
                 h.suppressed += 1;
@@ -241,7 +279,10 @@ impl Table {
                 h.conv = Some(c.clone());
                 h.heir = None;
             }
-            Event::BudgetExpired | Event::Started(_) | Event::Carried(_) | Event::Stopped => {}
+            Event::TurnBegan => h.clock.begin(at_ms),
+            Event::TurnEnded => h.clock.end(at_ms),
+            Event::Rooted(r) => h.root = Some(*r),
+            Event::BudgetExpired | Event::Started(_) | Event::Carried(_) | Event::Stopped { .. } => {}
         }
     }
 

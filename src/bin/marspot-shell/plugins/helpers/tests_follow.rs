@@ -37,7 +37,7 @@ fn helpers_a_start_keeps_the_directory_of_a_running_one_its_log_lacks() {
     garble(&s.log, b"1\t1\t2\tstarted\tparent=10\tcaller=shell\tagent=other\tbudget=30\n");
     garble(&s.log, b"1\t1\t1\tinput_seen\tx=\xff\xfe");
     feed(&s, 3, begun(AgentKind::Codex));
-    feed(&s, 4, [begun(AgentKind::Codex), vec![Event::Stopped]].concat());
+    feed(&s, 4, [begun(AgentKind::Codex), vec![Event::Stopped { exited: false }]].concat());
     for sid in 1..=5 {
         make(&s.dir_of(sid));
     }
@@ -54,7 +54,7 @@ fn helpers_a_start_that_cannot_read_the_log_removes_nothing() {
     let (s, _rx) = shared_at(&dir);
     std::fs::create_dir(&s.log).unwrap();
     make(&s.dir_of(1));
-    assert!(records::replay(&s.log).is_err());
+    assert!(records::replay(&s.log, &|_| None).is_err());
     assert_eq!(rebuild::rebuild(&s, HashSet::new), 0);
     assert!(s.dir_of(1).exists());
     s.park();
@@ -65,7 +65,7 @@ fn helpers_a_start_that_cannot_read_the_log_removes_nothing() {
 fn helpers_an_end_removes_only_what_stopped_or_is_gone() {
     let dir = temp("only");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, [begun(AgentKind::Codex), vec![Event::Stopped]].concat());
+    feed(&s, 1, [begun(AgentKind::Codex), vec![Event::Stopped { exited: false }]].concat());
     feed(&s, 2, begun(AgentKind::Codex));
     for sid in 1..=4 {
         make(&s.dir_of(sid));
@@ -124,7 +124,7 @@ fn helpers_another_approval_prompt_after_a_start_is_told() {
     feed(&s, 2, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: String::new() }]].concat());
     let carried = Event::Carried(Box::new(s.table().map[&1].clone()));
     assert_eq!(records::parse(&records::line(1, 1, 1, &carried)), Some((1, 1, carried)));
-    assert_eq!(records::replay(&s.log).unwrap().table, *s.table());
+    assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *s.table());
 
     // the first look after a start asks which prompt it is, once
     let mut in_turn = turn::turns_at_start(&s.table());
