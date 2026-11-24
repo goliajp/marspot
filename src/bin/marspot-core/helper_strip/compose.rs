@@ -23,7 +23,7 @@ const NAME_COL: u16 = 4;
 /// The narrowest and the widest the names' column gets.
 pub(super) const NAMES: (u16, u16) = (4, 28);
 /// What is blank at the right of a row.
-const MARGIN: u16 = 2;
+pub(super) const MARGIN: u16 = 2;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(in super::super) enum State {

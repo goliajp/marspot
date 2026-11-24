@@ -16,6 +16,9 @@
 #      pane below no window is refused.
 #   5. The helper panel's "View here" button.
 #   6. After a restart of the core the parent shows itself.
+#   7. In a window with one pane (no title strip) the header names the
+#      helper while it is viewed and stops when the view is left, and
+#      neither session is resized by switching.
 #
 # Sandbox-only: MARSPOT_STATE_DIR is redirected and the installed app is
 # never touched.  Opens windows, so it runs on the runner:
@@ -220,6 +223,45 @@ check "the shadow pane is back in the shadows" wait_count "$SD" SHADOW_ADOPTED "
 check "and viewed nowhere" test "$(events PEEK_SHOWN)" = "$shown"
 check "the parent is the size it was" bash -c "$(printf '%q' "$PEER") pane run $HOST --timeout 20 'stty size > $SD/host-size' >/dev/null && [[ \$(cat $SD/host-size) == '$HOST_SIZE' ]]"
 check "it is viewed again when asked" pc place "$H2" peek
+
+echo "════ 7. a window with one pane ════"
+check "no header line while the window had two panes" test "$(events PEEK_LINE)" = 0
+left=$(events PEEK_LEFT)
+check "place unpeek" pc place "$H2" unpeek
+check "the parent is shown again" wait_count "$SD" PEEK_LEFT "$left" 5
+check "the other pane is closed" pc close "$OTHER"
+LONE=""
+for (( i = 0; i < 40; i++ )); do
+  pc run "$HOST" --timeout 10 "stty size > $SD/host-size" >/dev/null 2>&1
+  LONE=$(cat "$SD/host-size" 2>/dev/null)
+  [[ -n $LONE && $LONE != "$HOST_SIZE" ]] && break
+  sleep 0.5
+done
+check "the parent took the title strip's row ($HOST_SIZE -> $LONE)" test "$LONE" != "$HOST_SIZE"
+sleep 1
+WINCH1=$(cat "$SD/winch-host" 2>/dev/null | wc -l)
+lines=$(events PEEK_LINE)
+check "place peek" pc place "$H2" peek
+check "the header says what is viewed" wait_count "$SD" PEEK_LINE "$lines" 10
+check "in words that fit the header" test "$(last_of PEEK_LINE drawn)" = 1 -a "$(last_of PEEK_LINE chars)" -gt 0
+check "the helper has the parent's size" bash -c "$(printf '%q' "$PEER") pane run $H2 --timeout 20 'stty size > $SD/h2-size' >/dev/null && [[ \$(cat $SD/h2-size) == '$LONE' ]]"
+sleep 1
+WINCH2=$(cat "$SD/winch-h2" 2>/dev/null | wc -l)
+lines=$(events PEEK_LINE)
+left=$(events PEEK_LEFT)
+check "place unpeek" pc place "$H2" unpeek
+check "the parent is shown again" wait_count "$SD" PEEK_LEFT "$left" 5
+check "the header line goes" wait_count "$SD" PEEK_LINE "$lines" 10
+check "and says nothing" test "$(last_of PEEK_LINE chars)" = 0
+lines=$(events PEEK_LINE)
+check "place peek again" pc place "$H2" peek
+check "the line is back" wait_count "$SD" PEEK_LINE "$lines" 10
+left=$(events PEEK_LEFT)
+check "place unpeek again" pc place "$H2" unpeek
+check "and left" wait_count "$SD" PEEK_LEFT "$left" 5
+sleep 1
+check "switching resized neither the parent nor the helper" test "$(cat "$SD/winch-host" 2>/dev/null | wc -l)" = "$WINCH1" -a "$(cat "$SD/winch-h2" 2>/dev/null | wc -l)" = "$WINCH2"
+check "the parent is the size it was" bash -c "$(printf '%q' "$PEER") pane run $HOST --timeout 20 'stty size > $SD/host-size' >/dev/null && [[ \$(cat $SD/host-size) == '$LONE' ]]"
 
 check "the app is still up" alive "$(dev_shell_pid)"
 check "no panic in the log" bash -c "! grep -qa $'\tPANIC' $(printf '%q' "$LOG")"

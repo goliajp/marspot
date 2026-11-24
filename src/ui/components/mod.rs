@@ -49,6 +49,9 @@ pub mod layout_view;
 pub mod context_menu;
 pub mod context_menu_view;
 pub mod toolbar_view;
+pub mod view_line;
+#[cfg(test)]
+mod view_line_tests;
 #[cfg(test)]
 mod toolbar_view_tests;
 #[cfg(test)]

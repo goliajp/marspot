@@ -208,6 +208,29 @@ impl CoreApp {
             Peek::Ended { name, .. } => Some(format!(" › {name} · {}  {key}", t(Msg::HelperEnded))),
         }
     }
+
+    /// What the header of window `wi` says while its one pane shows
+    /// another: that pane's title, which has no strip to go in.
+    pub(super) fn view_line<'a>(&self, wi: usize, titles: &'a [String]) -> &'a str {
+        let w = &win!(self, wi);
+        if w.layout.cell_title_h > 0.0 || w.panes.len() != 1 || w.panes[0].peek.is_none() {
+            return "";
+        }
+        titles.first().map_or("", String::as_str)
+    }
+
+    /// Hand window `wi`'s header what its lone pane shows, and say so
+    /// when that changes.
+    pub(super) fn publish_view_line(&self, wi: usize, wr: &mut marspot::render_metal::WindowRender, titles: &[String]) {
+        let line = self.view_line(wi, titles);
+        if !wr.set_view_line(line) {
+            return;
+        }
+        let (cw, ch) = self.renderer.cell_dims();
+        let drawn = marspot::ui::components::view_line::place(&win!(self, wi).layout, line, (cw as f32, ch as f32, 0.0));
+        lx_event!("PEEK_LINE", "the header of a window with one pane says what the pane shows",
+            chars = line.chars().count() as u32, drawn = drawn.is_some() as u32);
+    }
 }
 
 #[path = "peek_wait.rs"]
@@ -220,3 +243,6 @@ mod more_tests;
 #[cfg(test)]
 #[path = "peek_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "peek_line_tests.rs"]
+mod line_tests;

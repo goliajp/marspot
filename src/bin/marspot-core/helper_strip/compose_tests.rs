@@ -249,3 +249,27 @@ fn the_theme_is_the_one_the_agent_draws_in() {
     assert_eq!(Theme::for_paper(false), &THEMES[0]);
     assert_eq!(Theme::for_paper(true), &THEMES[1]);
 }
+
+#[test]
+fn a_row_with_no_figures_leaves_them_at_the_right_edge() {
+    let rule = "─".repeat(136);
+    let waiting = "  ◯ general-purpose  waiting on 1 shell · Wait for a signal · since 5:23 PM";
+    let mut t = Terminal::new(136, 12);
+    t.feed(format!("{rule}\r\n❯\r\n{rule}\r\n  foot\r\n\r\n  ⏺ main\r\n{waiting}").as_bytes());
+    let n = find(t.grid()).unwrap();
+    assert_eq!(n.columns.map(|c| (c.names, c.right)), Some((15, 134)));
+    let mine = [Row {
+        name: "codex",
+        named: false,
+        task: "review the parser",
+        state: State::Running,
+        elapsed_ms: 12_000,
+        tokens: None,
+        arrow: Arrow::Down,
+    }];
+    let l = List { rows: &mine, selected: None, viewed: Pick::Main, theme: &THEMES[0], native: n.columns };
+    let strip = strip_of(136, 1, &l);
+    let row = text(strip.grid(), 0);
+    assert!(row.starts_with("  ◯ codex            review the parser "), "{row:?}");
+    assert_eq!(row.trim_end().chars().count(), 134, "{row:?}");
+}
