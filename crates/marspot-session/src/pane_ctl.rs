@@ -16,6 +16,7 @@ use marspot_term::shell_proto::{
 use std::sync::mpsc::Sender;
 
 use crate::control_writer::ControlWriter;
+use crate::frames::Frames;
 use crate::{SessionEvent, SessionImpl};
 use crate::track::{LatestEnds, Track};
 use crate::typing::{Step, Typing};
@@ -82,7 +83,6 @@ impl PaneCtl {
             Request::Watch(w) => {
                 let code = self.watches.register(w.watch, session, &mut self.track);
                 self.done(w.req_id, code, poke.as_deref_mut());
-                self.watches.send_fired(poke);
             }
             Request::Type(t) => {
                 if let Some(mut reply) = self.typing.queue(t) {
@@ -95,14 +95,27 @@ impl PaneCtl {
     }
 
     /// After the loop's turn of parsing: note what the batch did, move
-    /// input along, look at the watches, and send what is owed.
-    pub(crate) fn after_turn(&mut self, session: &mut SessionImpl, procs_changed: bool, mut poke: Option<&mut ControlWriter>) {
+    /// input along, look at the watches, and send what is owed.  A
+    /// watch met is reported here alone, and the screen it was met on
+    /// is published first: its reader looks at once.
+    pub(crate) fn after_turn(
+        &mut self,
+        session: &mut SessionImpl,
+        frames: Option<&mut Frames>,
+        procs_changed: bool,
+        mut poke: Option<&mut ControlWriter>,
+    ) {
         let batch = self.track.after_batch(session);
         if self.typing.idle() && self.watches.is_empty() {
             return;
         }
         self.step(session, poke.as_deref_mut());
         self.watches.evaluate(session, &mut self.track, batch, procs_changed);
+        if let Some(f) = frames
+            && self.watches.unsent()
+        {
+            f.publish_withheld(session, poke.as_deref_mut());
+        }
         self.watches.send_fired(poke);
     }
 
@@ -174,7 +187,6 @@ impl PaneCtl {
                 Step::Refused(req_id, code) => self.done(req_id, code, poke.as_deref_mut()),
             }
         }
-        self.watches.send_fired(poke);
     }
 
     fn typed(&self, mut reply: PaneTyped, poke: Option<&mut ControlWriter>) {

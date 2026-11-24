@@ -30,4 +30,4 @@
 
 shell   = "0.7.647"  # a run ends at the command end its own status line prints
 core    = "0.12.642"  # the terminal tells a run's command end from others
-session = "0.11.427"  # a run ends at the command end its own status line prints
+session = "0.11.428"  # a watch is reported with the screen it was met on published

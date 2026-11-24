@@ -89,7 +89,7 @@ fn parse(out: &[u8], text: Option<(&str, Check)>) -> Cost {
     for chunk in chunks {
         tx.send(chunk.into()).expect("queue a chunk");
         session.pump();
-        ctl.after_turn(&mut session, false, None);
+        ctl.after_turn(&mut session, None, false, None);
     }
     let took = started.elapsed();
     let cost = Cost { took, instructions: instructions() - before };

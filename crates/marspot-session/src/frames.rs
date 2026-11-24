@@ -141,6 +141,13 @@ impl Frames {
         publish_and_poke(&mut self.shm, session, self.view_offset, &mut self.sync_gate, &mut self.blank_gate, poke);
     }
 
+    /// Publish the frame a flood is keeping back, if there is one.
+    pub(crate) fn publish_withheld(&mut self, session: &mut SessionImpl, poke: Option<&mut ControlWriter>) {
+        if self.flood_gate.owes_a_frame() && !self.flood_gate.hold(false) {
+            self.publish(session, poke);
+        }
+    }
+
     /// Final pump before post-loop dispatcher decides
     /// execv-handoff vs clean-exit.  Bounded: the reader is
     /// still running, and a program that floods faster than the

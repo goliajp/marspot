@@ -172,3 +172,27 @@ fn swap(sandbox: &crate::self_execv::Sandbox, s: &Session, mut l: Link) -> Link 
     let socket = marspot_term::session_registry::session_socket_path(crate::self_execv::id());
     Link::on(crate::support::reattach(&socket, 15).expect("reattach after the swap"))
 }
+
+/// An end parsed in a turn that took in a full read is reported once
+/// the frame that shows the output before it is out, though the frames
+/// of a flood are spaced out.
+#[test]
+fn typing_run_end_closing_a_flood_is_reported_with_its_last_line_on_screen() {
+    let mut sandbox = sandbox_state_dir();
+    let s = with_zsh(&mut sandbox);
+    let mut l = Link::new(&s);
+    let flood = sandbox.dir.join("flood");
+    for id in 1..=40 {
+        let mut out = "flood line\n".repeat(40_000 + id * 400);
+        out.push_str(&format!("last-{id}\n\x1b]133;D;0;marspot=run\x07"));
+        std::fs::write(&flood, out).expect("write the flood");
+        let p = l.pos();
+        l.armed(run_end(id as u32, p));
+        l.inject(&format!("cat '{}'\r", flood.display()));
+        l.fired(id as u32, 20.0);
+        let screen = s.try_screen(COLS, ROWS).unwrap_or_default();
+        l.cancel(id as u32);
+        assert!(screen.iter().any(|r| r.starts_with(&format!("last-{id}"))), "run {id}\n{screen:#?}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
