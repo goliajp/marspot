@@ -1,6 +1,6 @@
 //! A press on a strip: a helper's row shows that helper in the pane's
 //! place, `main` the pane itself again, and the row that says how many
-//! more there are opens the helper panel.
+//! more there are opens the helper panel.  And what stops a helper.
 
 use super::compose::Spot;
 use super::*;
@@ -30,5 +30,12 @@ impl CoreApp {
             None => {}
         }
         true
+    }
+
+    /// Stop a helper, as the helper panel's button does.
+    pub(super) fn stop_helper(&mut self, sid: u64) {
+        use marspot::shell_proto::{encode_helper_panel_act, CwdControl, HelperPanelAct, PanelAct};
+        let act = HelperPanelAct { sid, act: PanelAct::CloseHelper, want: CwdControl::Flip };
+        self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&act)));
     }
 }

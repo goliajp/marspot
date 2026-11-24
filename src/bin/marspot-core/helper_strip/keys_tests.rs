@@ -233,3 +233,17 @@ fn helper_strip_a_gemini_pane_has_no_keyboard() {
     after_probe(&mut app);
     assert!(!has_keys(&app));
 }
+
+#[test]
+fn helper_strip_keys_go_back_when_the_setting_is_turned_off() {
+    let sb = Sandbox::new();
+    let (mut app, _s, _h) = under_claude(&sb, 1, &claude_screen(60, "", ""));
+    press(&mut app, DOWN);
+    after_probe(&mut app);
+    assert!(has_keys(&app));
+    told_shell(&mut app);
+    super::host_tests::turned_on(false);
+    app.strips_tick();
+    assert!(!has_keys(&app));
+    assert_eq!(told_shell(&mut app), [false], "the shell lets x through no longer");
+}

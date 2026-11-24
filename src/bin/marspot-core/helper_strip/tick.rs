@@ -60,6 +60,13 @@ impl Strips {
 }
 
 impl CoreApp {
+    /// The user typed, pasted or composed in the focused slot of `wi`.
+    pub(in super::super) fn note_typing(&mut self, wi: usize) {
+        if let Some(sid) = win!(self, wi).try_focused_pane().and_then(|p| p.shelld_session_id()) {
+            self.strips.typed(sid);
+        }
+    }
+
     /// Once per loop turn.
     pub(in super::super) fn strips_tick(&mut self) {
         let now = Instant::now();
@@ -104,6 +111,7 @@ impl CoreApp {
         if on {
             return;
         }
+        self.leave_strip_keys();
         self.strips.due = None;
         self.strips.typed.clear();
         for sid in std::mem::take(&mut self.strips.hosts).into_keys() {

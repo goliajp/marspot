@@ -280,20 +280,6 @@ impl CoreApp {
         true
     }
 
-    /// The user typed, pasted or composed in the focused slot of `wi`.
-    pub(in super::super) fn note_typing(&mut self, wi: usize) {
-        if let Some(sid) = win!(self, wi).try_focused_pane().and_then(|p| p.shelld_session_id()) {
-            self.strips.typed(sid);
-        }
-    }
-
-    /// Stop a helper, as the helper panel's button does.
-    fn stop_helper(&mut self, sid: u64) {
-        use marspot::shell_proto::{encode_helper_panel_act, CwdControl, HelperPanelAct, PanelAct};
-        let act = HelperPanelAct { sid, act: PanelAct::CloseHelper, want: CwdControl::Flip };
-        self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&act)));
-    }
-
     /// Something other than a key happened in the strip's pane: what
     /// was waited for or taken goes.
     pub(in super::super) fn strip_keys_interrupted(&mut self) {

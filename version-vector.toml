@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.656"  # an input box says where it is
-core    = "0.12.660"  # the window test of the strip views helpers and uses its keyboard
+core    = "0.12.661"  # turning the list of helpers off gives the strip's keys back
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it
