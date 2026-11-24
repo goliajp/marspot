@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.701"  # every codex home shares its thread writer locks once none of its codex processes runs
+shell   = "0.7.702"  # a codex home share stopped half way is finished by the next pass; restore refuses while codex runs under the home
 core    = "0.12.686"  # the badge names the wait for the old codex account and why a switch did not happen
 session = "0.11.443"  # the text lane writes a lone character after a wide one in place

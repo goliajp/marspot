@@ -17,7 +17,9 @@
 use std::path::{Path, PathBuf};
 
 mod migrate;
-use migrate::{leftovers, move_into};
+mod probe;
+use migrate::{leftovers, move_into, recover};
+use probe::{daemon_pid, held, running_under};
 #[cfg(test)]
 use migrate::{Step, move_into_seen};
 
@@ -129,40 +131,6 @@ pub(super) fn busy(home: &Path) -> Option<String> {
     None
 }
 
-/// The pid of the daemon the pid file names, if that process is alive
-/// and is the one that wrote it.  `startSeconds` is the start time in
-/// whole unix seconds, as the kernel keeps it; a second either way is
-/// allowed, a reused pid differs by more.
-fn daemon_pid(home: &Path) -> Option<i32> {
-    let text = std::fs::read_to_string(home.join(PID_FILE)).ok()?;
-    let v = marspot_peer::json::parse(&text).ok()?;
-    let pid = i32::try_from(v.get("pid")?.i64()?).ok()?;
-    let row = marspot::pidtree::proc_row(pid)?;
-    match v.at(&["processIdentity", "startSeconds"]).and_then(|s| s.i64()) {
-        Some(start) if (start - row.start_unix as i64).abs() > 1 => None,
-        _ => Some(pid),
-    }
-}
-
-/// Whether some process holds a lock on `file`.  `F_GETLK` asks
-/// without taking one, so a codex starting at this moment is never
-/// refused because of the look.  That it also reports `flock` locks,
-/// which are what codex takes, is a macOS fact (one lock covers both
-/// there); on Linux it would not.  A look that fails counts as held.
-pub(super) fn held(file: &Path) -> bool {
-    use std::os::fd::AsRawFd;
-    let Ok(f) = std::fs::File::open(file) else { return false };
-    if !f.metadata().is_ok_and(|m| m.is_file()) {
-        return false;
-    }
-    let mut fl: libc::flock = unsafe { std::mem::zeroed() };
-    fl.l_type = libc::F_WRLCK as libc::c_short;
-    fl.l_whence = libc::SEEK_SET as libc::c_short;
-    // SAFETY: a valid fd and a flock the call fills in
-    let r = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETLK, &mut fl) };
-    r != 0 || fl.l_type != libc::F_UNLCK as libc::c_short
-}
-
 /// Both name the same existing file or directory.
 fn same(a: &Path, b: &Path) -> bool {
     matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
@@ -212,9 +180,13 @@ pub(super) fn share(home: &Path, shared: &Path) -> Outcome {
         if points_to(&dir, &target) {
             // a shared directory removed by hand comes back: codex makes
             // no lock file through a link to nothing
-            return match std::fs::create_dir_all(&target) {
-                Ok(()) => Outcome::Already,
-                Err(e) => Outcome::Failed(format!("{}: {e}", target.display())),
+            if let Err(e) = std::fs::create_dir_all(&target) {
+                return Outcome::Failed(format!("{}: {e}", target.display()));
+            }
+            return match recover(home, &target) {
+                Ok(None) => Outcome::Already,
+                Ok(Some((moved, duplicates, left))) => Outcome::Shared { moved, duplicates, left },
+                Err(o) => o,
             };
         }
         return match std::fs::read_link(&dir) {
@@ -231,15 +203,24 @@ pub(super) fn share(home: &Path, shared: &Path) -> Outcome {
     if let Err(e) = std::fs::create_dir_all(&target) {
         return Outcome::Failed(format!("{}: {e}", target.display()));
     }
-    move_into(home, &target, meta.is_some())
+    let (m, d, l) = match recover(home, &target) {
+        Ok(c) => c.unwrap_or_default(),
+        Err(o) => return o,
+    };
+    match move_into(home, &target, meta.is_some()) {
+        Outcome::Shared { moved, duplicates, left } => Outcome::Shared { moved: moved + m, duplicates: duplicates + d, left: left + l },
+        o => o,
+    }
 }
 
 /// Give `home` a directory of its own again, marked so that no pass
 /// shares it.  Its locks start empty: Codex makes a lock file when it
 /// loads a thread.  On the link `busy` sees only the daemon and the
-/// socket, not the shared lock files, which may be another home's.
-/// Entries an earlier `share` could not merge stay where it left them;
-/// the answer names those directories.
+/// socket, not the shared lock files, which may be another home's, so
+/// any process running under the home refuses it too.
+/// Entries an earlier `share` could not merge stay where it left them,
+/// and so does a directory one stopped in the middle of; the answer
+/// names those directories.
 pub(super) fn restore(home: &Path, shared: &Path) -> Result<String, String> {
     let dir = home.join(DIR);
     let meta = std::fs::symlink_metadata(&dir).ok();
@@ -247,7 +228,7 @@ pub(super) fn restore(home: &Path, shared: &Path) -> Result<String, String> {
     if linked && !points_to(&dir, &shared.join(DIR)) {
         return Err(format!("{} is a link this did not make; left alone", dir.display()));
     }
-    if let Some(why) = busy(home) {
+    if let Some(why) = busy(home).or_else(|| running_under(home)) {
         return Err(format!("not restored: {why}"));
     }
     std::fs::write(home.join(KEEP_OWN), "").map_err(|e| e.to_string())?;
@@ -308,3 +289,7 @@ mod tests;
 #[cfg(test)]
 #[path = "codex_locks_race_tests.rs"]
 mod race_tests;
+
+#[cfg(test)]
+#[path = "codex_locks_recover_tests.rs"]
+mod recover_tests;
