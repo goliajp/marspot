@@ -51,7 +51,7 @@ impl LocalSession {
     /// the texts on the grid, and a bit for the id of each text that
     /// was in it whole.
     pub(crate) fn take_text_check(&mut self) -> (bool, u8) {
-        self.out.texts.take()
+        self.out.texts.take(self.terminal.in_alt_screen())
     }
 }
 

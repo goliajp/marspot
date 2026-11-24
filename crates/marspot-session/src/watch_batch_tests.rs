@@ -26,7 +26,14 @@ impl Pane {
 
     /// One turn of the loop with `out` to parse.
     fn turn(&mut self, out: &str) {
-        self.tx.send(out.as_bytes().to_vec().into()).expect("queue a chunk");
+        self.turn_in(&[out]);
+    }
+
+    /// One turn of the loop with `chunks` to parse, read apart.
+    fn turn_in(&mut self, chunks: &[&str]) {
+        for out in chunks {
+            self.tx.send(out.as_bytes().to_vec().into()).expect("queue a chunk");
+        }
         self.session.pump();
         self.ctl.after_turn(&mut self.session, None, false, None);
     }
@@ -170,4 +177,41 @@ fn watch_text_printed_before_a_watch_on_the_alternate_screen_does_not_match() {
     p.watch(since, "shown-first");
     p.turn("\x1b[?1049l% ");
     assert_eq!(p.ctl.met(), None);
+}
+
+/// Four rows of old output, the cursor on the fifth.
+const FOUR: &str = "a\r\nb\r\nc\r\nd\r\n% ";
+
+#[test]
+fn watch_text_printed_above_in_the_batch_that_enters_the_alternate_screen_matches_when_it_is_left() {
+    let mut p = Pane::new();
+    p.turn(FOUR);
+    let since = p.pos();
+    p.watch(since, "needle-xyz");
+    p.turn("\x1b[H\x1b[2Jneedle-xyz\r\n\x1b[?1049h\x1b[Hup here");
+    assert_eq!(p.ctl.met(), None, "not on the alternate screen");
+    p.turn("\x1b[?1049l% ");
+    assert_eq!(p.ctl.met(), Some(Some(0)));
+}
+
+#[test]
+fn watch_text_drawn_on_the_alternate_screen_does_not_widen_the_main_one_s_rows() {
+    let mut p = Pane::new();
+    p.turn(OLD);
+    let since = p.pos();
+    p.watch(since, "needle-xyz");
+    p.turn("\x1b[?1049h\x1b[Hneedle-xyz\x1b[?1049l\x1b[3A\x1b[3B");
+    assert_eq!(p.ctl.met(), None);
+}
+
+#[test]
+fn watch_text_split_by_an_escape_that_unread_bytes_end_in_matches() {
+    let mut p = Pane::new();
+    p.turn(FOUR);
+    let since = p.pos();
+    p.watch(since, "needle-xyz");
+    // no `z` and a last line too long to read: the chunk is skipped
+    let first = format!("\x1b[H\x1b[2Jneedle-x{}y\x1b[", "\x1b[0m".repeat(130));
+    p.turn_in(&[&first, "1mz\r\n\x1b[5;1H% "]);
+    assert_eq!(p.ctl.met(), Some(Some(0)));
 }

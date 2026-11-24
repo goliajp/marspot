@@ -35,7 +35,7 @@ pub(super) fn text_line(session: &SessionImpl, n: &Needle, since: (u64, At), sca
             let (a, z) = (batch.start(since).0, batch.to.0);
             // the rows it went to and left again hold old text too, so
             // they are read only when the text is known to be new
-            let reach = batch.reach.filter(|_| whole).unwrap_or(Reach { top: a, bottom: a });
+            let reach = batch.reach(since).filter(|_| whole).unwrap_or(Reach { top: a, bottom: a });
             let span = Span { floor, lo: a.min(z).min(reach.top), hi: a.max(z).max(reach.bottom) };
             let (line, cut) = find(grid, n, span, BATCH_ROWS);
             *cuts += u32::from(cut);
