@@ -26,7 +26,9 @@ pub(super) fn dump(strip: &Strip, sid: u64, last: &mut u64) {
     let Some(v) = strip.view().filter(|v| v.seq != *last) else { return };
     *last = v.seq;
     let line = |r| (0..v.grid.cols()).map(|c| v.grid.cell(c, r).ch).filter(|c| *c != '\0').collect::<String>();
-    let lines: Vec<String> = (0..v.grid.rows()).map(|r| line(r).trim_end().to_string()).collect();
+    // a value of the log has a bounded length
+    let words = |l: String| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lines: Vec<String> = (0..v.grid.rows()).map(|r| words(line(r))).collect();
     lx_event!("DEV_STRIP", "what a strip holds", session = sid, top = v.top_row, lines = lines.join("|"));
 }
 

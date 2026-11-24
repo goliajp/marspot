@@ -8,13 +8,20 @@ Usage: _peerbus_fake_claude.py <registry-dir> <seconds> [<log-file>]
 
 Every line that arrives on the inbox is appended to <log-file>.  The
 record and the socket are removed when the time is up.
+
+FAKE_SIZE_LOG in the environment names a file that gets the terminal's
+size, `<epoch seconds> <cols> <rows>`, at the start and at each SIGWINCH.
+With FAKE_ALT the session is on the alternate screen.
 """
+import fcntl
 import json
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
+import termios
 import time
 import uuid
 
@@ -49,6 +56,19 @@ with open(path, "w") as f:
                "pidDomain": "darwin", "messagingSocketPath": inbox,
                "name": "fake-claude-6a", "nameSource": "derived", "nameSince": now,
                "status": "idle", "updatedAt": now, "statusUpdatedAt": now}, f)
+
+
+def note_size(*_):
+    rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+    with open(os.environ["FAKE_SIZE_LOG"], "a") as sizes:
+        sizes.write("%.3f %d %d\n" % (time.time(), cols, rows))
+
+
+if "FAKE_ALT" in os.environ:
+    sys.stdout.write("\x1b[?1049h\x1b[H")
+if "FAKE_SIZE_LOG" in os.environ:
+    note_size()
+    signal.signal(signal.SIGWINCH, note_size)
 print("fake claude %d registered" % pid, flush=True)
 # a kill still removes the record and the socket
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))

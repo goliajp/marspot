@@ -12,6 +12,10 @@ The task says what to do:
   FAKE-EXIT    write the result file the task names, then exit
   FAKE-STAY    write it, then draw an empty input box and wait
   FAKE-SILENT  write nothing, draw the box and wait
+  FAKE-WORK=f  first print a line a second until the file f is there
+  FAKE-BLOCK   ask a question, and wait for an answer
+  FAKE-TOKENS  (claude) first register as a Claude session whose last
+               response says 115 300 tokens, after a tool call
 
 claude shows its first-run dialogs before that, the cursor on "No, exit"
 and with no numbers, when the task holds
@@ -26,11 +30,15 @@ Started with --continue it draws the box and waits.
 Each key it reads there is logged as `key<TAB>what`.
 """
 import os
+import atexit
+import json
 import re
+import subprocess
 import sys
 import termios
 import time
 import tty
+import uuid
 
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
@@ -125,6 +133,50 @@ if name == "claude":
     if "FAKE-BYPASS" in task:
         time.sleep(late)
         bypass()
+
+
+
+def ps(field):
+    return subprocess.run(["ps", "-o", field + "=", "-p", str(os.getpid())], env={"LC_ALL": "C", "TZ": "UTC"},
+                          capture_output=True, text=True).stdout.strip()
+
+
+def register():
+    """The record Claude keeps of a running session, and its transcript."""
+    home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.environ["HOME"], ".claude")
+    sid, now = str(uuid.uuid4()), int(time.time() * 1000)
+    project = os.path.join(home, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()))
+    os.makedirs(project, exist_ok=True)
+    os.makedirs(os.path.join(home, "sessions"), exist_ok=True)
+    usage = {"input_tokens": 300, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 114000, "output_tokens": 1000}
+    said = {"type": "assistant", "isSidechain": False, "message": {"id": "m1", "role": "assistant", "usage": usage,
+            "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]}}
+    asked = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": task[:100]}}
+    with open(os.path.join(project, sid + ".jsonl"), "w") as f:
+        for r in (asked, said):
+            f.write(json.dumps(dict(r, sessionId=sid, cwd=os.getcwd()), separators=(",", ":")) + "\n")
+    record = os.path.join(home, "sessions", "%d.json" % os.getpid())
+    atexit.register(os.unlink, record)
+    with open(record, "w") as f:
+        json.dump({"pid": os.getpid(), "sessionId": sid, "cwd": os.getcwd(), "startedAt": now, "procStart": ps("lstart"),
+                   "version": "2.1.308", "peerProtocol": 1, "kind": "interactive", "entrypoint": "cli",
+                   "pidDomain": "darwin", "status": "busy", "updatedAt": now, "statusUpdatedAt": now}, f,
+                  separators=(",", ":"))
+
+
+if "FAKE-TOKENS" in task:
+    # what reads the record takes only a program called claude for one
+    if os.path.basename(ps("args").split(" ")[0]) != "claude":
+        os.execv(ps("comm"), ["claude"] + sys.argv)
+    register()
+working = re.search(r"FAKE-WORK=(\S+)", task)
+while working and not os.path.exists(working.group(1)):
+    print("%s still working" % name, flush=True)
+    time.sleep(1)
+
+while "FAKE-BLOCK" in task:
+    print("Allow this command to run? [y/n]", flush=True)
+    sys.stdin.readline()
 
 found = re.search(r"write your final result to (\S+result\.md)", task)
 print("%s stand-in working on %d bytes" % (name, size), flush=True)
