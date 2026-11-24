@@ -172,10 +172,11 @@ fn replace(file: &Path, body: &str, was: Stamp, ready: &mut impl FnMut()) -> io:
     let tmp = file.with_extension("tsv.tmp");
     let put = (|| {
         let mode = std::fs::metadata(file).ok().map(|m| m.permissions().mode() & 0o7777);
-        create_tmp(&tmp, mode)?.write_all(body.as_bytes())?;
+        let mut f = create_tmp(&tmp, mode)?;
+        f.write_all(body.as_bytes())?;
         if let Some(m) = mode {
             // bits the umask took off; it never adds any
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(m))?;
+            f.set_permissions(std::fs::Permissions::from_mode(m))?;
         }
         ready();
         // what a person wrote meanwhile is read and changed instead

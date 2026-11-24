@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.689"  # a rule far up the transcript is not where an approval prompt starts
-core    = "0.12.679"  # the deny list's new content is created with the list's mode instead of chmod-ed to it
+shell   = "0.7.690"  # the deny list sets its mode on the open file; PaneRetire's codec moves to its own file
+core    = "0.12.680"  # the core refuses to retire a shadow-only pane once it is in a window; the deny list sets its mode on the open file
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
