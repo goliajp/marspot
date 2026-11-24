@@ -142,7 +142,13 @@ impl ClaudecodePlugin {
                 }
                 continue;
             }
-            self.unjudged.remove(&sid);
+            if self.unjudged.remove(&sid) {
+                host.log(
+                    LogLevel::Info,
+                    "quota.judged",
+                    &format!("sid={sid} on P{} takes part in switching: {model:?} {:?}/{:?}", meta.profile_num, choice.model, choice.effort),
+                );
+            }
             let in_flight = self.rebalance_in_flight(sid, meta.profile_num);
             let marked = self.fable_need.marked(sid);
             let as_judged = judged(sid, marked);
