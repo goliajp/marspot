@@ -600,7 +600,7 @@ pub enum MsgType {
     /// L1 → L2: the icon asked for.  `symbol u16, point_px u16,
     /// side u16`, then `side * side` bytes of coverage.
     IconMask = 87,
-    // ── pane control (130..=144): payloads and directions in `pane_control` ──
+    // ── pane control (130..=145): payloads and directions in `pane_control` ──
     PaneSpawn = 130,
     PaneSpawned = 131,
     PaneRetire = 132,
@@ -616,6 +616,7 @@ pub enum MsgType {
     SessionReadsPaneControl = 142,
     HelperPanelAct = 143,
     HelperStrip = 144,
+    StripKeys = 145,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -719,6 +720,7 @@ impl MsgType {
             142 => MsgType::SessionReadsPaneControl,
             143 => MsgType::HelperPanelAct,
             144 => MsgType::HelperStrip,
+            145 => MsgType::StripKeys,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -734,6 +736,8 @@ pub use inject::{decode_inject_input, encode_inject_input};
 
 mod pane_events;
 pub use pane_events::*;
+mod surface_attach;
+pub use surface_attach::*;
 mod pointer;
 pub use pointer::{PointerInput, PointerKind, decode_pane_pointer_input, encode_pane_pointer_input};
 
@@ -1109,53 +1113,6 @@ pub fn decode_scroll(payload: &[u8]) -> io::Result<(f64, f64, bool, u32)> {
 }
 
 // ── Focus / Resize / Preedit ──
-
-/// Resize payload layout:
-///
-/// ```text
-/// [new_surface_id : u32 LE]
-/// [w_phys         : f64 LE]
-/// [h_phys         : f64 LE]
-/// [scale          : f64 LE]
-/// ```
-///
-/// The shell creates a fresh IOSurface at the new dimensions, then
-/// sends this frame.  The core looks the surface up, rebuilds its
-/// render target and layout, and acks with `SurfaceReady(id)`.
-/// SURFACE_ATTACH payload (32 bytes LE):
-///   front_id u32, back_id u32, w_phys f64, h_phys f64, scale f64.
-/// Introduced at PROTO_VERSION=2 for double-buffer IOSurface.
-pub fn encode_surface_attach(
-    front_id: u32,
-    back_id: u32,
-    w_phys: f64,
-    h_phys: f64,
-    scale: f64,
-) -> Vec<u8> {
-    let mut v = Vec::with_capacity(4 + 4 + 8 + 8 + 8);
-    v.extend_from_slice(&front_id.to_le_bytes());
-    v.extend_from_slice(&back_id.to_le_bytes());
-    v.extend_from_slice(&w_phys.to_le_bytes());
-    v.extend_from_slice(&h_phys.to_le_bytes());
-    v.extend_from_slice(&scale.to_le_bytes());
-    v
-}
-
-pub fn decode_surface_attach(payload: &[u8]) -> io::Result<(u32, u32, f64, f64, f64)> {
-    if payload.len() != 32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "SURFACE_ATTACH payload != 32 bytes",
-        ));
-    }
-    Ok((
-        u32::from_le_bytes(payload[0..4].try_into().unwrap()),
-        u32::from_le_bytes(payload[4..8].try_into().unwrap()),
-        f64::from_le_bytes(payload[8..16].try_into().unwrap()),
-        f64::from_le_bytes(payload[16..24].try_into().unwrap()),
-        f64::from_le_bytes(payload[24..32].try_into().unwrap()),
-    ))
-}
 
 /// Window-aware `SurfaceAttach` (RFC-005): the legacy 32-byte body
 /// plus a trailing `window_id`.

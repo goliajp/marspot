@@ -42,6 +42,7 @@ impl ShellApp {
                     lx_event!("HELLO_ACK", "core handshake OK", v = v);
                     sup_log::log("HELLO_ACK", &format!("v={v}"));
                     self.replay_pane_wheel_keys();
+                    marspot::app_strip_keys::clear_strip_keys();
                     // Every core that becomes the active one comes
                     // through here (boot, restart, update swap).
                     self.pane_look.core_replaced();
@@ -70,6 +71,13 @@ impl ShellApp {
                     && nonce == c.last_ping_nonce {
                         c.last_pong_at = Instant::now();
                     }
+            }
+            // the frame back says to the core that its `x` gets through
+            ShellInbox::StripKeys(m) => {
+                marspot::app_strip_keys::set_strip_keys_for(m.window_id, m.on);
+                if let Some(c) = self.active.as_ref() {
+                    c.send(MsgType::StripKeys, marspot::shell_proto::encode_strip_keys(&m));
+                }
             }
             ShellInbox::CaretRect(rect, window_id) => {
                 // NOT `ctx` — the control socket is drained in

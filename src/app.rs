@@ -567,11 +567,11 @@ define_class!(
             key_script::trace_key_down(event);
             let mods = nsevent_modifiers(event);
 
-            // Cmd / Ctrl combos bypass the IME entirely.  This keeps
-            // shortcuts that the rest of marspot expects (Cmd-V paste,
-            // Ctrl-C → 0x03, Ctrl-[ → ESC) working — IMEs typically
-            // don't consume these but we don't want to depend on that.
-            if mods.super_ || mods.control {
+            // Cmd / Ctrl combos (Cmd-V, Ctrl-C, Ctrl-[) and a helper
+            // strip's `x` bypass the IME: none depends on it passing them.
+            let composing = !self.ivars().marked_text.borrow().is_empty();
+            let window = self.ivars().window_id.get();
+            if mods.super_ || mods.control || crate::app_strip_keys::plain_x(window, event.keyCode(), mods, composing) {
                 if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
                     dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
                 }

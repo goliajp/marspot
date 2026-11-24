@@ -24,6 +24,8 @@ pub(crate) enum ShellInbox {
     /// Caret rect plus the window it belongs to — the shell parks the
     /// IME candidate panel against that window.
     CaretRect(Option<(f64, f64, f64, f64)>, u32),
+    /// Whether a window's keys are a helper strip's.
+    StripKeys(marspot::shell_proto::StripKeys),
     /// Core rendered a fresh frame into the IOSurface — present it.  Carries
     /// nothing; its arrival (via the reader's `proxy.wake()`) drives the
     /// per-frame present, replacing the blind ~60 fps redraw timer.
@@ -95,6 +97,7 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
                             .ok()
                             .map(ShellInbox::PaneBadgeClicked)
                     }
+                    MsgType::StripKeys => marspot::shell_proto::decode_strip_keys(&frame.payload).ok().map(ShellInbox::StripKeys),
                     MsgType::PaneFocused => {
                         marspot::shell_proto::decode_pane_focused(&frame.payload)
                             .ok()

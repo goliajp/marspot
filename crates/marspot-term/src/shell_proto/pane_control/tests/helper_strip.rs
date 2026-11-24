@@ -162,3 +162,19 @@ fn helper_strip_is_skipped_by_a_build_without_it() {
     let before = CAP_TYPE_AND_WATCH | CAP_SHADOWS | CAP_PEEK | CAP_HELPER_PANEL;
     assert_eq!(before & CAP_HELPER_STRIP, 0);
 }
+
+#[test]
+fn helper_strip_keys_frame_round_trips_and_is_skipped_by_a_build_without_it() {
+    for m in [StripKeys { window_id: 7, on: true }, StripKeys { window_id: u32::MAX, on: false }] {
+        assert_eq!(decode_strip_keys(&encode_strip_keys(&m)).unwrap(), m);
+    }
+    assert!(decode_strip_keys(&[1, 0, 0]).is_err());
+    assert_eq!(MsgType::from_u32(145), Some(MsgType::StripKeys));
+    let mut buf = Vec::new();
+    Frame::new(MsgType::StripKeys, encode_strip_keys(&StripKeys { window_id: 1, on: true })).write_to(&mut buf).unwrap();
+    let at = buf.windows(4).position(|w| w == 145u32.to_le_bytes()).unwrap();
+    buf[at..at + 4].copy_from_slice(&199u32.to_le_bytes());
+    Frame::new(MsgType::Ping, encode_ping(8)).write_to(&mut buf).unwrap();
+    let f = Frame::read_from(&mut std::io::Cursor::new(buf)).unwrap().unwrap();
+    assert_eq!((f.msg_type, decode_ping(&f.payload).unwrap()), (MsgType::Ping, 8));
+}

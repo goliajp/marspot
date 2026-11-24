@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.654"  # a pane opened for a helper is said to be one
-core    = "0.12.657"  # a press on a helper's row views it in its pane's place
+shell   = "0.7.655"  # the shell lets a strip's x past the input method
+core    = "0.12.658"  # the shell lets a strip's x past the input method
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it
