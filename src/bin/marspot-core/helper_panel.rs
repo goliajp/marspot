@@ -64,6 +64,10 @@ impl Family {
         at
     }
 
+    pub(super) fn counted(&self) -> bool {
+        self.counted
+    }
+
     pub(super) fn count(&self, sid: u64) -> u32 {
         self.counts.iter().find(|c| c.0 == sid).map_or(0, |c| c.1)
     }
@@ -275,7 +279,7 @@ impl CoreApp {
         let panes = win!(self, wi).panes.iter();
         wr.set_helpers(
             self.shadows.len() as u32,
-            panes.map(|p| p.shelld_session_id().map_or(0, |sid| fam.count(sid))),
+            panes.map(|p| p.shelld_session_id().filter(|sid| !self.strips.drawn(*sid)).map_or(0, |sid| fam.count(sid))),
         );
     }
 

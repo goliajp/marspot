@@ -3221,7 +3221,6 @@ fn main() {
         app.dev_drive_drag();
         app.dev_drive_panels();
         app.pane_control_tick();
-        app.strips_tick();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)
@@ -3684,6 +3683,7 @@ fn main() {
         watch.phase("pump");
         let pump_t0 = if trace::enabled() { trace::now_ns() } else { 0 };
         let pumped = app.pump_all();
+        app.strips_tick();
         if pumped > 0 {
             trace::mark_at(Stage::PumpBegin, 0, pump_t0);
             trace::mark(Stage::PumpEnd, 0);

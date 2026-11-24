@@ -137,6 +137,9 @@ impl CoreApp {
         w.needs_render |= moved || w.selection.is_some();
         w.selection = None;
         w.selection_dragging = false;
+        if event.state == KeyState::Pressed {
+            self.note_typing(wi);
+        }
         if let Some(sid) = sid.filter(|_| event.state == KeyState::Pressed && !event.repeat) {
             self.pane_control.shadows.peeks.held.went_to(&event.logical, sid);
         }

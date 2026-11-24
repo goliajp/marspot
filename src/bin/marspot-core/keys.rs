@@ -11,6 +11,7 @@ impl CoreApp {
             self.typed_before_view(wi);
         }
         if win!(self, wi).ime_preedit != text {
+            self.note_typing(wi);
             win!(self, wi).ime_preedit = text;
             win!(self, wi).needs_render = true;
         }
@@ -138,6 +139,12 @@ impl CoreApp {
         self.key_to_pane(wi, &event, modifiers);
     }
 
+    pub(super) fn note_typing(&mut self, wi: usize) {
+        if let Some(sid) = win!(self, wi).try_focused_pane().and_then(|p| p.shelld_session_id()) {
+            self.strips.typed(sid);
+        }
+    }
+
     fn pane_session_holds_keys(&self, sid: u64) -> bool {
         self.pane_session_for(sid)
             .is_some_and(|s| s.has(marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS))
@@ -207,6 +214,7 @@ impl CoreApp {
             let moved = pane.snap_to_live();
             pane.session_mut().forward_paste(&text);
             win!(self, wi).needs_render |= moved;
+            self.note_typing(wi);
         }
         true
     }

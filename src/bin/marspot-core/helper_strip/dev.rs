@@ -9,7 +9,8 @@ use marspot_term::grid::Grid;
 impl Strips {
     pub(in super::super) fn from_env() -> Self {
         let dev = std::env::var("MARSPOT_DEV_HELPER_STRIP").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0);
-        Self { dev, ..Self::default() }
+        let dump = std::env::var_os("MARSPOT_DEV_STRIP_DUMP").is_some();
+        Self { dev, dump, on: marspot::settings::get().helper_strip, born: Some(Instant::now()), ..Self::default() }
     }
 
     pub(super) fn dev_ask(&mut self, panes: &[Pane]) {
@@ -20,6 +21,15 @@ impl Strips {
     }
 }
 
+/// Log what a strip holds, when that is not what `last` was (dev seam).
+pub(super) fn dump(strip: &Strip, sid: u64, last: &mut u64) {
+    let Some(v) = strip.view().filter(|v| v.seq != *last) else { return };
+    *last = v.seq;
+    let line = |r| (0..v.grid.cols()).map(|c| v.grid.cell(c, r).ch).filter(|c| *c != '\0').collect::<String>();
+    let lines: Vec<String> = (0..v.grid.rows()).map(|r| line(r).trim_end().to_string()).collect();
+    lx_event!("DEV_STRIP", "what a strip holds", session = sid, top = v.top_row, lines = lines.join("|"));
+}
+
 const ROW: Row = Row {
     name: "helper",
     named: false,
@@ -28,14 +38,13 @@ const ROW: Row = Row {
     elapsed_ms: 92_000,
     tokens: Some(115_300),
     arrow: Arrow::Down,
-    gone: false,
 };
 
 const ROWS: [Row; 6] = [
     ROW,
     Row { name: "reviewer", named: true, tokens: None, arrow: Arrow::Up, ..ROW },
     Row { state: State::Awaiting, ..ROW },
-    Row { state: State::Done, gone: true, ..ROW },
+    Row { state: State::Done, ..ROW },
     Row { state: State::Failed, ..ROW },
     Row { state: State::Stopped, ..ROW },
 ];

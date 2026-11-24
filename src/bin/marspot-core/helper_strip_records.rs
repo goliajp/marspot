@@ -12,6 +12,7 @@ const CAP: usize = 256;
 #[derive(Default)]
 pub(super) struct Records {
     list: Vec<HelperStrip>,
+    changes: u64,
     all_told: bool,
 }
 
@@ -26,6 +27,7 @@ impl Records {
                 rows = m.rows.len()
             );
         }
+        self.changes += 1;
         if m.is_all_told() {
             self.all_told = true;
             return;
@@ -49,9 +51,21 @@ impl Records {
         self.list.iter().find(|r| r.root_sid == root)
     }
 
+    pub(super) fn all(&self) -> impl Iterator<Item = &HelperStrip> {
+        self.list.iter()
+    }
+
+    /// How many were taken.
+    pub(super) fn changes(&self) -> u64 {
+        self.changes
+    }
+
+    pub(super) fn forget(&mut self, root: u64) {
+        self.list.retain(|r| r.root_sid != root);
+    }
+
     /// L1 has said everything it had to say at first: a pane with no
     /// record has no helpers.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read once the strip is drawn"))]
     pub(super) fn all_told(&self) -> bool {
         self.all_told
     }

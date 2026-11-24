@@ -52,8 +52,38 @@ pub(in super::super) struct Row<'a> {
     pub elapsed_ms: u64,
     pub tokens: Option<u64>,
     pub arrow: Arrow,
-    /// It has left the list, and is in it only while it is in view.
-    pub gone: bool,
+}
+
+/// What a strip was made to hold, line by line.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(in super::super) struct Drawn {
+    /// The line of the first helper, and which helper that is.
+    line: u16,
+    first: usize,
+    rows: u16,
+    more: bool,
+}
+
+/// What is on a line of a strip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in super::super) enum Spot {
+    Main,
+    /// A helper, by its place in the list.
+    Row(usize),
+    More,
+}
+
+impl Drawn {
+    pub(in super::super) fn at(&self, line: u16) -> Option<Spot> {
+        let Some(i) = line.checked_sub(self.line) else {
+            return (line + 1 == self.line).then_some(Spot::Main);
+        };
+        match i {
+            i if i < self.rows => Some(Spot::Row(self.first + i as usize)),
+            i if i == self.rows && self.more => Some(Spot::More),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,44 +103,49 @@ pub(in super::super) struct List<'a> {
     pub native: Option<Columns>,
 }
 
-impl<'a> List<'a> {
-    /// The rows there are, each with its place in `rows`.
-    fn shown(&self) -> impl Iterator<Item = (usize, &'a Row<'a>)> + '_ {
-        self.rows.iter().enumerate().filter(|(i, r)| !r.gone || self.viewed == Pick::Row(*i))
+impl List<'_> {
+    /// The first of the `fit` rows in sight.
+    fn first(&self, fit: usize) -> usize {
+        if fit == 0 {
+            return 0;
+        }
+        let on = match (self.selected, self.viewed) {
+            (Some(Pick::Row(i)), _) | (_, Pick::Row(i)) => i,
+            _ => 0,
+        };
+        (on + 1).saturating_sub(fit).min(self.rows.len().saturating_sub(fit))
     }
 
-    /// The first row of the window, and how many rows there are.
-    fn window(&self) -> (usize, usize) {
-        let count = self.shown().count();
-        let nth = |pick| match pick {
-            Some(Pick::Row(i)) => self.shown().position(|(at, _)| at == i),
-            _ => None,
-        };
-        let on = match self.selected {
-            Some(Pick::Main) | None => nth(Some(self.viewed)),
-            row => nth(row),
-        };
-        let first = (on.unwrap_or(0) + 1).saturating_sub(WINDOW);
-        (first.min(count.saturating_sub(WINDOW)), count)
+    /// The first row in sight, and how many are, with `room` lines for
+    /// them and for the one that says how many more there are.
+    fn window(&self, room: usize) -> (usize, usize) {
+        let fit = WINDOW.min(room);
+        let first = self.first(fit);
+        if first + fit < self.rows.len() && room == fit {
+            let fit = fit.saturating_sub(1);
+            return (self.first(fit), fit);
+        }
+        (first, fit)
     }
 }
 
 /// Write `list` into `strip`: a blank row and `main` first, unless it
 /// goes on from the agent's own.  The same rows again allocate nothing.
-pub(in super::super) fn compose(strip: &mut Strip, list: &List) {
-    let (first, count) = list.window();
-    let mut at = 0;
-    if list.native.is_none() {
+pub(in super::super) fn compose(strip: &mut Strip, list: &List) -> Drawn {
+    let line = if list.native.is_none() { 2 } else { 0 };
+    let (first, fit) = list.window(strip.rows().saturating_sub(line) as usize);
+    if line > 0 {
         strip.line(0, &[]);
         main_row(strip, list, first);
-        at = 2;
     }
     let place = Place::of(strip.cols(), list);
-    for (i, row) in list.shown().skip(first).take(WINDOW) {
+    let mut at = line;
+    for (i, row) in list.rows.iter().enumerate().skip(first).take(fit) {
         place.row(strip, at, list, i, row);
         at += 1;
     }
-    let below = count.saturating_sub(first + WINDOW);
+    let rows = at - line;
+    let below = list.rows.len().saturating_sub(first + fit);
     if below > 0 {
         let more = more("↓", below);
         strip.line(at, &[Run { col: 2, text: more.as_str(), attrs: list.theme.dim() }]);
@@ -119,6 +154,7 @@ pub(in super::super) fn compose(strip: &mut Strip, list: &List) {
     for rest in at..strip.rows() {
         strip.line(rest, &[]);
     }
+    Drawn { line, first, rows, more: below > 0 }
 }
 
 fn more(arrow: &str, n: usize) -> Text {
@@ -186,8 +222,8 @@ struct Place {
 
 impl Place {
     fn of(cols: u16, list: &List) -> Self {
-        let names = list.shown().map(|(_, r)| width(r.name)).max().unwrap_or(0).clamp(NAMES.0, NAMES.1);
-        let figures = list.shown().map(|(_, r)| width(figures(r, false).as_str())).max().unwrap_or(0);
+        let names = list.rows.iter().map(|r| width(r.name)).max().unwrap_or(0).clamp(NAMES.0, NAMES.1);
+        let figures = list.rows.iter().map(|r| width(figures(r, false).as_str())).max().unwrap_or(0);
         let own = Columns { names, right: cols.saturating_sub(MARGIN) };
         let Columns { names, right } = list.native.unwrap_or(own);
         Self { cols, names, right, figures }

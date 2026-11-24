@@ -195,6 +195,8 @@ impl CoreApp {
             .map(|s| truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS))
             .collect();
 
+        // the titles say how many helpers only where no strip lists them
+        self.place_strips(wi);
         self.publish_overlays(wi, &mut wr, &resolved_labels);
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.
@@ -208,7 +210,6 @@ impl CoreApp {
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate().take(cell_count) {
             fading |= p.aim_scrim(i == focused, now);
         }
-        self.place_strips(wi);
         let views: Vec<SessionView> = win!(self, wi)
             .panes
             .iter()

@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.652"  # a setting for listing helpers under their pane
-core    = "0.12.653"  # a setting for listing helpers under their pane
+core    = "0.12.654"  # a pane's helpers are listed at its bottom, when the setting says so
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it

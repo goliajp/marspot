@@ -44,6 +44,9 @@ impl CoreApp {
             text.push(' ');
         }
         self.shown_mut(wi, idx).session_mut().forward_paste(&text);
+        if let Some(sid) = win!(self, wi).panes[idx].shelld_session_id() {
+            self.strips.typed(sid);
+        }
         win!(self, wi).needs_render = true;
     }
 

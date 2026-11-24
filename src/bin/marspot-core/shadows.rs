@@ -139,7 +139,7 @@ impl CoreApp {
     /// which leaves the keyboard focus where it is.
     fn spawn_pane(&mut self, m: PaneSpawn) -> Route {
         let (cols, rows) = match (m.cols, m.rows) {
-            (0, 0) => (DEFAULT_COLS, DEFAULT_ROWS),
+            (0, 0) => self.helper_size(m.parent_sid).unwrap_or((DEFAULT_COLS, DEFAULT_ROWS)),
             (c, r) => (c, r),
         };
         if !size_ok(cols, rows) {
@@ -251,6 +251,7 @@ impl CoreApp {
         }
         if let Some(i) = self.shadow_index(sid).filter(|_| self.viewer_of(sid).is_none()) {
             self.shadows[i].resize(cols, rows);
+            self.strips.sized(sid);
             return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Ok, "");
         }
         if self.slot_showing(sid).is_some() {
