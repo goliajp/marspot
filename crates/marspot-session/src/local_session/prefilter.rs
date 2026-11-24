@@ -170,7 +170,11 @@ impl Prefilter {
         }
         if tail > 0 {
             self.skip(&bytes[..tail]);
-            self.line_break();
+            // a line break inside a string sequence the skip left open
+            // moves nothing
+            if self.mode == Mode::Text {
+                self.line_break();
+            }
         }
         self.read(&bytes[tail..]);
     }
@@ -526,6 +530,14 @@ mod tests {
             vec![format!("\x1b]0;t{payload}\x07{payload}"), "\r\nDONE".into()],
         ];
         assert_eq!(cases.map(|c| held(&c)), [0, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn watch_prefilter_does_not_take_a_line_break_in_an_open_string_for_one() {
+        let mut p = set("DONE");
+        p.took(b"DO\x1b]0;a\nb");
+        p.took(b"\x07NE");
+        assert_eq!(p.take(false).1, 1);
     }
 
     #[test]
