@@ -18,26 +18,27 @@ use marspot_term::test_env::EnvGuard;
 
 use super::bind::Pane;
 use super::fake_daemon::{thread, Daemon};
-use super::moving::{self, running_descendant, Ask, Held, Loaded, Verdict};
+use super::moving::{self, Ask, Held, Verdict};
+use super::moving_checks::{queued, running_descendant, Loaded};
 use super::worker::{Worker, CHANNEL};
 
-const SID: u64 = 7;
-const T: &str = "01a133f4-8e7b-7331-9630-9c40ff4b467f";
+pub(super) const SID: u64 = 7;
+pub(super) const T: &str = "01a133f4-8e7b-7331-9630-9c40ff4b467f";
 
-struct Rig {
-    root: PathBuf,
-    home: PathBuf,
-    cwd: String,
-    daemon: Daemon,
-    tui: Child,
-    codex: ProcId,
-    w: Worker,
+pub(super) struct Rig {
+    pub root: PathBuf,
+    pub home: PathBuf,
+    pub cwd: String,
+    pub daemon: Daemon,
+    pub tui: Child,
+    pub codex: ProcId,
+    pub w: Worker,
     _env: EnvGuard,
 }
 
 /// A process the way the worker sees a codex TUI: its `CODEX_HOME` and
 /// its working directory.
-fn tui(home: &Path, cwd: &str) -> (Child, ProcId) {
+pub(super) fn tui(home: &Path, cwd: &str) -> (Child, ProcId) {
     let child = Command::new("/bin/sleep").arg("60").env("CODEX_HOME", home).current_dir(cwd).spawn().unwrap();
     let id = seen(child.id() as i32);
     (child, id)
@@ -56,7 +57,7 @@ fn seen(pid: i32) -> ProcId {
 
 /// Socket paths have a 104-byte ceiling, which the system temp
 /// directory leaves no room under.
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     let root = PathBuf::from(format!("/tmp/pbm-{}", marspot_peer::rand::hex(6)));
     std::fs::create_dir_all(&root).unwrap();
     let root = root.canonicalize().unwrap();
@@ -78,7 +79,7 @@ fn rig() -> Rig {
     Rig { root, home, cwd, daemon, tui, codex, w, _env: env }
 }
 
-fn bind(w: &mut Worker, home: &Path, cwd: &str, codex: ProcId) {
+pub(super) fn bind(w: &mut Worker, home: &Path, cwd: &str, codex: ProcId) {
     let pane = Pane {
         sid: SID,
         home: home.to_path_buf(),
@@ -95,7 +96,7 @@ fn bind(w: &mut Worker, home: &Path, cwd: &str, codex: ProcId) {
 }
 
 impl Rig {
-    fn verdict(&mut self) -> Verdict {
+    pub(super) fn verdict(&mut self) -> Verdict {
         self.w.on_move(Ask::Begin { sid: SID, codex: self.codex });
         let mut v = moving::verdicts();
         assert_eq!(v.len(), 1, "{v:?}");
@@ -106,7 +107,7 @@ impl Rig {
 
     /// Send the pane a message as a peer would and return the receipt
     /// it got back, if any.
-    fn message(&mut self, id: &str) -> Option<Value> {
+    pub(super) fn message(&mut self, id: &str) -> Option<Value> {
         let me = self.root.join(format!("r-{id}.sock"));
         let listener = UnixListener::bind(&me).unwrap();
         let from = format!("uds:{}", me.display());
@@ -148,7 +149,8 @@ impl Drop for Rig {
 #[test]
 fn a_message_while_moving_is_refused_and_never_reaches_the_old_home() {
     let mut r = rig();
-    assert_eq!(r.verdict(), Verdict::Go { thread: T.into(), home: r.home.clone() });
+    let home = r.home.clone();
+    assert!(matches!(r.verdict(), Verdict::Go { thread, home: h, .. } if thread == T && h == home));
     let receipt = r.message("m1").expect("the sender is told");
     assert_eq!(receipt.str_at("status_detail"), Some("refused"), "{}", receipt.to_json());
     assert_eq!(receipt.str_at("orig_msg_id"), Some("m1"));
@@ -156,9 +158,12 @@ fn a_message_while_moving_is_refused_and_never_reaches_the_old_home() {
     assert_eq!(r.verdict(), Verdict::Held(Held::Moving), "one move at a time");
 
     // the move did not happen and the TUI is still there: unmarked
+    let resumed = r.daemon.asked("thread/resume");
     r.w.on_move(Ask::End { sid: SID, codex: r.codex });
     assert_eq!(r.message("m2"), None, "an accepted message gets no receipt");
     assert_eq!(r.daemon.asked("thread/queue/add"), 1);
+    assert_eq!(r.daemon.asked("thread/resume"), resumed + 1, "subscribed again");
+    assert!(r.w.bindings[&SID].subscribed);
 }
 
 #[test]
@@ -209,7 +214,7 @@ fn mail_queued_in_the_old_home_holds_the_move() {
     );
     r.queue(&format!("insert into queued_items values ('q1', '{T}', '{{}}', 0, 0, 0);"));
     assert_eq!(r.verdict(), Verdict::Held(Held::Queued));
-    assert_eq!(moving::queued(&r.home, "01a133f4-0000-7331-9630-9c40ff4b467f"), Ok(0), "another thread's mail is not this one's");
+    assert_eq!(queued(&r.home, "01a133f4-0000-7331-9630-9c40ff4b467f"), Ok(0), "another thread's mail is not this one's");
     r.queue("delete from queued_items;");
     assert!(matches!(r.verdict(), Verdict::Go { .. }));
 }

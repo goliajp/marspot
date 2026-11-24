@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.698"  # the codex badge switch waits until the session may move, and resumes it by id
-core    = "0.12.685"  # the badge says why a codex switch did not happen
+shell   = "0.7.699"  # a codex switch waits for the old home to let go of the session, and always unmarks a pane it gave up on
+core    = "0.12.686"  # the badge names the wait for the old codex account and why a switch did not happen
 session = "0.11.443"  # the text lane writes a lone character after a wide one in place

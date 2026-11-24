@@ -10,7 +10,8 @@ use std::sync::Mutex;
 use super::pane::PaneCodex;
 use super::CodexPlugin;
 use crate::plugins::handoff::{self, Agent};
-use crate::plugins::{pty_op, LogLevel, Plugin, PluginError, PluginHost};
+use crate::plugins::{pty_op, LogLevel, PaneStatusView, Plugin, PluginError, PluginHost};
+use marspot::pane_state::{BusyKind, PaneStatus};
 use marspot::pidtree::ProcId;
 use marspot_term::test_env::{EnvGuard, TempDir};
 
@@ -28,6 +29,11 @@ impl PluginHost for Recorder {
         self.submitted.lock().unwrap().push((sid, op.name));
         Ok(())
     }
+    /// A terminal long quiet: no turn is drawing.
+    fn pane_status(&self, _sid: u64) -> Result<Option<PaneStatusView>, PluginError> {
+        let held = std::time::Duration::from_secs(60);
+        Ok(Some(PaneStatusView { status: PaneStatus::Busy(BusyKind::ForegroundJob), held, quiescent: true }))
+    }
 }
 
 #[test]
@@ -44,7 +50,7 @@ fn a_pick_on_claude_s_badge_makes_codex_submit_nothing() {
     // pane on profile 1, as it wrongly did for pane 484
     const SID: u64 = 484;
     let mut plugin = CodexPlugin::new();
-    plugin.panes.insert(SID, PaneCodex { codex: ProcId { pid: i32::MAX, start_us: 1 }, shell_pid: i32::MAX, profile: Some(1), argv: None });
+    plugin.panes.insert(SID, PaneCodex { codex: ProcId { pid: i32::MAX, start_us: 1 }, shell_pid: i32::MAX, profile: Some(1), argv: Some(vec!["codex".into()]) });
     let host = Recorder::default();
 
     let mut claude_rows = crate::plugins::claudecode::badge_menu_for(1, &[1, 2]);

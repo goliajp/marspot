@@ -17,6 +17,10 @@ const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 pub(super) struct State {
     /// `thread/read`'s `thread` for each loaded thread, in order.
     pub threads: Vec<(String, Value)>,
+    /// Listed as loaded, but `thread/read` fails for them.
+    pub unreadable: Vec<String>,
+    /// Ids per page of `thread/loaded/list`; all on one when None.
+    pub page: Option<usize>,
     /// Every request's method, in the order they came.
     pub asked: Vec<String>,
 }
@@ -92,7 +96,13 @@ fn answer(state: &Mutex<State>, method: &str, params: Option<&Value>) -> Result<
     let id = params.and_then(|p| p.str_at("threadId")).unwrap_or_default().to_string();
     match method {
         "initialize" => Ok(obj([("userAgent", Value::from("codex-tui/0.172.0 (fake)"))])),
-        "thread/loaded/list" => Ok(obj([("data", Value::Arr(s.threads.iter().map(|(i, _)| Value::from(i.as_str())).collect()))])),
+        "thread/loaded/list" => {
+            let ids: Vec<&str> = s.threads.iter().map(|(i, _)| i.as_str()).chain(s.unreadable.iter().map(String::as_str)).collect();
+            let from: usize = params.and_then(|p| p.str_at("cursor")).and_then(|c| c.parse().ok()).unwrap_or(0);
+            let to = s.page.map_or(ids.len(), |n| (from + n).min(ids.len()));
+            let next = if to < ids.len() { Value::from(to.to_string().as_str()) } else { Value::Null };
+            Ok(obj([("data", Value::Arr(ids[from..to].iter().map(|i| Value::from(*i)).collect())), ("nextCursor", next)]))
+        }
         "thread/read" => s.threads.iter().find(|(i, _)| *i == id).map(|(_, t)| obj([("thread", t.clone())])).ok_or("not loaded".into()),
         "thread/resume" => Ok(obj([("approvalPolicy", Value::from("never")), ("sandbox", obj([("type", Value::from("dangerFullAccess"))]))])),
         "thread/unsubscribe" | "thread/queue/add" | "turn/steer" => Ok(obj([])),

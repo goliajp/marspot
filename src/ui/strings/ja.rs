@@ -174,6 +174,10 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeCodexCustomCommand => "⚠ カスタム引数のため切り替えなし",
         Msg::BadgeCodexStateUnknown => "⚠ セッション状態不明のため切り替えなし",
         Msg::BadgeCodexSwitching => "⚠ 切り替え中",
+        Msg::BadgeCodexNotTracked => "⚠ セッション未追跡のため切り替えなし",
+        Msg::BadgeCodexTerminalBusy => "⚠ codex作業中のため切り替えなし",
+        Msg::BadgeCodexWaitingRelease => "旧アカウントの解放待ち",
+        Msg::BadgeCodexStillLoaded => "⚠ 旧アカウントがセッションを保持中のため切り替えなし",
 
         Msg::Language => "言語",
         Msg::CostLanguage => "Marspotのパネルとメニューにすぐ反映されます",

@@ -90,6 +90,8 @@ pub(crate) enum Event {
     Notice { key: u64, from: String, state: String, finished_at: Option<i64> },
     /// A codex pane moving to another account (`moving`).
     Move(super::moving::Ask),
+    /// An end is waiting in `moving`'s list.
+    MoveEnded,
     Rpc { home: PathBuf, msg: Value },
     RpcClosed { home: PathBuf },
     Stop,
@@ -247,7 +249,7 @@ impl Worker {
                 Some(e) => e,
                 None => {
                     // with nothing owed on a clock, until the next event
-                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min()].into_iter().flatten().min();
+                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min(), self.moves.due()].into_iter().flatten().min();
                     let got = match due {
                         Some(due) => self.rx.recv_timeout(due.saturating_duration_since(Instant::now())),
                         None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -262,6 +264,7 @@ impl Worker {
                                 self.publish();
                             }
                             self.idle_checks_due(now);
+                            self.moves_due(now);
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
@@ -302,6 +305,7 @@ impl Worker {
                 Event::Subscribe { key, from, msg_id } => self.subscribe(key, from, msg_id),
                 Event::Notice { key, from, state, finished_at } => self.notice(key, &from, &state, finished_at),
                 Event::Move(a) => self.on_move(a),
+                Event::MoveEnded => {}
                 Event::Rpc { home, msg } => self.on_note(&home, &msg),
                 Event::RpcClosed { home } => {
                     if self.conns.remove(&home).is_some() {
@@ -312,6 +316,7 @@ impl Worker {
                 }
                 Event::Stop => break,
             }
+            self.take_ends();
             self.publish();
         }
         self.teardown();
@@ -349,7 +354,7 @@ impl Worker {
                     self.refresh();
                     return;
                 }
-                let Some(new) = status.and_then(status_of) else { return };
+                let Some(new) = status.and_then(super::daemon::status_of) else { return };
                 let Some(sid) = self.find(home, &thread) else { return };
                 // a thread that has now run a turn can be subscribed
                 if new == Status::Idle && !self.bindings[&sid].subscribed {
@@ -463,31 +468,4 @@ impl Worker {
             }
         }
     }
-
-}
-
-fn status_of(s: &Value) -> Option<Status> {
-    match s.str_at("type")? {
-        "idle" => Some(Status::Idle),
-        "active" => {
-            let waiting = s.get("activeFlags").map_or(&[][..], Value::arr).iter().filter_map(Value::str).any(|f| f.starts_with("waiting"));
-            Some(if waiting { Status::Waiting } else { Status::Busy })
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use marspot_peer::json::parse;
-
-    #[test]
-    fn statuses_map_to_registry_words() {
-        assert_eq!(status_of(&parse(r#"{"type":"idle"}"#).unwrap()), Some(Status::Idle));
-        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":[]}"#).unwrap()), Some(Status::Busy));
-        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":["waitingOnApproval"]}"#).unwrap()), Some(Status::Waiting));
-        assert_eq!(status_of(&parse(r#"{"type":"systemError"}"#).unwrap()), None);
-    }
-
 }

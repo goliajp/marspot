@@ -151,8 +151,7 @@ impl Worker {
 
     /// The daemon's loaded user threads with their cwds.
     pub(super) fn loaded_threads(&mut self, home: &Path) -> Result<Vec<(String, String)>, RpcError> {
-        let r = self.call(home, "thread/loaded/list", obj([]))?;
-        let ids: Vec<String> = r.get("data").map_or(&[][..], Value::arr).iter().filter_map(Value::str).map(str::to_string).collect();
+        let ids = self.loaded_ids(home)?;
         self.cwds.retain(|(h, id), _| h != home || ids.contains(id));
         let mut out = Vec::new();
         for id in ids {
@@ -287,7 +286,7 @@ impl Worker {
     }
 
     pub(super) fn unbind(&mut self, sid: u64, mut b: Binding) {
-        self.moved_out(sid);
+        self.moved_out(sid, &b);
         send_notices(sid, &mut b, IdleState::Exited);
         super::records::remove_record(&b.record);
         if b.subscribed {

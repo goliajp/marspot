@@ -180,6 +180,10 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeCodexCustomCommand => "⚠ custom command line, not switched",
         Msg::BadgeCodexStateUnknown => "⚠ session state unknown, not switched",
         Msg::BadgeCodexSwitching => "⚠ already switching",
+        Msg::BadgeCodexNotTracked => "⚠ session not tracked yet, not switched",
+        Msg::BadgeCodexTerminalBusy => "⚠ codex is at work, not switched",
+        Msg::BadgeCodexWaitingRelease => "waiting for the old account to let go",
+        Msg::BadgeCodexStillLoaded => "⚠ old account kept the session, not switched",
 
         Msg::Language => "Language",
         Msg::CostLanguage => "applies at once to Marspot's own panels and menus",

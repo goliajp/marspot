@@ -285,7 +285,7 @@ fn fid(pid: i32) -> ProcId {
 }
 
 #[derive(Default)]
-struct FakeState {
+pub(super) struct FakeState {
     now_ms: Mutex<u64>,
     alive: Mutex<Vec<i32>>,
     present: Mutex<Vec<i32>>,
@@ -387,9 +387,9 @@ impl OpEnv for FakeEnv {
     }
 }
 
-struct Host {
+pub(super) struct Host {
     ended: Mutex<bool>,
-    badges: Mutex<Vec<String>>,
+    pub(super) badges: Mutex<Vec<String>>,
 }
 impl PaneSessionHost for Host {
     fn shelld_session_id(&self) -> u64 {
@@ -404,7 +404,7 @@ impl PaneSessionHost for Host {
     fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
 }
 
-fn setup() -> (Arc<FakeState>, Box<dyn OpEnv>, Host) {
+pub(super) fn setup() -> (Arc<FakeState>, Box<dyn OpEnv>, Host) {
     let state = Arc::new(FakeState::default());
     let env = FakeEnv {
         io: Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>,
@@ -421,7 +421,7 @@ fn advance(state: &FakeState, ms: u64) {
 /// Ticks the runner the way the host does, advancing the clock a
 /// frame at a time.  Returns when the run ends or the budget runs
 /// out.
-fn run(r: &mut OpRunner, host: &Host, state: &FakeState, ms: u64) {
+pub(super) fn run(r: &mut OpRunner, host: &Host, state: &FakeState, ms: u64) {
     for _ in 0..(ms / 16) {
         if *host.ended.lock().unwrap() {
             return;

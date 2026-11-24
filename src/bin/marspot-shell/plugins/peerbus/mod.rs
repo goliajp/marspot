@@ -34,6 +34,10 @@ mod kimi_config;
 mod leftovers;
 mod lifecycle;
 pub(crate) mod moving;
+mod moving_checks;
+mod moving_release;
+#[cfg(test)]
+mod moving_release_tests;
 #[cfg(test)]
 mod moving_tests;
 mod names;

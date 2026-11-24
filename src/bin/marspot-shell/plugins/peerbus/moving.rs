@@ -7,19 +7,19 @@
 //! move is decided until the old binding is gone, nothing is handed to
 //! that daemon and senders are told so.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use marspot::pidtree::{self, ProcId};
-use marspot_peer::json::{obj, Value};
-use marspot_peer::rpc::RpcError;
 use marspot_term::{lx_info, lx_warn};
 
-use super::worker::{Event, Worker};
+pub(crate) use super::moving_release::RELEASE_WAIT;
+use super::moving_release::Release;
+use super::worker::{Binding, Event, Worker};
+use crate::plugins::pty_op::Job;
 
 /// What the codex plugin asks of the worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,20 +41,48 @@ pub(crate) enum Held {
     Unknown,
 }
 
+/// Finished by the worker once the old home's daemon no longer has the
+/// session loaded, or with an error when it still has at the deadline.
+#[derive(Clone)]
+pub(crate) struct Released(pub Arc<Job>);
+
+impl PartialEq for Released {
+    fn eq(&self, o: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &o.0)
+    }
+}
+
+impl Eq for Released {}
+
+impl std::fmt::Debug for Released {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Released")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Verdict {
-    Go { thread: String, home: PathBuf },
+    Go { thread: String, home: PathBuf, released: Released },
     Held(Held),
 }
 
 /// Verdicts not yet taken; one per ask, and asks come from clicks.
 const MAX_VERDICTS: usize = 64;
+/// Ends not yet taken, for the same reason.
+const MAX_ENDS: usize = 64;
 /// How long after a move the next binding of its pane is still the
 /// moved session's, owed the sentence that it may go on.
 const GO_ON_WITHIN: Duration = Duration::from_secs(120);
+/// A mark whose process is still there this long after it was set
+/// belongs to a move that never happened: the TUI is ended within
+/// seconds of the verdict.
+const MARK_FOR: Duration = Duration::from_secs(120);
 
 static ASKS: Mutex<Option<SyncSender<Event>>> = Mutex::new(None);
 static VERDICTS: Mutex<Vec<(u64, ProcId, Verdict)>> = Mutex::new(Vec::new());
+/// Ends wait here rather than in the worker's channel, which drops what
+/// does not fit: a lost end leaves the pane refusing mail.
+static ENDS: Mutex<Vec<Ask>> = Mutex::new(Vec::new());
 
 pub(crate) fn connect(tx: Option<SyncSender<Event>>) {
     *ASKS.lock().unwrap() = tx;
@@ -62,7 +90,19 @@ pub(crate) fn connect(tx: Option<SyncSender<Event>>) {
 
 /// Hand the worker `a`; false when there is no worker to take it.
 pub(crate) fn ask(a: Ask) -> bool {
-    ASKS.lock().unwrap().as_ref().is_some_and(|tx| tx.try_send(Event::Move(a)).is_ok())
+    let tx = ASKS.lock().unwrap();
+    let Some(tx) = tx.as_ref() else { return false };
+    if let Ask::End { .. } = a {
+        let mut q = ENDS.lock().unwrap();
+        if q.len() == MAX_ENDS {
+            q.remove(0);
+        }
+        q.push(a);
+        // only a wake-up: the worker takes the ends after every event
+        let _ = tx.try_send(Event::MoveEnded);
+        return true;
+    }
+    tx.try_send(Event::Move(a)).is_ok()
 }
 
 /// A stand-in for the worker, for tests on the asking side: takes
@@ -76,15 +116,19 @@ impl Listener {
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         connect(Some(tx));
         verdicts();
+        ENDS.lock().unwrap().clear();
         Listener(rx)
     }
 
     /// The next ask, if one came.
     pub(crate) fn next(&self) -> Option<Ask> {
-        match self.0.try_recv() {
-            Ok(Event::Move(a)) => Some(a),
-            _ => None,
+        while let Ok(e) = self.0.try_recv() {
+            if let Event::Move(a) = e {
+                return Some(a);
+            }
         }
+        let mut q = ENDS.lock().unwrap();
+        (!q.is_empty()).then(|| q.remove(0))
     }
 }
 
@@ -101,19 +145,33 @@ pub(crate) fn post(sid: u64, codex: ProcId, v: Verdict) {
     q.push((sid, codex, v));
 }
 
-/// The worker's side: which panes are moving, and which are owed the
-/// go-on sentence once their new process binds.
-#[derive(Default)]
-pub(crate) struct Moves {
-    marked: HashMap<u64, ProcId>,
-    go_on: HashMap<u64, (ProcId, Instant)>,
+pub(super) struct Mark {
+    pub codex: ProcId,
+    pub at: Instant,
+    /// The binding was subscribed before the move unsubscribed it.
+    pub resubscribe: bool,
 }
 
-/// One loaded thread, as `thread/read` gives it.
-pub(super) struct Loaded {
-    pub id: String,
-    pub parent: Option<String>,
-    pub status: Option<String>,
+/// The worker's side: which panes are moving, which are owed the go-on
+/// sentence once their new process binds, and whose old home is being
+/// watched for letting go of the session.
+#[derive(Default)]
+pub(crate) struct Moves {
+    pub(super) marked: HashMap<u64, Mark>,
+    go_on: HashMap<u64, (ProcId, Instant)>,
+    pub(super) releases: HashMap<u64, Release>,
+}
+
+impl Moves {
+    /// When the worker next has something to look at here.
+    pub(super) fn due(&self) -> Option<Instant> {
+        let marks = self.marked.values().map(|m| m.at + MARK_FOR);
+        marks.chain(self.releases.values().map(|r| r.next)).min()
+    }
+}
+
+fn alive(id: ProcId) -> bool {
+    pidtree::proc_id(id.pid) == Some(id)
 }
 
 impl Worker {
@@ -124,15 +182,29 @@ impl Worker {
                 lx_info!("peerbus.move", &format!("{v:?}"), sid = sid);
                 post(sid, codex, v);
             }
-            Ask::End { sid, codex } => {
-                self.moves.go_on.remove(&sid);
-                // a process already gone leaves its binding to the next
-                // refresh, and the mark has to outlast that binding
-                if self.moves.marked.get(&sid) == Some(&codex) && pidtree::proc_id(codex.pid) == Some(codex) {
-                    self.moves.marked.remove(&sid);
-                    lx_info!("peerbus.move.ended", "the session stays where it was", sid = sid);
-                }
-            }
+            Ask::End { sid, codex } => self.end_move(sid, codex),
+        }
+    }
+
+    /// Take the ends the codex plugin left; called after every event.
+    pub(super) fn take_ends(&mut self) {
+        let ends = std::mem::take(&mut *ENDS.lock().unwrap());
+        for a in ends {
+            self.on_move(a);
+        }
+    }
+
+    fn end_move(&mut self, sid: u64, codex: ProcId) {
+        self.moves.go_on.remove(&sid);
+        if let Some(r) = self.moves.releases.remove(&sid) {
+            r.job.finish(Err("the switch ended".into()));
+        }
+        // a process already gone leaves its binding to the next
+        // refresh, and the mark has to outlast that binding
+        if self.moves.marked.get(&sid).is_some_and(|m| m.codex == codex) && alive(codex) {
+            let m = self.moves.marked.remove(&sid).expect("checked above");
+            self.resubscribe(sid, &m);
+            lx_info!("peerbus.move.ended", "the session stays where it was", sid = sid);
         }
     }
 
@@ -143,82 +215,52 @@ impl Worker {
         if self.moves.marked.contains_key(&sid) {
             return Verdict::Held(Held::Moving);
         }
-        let (home, thread, turn) = (b.home.clone(), b.thread.clone(), b.active_turn.is_some());
+        let (home, thread, turn, subscribed) = (b.home.clone(), b.thread.clone(), b.active_turn.is_some(), b.subscribed);
         // marked before the checks: nothing is queued between them and the move
-        self.moves.marked.insert(sid, codex);
+        self.moves.marked.insert(sid, Mark { codex, at: Instant::now(), resubscribe: subscribed });
         let held = if turn { Some(Held::Busy) } else { self.why_held(&home, &thread) };
         if let Some(h) = held {
             self.moves.marked.remove(&sid);
             return Verdict::Held(h);
         }
+        // the daemon unloads a session only once nobody is subscribed
+        // to it, so this goes now, not when the binding does
+        self.unsubscribe(&home, &thread);
+        if let Some(b) = self.bindings.get_mut(&sid) {
+            b.subscribed = false;
+        }
         self.moves.go_on.insert(sid, (codex, Instant::now()));
-        Verdict::Go { thread, home }
+        let released = self.watch_release(sid, &home, &thread);
+        Verdict::Go { thread, home, released: Released(released) }
     }
 
-    /// The daemon's word on `thread` and the threads it started, and
-    /// the home's queue; None when it may move.
-    fn why_held(&mut self, home: &Path, thread: &str) -> Option<Held> {
-        let loaded = match self.loaded_states(home) {
-            Ok(l) => l,
-            Err(e) => {
-                lx_warn!("peerbus.move.unknown", &e.to_string(), thread = thread.to_string());
-                return Some(Held::Unknown);
-            }
-        };
-        match loaded.iter().find(|t| t.id == thread).map(|t| t.status.as_deref()) {
-            Some(Some("idle")) => {}
-            Some(Some("active")) => return Some(Held::Busy),
-            _ => return Some(Held::Unknown),
-        }
-        if running_descendant(&loaded, thread) {
-            return Some(Held::ChildRunning);
-        }
-        match queued(home, thread) {
-            Ok(0) => None,
-            Ok(_) => Some(Held::Queued),
-            Err(e) => {
-                lx_warn!("peerbus.move.queue_unread", &e, thread = thread.to_string());
-                Some(Held::Unknown)
-            }
-        }
+    fn resubscribe(&mut self, sid: u64, m: &Mark) {
+        let Some(b) = self.bindings.get(&sid).filter(|b| m.resubscribe && b.codex == m.codex && !b.subscribed) else { return };
+        let (home, thread, cwd, argv) = (b.home.clone(), b.thread.clone(), b.record.cwd.clone(), b.argv.clone());
+        let (class, subscribed) = self.class_for(&home, &thread, &cwd, &argv);
+        let b = self.bindings.get_mut(&sid).expect("found above");
+        b.subscribed = subscribed;
+        b.class = class;
+        b.record.class = class;
     }
 
-    fn loaded_states(&mut self, home: &Path) -> Result<Vec<Loaded>, RpcError> {
-        let r = self.call(home, "thread/loaded/list", obj([]))?;
-        let ids: Vec<String> = r.get("data").map_or(&[][..], Value::arr).iter().filter_map(Value::str).map(str::to_string).collect();
-        let mut out = Vec::new();
-        for id in ids {
-            let read = self.call(home, "thread/read", obj([("threadId", Value::from(id.as_str())), ("includeTurns", Value::from(false))]));
-            let t = match read {
-                Ok(v) => v,
-                Err(RpcError::Remote { .. }) => continue, // unloaded in between
-                Err(e) => return Err(e),
-            };
-            let t = t.get("thread");
-            let parent = t.and_then(|t| t.str_at("parentThreadId")).map(str::to_string);
-            let status = t.and_then(|t| t.get("status")).and_then(|s| s.str_at("type")).map(str::to_string);
-            out.push(Loaded { id, parent, status });
-        }
-        Ok(out)
-    }
-
-    /// Put `text` into the thread: steering the running turn when asked
-    /// to and able, queued as the next input otherwise.  Never into a
-    /// session that is moving: its daemon is the one being left.
-    pub(super) fn hand_over(&mut self, home: &Path, thread: &str, text: String, steer_turn: Option<String>, id: String) -> (Result<Value, RpcError>, &'static str) {
-        if self.find(home, thread).is_some_and(|sid| self.moving(sid)) {
-            return (Err(RpcError::Protocol("the session is moving to another account".into())), "moving");
-        }
-        let input = Value::Arr(vec![obj([("type", Value::from("text")), ("text", Value::from(text))])]);
-        if let Some(turn) = steer_turn {
-            let p = obj([("threadId", Value::from(thread)), ("expectedTurnId", Value::from(turn)), ("input", input.clone())]);
-            let r = self.call(home, "turn/steer", p);
-            if r.is_ok() {
-                return (r, "turn/steer");
+    /// Clear the marks of moves that never happened and look at the
+    /// old homes being watched.
+    pub(super) fn moves_due(&mut self, now: Instant) {
+        let late: Vec<u64> = self.moves.marked.iter().filter(|(_, m)| m.at + MARK_FOR <= now).map(|(s, _)| *s).collect();
+        for sid in late {
+            let codex = self.moves.marked[&sid].codex;
+            let bound = self.bindings.get(&sid).is_some_and(|b| b.codex == codex);
+            if alive(codex) || !bound {
+                let m = self.moves.marked.remove(&sid).expect("listed above");
+                lx_warn!("peerbus.move.mark_expired", "a move that never happened left its mark", sid = sid);
+                self.resubscribe(sid, &m);
+            } else if let Some(m) = self.moves.marked.get_mut(&sid) {
+                // gone, and its binding still there: the next refresh takes both
+                m.at = now;
             }
         }
-        let p = obj([("threadId", Value::from(thread)), ("clientUserMessageId", Value::from(id)), ("input", input)]);
-        (self.call(home, "thread/queue/add", p), "thread/queue/add")
+        self.releases_due(now);
     }
 
     /// Is `sid`'s session moving?  Nothing is handed to its daemon then.
@@ -226,9 +268,13 @@ impl Worker {
         self.moves.marked.contains_key(&sid)
     }
 
-    /// The binding the mark protected is gone.
-    pub(super) fn moved_out(&mut self, sid: u64) {
-        self.moves.marked.remove(&sid);
+    /// The binding `b` of pane `sid` is gone.  The mark goes with it
+    /// only when it is the marked process's and that process has ended:
+    /// a new thread in the same TUI is not the move.
+    pub(super) fn moved_out(&mut self, sid: u64, b: &Binding) {
+        if self.moves.marked.get(&sid).is_some_and(|m| m.codex == b.codex) && !alive(b.codex) {
+            self.moves.marked.remove(&sid);
+        }
     }
 
     /// A new process in a pane that moved has bound: tell the session
@@ -248,54 +294,4 @@ impl Worker {
             Err(e) => lx_warn!("peerbus.move.go_on_failed", &e.to_string(), sid = sid),
         }
     }
-}
-
-/// A thread started by `root`, or by one of those, still at work.  A
-/// thread with no status is counted as working: not knowing is no
-/// reason to move.
-pub(super) fn running_descendant(loaded: &[Loaded], root: &str) -> bool {
-    let mut family: HashSet<&str> = HashSet::from([root]);
-    // each pass adds a generation; there are no more than threads
-    for _ in 0..loaded.len() {
-        let before = family.len();
-        for t in loaded {
-            if t.parent.as_deref().is_some_and(|p| family.contains(p)) {
-                family.insert(&t.id);
-            }
-        }
-        if family.len() == before {
-            break;
-        }
-    }
-    loaded
-        .iter()
-        .filter(|t| t.id != root && family.contains(t.id.as_str()))
-        .any(|t| !matches!(t.status.as_deref(), Some("idle" | "notLoaded" | "systemError")))
-}
-
-/// Messages waiting in `home`'s queue for `thread`.
-///
-/// Read from the daemon's own store with the system's `sqlite3`, opened
-/// read-only: the app-server has a `thread/queue/list`, but what it
-/// answers has not been established, and a misread "empty" would move
-/// a session away from mail that then runs in the home it left.
-pub(super) fn queued(home: &Path, thread: &str) -> Result<u64, String> {
-    let db = home.join("queue_1.sqlite");
-    if !db.exists() {
-        return Ok(0);
-    }
-    // it goes into the query as a literal
-    if thread.is_empty() || !thread.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        return Err(format!("not a thread id: {thread:?}"));
-    }
-    let out = Command::new("/usr/bin/sqlite3")
-        .args(["-readonly", "-cmd", ".timeout 2000"])
-        .arg(&db)
-        .arg(format!("select count(*) from queued_items where thread_id = '{thread}';"))
-        .output()
-        .map_err(|e| format!("sqlite3: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("sqlite3: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().map_err(|e| format!("sqlite3 answered {:?}: {e}", out.stdout))
 }
