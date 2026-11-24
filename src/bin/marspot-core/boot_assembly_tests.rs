@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "reattach_tests.rs"]
 mod reattach_tests;
+#[path = "saved_slots_tests.rs"]
+mod saved_slots_tests;
 use marspot::state::{SavedPane, SavedWindowLayout};
 use marspot_term::session_registry::{
     self as reg, write_session_entry, SessionEntry,
@@ -472,3 +474,4 @@ fn a_closed_session_is_not_restored() {
     }
     assert!(reg::session_dir(kept).exists());
 }
+

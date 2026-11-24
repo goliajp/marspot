@@ -33,6 +33,12 @@ pub(crate) fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// The process is gone and was reaped: a zombie still takes a signal.
+pub(crate) fn reaped(pid: i32) -> bool {
+    // SAFETY: plain libc call
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
 /// What the loop does with the events these tests care about.
 pub(crate) fn drive(app: &mut CoreApp, rx: &Receiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
@@ -131,10 +137,7 @@ fn shadow_open_resize_and_close_through_the_dev_hook() {
     assert_eq!(app.route_pane_control(retire), Route::Answered(DoneCode::Ok));
     assert!(app.shadows.is_empty());
     assert!(!unwatched::is(sid));
-    wait_for("the session's process ended", || {
-        // SAFETY: the session is this test process's child; this reaps it
-        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == pid }
-    });
+    wait_for("the session's process ended", || reaped(pid));
     assert!(!reg::session_dir(sid).exists(), "its dir went before it did");
     let again = frame(MsgType::PaneRetire, encode_pane_retire(&PaneRetire { req_id: 12, sid, mode: RetireMode::Delete }));
     assert_eq!(app.route_pane_control(again), Route::Answered(DoneCode::NoSuchSession));

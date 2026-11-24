@@ -129,6 +129,7 @@ pub mod selection_tape;
 mod snapshot_kit;
 pub mod wheel_marker;
 pub mod pidtree;
+pub mod l3_reaper;
 /// PNG writer for `--snapshot`; see the `snapshot` feature in
 /// `Cargo.toml`.
 #[cfg(feature = "snapshot")]

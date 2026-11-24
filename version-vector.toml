@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.657"  # a pane read once waits for a frame being published
-core    = "0.12.664"  # a pane read once waits for a frame being published
-session = "0.11.433"  # a text watch follows the screen from when it is set and ends sequences where the parser does
+core    = "0.12.666"  # a closed session's slot is emptied in the saved layout before its close is finished; exiting l3s are reaped with a blocking wait
+session = "0.11.435"  # the socket the first image bound crosses the handoff; leaving unreachable is no abnormal drop

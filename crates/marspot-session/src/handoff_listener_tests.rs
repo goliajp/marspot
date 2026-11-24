@@ -16,8 +16,12 @@ fn inherited() -> RawFd {
 }
 
 fn adopt() -> (SessionListener, Receiver<crate::SessionEvent>) {
+    adopt_bound(None)
+}
+
+fn adopt_bound(socket: Option<crate::own_socket::SocketId>) -> (SessionListener, Receiver<crate::SessionEvent>) {
     let (tx, rx) = channel();
-    (SessionListener::from_handoff(SID, inherited(), 4242, 80, 24, 0, tx).unwrap(), rx)
+    (SessionListener::from_handoff(SID, inherited(), 4242, 80, 24, 0, socket, tx).unwrap(), rx)
 }
 
 #[test]
@@ -44,4 +48,21 @@ fn an_image_that_takes_over_does_not_make_a_dir_that_went() {
     let _sandbox = sandbox_state_dir();
     let (_l, _rx) = adopt();
     assert!(!session_dir(SID).exists());
+}
+
+/// The directory was taken over before the swap: the socket at the path
+/// is the new owner's, and the image that takes over leaves it there.
+#[test]
+fn an_image_that_takes_over_removes_only_the_socket_the_first_one_bound() {
+    use crate::own_socket::SocketId;
+    let _sandbox = sandbox_state_dir();
+    std::fs::create_dir_all(session_dir(SID)).unwrap();
+    let ours = session_dir(SID).join("ours");
+    std::fs::write(&ours, "").unwrap();
+    let theirs = session_socket_path(SID);
+    std::fs::write(&theirs, "").unwrap();
+    adopt_bound(SocketId::of(&ours)).0.leave_unreachable();
+    assert!(theirs.exists(), "the new owner's socket is left");
+    adopt_bound(SocketId::of(&theirs)).0.leave_unreachable();
+    assert!(!theirs.exists(), "its own goes");
 }

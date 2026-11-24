@@ -2,7 +2,7 @@
 //! session was writing.  Against real `marspot-session` processes.
 
 use super::super::spawn::spawn_l3_shadow_with_cwd;
-use super::tests::{app_with_parent, drive, frame, sandbox, wait_for};
+use super::tests::{app_with_parent, drive, frame, reaped, sandbox, wait_for};
 use super::*;
 use crate::boot_assembly_tests::Sandbox;
 use marspot::shell_proto::{PaneRetire, encode_pane_retire};
@@ -76,10 +76,7 @@ fn close_of_fifty_panes_in_full_output_leaves_no_session_dir() {
             }
         }
         for pid in pids {
-            wait_for("the session's process ended", || {
-                // SAFETY: the session is this test process's child; this reaps it
-                unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == pid }
-            });
+            wait_for("the session's process ended", || reaped(pid));
         }
         assert_eq!(left(&sb, "sessions"), [psid.to_string()], "only the parent's dir is there, round {round}");
         assert_eq!(left(&sb, "retired"), [""; 0], "and none was kept, round {round}");
@@ -182,13 +179,48 @@ fn close_into_the_recycle_dir_keeps_the_history() {
     sb.own(pid);
     wait_for("the pane wrote to its dir", || writes(sid, 512 * 1024));
     retire(&mut app, 9, sid, RetireMode::Recycle);
-    wait_for("the session's process ended", || {
-        // SAFETY: the session is this test process's child; this reaps it
-        unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == pid }
-    });
+    wait_for("the session's process ended", || reaped(pid));
     assert_eq!(left(&sb, "sessions"), [psid.to_string()]);
     let kept = left(&sb, "retired");
     assert_eq!(kept.len(), 1, "{kept:?}");
     assert!(kept[0].starts_with(&format!("{sid}-")), "{kept:?}");
     assert!(sb.dir().join("retired").join(&kept[0]).join("entry.toml").exists());
+}
+
+/// A slot with no L3 as far as the core knows, whose session runs after
+/// all: closing the slot closes the session.
+#[test]
+fn close_of_an_empty_slot_closes_the_l3_that_holds_its_dir() {
+    let sb = sandbox();
+    let (mut app, _rx, psid) = app_with_parent(&sb);
+    let sid = reg::allocate_next_session_id().unwrap();
+    let _running = spawn_l3_pane_with_cwd(60, 16, sid, "", &app.event_tx.clone()).expect("real L3 spawn");
+    sb.own(reg::read_session_entry(sid).unwrap().pid);
+    app.windows[0].panes.push(Pane::new_vacant(sid, 60, 16));
+    app.close_session(0, 1);
+    // closed, not recycled: it goes through the recycle dir and leaves nothing there
+    wait_for("the session's dir went", || {
+        left(&sb, "sessions") == [psid.to_string()] && left(&sb, "retired").is_empty()
+    });
+}
+
+/// The core reaps the L3s it started once their panes are closed.
+#[test]
+fn close_leaves_no_zombie() {
+    let sb = sandbox();
+    let (mut app, _rx, psid) = app_with_parent(&sb);
+    let tx = app.event_tx.clone();
+    let (pane, shadow) = (reg::allocate_next_session_id().unwrap(), reg::allocate_next_session_id().unwrap());
+    app.windows[0].panes.push(spawn_l3_pane_with_cwd(60, 16, pane, "", &tx).expect("real L3 spawn"));
+    let env = ShadowEnv { parent: psid, idle_s: 0 };
+    app.shadows.push(spawn_l3_shadow_with_cwd(60, 16, shadow, env, &tx).expect("shadow L3 spawn"));
+    let pids = [pane, shadow].map(|sid| reg::read_session_entry(sid).unwrap().pid);
+    for pid in pids {
+        sb.own(pid);
+    }
+    app.close_session(0, 1);
+    retire(&mut app, 1, shadow, RetireMode::Delete);
+    for pid in pids {
+        wait_for("the session's process was reaped", || reaped(pid));
+    }
 }

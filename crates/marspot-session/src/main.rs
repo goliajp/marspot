@@ -40,6 +40,7 @@ mod resurrect;
 mod shadow;
 mod local_session;
 mod pane_ctl;
+mod own_socket;
 mod pane_env;
 mod pointer;
 mod publish_gate;
@@ -614,7 +615,7 @@ fn main() {
             // Adopt inherited UDS listener fd; no rebind, entry.toml
             // already has our (preserved) PID.
             match uds_server::SessionListener::from_handoff(
-                id, h.listen_fd, h.child_pid, h.cols, h.rows, shadow_cfg.parent, ev_tx.clone(),
+                id, h.listen_fd, h.child_pid, h.cols, h.rows, shadow_cfg.parent, h.socket, ev_tx.clone(),
             ) {
                 Ok(l) => _listener = Some(l),
                 Err(e) => {
@@ -781,7 +782,6 @@ fn main() {
 /// already anomalous and worth a line in the log.
 const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
 
-
 const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
     let mut last_snapshot_at = Instant::now();
@@ -904,6 +904,8 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             if leave.act(session.id(), session.child_pid()) {
                 pane_ctl.session_ended(&mut session, poke.as_mut());
                 shell_ended = true;
+            } else if let Some(listener) = _listener.take() {
+                listener.leave_unreachable();
             }
             break;
         }
@@ -1613,31 +1615,15 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let marks = pane_ctl.marks(&session);
         let SessionImpl::Local(local) = session;
         if do_execv {
-            match _listener.take() { Some(listener_owned) => {
-                lx_event!(
-                    "L3_SHUTDOWN_EXECV",
-                    "fingerprint differs from current/marspot-session — execv",
-                    session_id = id
-                );
-                match do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer, marks, upkeep.shadow()) {
-                    Ok(()) => unreachable!(),
-                    Err(e) => {
-                        lx_error!(
-                            "l3.execv.aborted",
-                            &format!("{e}; exiting so L2 respawns this pane"),
-                            session_id = id
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            } _ => {
-                lx_error!(
-                    "l3.execv.no_listener",
-                    "want_shutdown but no SessionListener; bug",
-                    session_id = id
-                );
+            let Some(listener_owned) = _listener.take() else {
+                lx_error!("l3.execv.no_listener", "want_shutdown but no SessionListener; bug", session_id = id);
                 std::process::exit(1);
-            }}
+            };
+            lx_event!("L3_SHUTDOWN_EXECV", "fingerprint differs from current/marspot-session — execv", session_id = id);
+            if let Err(e) = do_l3_execv_swap(id, local, listener_owned, poke.take(), &snapshot_writer, marks, upkeep.shadow()) {
+                lx_error!("l3.execv.aborted", &format!("{e}; exiting so L2 respawns this pane"), session_id = id);
+            }
+            std::process::exit(1);
         } else {
             session_end::shut_down(id, &local, &snapshot_writer);
             std::process::exit(0);

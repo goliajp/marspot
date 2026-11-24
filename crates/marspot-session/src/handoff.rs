@@ -58,6 +58,9 @@ pub(crate) struct L3Handoff {
     /// Whose shadow pane this is, and its idle timeout; not in a
     /// manifest from an image before them: no shadow.
     pub(crate) shadow: crate::shadow::ShadowCfg,
+    /// The socket the first image bound, which the last one removes and
+    /// no other; not in a manifest from an image before it: none.
+    pub(crate) socket: Option<crate::own_socket::SocketId>,
 }
 
 pub(crate) fn handoff_manifest_path() -> std::path::PathBuf {
@@ -92,6 +95,9 @@ pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> s
     }
     if h.shadow.parent != 0 {
         body.push_str(&format!("shadow_of={}\nshadow_idle_s={}\n", h.shadow.parent, h.shadow.idle_s));
+    }
+    if let Some(s) = h.socket {
+        body.push_str(&format!("socket_dev={}\nsocket_ino={}\n", s.dev, s.ino));
     }
     let tmp = path.with_extension("tsv.tmp");
     std::fs::write(&tmp, body)?;
@@ -144,35 +150,22 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
         fields.get("shadow_of").and_then(|s| s.parse().ok()).unwrap_or(0),
         fields.get("shadow_idle_s").and_then(|s| s.parse().ok()).unwrap_or(0),
     );
+    let num = |k: &str| fields.get(k).and_then(|s| s.parse::<u64>().ok());
+    let socket = num("socket_dev").zip(num("socket_ino")).map(|(dev, ino)| crate::own_socket::SocketId { dev, ino });
+    fn req<T: std::str::FromStr>(fields: &std::collections::HashMap<String, String>, k: &str) -> std::io::Result<T> {
+        let v = fields.get(k).and_then(|s| s.parse().ok());
+        v.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("manifest bad/missing {k}")))
+    }
     Ok(L3Handoff {
-        master_fd: fields
-            .get("master_fd")
-            .ok_or_else(|| inv("master_fd"))?
-            .parse()
-            .map_err(|_| inv("master_fd"))?,
-        child_pid: fields
-            .get("child_pid")
-            .ok_or_else(|| inv("child_pid"))?
-            .parse()
-            .map_err(|_| inv("child_pid"))?,
-        listen_fd: fields
-            .get("listen_fd")
-            .ok_or_else(|| inv("listen_fd"))?
-            .parse()
-            .map_err(|_| inv("listen_fd"))?,
-        cols: fields
-            .get("cols")
-            .ok_or_else(|| inv("cols"))?
-            .parse()
-            .map_err(|_| inv("cols"))?,
-        rows: fields
-            .get("rows")
-            .ok_or_else(|| inv("rows"))?
-            .parse()
-            .map_err(|_| inv("rows"))?,
+        master_fd: req(&fields, "master_fd")?,
+        child_pid: req(&fields, "child_pid")?,
+        listen_fd: req(&fields, "listen_fd")?,
+        cols: req(&fields, "cols")?,
+        rows: req(&fields, "rows")?,
         control_stream_fd,
         marks,
         shadow,
+        socket,
     })
 }
 
@@ -239,6 +232,7 @@ mod tests {
             control_stream_fd: 11,
             marks: crate::pane_ctl::Marks { pos: 123_456, ends: LatestEnds { any: Some((120_000, Some(1))), run: Some((110_000, Some(7))), hook: Some((120_000, Some(1))) }, input_start: Some(119_000) },
             shadow: crate::shadow::ShadowCfg::default(),
+            socket: None,
         }
     }
 
@@ -407,6 +401,21 @@ mod tests {
         let dir = TempDir::new("handoff");
         let body = format!("future_thing=on\n{V2}  \nno equals sign here\nanother=\n");
         assert_eq!(read_body(&dir, &body).unwrap(), sample());
+    }
+
+    /// The socket the first image bound crosses every swap; an image
+    /// before it passes none on, and a half-written one counts as none.
+    #[test]
+    fn the_bound_socket_crosses_the_manifest() {
+        let dir = TempDir::new("handoff");
+        let path = dir.join("m.tsv");
+        let bound = L3Handoff { socket: Some(crate::own_socket::SocketId { dev: 16_777_234, ino: 98_765_432_101 }), ..sample() };
+        write_handoff_manifest(&bound, &path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("socket_dev=16777234\nsocket_ino=98765432101\n"), "{body}");
+        assert_eq!(read_handoff_manifest(&path).unwrap(), bound);
+        assert_eq!(read_body(&dir, V2).unwrap().socket, None);
+        assert_eq!(read_body(&dir, &format!("{V2}socket_dev=3\n")).unwrap().socket, None);
     }
 
     /// The new image consumes the manifest exactly once, whether it

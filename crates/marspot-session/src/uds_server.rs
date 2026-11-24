@@ -9,14 +9,10 @@
 //! - listener binds, accepts in a dedicated thread
 //! - every accepted connection is currently logged and dropped
 //!   (frame-level protocol arrives in 2d)
-//! - registry entry is written atomically on bind and removed via
-//!   `Drop` so a clean L3 exit leaves no stale entries behind
+//! - registry entry is written atomically on bind
 //!
-//! Why the entry-write happens here and not inside `LocalSession`:
-//! the listener owns the socket path; the registry is the
-//! pairing-up artefact that ties a process to a socket. Co-locating
-//! both in one type makes RAII cleanup atomic — when the listener
-//! drops, the entry and the sock file both go.
+//! The entry is written here and not in `LocalSession`: the listener
+//! owns the socket path, and the entry ties a process to a socket.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -60,6 +56,8 @@ pub struct SessionListener {
     /// Set by `take_dir`: the directory is already gone, and
     /// Drop has nothing to report.
     ended: bool,
+    /// The socket this process bound, which Drop removes and no other.
+    socket_id: Option<crate::own_socket::SocketId>,
 }
 
 impl SessionListener {
@@ -106,6 +104,7 @@ impl SessionListener {
 
         let socket_path = session_socket_path(id);
         let listener = UnixListener::bind(&socket_path)?;
+        let socket_id = crate::own_socket::SocketId::of(&socket_path);
         // Clone before moving into the accept thread: one fd for the
         // thread to accept() on, one for us to keep so execv handoff
         // can pull the raw fd out without going through the thread.
@@ -165,12 +164,14 @@ impl SessionListener {
             keep_listener: Some(listener),
             suppress_drop: false,
             ended: false,
+            socket_id,
             dir_lock: Some(dir_lock),
         })
     }
 
     /// RFC-003 §6 Amendment 14 — adopt an inherited UDS listener fd
-    /// after an L3 execv handoff.  No `bind`, no `write_session_entry`:
+    /// after an L3 execv handoff; `socket_id` is the socket the first
+    /// image bound, as it found it.  No `bind`, no `write_session_entry`:
     /// the sock file is still on disk (the pre-execv image's
     /// `suppress_drop` keeps it intact), entry.toml's pid is still
     /// ours (PID is preserved across execv), so we just spawn a fresh
@@ -182,6 +183,7 @@ impl SessionListener {
         cols: u16,
         rows: u16,
         shadow_of: u64,
+        socket_id: Option<crate::own_socket::SocketId>,
         ev_tx: Sender<crate::SessionEvent>,
     ) -> io::Result<Self> {
         // SAFETY: caller asserts `raw_fd` is a live UnixListener fd
@@ -230,6 +232,7 @@ impl SessionListener {
             keep_listener: Some(listener),
             suppress_drop: false,
             ended: false,
+            socket_id,
             // RFC-004 A.3 — the pre-execv image's lock fd is still
             // open in this same process (CLOEXEC cleared before the
             // swap), so the flock is already ours; nothing to acquire.
@@ -294,6 +297,17 @@ impl SessionListener {
         self.ended = true;
         crate::session_end::take_own_dir(self.id)
     }
+
+    /// Nobody can reach the session any more: it leaves its directory
+    /// to whoever took it away, and its socket only if it is still there.
+    pub fn leave_unreachable(mut self) {
+        self.ended = true;
+        crate::own_socket::remove_if_ours(&session_socket_path(self.id), self.socket_id);
+    }
+
+    pub(crate) fn socket_id(&self) -> Option<crate::own_socket::SocketId> {
+        self.socket_id
+    }
 }
 
 impl Drop for SessionListener {
@@ -323,8 +337,9 @@ impl Drop for SessionListener {
         // Reached on an abnormal unwind (a panic in the main loop): a
         // shell that ended and a close go through `take_dir`.  The
         // on-disk state has to survive, so only the socket goes; the
-        // next core resurrects or retires the dir.
-        cleanup_stale_socket(self.id);
+        // next core resurrects or retires the dir.  The socket of a
+        // session that took the directory over is not this one's.
+        crate::own_socket::remove_if_ours(&session_socket_path(self.id), self.socket_id);
         lx_warn!(
             "session.listener.abnormal_drop",
             "SessionListener dropped outside execv/clean-exit — \
