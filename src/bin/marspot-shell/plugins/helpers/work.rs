@@ -38,6 +38,10 @@ pub(super) enum Job {
     /// Its session was missing from the last walk: close it if a fresh
     /// one agrees.
     Gone { sid: u64 },
+    /// Look at how large the codex helpers' contexts are.
+    Contexts,
+    /// Write down what the main loop saw at `at_ms`.
+    Fact { sid: u64, at_ms: u64, ev: Event },
     /// Try an undelivered notice again.
     Redeliver { sid: u64 },
 }
@@ -46,9 +50,9 @@ impl Job {
     /// The helper it is about; 0 for none.
     pub fn sid(&self) -> u64 {
         match self {
-            Job::Wake => 0,
+            Job::Wake | Job::Contexts => 0,
             Job::ParentMoved(m) => m.pane,
-            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Redeliver { sid } => *sid,
+            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Fact { sid, .. } | Job::Redeliver { sid } => *sid,
         }
     }
 
@@ -61,6 +65,8 @@ impl Job {
             Job::Release { .. } => "release",
             Job::Close { .. } => "close",
             Job::Gone { .. } => "gone",
+            Job::Contexts => "contexts",
+            Job::Fact { .. } => "fact",
             Job::Redeliver { .. } => "redeliver",
         }
     }
@@ -171,6 +177,12 @@ fn handle(s: &Arc<Shared>, job: Job) {
                 s.lock().closing.remove(&sid);
             }
         }
+        Job::Contexts => s.look_at_contexts(&crate::plugins::peerbus::threads()),
+        Job::Fact { sid, at_ms, ev } => {
+            if s.table().map.contains_key(&sid) {
+                s.record_seen(sid, at_ms, ev);
+            }
+        }
         Job::Redeliver { sid } => {
             let n = s.lock().undelivered.take(sid);
             if let Some(n) = n {
@@ -218,6 +230,10 @@ pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &
         None => marspot::lx_warn!("helpers.notice", &format!("sid={sid}: not delivered (try {}): {e}", n.tries)),
     }
     let kept = s.lock().undelivered.keep(sid, n);
+    s.strip_changed();
+    if let Some(h) = crate::pane_control::hub() {
+        h.knock();
+    }
     // the worker of a later start may be the one to try it
     s.wake();
     if !kept {

@@ -133,7 +133,7 @@ fn helpers_a_turn_ended_to_wait_for_its_own_helpers_is_not_told() {
     assert_eq!(h.told(BUSY) + h.told(PaneStatus::AwaitingUser), 0);
     turns::publish(vec![(1, over(end))]);
     // closed with no notice: the end is told, after a moment
-    feed(&h.s, 2, vec![Event::Stopped]);
+    feed(&h.s, 2, vec![Event::Stopped { exited: false }]);
     assert_eq!(h.told(PaneStatus::AwaitingUser), 0, "only just");
     h.time_passed();
     assert_eq!(h.told(PaneStatus::AwaitingUser), 1);
@@ -149,7 +149,7 @@ fn helpers_a_held_end_with_no_scans_left_is_told_once_its_helpers_go() {
     assert_eq!(h.told(BUSY), 0);
     turns::publish(Vec::new());
     assert_eq!(h.told(BUSY) + h.told(PaneStatus::AwaitingUser), 0);
-    feed(&h.s, 2, vec![Event::Stopped]);
+    feed(&h.s, 2, vec![Event::Stopped { exited: false }]);
     h.time_passed();
     assert_eq!(h.told(PaneStatus::AwaitingUser), 1);
     turns::publish(vec![(1, over(end))]);

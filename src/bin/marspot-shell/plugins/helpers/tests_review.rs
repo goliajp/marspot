@@ -182,7 +182,7 @@ fn helpers_account_change_is_where_it_runs_now() {
     account_changed(AccountChanged { sid: 99, agent: "claude", from: 1, to: 3, at: 0 });
     super::work::account_changes(&s);
     assert_eq!(s.table().map[&4].account, "P5");
-    assert_eq!(records::replay(&dir.join("events.log")).unwrap().table.map[&4].account, "P5", "and the log says so");
+    assert_eq!(records::replay(&dir.join("events.log"), &|_| None).unwrap().table.map[&4].account, "P5", "and the log says so");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

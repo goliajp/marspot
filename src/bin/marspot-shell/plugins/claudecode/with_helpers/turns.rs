@@ -62,7 +62,12 @@ pub(in crate::plugins) fn publish(found: Vec<(u64, Look)>) {
 /// is the pane's; one guessed from the files there are may be a
 /// neighbour's.
 pub(in crate::plugins) fn look_in(bound_by: &str, tail: Option<&str>) -> Option<Look> {
-    matches!(bound_by, "record" | "statusline_hook").then_some(tail).flatten().and_then(look_of)
+    named_by_claude(bound_by).then_some(tail).flatten().and_then(look_of)
+}
+
+/// Whether a binding of this kind is one claude itself named.
+pub(in crate::plugins::claudecode) fn named_by_claude(bound_by: &str) -> bool {
+    matches!(bound_by, "record" | "statusline_hook")
 }
 
 /// The turn the transcript ends with; None when its end is out of reach.

@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use marspot::pidtree::ProcRow;
-use marspot::shell_proto::{CAP_SHADOWS, MsgType, PaneRetire, PaneType, RetireMode, WatchBody, WatchKind, WatchReason, encode_pane_retire};
+use marspot::shell_proto::{CAP_HELPER_STRIP, CAP_SHADOWS, MsgType, PaneRetire, PaneType, RetireMode, WatchBody, WatchKind, WatchReason, encode_pane_retire};
 use marspot_peer::control::{ErrorCode, HelperStartArgs, HelperStop, Op, OpenArgs, Reject};
 use marspot_peer::json::Value;
 
@@ -75,6 +75,12 @@ pub(crate) struct Port<'a, 'h> {
     ctx: &'a Ctx,
 }
 
+/// What a helper's pane opens at.  A core that shows helpers in place
+/// sizes one itself, by the pane it is shown in.
+fn helper_size(caps: u32) -> (u16, u16) {
+    if caps & CAP_HELPER_STRIP != 0 { (0, 0) } else { (120, 40) }
+}
+
 /// Run `f` with a port no connection opened, counted as asked by pane
 /// `caller` (or from outside the panes).  None before the socket runs.
 pub(crate) fn with_port<R>(caller: Option<u64>, f: impl FnOnce(&mut Port) -> R) -> Option<R> {
@@ -122,7 +128,8 @@ impl Port<'_, '_> {
     /// `pane.open` from the caller is held to: its id and the full name
     /// `pane.list` shows for it.
     pub fn open_shadow(&mut self, parent: u64, cwd: &str) -> Result<(u64, String), Reject> {
-        let a = OpenArgs { cwd: Some(cwd.to_string()), shadow: true, parent: Some(parent.to_string()), cols: 120, rows: 40, command: None };
+        let (cols, rows) = helper_size(self.conn.hub.caps());
+        let a = OpenArgs { cwd: Some(cwd.to_string()), shadow: true, parent: Some(parent.to_string()), cols, rows, command: None };
         let v = ops_pane::open(self.conn, self.ctx, &a)?;
         let sid = v.get("id").and_then(Value::i64).map(|i| i as u64).ok_or_else(|| Reject::new(ErrorCode::Internal, "the new pane has no id"))?;
         let name = v.str_at("name").map_or_else(|| sid.to_string(), str::to_string);
@@ -177,5 +184,16 @@ impl Port<'_, '_> {
     /// Write down what a helper request did to pane `sid`.
     pub fn audit(&self, op: &'static str, sid: u64, detail: &str, result: &str) {
         audit(self.conn, self.ctx, op, sid, Some(detail.as_bytes().to_vec()), false, result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_control_helper_strip_core_sizes_a_helper_itself() {
+        assert_eq!(helper_size(CAP_HELPER_STRIP | CAP_SHADOWS), (0, 0));
+        assert_eq!(helper_size(!CAP_HELPER_STRIP), (120, 40));
     }
 }

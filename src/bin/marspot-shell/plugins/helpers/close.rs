@@ -38,7 +38,7 @@ pub(super) fn close(s: &Arc<Shared>, sid: u64) -> bool {
         retry_close_later(s, sid, &why);
         return false;
     }
-    s.record(sid, Event::Stopped);
+    s.record(sid, Event::Stopped { exited: false });
     s.sweep_dirs();
     true
 }

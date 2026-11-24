@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use super::CcActivity;
+use super::context::used_in;
+use crate::plugins::helpers::used::Used;
 
 /// How much of a transcript's end the cheap checks read.  A single
 /// record longer than this (a huge tool result) reads as `Unknown`,
@@ -173,6 +175,13 @@ fn read_tail(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+struct Tail {
+    len: u64,
+    mtime: SystemTime,
+    text: Arc<str>,
+    used: Option<Used>,
+}
+
 /// Transcript tails, read once per file version.
 ///
 /// A scan asks each bound transcript what the session is doing, whether
@@ -183,7 +192,7 @@ fn read_tail(path: &Path) -> Option<String> {
 /// keeps in `seen`.
 #[derive(Default)]
 pub(super) struct TailCache {
-    map: HashMap<PathBuf, (u64, SystemTime, Arc<str>)>,
+    map: HashMap<PathBuf, Tail>,
     pub(super) reads: u64,
 }
 
@@ -191,15 +200,21 @@ impl TailCache {
     pub(super) fn tail(&mut self, path: &Path) -> Option<Arc<str>> {
         let md = fs::metadata(path).ok()?;
         let key = (md.len(), md.modified().ok()?);
-        if let Some((len, mtime, text)) = self.map.get(path)
-            && (*len, *mtime) == key
+        if let Some(t) = self.map.get(path)
+            && (t.len, t.mtime) == key
         {
-            return Some(text.clone());
+            return Some(t.text.clone());
         }
         self.reads += 1;
         let text: Arc<str> = read_tail(path)?.into();
-        self.map.insert(path.to_path_buf(), (key.0, key.1, text.clone()));
+        self.map.insert(path.to_path_buf(), Tail { len: key.0, mtime: key.1, text: text.clone(), used: None });
         Some(text)
+    }
+
+    /// What the window last read says of the context; None when none was.
+    pub(super) fn used(&mut self, path: &Path) -> Option<Used> {
+        let t = self.map.get_mut(path)?;
+        Some(*t.used.get_or_insert_with(|| used_in(&t.text, t.len <= TAIL)))
     }
 
     pub(super) fn retain(&mut self, keep: impl Fn(&PathBuf) -> bool) {

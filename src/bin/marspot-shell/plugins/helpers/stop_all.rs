@@ -27,7 +27,7 @@ pub(super) fn stop_one(s: &Shared, sid: u64, close: impl FnOnce() -> Result<(), 
     {
         return Err(r);
     }
-    s.record(sid, Event::Stopped);
+    s.record(sid, Event::Stopped { exited: false });
     s.sweep_dirs();
     Ok(())
 }

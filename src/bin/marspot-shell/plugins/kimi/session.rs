@@ -23,6 +23,8 @@ use marspot_peer::envelope::Mode;
 use marspot_peer::json::{self, Value};
 use marspot_peer::registry::Status;
 
+use super::context::used_in;
+use crate::plugins::helpers::used::{self, Used};
 use crate::plugins::pidtree::ProcId;
 
 /// A session id as kimi makes them (`session_<uuid>`), which is also
@@ -166,7 +168,7 @@ pub(crate) struct Facts {
 /// model and the state as they were last read.
 const TAIL_BYTES: u64 = 256 * 1024;
 
-fn typed(line: &str, ty: &str) -> Option<Value> {
+pub(super) fn typed(line: &str, ty: &str) -> Option<Value> {
     // the type leads every record this reads; a tool's output further
     // into some other line cannot pass for one
     let rest = line.strip_prefix(r#"{"type":""#)?;
@@ -276,6 +278,8 @@ pub(super) struct Asker<'a> {
     /// No other kimi shares this home and directory.  When one does,
     /// the newest session there could be either one's.
     pub lone: bool,
+    /// It is a helper whose context is shown.
+    pub helper: bool,
 }
 
 struct Bound {
@@ -283,6 +287,9 @@ struct Bound {
     wire: PathBuf,
     read_at: Option<SystemTime>,
     facts: Option<Facts>,
+    used: Used,
+    /// The write `used` is of.
+    used_at: Option<SystemTime>,
 }
 
 /// The session of each kimi process, and what its record last said.
@@ -322,57 +329,48 @@ impl SessionIndex {
             if let Some((wire, id)) = id.and_then(|id| Some((wire_of(who.home, &id)?, id)))
                 && self.bound.get(&proc).is_none_or(|b| b.id != id)
             {
-                self.bound.insert(proc, Bound { id, wire, read_at: None, facts: None });
+                self.bound.insert(proc, Bound { id, wire, read_at: None, facts: None, used: Used::default(), used_at: None });
             }
         }
         let bound = self.bound.get_mut(&proc)?;
-        let Ok(written) = std::fs::metadata(&bound.wire).and_then(|m| m.modified()) else {
+        let Ok((len, written)) = std::fs::metadata(&bound.wire).and_then(|m| Ok((m.len(), m.modified()?))) else {
             self.bound.remove(&proc);
             return None;
         };
-        if bound.read_at != Some(written) {
-            bound.read_at = Some(written);
+        // one that becomes a helper after its tail was read has it read again
+        let (facts, used) = (bound.read_at != Some(written), who.helper && bound.used_at != Some(written));
+        if facts || used {
+            let text = tail(&bound.wire, TAIL_BYTES);
             // a tail nothing can be read from leaves the last reading
-            if let Some(facts) = tail(&bound.wire, TAIL_BYTES).as_deref().and_then(facts_in) {
-                bound.facts = Some(facts);
+            if facts {
+                bound.read_at = Some(written);
+                bound.facts = text.as_deref().and_then(facts_in).or(bound.facts.take());
+            }
+            if used {
+                bound.used_at = Some(written);
+                bound.used = text.map_or(bound.used, |t| used_in(&t, len <= TAIL_BYTES));
             }
         }
         Some((bound.id.clone(), bound.facts.clone()))
     }
+
+    /// Say what was read of the context of the session of `proc`, the
+    /// kimi in pane `sid`.
+    pub(super) fn tell_used(&self, sid: u64, proc: ProcId) {
+        if let Some(b) = self.bound.get(&proc) {
+            used::read(sid, &b.id, b.used);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn used_of(&self, proc: ProcId) -> Option<Used> {
+        Some(self.bound.get(&proc)?.used)
+    }
 }
 
 #[cfg(test)]
-pub(crate) mod fixture {
-    use std::path::{Path, PathBuf};
-
-    /// Records a 2.5.3 build wrote against a local model server, with
-    /// the lines over 2 KB (tool and profile snapshots) left out.
-    pub(crate) const CANCELLED_THEN_COMPLETED: &str = include_str!("fixtures/wire-cancelled-then-completed.jsonl");
-    pub(crate) const STOP_HOOK: &str = include_str!("fixtures/wire-stop-hook.jsonl");
-    pub(crate) const TOOL_CALL: &str = include_str!("fixtures/wire-tool-call.jsonl");
-
-    pub(crate) const ID: &str = "session_84eb6e0a-2c78-40a4-b453-dc017d464a35";
-
-    /// A home holding session `id` with `wire` as its record, locked
-    /// by `pid`.  Returns the record's path.
-    pub(crate) fn session(home: &Path, id: &str, wire: &str, pid: Option<i32>) -> PathBuf {
-        let dir = home.join("sessions/wd_a_0123456789ab").join(id);
-        std::fs::create_dir_all(dir.join("agents/main")).unwrap();
-        std::fs::write(dir.join("agents/main/wire.jsonl"), wire).unwrap();
-        let line = format!("{{\"sessionId\":\"{id}\",\"sessionDir\":\"/elsewhere/sessions/wd_a_0123456789ab/{id}\",\"workDir\":\"/w/a\"}}\n");
-        let mut index = std::fs::read_to_string(home.join("session_index.jsonl")).unwrap_or_default();
-        index.push_str(&line);
-        std::fs::write(home.join("session_index.jsonl"), index).unwrap();
-        if let Some(pid) = pid {
-            std::fs::create_dir_all(home.join("locks/sessions")).unwrap();
-            let lock = format!(
-                "{{\"version\":1,\"token\":\"{pid}:0d9f6c1e-5a55-4c3e-9a41-7f3d0c8f5b21\",\"pid\":{pid},\"hostname\":\"host.local\",\"startedAt\":1794351557245,\"clientIdentity\":\"kimi_code_cli\"}}"
-            );
-            std::fs::write(home.join("locks/sessions").join(format!("{id}.lock")), lock).unwrap();
-        }
-        dir.join("agents/main/wire.jsonl")
-    }
-}
+#[path = "fixture.rs"]
+pub(crate) mod fixture;
 
 #[cfg(test)]
 mod tests {
@@ -510,7 +508,7 @@ mod tests {
     }
 
     fn asker<'a>(home: &'a Path, cwd: Option<&'a str>, lone: bool) -> Asker<'a> {
-        Asker { proc: ProcId { pid: 4242, start_us: 1 }, started: SystemTime::now() - Duration::from_secs(1), home, cwd, lone }
+        Asker { proc: ProcId { pid: 4242, start_us: 1 }, started: SystemTime::now() - Duration::from_secs(1), home, cwd, lone, helper: false }
     }
 
     #[test]

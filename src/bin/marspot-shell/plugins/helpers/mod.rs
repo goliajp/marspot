@@ -46,6 +46,7 @@ mod screen;
 mod service;
 mod settle;
 mod stop_all;
+pub(crate) mod strip;
 mod table;
 mod tick;
 pub(crate) mod titles;
@@ -79,6 +80,7 @@ mod tests_again;
 #[cfg(test)]
 mod tests_follow;
 
+pub(in crate::plugins) use strip::used;
 pub(in crate::plugins) use pair::{Moved, is_pair, leaving, moved};
 use table::{Event, Table};
 
@@ -103,6 +105,12 @@ pub(super) struct Shared {
     /// Moved on by each park and each start: the threads of an earlier
     /// start end.
     epoch: AtomicU64,
+    /// Moved on by what a strip shows that is not in the table.
+    strip_gen: AtomicU64,
+    /// A look at the codex contexts sits in the queue.
+    contexts_queued: AtomicBool,
+    /// Locked by the worker alone.
+    contexts: Mutex<super::codex::context::Contexts>,
     log: PathBuf,
 }
 
@@ -132,8 +140,18 @@ struct State {
     /// Helpers that stopped, while their session or directory may be
     /// there (`dirs`).
     stopped: HashSet<u64>,
+    /// What stopped and is still listed in a strip.
+    batches: strip::batch::Batches,
+    /// Where each turn is, as of the last tick.
+    turns: HashMap<u64, turn::Turn>,
     /// Claude and kimi helpers whose plugin has reported a turn.
     turned: HashSet<u64>,
+    /// Those of them whose plugin reports one now.
+    at_work: HashSet<u64>,
+    /// What the records of the helpers' agents say of their context.
+    used: HashMap<u64, strip::used::Known>,
+    /// When the table was taken from the log (ms after the epoch).
+    began_ms: u64,
 }
 
 static SHARED: OnceLock<Arc<Shared>> = OnceLock::new();
@@ -159,6 +177,9 @@ impl Shared {
             wake_queued: AtomicBool::new(false),
             parked: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            strip_gen: AtomicU64::new(0),
+            contexts_queued: AtomicBool::new(false),
+            contexts: Mutex::default(),
             log,
         }
     }
@@ -170,20 +191,40 @@ impl Shared {
     /// Write the fact down, then let it change the table.  The file is
     /// written outside the state lock, which the main loop's tick takes.
     fn record(&self, sid: u64, ev: Event) {
+        self.record_at(sid, records::now_ms(), ev);
+    }
+
+    /// [`Shared::record`] of what happened at `now`.
+    fn record_at(&self, sid: u64, now: u64, ev: Event) {
+        self.write(sid, now, ev, true);
+    }
+
+    /// Write down what the main loop saw at `at_ms` and changed the table
+    /// by then.
+    fn record_seen(&self, sid: u64, at_ms: u64, ev: Event) {
+        self.write(sid, at_ms, ev, false);
+    }
+
+    fn write(&self, sid: u64, now: u64, ev: Event, apply: bool) {
         let _w = self.writing.lock().unwrap_or_else(|p| p.into_inner());
-        let now = records::now_ms();
         records::append(&self.log, records::ROTATE_AT, &self.table(), sid, now, &ev);
-        let mut st = self.lock();
+        // where a pane that stopped was
+        let obs = matches!(ev, Event::Stopped { .. }).then(|| crate::observe::shared().latest());
+        let mut guard = self.lock();
+        let st = &mut *guard;
         let parent = st.table.map.get(&sid).map(|h| h.started.parent);
         if st.table.map.get(&sid).is_some_and(|h| turn::pokes(h, &ev)) {
             st.poked.insert(sid, now);
         }
         let contained = st.table.map.get(&sid).is_some_and(|h| h.contained());
-        st.table.apply(sid, now, &ev);
-        if matches!(ev, Event::Stopped) {
+        if apply {
+            st.batches.apply(&mut st.table, sid, now, &ev, &|sid| strip::above(obs.as_deref()?, sid));
+        }
+        if matches!(ev, Event::Stopped { .. }) {
             st.stopped.insert(sid);
             st.watchers.remove(&sid);
             st.turned.remove(&sid);
+            st.at_work.remove(&sid);
             st.poked.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
@@ -194,8 +235,8 @@ impl Shared {
             }
         }
         *self.published.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(st.table.clone());
-        drop(st);
-        if contained && matches!(ev, Event::Stopped) {
+        drop(guard);
+        if contained && matches!(ev, Event::Stopped { .. }) {
             container::remove_later(sid, self.root());
         }
         // a new deadline, or a notice held back: the worker's sleep changes
@@ -270,6 +311,7 @@ impl Plugin for HelpersPlugin {
         super::claudecode::with_helpers::on_account_changed(Arc::new(move || w.wake()));
         let n = begin(&s, rebuild::live_shadows).map_err(|e| PluginError::Other(format!("helpers worker: {e}")))?;
         self.in_turn = turn::turns_at_start(&s.table());
+        s.publish_turns(&self.in_turn);
         // after the table: a rebuild closes what it finds half started
         crate::pane_control::helpers_port::register(Box::new(service::Service(Arc::clone(&s))));
         host.log(LogLevel::Info, "start", &format!("{n} helpers carried over"));
@@ -286,11 +328,13 @@ impl Plugin for HelpersPlugin {
         let obs = crate::observe::shared().latest();
         let st = shared().lock();
         let no_agent = st.no_agent.keys().copied().collect();
+        let over = st.batches.next_ms(&st.table);
         let (retry, closing) = (st.undelivered.waiting_on(&obs), st.closing.clone());
         drop(st);
         let (t, now) = (shared().table(), records::now_ms());
         let due = tick::due(&t, &no_agent, &self.parked_parents, &obs, retry, now);
-        tick::sooner(due, tick::gone_due(&t, &closing, &obs, now))
+        let strips = over.map_or(TickDue::Event, |at| tick::at(at, now));
+        tick::sooner(tick::sooner(due, strips), tick::gone_due(&t, &closing, &obs, now))
     }
 
     fn stop(&mut self, _host: &dyn PluginHost) {

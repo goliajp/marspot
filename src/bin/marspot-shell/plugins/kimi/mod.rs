@@ -14,6 +14,7 @@ pub(in crate::plugins) mod accounts;
 mod badge;
 mod balance;
 mod config;
+mod context;
 mod hand_off;
 mod pane;
 mod peer;
@@ -32,6 +33,7 @@ use marspot_peer::registry::Status;
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use crate::observe::Proc;
 use crate::plugins::beside::{self, Beside};
+use crate::plugins::helpers::used;
 use crate::plugins::{handoff, pidtree, pty_op};
 use marspot::ui::strings::{self, Arg};
 
@@ -203,10 +205,11 @@ impl KimiPlugin {
         // other kimi has been there, under the same home, since it started
         let lone = cwd.as_ref().is_some_and(|c| self.beside.alone(proc, &place(&home, c), kimi.row.start_us / 1000));
         let started = SystemTime::UNIX_EPOCH + Duration::from_micros(kimi.row.start_us);
-        let (session, facts) = match self.sessions.look(&Asker { proc, started, home: &home, cwd: cwd.as_deref(), lone }) {
+        let (session, facts) = match self.sessions.look(&Asker { proc, started, home: &home, cwd: cwd.as_deref(), lone, helper: used::wanted(sid) }) {
             Some((id, facts)) => (Some(id), facts),
             None => (None, None),
         };
+        self.sessions.tell_used(sid, proc);
         let shown = match &facts {
             Some(f) => shown_of(f, env_model.as_deref()),
             None => {
@@ -313,9 +316,7 @@ impl Plugin for KimiPlugin {
     /// kimi's gets no rows from here; every plugin is asked about every
     /// pane.
     fn pane_badge_menu(&mut self, _host: &dyn PluginHost, shelld_session_id: u64) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
-        let Some(pane) = self.panes.get(&shelld_session_id) else {
-            return Vec::new();
-        };
+        let Some(pane) = self.panes.get(&shelld_session_id) else { return Vec::new() };
         let mut rows: Vec<_> = pane::profile_dirs()
             .iter()
             .map(|(n, _)| marspot::shell_proto::PaneBadgeMenuItem {
@@ -331,9 +332,7 @@ impl Plugin for KimiPlugin {
         // every plugin hears every pick; only kimi's own rows are read,
         // and only on a pane that runs kimi
         let Some(pick) = handoff::parse_tag(handoff::Agent::Kimi, tag) else { return };
-        let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
-            return;
-        };
+        let Some(pane) = self.panes.get(&shelld_session_id).cloned() else { return };
         // a move to another kimi profile is a handoff to kimi itself
         let (to, n) = match pick {
             handoff::Pick::Profile(n) if pane.profile == Some(n) => return, // a stale menu is not a request

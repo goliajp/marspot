@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use marspot::pidtree::ProcId;
 use marspot_peer::control::{AgentKind, Isolation};
 
+use super::strip::batch::{Above, Batches};
+use super::strip::clock::Clock;
 use super::table::{Event, Helper, Started, Table};
 
 pub(super) const ROTATE_AT: u64 = 8 * 1024 * 1024;
@@ -65,6 +67,7 @@ fn started_kv(s: &Started) -> Vec<(&'static str, String)> {
         ("label", s.label.clone()),
     ];
     v.extend(s.conv.clone().map(|c| ("conv", c)));
+    v.extend(s.root.map(|r| ("root", r.to_string())));
     v
 }
 
@@ -85,6 +88,8 @@ fn kv(ev: &Event) -> Vec<(&'static str, String)> {
         Event::BlockedNoticed { prompt } if !prompt.is_empty() => vec![("prompt", prompt.clone())],
         Event::ParentAgent(p) => vec![("agent_proc", proc_text(p))],
         Event::ConversationChanged(c) => vec![("conv", c.clone())],
+        Event::Rooted(r) => vec![("root", r.to_string())],
+        Event::Stopped { exited: true } => vec![("exited", "true".into())],
         Event::NoticeSuppressed { blocked: true } => vec![("stop", "blocked".into())],
         Event::Carried(h) => {
             let mut v = started_kv(&h.started);
@@ -103,7 +108,12 @@ fn kv(ev: &Event) -> Vec<(&'static str, String)> {
                 ("notices", list(&h.notices)),
                 ("suppressed", h.suppressed.to_string()),
                 ("held_blocked", h.held_blocked.to_string()),
+                ("exited", h.exited.to_string()),
+                ("worked_ms", h.clock.worked_ms.to_string()),
+                ("since_ms", h.clock.since_ms.map_or(String::new(), |t| t.to_string())),
+                ("ended_ms", h.clock.ended_ms.to_string()),
             ]);
+            v.extend(h.root.map(|r| ("now_root", r.to_string())));
             v.extend(h.conv.clone().map(|c| ("now_conv", c)));
             v.extend(h.heir.as_ref().map(|p| ("heir", proc_text(p))));
             v
@@ -138,6 +148,7 @@ fn started_of(get: &dyn Fn(&str) -> Option<String>) -> Option<Started> {
         task_sha: get("sha256").unwrap_or_default(),
         label: get("label").unwrap_or_default(),
         conv: get("conv"),
+        root: get("root").and_then(|r| r.parse().ok()),
     })
 }
 
@@ -159,6 +170,13 @@ fn carried_of(sid: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<Helper> 
     h.notices = get("notices").unwrap_or_default().split(',').filter_map(|t| t.parse().ok()).collect();
     h.suppressed = get("suppressed").and_then(|r| r.parse().ok()).unwrap_or(0);
     h.held_blocked = flag("held_blocked");
+    h.exited = flag("exited");
+    h.root = get("now_root").and_then(|r| r.parse().ok()).or(h.root);
+    let num = |k: &str| get(k).and_then(|t| t.parse().ok());
+    // a line of an older build has none of them
+    if let (Some(worked_ms), Some(ended_ms)) = (num("worked_ms"), num("ended_ms")) {
+        h.clock = Clock { worked_ms, since_ms: num("since_ms"), ended_ms };
+    }
     Some(h)
 }
 
@@ -186,8 +204,11 @@ pub(super) fn parse(l: &str) -> Option<(u64, u64, Event)> {
         "account_changed" => Event::AccountChanged(get("account")?),
         "parent_agent" => Event::ParentAgent(proc_of(&get("agent_proc")?)?),
         "conversation_changed" => Event::ConversationChanged(get("conv")?),
+        "turn_began" => Event::TurnBegan,
+        "turn_ended" => Event::TurnEnded,
+        "rooted" => Event::Rooted(get("root")?.parse().ok()?),
         "budget_expired" => Event::BudgetExpired,
-        "stopped" => Event::Stopped,
+        "stopped" => Event::Stopped { exited: get("exited").as_deref() == Some("true") },
         "carried" => Event::Carried(Box::new(carried_of(sid, &get)?)),
         _ => return None,
     };
@@ -200,20 +221,40 @@ pub(super) struct Replayed {
     pub table: Table,
     /// The helpers it says stopped.
     pub stopped: HashSet<u64>,
+    /// What stopped and is still listed in a strip.
+    pub batches: Batches,
+}
+
+/// Add one more fact of the log.  What the main loop saw is written a
+/// moment later: it goes before what happened after it.
+fn take(facts: &mut Vec<(u64, u64, Event)>, f: (u64, u64, Event)) {
+    let (at, sid) = (f.0, f.1);
+    let mut i = facts.len();
+    if matches!(f.2, Event::TurnBegan | Event::TurnEnded | Event::Rooted(_)) {
+        let opens = |e: &(u64, u64, Event)| e.1 == sid && matches!(e.2, Event::Started(_) | Event::Carried(_));
+        while i > 0 && facts[i - 1].0 > at && !opens(&facts[i - 1]) {
+            i -= 1;
+        }
+    }
+    facts.insert(i, f);
 }
 
 /// Replay the log at `path`; none there is an empty one.  A line that
 /// cannot be read is skipped by itself.
-pub(super) fn replay(path: &Path) -> std::io::Result<Replayed> {
+pub(super) fn replay(path: &Path, above: Above) -> std::io::Result<Replayed> {
     let mut r = Replayed::default();
     let body = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(r),
         Err(e) => return Err(e),
     };
-    for (at, sid, ev) in body.split(|b| *b == b'\n').filter_map(|l| parse(std::str::from_utf8(l).ok()?)) {
+    let mut facts = Vec::new();
+    for f in body.split(|b| *b == b'\n').filter_map(|l| parse(std::str::from_utf8(l).ok()?)) {
+        take(&mut facts, f);
+    }
+    for (at, sid, ev) in facts {
         match ev {
-            Event::Stopped => {
+            Event::Stopped { .. } => {
                 r.stopped.insert(sid);
             }
             Event::Started(_) | Event::Carried(_) => {
@@ -221,7 +262,7 @@ pub(super) fn replay(path: &Path) -> std::io::Result<Replayed> {
             }
             _ => {}
         }
-        r.table.apply(sid, at, &ev);
+        r.batches.apply(&mut r.table, sid, at, &ev, above);
     }
     Ok(r)
 }
