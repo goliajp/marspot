@@ -110,6 +110,46 @@ fn figures(g: &Grid, col: u16, row: u16) -> bool {
     end > col && end < g.cols() && matches!(g.cell(end, row).ch, 's' | 'm' | 'h' | 'd') && blank(g, end + 1, row)
 }
 
+/// The words that follow a row's first figures.
+const WORDS: [&str; 9] = ["·", "↑", "↓", "tokens", "queued", "failed", "stopped", "awaiting", "approval"];
+
+/// Whether cells `from..to` say one of the words of the figures: one of
+/// `WORDS`, or a number with at most one unit after it (`30s`, `12.0k`).
+fn figure_word(g: &Grid, from: u16, to: u16, row: u16) -> bool {
+    let ch = |c: u16| g.cell(c, row).ch;
+    if WORDS.iter().any(|w| w.chars().eq((from..to).map(ch))) {
+        return true;
+    }
+    let digits = |at: u16| (at..to).find(|&c| !ch(c).is_ascii_digit()).unwrap_or(to);
+    let mut end = digits(from);
+    if end > from && end + 1 < to && ch(end) == '.' && digits(end + 1) > end + 1 {
+        end = digits(end + 1);
+    }
+    end > from && (end == to || (end + 1 == to && "smhdkbtM".contains(ch(end))))
+}
+
+/// Whether the figures start at `col` and nothing else follows them on
+/// the row.  A task's own words (` failed`, ` 30s `) are figures only
+/// when the row ends with them.
+fn figures_to_end(g: &Grid, col: u16, row: u16) -> bool {
+    if !figures(g, col, row) {
+        return false;
+    }
+    let mut at = col;
+    while let Some(start) = (at..g.cols()).find(|&c| !blank(g, c, row)) {
+        let end = (start..g.cols()).find(|&c| blank(g, c, row)).unwrap_or(g.cols());
+        // only the last word may be cut short
+        if g.cell(end - 1, row).ch == '…' {
+            return (end..g.cols()).all(|c| blank(g, c, row));
+        }
+        if !figure_word(g, start, end, row) {
+            return false;
+        }
+        at = end;
+    }
+    true
+}
+
 /// The columns of rows `from..=to`.
 fn columns(g: &Grid, from: u16, to: u16) -> Option<Columns> {
     let (mut names, mut task_at, mut butted, mut right) = (0, None::<u16>, None::<u16>, None::<u16>);
@@ -117,7 +157,10 @@ fn columns(g: &Grid, from: u16, to: u16) -> Option<Columns> {
         let (start, end) = piece(g, row, 4)?;
         // a row without figures (one waiting on its own work) ends where
         // its task does, not at the column where figures end
-        if (start + 1..g.cols()).any(|c| blank(g, c - 1, row) && figures(g, c, row)) {
+        // and figures cut at the pane's edge can be too short to read
+        // (`4…`), so a row cut there ends at the edge
+        let cut = !blank(g, g.cols() - 1, row);
+        if cut || (start + 1..g.cols()).any(|c| blank(g, c - 1, row) && figures_to_end(g, c, row)) {
             let ink = (start..g.cols()).rev().find(|&c| !blank(g, c, row)).map_or(0, |c| c + 1);
             right = Some(right.map_or(ink, |r| r.max(ink)));
         }
@@ -128,7 +171,7 @@ fn columns(g: &Grid, from: u16, to: u16) -> Option<Columns> {
         }
         match piece(g, row, end) {
             // figures too, when they are cut at the pane's edge
-            Some((at, to)) if to < g.cols() && !figures(g, at, row) => task_at = Some(task_at.map_or(at, |t| t.min(at))),
+            Some((at, to)) if to < g.cols() && !figures_to_end(g, at, row) => task_at = Some(task_at.map_or(at, |t| t.min(at))),
             _ => {}
         }
     }

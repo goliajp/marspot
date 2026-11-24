@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.667"  # mcp initialize tells every agent when to start a helper; the helpers skill leads with its trigger
-core    = "0.12.672"  # the slow-exit reaper test skips when the runner let the exit finish first
+core    = "0.12.673"  # the strip takes its right edge only from figures that end a row, or from a row cut at the edge
 session = "0.11.438"  # an image taking over from one without the socket id removes the socket it bound
