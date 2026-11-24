@@ -4,6 +4,25 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.13.0
+
+- A helper can be viewed in the pane it works for: the helper panel's
+  View here, or `marspot-peer pane place <helper> peek`, shows the helper's
+  live screen in its parent's place, at the same size, to type into and
+  scroll; the parent's screen, scroll position and half-typed line come
+  back unchanged. Another program cannot switch what is shown while you
+  type there.
+- An optional list of helpers under their pane (Settings, off for now):
+  each helper's task, time and context size in the style of Claude
+  Code's own list of agents, taken from the bottom rows of the pane. A
+  click or the arrow keys from an empty input box view a helper, `x`
+  stops it.
+- `pane.run` in a pane that has just opened no longer answers with the
+  shell's start-up status, and a command interrupted with Ctrl-C or
+  ended by a syntax error is answered with its own status at once.
+- An idle Codex that went back to an older conversation with /resume
+  gets its inbox again after Marspot updates itself.
+
 ## 0.12.0
 
 - A pane whose session has shadow panes shows how many after its title
