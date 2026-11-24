@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use marspot::pidtree::ProcId;
 use marspot_peer::registry::{self, Record};
 use marspot_term::lx_warn;
 
@@ -34,9 +35,9 @@ impl Worker {
     }
 }
 
-/// The pid each record of ours is filed under (its relay's), by the pid
-/// of the agent it stands for: one per binding.
-static FILED: Mutex<Option<HashMap<i32, i32>>> = Mutex::new(None);
+/// The pid each record of ours is filed under (its relay's) and when it
+/// was made, by the pid of the agent it stands for: one per binding.
+static FILED: Mutex<Option<HashMap<i32, (i32, i64)>>> = Mutex::new(None);
 
 pub(super) fn write_record(dirs: &[PathBuf], r: &Record) {
     for d in dirs {
@@ -44,7 +45,7 @@ pub(super) fn write_record(dirs: &[PathBuf], r: &Record) {
             lx_warn!("peerbus.registry.write_failed", &e.to_string(), dir = d.display().to_string());
         }
     }
-    FILED.lock().unwrap().get_or_insert_default().insert(r.agent_pid, r.pid);
+    FILED.lock().unwrap().get_or_insert_default().insert(r.agent_pid, (r.pid, r.started_at_ms));
     crate::plugins::helpers::record_written();
 }
 
@@ -53,15 +54,22 @@ pub(super) fn remove_record(r: &Record) {
     for d in registry::default_dirs() {
         let _ = registry::remove_ours(&d, r.pid);
     }
+    unfile(r);
+}
+
+/// Forget where record `r` is filed.
+pub(super) fn unfile(r: &Record) {
     if let Some(m) = FILED.lock().unwrap().as_mut() {
-        m.retain(|agent, relay| (*agent, *relay) != (r.agent_pid, r.pid));
+        m.retain(|agent, (relay, _)| (*agent, *relay) != (r.agent_pid, r.pid));
     }
 }
 
-/// The pid the record marspot keeps for agent `agent_pid` is filed
-/// under, while it keeps one.
-pub(super) fn filed_under(agent_pid: i32) -> Option<i32> {
-    FILED.lock().unwrap().as_ref()?.get(&agent_pid).copied()
+/// The pid the record marspot keeps for `agent` is filed under, while it
+/// keeps one.  One made before `agent` started stands for an earlier
+/// process its pid was reused from, whose binding is not undone yet.
+pub(super) fn filed_under(agent: ProcId) -> Option<i32> {
+    let (relay, made_ms) = *FILED.lock().unwrap().as_ref()?.get(&agent.pid)?;
+    (made_ms >= (agent.start_us / 1000) as i64).then_some(relay)
 }
 
 /// `<pid>-<8 hex>.sock`: only files of this shape are ours to delete.

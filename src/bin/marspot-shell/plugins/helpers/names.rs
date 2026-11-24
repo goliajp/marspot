@@ -5,7 +5,7 @@
 //! helpers follow, so one it moves to later (a `/clear`) is not.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use marspot::pidtree::ProcId;
@@ -21,7 +21,7 @@ pub(super) struct Names {
     /// Something they wait on changed, or one was added: look.
     due: bool,
     watch: Option<Watch>,
-    /// The record directories watched; None: the registry's.
+    /// The record directories, existing or not; None: the registry's.
     pub dirs: Option<Vec<PathBuf>>,
 }
 
@@ -64,8 +64,14 @@ fn heirs(s: &Shared) -> Vec<ProcId> {
     dedup(parents.iter().flat_map(|p| t.under(*p).filter_map(|h| h.heir)).collect())
 }
 
-fn dirs(s: &Shared) -> Vec<PathBuf> {
-    s.lock().names.dirs.clone().unwrap_or_else(marspot_peer::registry::default_dirs)
+/// The record directories there are, and those that may appear (their
+/// parent is there).
+fn dirs(s: &Shared) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let Some(all) = s.lock().names.dirs.clone() else {
+        return (marspot_peer::registry::default_dirs(), marspot_peer::registry::missing_dirs());
+    };
+    let missing = |d: &PathBuf| d.symlink_metadata().is_err() && d.parent().is_some_and(Path::is_dir);
+    (all.iter().filter(|d| d.is_dir()).cloned().collect(), all.iter().filter(|d| missing(d)).cloned().collect())
 }
 
 /// marspot wrote a record of its own: a parent waiting on the agent it
@@ -80,16 +86,18 @@ pub(in crate::plugins) fn record_written() {
 
 /// Watch each heir's own records (the directory holding them reports
 /// one coming, going or replaced; claude also rewrites its own in
-/// place) and each heir's exit, while a parent waits; stop once none
-/// does.
+/// place), each record directory not made yet (a profile's first
+/// session makes it) and each heir's exit, while a parent waits; stop
+/// once none does.
 fn sync_watch(s: &Arc<Shared>) {
     let heirs = heirs(s);
     if heirs.is_empty() {
         s.lock().names.watch = None;
         return;
     }
-    let dirs = dirs(s);
-    let files: Vec<PathBuf> = dirs.iter().flat_map(|d| heirs.iter().flat_map(|h| record_files(d, h.pid))).collect();
+    let (dirs, missing) = dirs(s);
+    let mut files: Vec<PathBuf> = dirs.iter().flat_map(|d| heirs.iter().flat_map(|h| record_files(d, *h))).collect();
+    files.extend(missing);
     let pids: Vec<i32> = heirs.iter().map(|h| h.pid).collect();
     let same = |w: &Watch| w.files == files && w.pids == pids && w.w.alive();
     if s.lock().names.watch.as_ref().is_some_and(same) {
@@ -125,7 +133,7 @@ pub(super) fn on_change(s: &Arc<Shared>) {
     }
     // armed before the look: a record written after it is an event
     sync_watch(s);
-    let dirs = dirs(s);
+    let (dirs, _) = dirs(s);
     look(s, &|p: ProcId| marspot::pidtree::proc_id(p.pid) == Some(p), |heir| conversation_of_agent(&dirs, heir));
     sync_watch(s);
 }
