@@ -64,7 +64,7 @@ fn a_told_pane_stays_until_its_account_refuses_and_is_then_moved_and_told_to_go_
         sweep(&mut plugin, &host, &mut result);
     }
     assert!(host.submitted.lock().unwrap().is_empty(), "working on an account that still answers: not moved");
-    assert!(plugin.rebalance_said.get(&sid).is_some_and(|k| k.ends_with("|true")), "the rebalance waits on it");
+    assert!(!plugin.rebalance_said.contains_key(&sid), "the one pane on it stays to use what is left");
 
     feed(&home, "kw", ("rejected", 1.0));
     sweep(&mut plugin, &host, &mut result);
@@ -88,7 +88,20 @@ fn a_told_pane_that_stopped_is_told_to_go_on_after_any_move() {
     let mut plugin = stranded_plugin(pane_on_p1(&home, "u-96"), sid);
     // the resting move waits out an overloaded machine; this one is idle
     plugin.host_load = || Some(0.0);
-    sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::Working));
+    // a slower pane shares the account and stays on it to use the rest
+    let slower = 196u64;
+    confirmed("u-196");
+    plugin.last_meta.insert(slower, pane_on_p1(&home, "u-196"));
+    let two = |activity| {
+        let mut scan = scan_of(sid, activity);
+        scan.sessions_seen.push(slower);
+        scan.new_models.insert(slower, "opus-5-5".into());
+        scan.new_vetoes.insert(slower, (false, false));
+        scan.new_activity.insert(slower, CcActivity::Working);
+        scan.pane_tokens.extend([(sid, 900.0), (slower, 100.0)]);
+        scan
+    };
+    sweep(&mut plugin, &host, &mut two(CcActivity::Working));
     delivered(&plugin, sid);
     assert!(host.submitted.lock().unwrap().is_empty());
 
@@ -101,8 +114,9 @@ fn a_told_pane_that_stopped_is_told_to_go_on_after_any_move() {
             quiescent: true,
         },
     );
-    sweep(&mut plugin, &host, &mut scan_of(sid, CcActivity::AwaitingUser));
+    sweep(&mut plugin, &host, &mut two(CcActivity::AwaitingUser));
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "moved off the account that is running out");
+    assert_eq!(host.submitted.lock().unwrap()[0].0, sid, "the faster pane leaves");
     let sent = host.sent.lock().unwrap().clone();
     assert_told_to_go_on(&sent[0].1, false);
 }

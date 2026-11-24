@@ -107,6 +107,21 @@ impl ClaudecodePlugin {
                 None => true,
             }
         });
+        let taking: Vec<leave_early::Taking> = result
+            .new_meta
+            .iter()
+            .filter(|(sid, m)| {
+                let choice = result.choices.get(*sid).cloned().unwrap_or_default();
+                m.config_dir.is_some() && confirm_choice(result.new_models.get(*sid).map(String::as_str), &choice).is_ok()
+            })
+            .map(|(sid, m)| (*sid, m.profile_num, judged(*sid, marks.marked(*sid))))
+            .filter(|(sid, _, model)| !out_for(*sid, &result.new_meta[sid], *model))
+            .collect();
+        self.leave.trends.note(&usage.accounts);
+        self.persist_trends(host);
+        let now = rooms::unix_now();
+        let mut plan = leave_early::plan(&self.leave.trends, &rooms, &usage.accounts, &result.profiles, &taking, &result.pane_tokens, now);
+        self.say_short(host, &plan);
         // Bounded with the panes, like everything else here.
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalanced.retain(|sid, _| result.sessions_seen.contains(sid));
@@ -156,7 +171,12 @@ impl ClaudecodePlugin {
             // answers that refusal, and the session hears about it
             let for_fable = as_judged != model.as_deref() && !out_for(sid, &meta, model.as_deref());
             if !out_for(sid, &meta, as_judged) {
-                self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged);
+                let part = plan.part(sid);
+                self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged, part);
+                if part.short {
+                    rebalanced_this_pass |= !part.stays && self.leave_short(host, sid, &meta, result, as_judged, &choice, in_flight, &mut plan);
+                    continue;
+                }
                 if mode != marspot::settings::Rebalance::Off
                     && self.rebalance(host, sid, &rooms, &meta, result, as_judged, &choice, in_flight, mode, rebalanced_this_pass)
                 {
@@ -356,21 +376,8 @@ impl ClaudecodePlugin {
             self.rebalance_said.remove(&sid);
             return false;
         };
-        let (work_in_flight, own_timer) = result.new_vetoes.get(&sid).copied().unwrap_or((true, true));
-        let view = host.pane_status(sid).ok().flatten();
-        let pane = rebalance::Pane {
-            awaiting_user: view.as_ref().is_some_and(|v| {
-                v.quiescent && matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)
-            }),
-            user_here: self.focused_sid == Some(sid),
-            work_in_flight,
-            own_timer,
-            idle_for: SystemTime::now().duration_since(meta.transcript_at).unwrap_or_default(),
-            since_last: self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()),
-            move_in_flight,
-            host_load: (self.host_load)(),
-            helper_bound: result.helpers.sits_out(sid),
-        };
+        let since_last = self.rebalanced.get(&sid).map(|(at, _)| at.elapsed());
+        let pane = self.resting(host, sid, meta, result, move_in_flight, since_last);
         let dry = mode == marspot::settings::Rebalance::DryRun;
         let held = rebalance::not_now(&pane)
             .or((already_moved_one && !dry).then_some("another pane moved this pass"));

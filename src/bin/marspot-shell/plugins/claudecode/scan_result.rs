@@ -5,6 +5,18 @@ use std::time::SystemTime;
 
 use super::*;
 
+/// What the scan keeps per process and per file between passes.
+#[derive(Default)]
+pub(super) struct ScanCaches {
+    pub(super) env: crate::observe::EnvCache,
+    pub(super) tails: super::transcript::TailCache,
+    pub(super) profiles: super::profiles::ProfileCache,
+    /// Per pane: the processes under its claude last reported as work,
+    /// so the log says when that set changes and not every pass.
+    pub(super) work: HashMap<u64, Vec<String>>,
+    pub(super) tokens: super::pane_tokens::TokenCache,
+}
+
 pub(super) struct ScanResult {
     /// `shelld_session_id → badge string ("P<n> <uuid>")`.  Replaces
     /// `last_mapping` on the main side every time it arrives.
@@ -62,6 +74,9 @@ pub(super) struct ScanResult {
     /// Which live sessions are helpers or have helpers, from the
     /// registry this pass read.
     pub(super) helpers: super::with_helpers::HelperRoles,
+    /// Per pane: what its responses of the last ninety minutes weighed,
+    /// in input-token equivalents.
+    pub(super) pane_tokens: HashMap<u64, f64>,
 }
 
 /// The files the quota sweep judges by besides the bindings: the usage

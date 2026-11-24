@@ -28,6 +28,7 @@ impl Plugin for ClaudecodePlugin {
         // scrollback and its uuid; the next scan re-arms the wake path.
         self.load_dormant(host);
         self.load_heads_up(host);
+        self.load_trends(host);
         self.load_refused(host);
         self.load_fable_need(host);
         // Resolve ~/.claude/projects.  Without HOME there's nothing

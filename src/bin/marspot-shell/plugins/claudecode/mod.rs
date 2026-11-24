@@ -25,6 +25,9 @@ pub(in crate::plugins) mod rooms;
 mod rebalance;
 mod switching;
 mod heads_up_due;
+mod burn;
+mod leave_early;
+mod pane_tokens;
 pub(in crate::plugins) mod heads_up;
 mod refusal;
 mod fable_need;
@@ -142,6 +145,8 @@ pub struct ClaudecodePlugin {
     rebalance_said: HashMap<u64, String>,
     /// Busy panes told their account was nearly out, so each is told once each time its account runs low.
     heads_up: heads_up::Ledger,
+    /// Accounts' speeds, and who leaves one running short.
+    leave: leave_early::State,
     /// Panes left out of the sweep because their model or effort could not be
     /// confirmed, kept so the reason is logged once, not every pass.
     unjudged: std::collections::HashSet<u64>,
@@ -243,6 +248,7 @@ impl ClaudecodePlugin {
             rebalanced: HashMap::new(),
             rebalance_said: HashMap::new(),
             heads_up: heads_up::Ledger::default(),
+            leave: Default::default(),
             unjudged: std::collections::HashSet::new(),
             refused: seen::Seen::default(),
             fable_need: fable_need::Marks::default(),
@@ -357,6 +363,7 @@ mod tests {
     mod refused;
     mod settings_file;
     mod telling;
+    mod leaving;
     mod heads_up_keep_working;
     mod api_errors;
     mod refusal_text;

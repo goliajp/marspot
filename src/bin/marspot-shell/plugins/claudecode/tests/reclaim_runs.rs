@@ -172,6 +172,7 @@ fn empty_scan() -> ScanResult {
         agent_refused: HashMap::new(),
         fable_refused: HashMap::new(),
         helpers: Default::default(),
+        pane_tokens: HashMap::new(),
         scanned_at: SystemTime::now(),
         sessions_seen: Vec::new(),
         log_lines: Vec::new(),

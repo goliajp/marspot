@@ -16,17 +16,6 @@ use std::time::{Duration, Instant, SystemTime};
 use super::with_helpers::turns;
 use super::*;
 
-/// What the scan keeps per process and per file between passes.
-#[derive(Default)]
-pub(super) struct ScanCaches {
-    pub(super) env: crate::observe::EnvCache,
-    pub(super) tails: super::transcript::TailCache,
-    pub(super) profiles: super::profiles::ProfileCache,
-    /// Per pane: the processes under its claude last reported as work,
-    /// so the log says when that set changes and not every pass.
-    pub(super) work: HashMap<u64, Vec<String>>,
-}
-
 /// Everything the worker owns.  No shared mutable state with the
 /// plugin; the worker reads disk + procs and sends ScanResult back.
 pub(super) struct WorkerCtx {
@@ -195,6 +184,7 @@ impl WorkerCtx {
         self.last_model.retain(|p, _| alive.contains(p));
         self.last_refusal.retain(|p, _| alive.contains(p));
         self.caches.tails.retain(|p| alive.contains(p));
+        self.caches.tokens.retain(|p| alive.contains(p));
         if newly_seen > 0 || updates > 0 {
             log_lines.push((
                 LogLevel::Debug,
@@ -453,6 +443,7 @@ impl WorkerCtx {
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
         let mut new_vetoes: HashMap<u64, (bool, bool)> = HashMap::new();
         let mut agent_refused: HashMap<u64, super::quota::Refusal> = HashMap::new();
+        let mut pane_tokens: HashMap<u64, f64> = HashMap::new();
         let mut fable_refused: HashMap<u64, super::fable_need::Ask> = HashMap::new();
         self.caches.env.prune(obs);
         // Pass 1 — the per-pane facts, gathered before anything is
@@ -737,6 +728,9 @@ impl WorkerCtx {
                 new_activity.insert(f.shelld_sid, activity_of(tail.as_deref(), has_young_child));
             }
             self.note_context(f.shelld_sid, bound_by, jsonl_path.as_deref());
+            if let Some(path) = jsonl_path.as_ref() {
+                pane_tokens.insert(f.shelld_sid, self.caches.tokens.recent(path, super::rooms::unix_now()));
+            }
             turn_looks.extend(turns::look_in(bound_by, tail.as_deref()).map(|l| (f.shelld_sid, l)));
             // a read failure is an empty window, which every check below
             // takes as "no evidence"
@@ -819,7 +813,7 @@ impl WorkerCtx {
         ScanResult {
             new_mapping, new_meta, new_activity, new_models, new_cpu, new_vetoes,
             scanned_at, sessions_seen, log_lines, profiles, usage, choices, agent_refused, fable_refused,
-            helpers: super::with_helpers::HelperRoles::of_observation(obs),
+            helpers: super::with_helpers::HelperRoles::of_observation(obs), pane_tokens,
         }
     }
 }
