@@ -40,7 +40,10 @@ use crate::language::LangId;
 use crate::palette::ThemeId;
 use values::{fmt_f32, parse_bool, parse_f32};
 
+mod rebalance;
 mod values;
+
+pub use rebalance::Rebalance;
 
 /// Every user-owned decision, resolved.
 ///
@@ -146,40 +149,16 @@ pub struct Settings {
     /// conversation resumes, but its prompt cache does not come along.
     /// `DryRun` logs what would be moved and moves nothing.
     pub cc_rebalance: Rebalance,
+    /// List a pane's helpers in rows at its bottom, as the agent in it
+    /// lists its own.  Off until it has been lived with: the program in
+    /// the pane is made shorter while there are any.
+    pub helper_strip: bool,
     /// The theme everything is drawn in; `None` follows the system.
     /// Dark by default, so an upgrade changes nothing a user can see.
     pub appearance_theme: Option<ThemeId>,
     /// The language the interface is in; `None` follows the system's
     /// language list.
     pub appearance_language: Option<LangId>,
-}
-
-/// What the claudecode plugin does with an idle pane that has a better
-/// account to be on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rebalance {
-    Off,
-    DryRun,
-    On,
-}
-
-impl Rebalance {
-    fn parse(v: &str, fallback: Self) -> Self {
-        match v.to_ascii_lowercase().as_str() {
-            "on" | "true" => Self::On,
-            "dryrun" | "dry_run" | "dry-run" => Self::DryRun,
-            "off" | "false" => Self::Off,
-            _ => fallback,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::DryRun => "dryrun",
-            Self::On => "on",
-        }
-    }
 }
 
 impl Default for Settings {
@@ -196,6 +175,7 @@ impl Default for Settings {
             codex_follow_updates: true,
             agents_install: true,
             cc_rebalance: Rebalance::On,
+            helper_strip: false,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
         }
@@ -336,6 +316,7 @@ const KEYS: &[&str] = &[
     "appearance.language",
     "appearance.circled_wide",
     "appearance.dim_scale",
+    "appearance.helper_strip",
     "input.scroll_factor",
     "claudecode.statusline_hook",
 ];
@@ -350,6 +331,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
         "appearance.render_u_tags" => s.render_u_tags.to_string(),
         "appearance.dim_scale" => fmt_f32(s.dim_scale),
+        "appearance.helper_strip" => s.helper_strip.to_string(),
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         "codex.follow_updates" => s.codex_follow_updates.to_string(),
@@ -391,6 +373,7 @@ pub fn parse(body: &str) -> Settings {
             }
             "appearance.render_u_tags" => s.render_u_tags = parse_bool(v, s.render_u_tags),
             "appearance.dim_scale" => s.dim_scale = parse_f32(v, s.dim_scale, 0.0, 2.0),
+            "appearance.helper_strip" => s.helper_strip = parse_bool(v, s.helper_strip),
             "input.scroll_factor" => s.scroll_factor = parse_f32(v, s.scroll_factor, 0.1, 8.0),
             "claudecode.statusline_hook" => {
                 s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)

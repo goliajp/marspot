@@ -69,6 +69,7 @@ pub enum Msg {
     Theme,
     DimOtherPanes,
     CircledDigitsWide,
+    HelperStrip,
     ClaudeCodeReportsModel,
     WheelSpeed,
     // Settings — the cost line under each row
@@ -78,6 +79,7 @@ pub enum Msg {
     CostTheme,
     CostDimOtherPanes,
     CostCircledDigitsWide,
+    CostHelperStrip,
     CostClaudeCodeReportsModel,
     CostWheelSpeed,
     // Pane context menu
@@ -344,6 +346,7 @@ pub const ALL: &[Msg] = &[
     Msg::Theme,
     Msg::DimOtherPanes,
     Msg::CircledDigitsWide,
+    Msg::HelperStrip,
     Msg::ClaudeCodeReportsModel,
     Msg::WheelSpeed,
     Msg::CostReclaimIdlePanes,
@@ -352,6 +355,7 @@ pub const ALL: &[Msg] = &[
     Msg::CostTheme,
     Msg::CostDimOtherPanes,
     Msg::CostCircledDigitsWide,
+    Msg::CostHelperStrip,
     Msg::CostClaudeCodeReportsModel,
     Msg::CostWheelSpeed,
     Msg::MenuCopy,

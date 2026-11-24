@@ -181,7 +181,7 @@ pub(super) fn snapshot_on(
 
 #[test]
 pub(super) fn panel_snapshot_settings() {
-    snapshot("settings", 1000, 1360, |renderer, layout| {
+    snapshot("settings", 1000, 1456, |renderer, layout| {
         open_settings(renderer, layout, None);
     });
 }
