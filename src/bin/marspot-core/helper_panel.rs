@@ -25,6 +25,8 @@ use super::*;
 /// The badge menu's row that opens the panel: the core's own, outside
 /// every plugin's range.
 pub(super) const MENU_TAG: u32 = 0x6000_0000;
+/// The badge menu's row that leaves the pane's view.
+pub(super) const BACK_TAG: u32 = MENU_TAG + 1;
 
 /// Shadow panes nest two deep by default; a chain that loops ends here.
 const WALK_MAX: usize = 16;
@@ -51,7 +53,7 @@ impl Family {
     }
 
     /// The pane at the top of `sid`'s chain of parents.
-    fn root(&self, sid: u64) -> u64 {
+    pub(super) fn root(&self, sid: u64) -> u64 {
         let mut at = sid;
         for _ in 0..WALK_MAX {
             match self.parents.get(&at) {
@@ -301,6 +303,12 @@ impl CoreApp {
                 }
                 return;
             }
+            Ask::View(i) => {
+                if let Some(sid) = row(i).map(|r| r.sid) {
+                    self.view_from_panel(wi, sid);
+                }
+                return;
+            }
             Ask::Close(i) => (row(i).map(|r| r.sid), PanelAct::CloseHelper),
             Ask::CloseAll(g) => (groups.get(g).map(|g| g.parent), PanelAct::CloseAllOfParent),
             Ask::Control(g) => {
@@ -314,9 +322,18 @@ impl CoreApp {
         self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&HelperPanelAct { sid, act, want })));
     }
 
+    /// In its parent's place, with the panel out of the way.
+    fn view_from_panel(&mut self, wi: usize, sid: u64) {
+        let host = self.pane_control.shadows.family.root(sid);
+        if self.view_helper(host, Some(sid)) {
+            let change = win!(self, wi).panels.close(CloseBy::Replaced);
+            self.apply_surface_change(wi, change);
+        }
+    }
+
     /// Into the window of its parent; the answer is nobody's.
     fn move_helper_to_window(&mut self, sid: u64, parent: u64) {
-        let m = PanePlace { req_id: L2_REQ_UNTRACKED, sid, to: PlaceWhere::Window, host_sid: parent };
+        let m = PanePlace { req_id: L2_REQ_UNTRACKED, sid, to: PlaceWhere::Window, host_sid: parent, force: false };
         let route = self.place_pane(m);
         lx_event!("HELPER_PANEL_MOVE", "the user moved a shadow pane to a window", session = sid, route = format!("{route:?}"));
     }
@@ -330,14 +347,18 @@ impl CoreApp {
             self.open_helpers(wi, sid);
             return;
         }
+        if tag == BACK_TAG {
+            self.view_helper(sid, None);
+            return;
+        }
         let payload = marspot::shell_proto::encode_pane_badge_menu_action(sid, tag);
         self.pending_to_shell.push((MsgType::PaneBadgeMenuAction, payload));
     }
 
     /// Dev seam (`MARSPOT_DEV_PANELS`): where the first pane's `+N` is,
     /// then the first button of each kind on the open panel.
-    pub(super) fn dev_helper_spots(&mut self, wi: usize) -> [Option<(f64, f64)>; 5] {
-        let mut out = [None; 5];
+    pub(super) fn dev_helper_spots(&mut self, wi: usize) -> [Option<(f64, f64)>; 6] {
+        let mut out = [None; 6];
         if self.shadows.is_empty() || !self.dev_panels.as_ref().is_some_and(|s| s.wants_helpers()) {
             return out;
         }
@@ -357,6 +378,7 @@ impl CoreApp {
                     Ask::Close(0) => 2,
                     Ask::CloseAll(0) => 3,
                     Ask::Control(0) => 4,
+                    Ask::View(0) => 5,
                     _ => continue,
                 };
                 out[spot].get_or_insert(p);

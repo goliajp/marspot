@@ -112,13 +112,14 @@ impl CoreApp {
         for (i, (pane, cell)) in w.panes.iter().zip(&w.layout.cells).enumerate().filter(|(_, (_, c))| c.strip_rows > 0) {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let Some(strip) = self.strips.by_sid.get_mut(&sid) else { continue };
+            let pane = shown::shown_of(pane, &self.shadows);
             let screen = pane.session().grid();
             if self.strips.dev.is_some() {
                 dev::fill(strip, screen);
             }
             strip.place(Over {
                 screen,
-                shown: sid,
+                shown: pane.shelld_session_id().unwrap_or(sid),
                 seq: pane.grid_seq(),
                 scrolled: pane.view_offset() != 0,
                 rows: cell.rows,
@@ -143,8 +144,10 @@ impl CoreApp {
     /// The last row a selection in pane `idx` can reach: the one above
     /// its strip, where that is drawn over the live screen.
     pub(super) fn selection_floor(&self, wi: usize, idx: usize, last: u16) -> u16 {
-        let pane = self.windows[wi].panes.get(idx).filter(|p| p.view_offset() == 0);
-        let top = pane.and_then(|p| self.strips.top_row(p.shelld_session_id()));
+        if self.shown_pane(wi, idx).is_none_or(|p| p.view_offset() != 0) {
+            return last;
+        }
+        let top = self.strips.top_row(self.windows[wi].panes[idx].shelld_session_id());
         top.map_or(last, |t| last.min(t.saturating_sub(1)))
     }
 
@@ -155,7 +158,7 @@ impl CoreApp {
         let w = &self.windows[wi];
         window == w.window_id
             && self.strip_at(wi, x, y).is_some()
-            && w.panes.get(idx).is_some_and(|p| {
+            && self.shown_pane(wi, idx).is_some_and(|p| {
                 p.program_owns_scroll() || p.shelld_session_id().is_some_and(|sid| self.pane_wheel_keys.contains_key(&sid))
             })
     }

@@ -22,15 +22,14 @@ impl CoreApp {
             .as_ref()
             .filter(|t| t.pane_idx() == idx && !t.broken)
             .and_then(|t| t.text(blockwise));
-        let is_l3 = win!(self, wi).panes.get(idx).is_some_and(|p| p.is_l3());
+        let is_l3 = self.shown_pane(wi, idx).is_some_and(|p| p.is_l3());
         let text = if taped.is_some() {
             taped
         } else if is_l3 {
-            win!(self, wi).panes
-                .get_mut(idx)
+            self.shown_pane_mut(wi, idx)
                 .and_then(|p| p.session_mut().request_selection_text(sel.anchor, sel.focus, blockwise))
         } else {
-            win!(self, wi).panes.get(idx).and_then(|pane| selection_text(pane, &sel))
+            self.shown_pane(wi, idx).and_then(|pane| selection_text(pane, &sel))
         };
         // cc-only post-processing: claudecode renders to a fixed inner
         // width with hard `\n` wraps that we don't want on the clipboard.
@@ -38,9 +37,8 @@ impl CoreApp {
         // this pane's shelld_session_id means cc plugin tagged it.  See
         // `src/cc.rs`.
         let text = text.map(|t| {
-            let is_cc = win!(self, wi)
-                .panes
-                .get(idx)
+            let is_cc = self
+                .shown_pane(wi, idx)
                 .and_then(|p| p.shelld_session_id())
                 .and_then(|sid| self.pane_badges.get(&sid))
                 .map(|b| !b.is_empty())
@@ -64,7 +62,7 @@ impl CoreApp {
         row: u16,
     ) -> Option<(marspot::grid_links::LinkRange, bool)> {
         let focused = win!(self, wi).focused_idx == idx;
-        let pane = win!(self, wi).panes.get(idx)?;
+        let pane = self.shown_pane(wi, idx)?;
         // The offset the RENDERER used, not the pane's logical one —
         // see `Pane::render_view_offset`.
         let view_offset = pane.render_view_offset(focused);
@@ -132,7 +130,7 @@ impl CoreApp {
     pub(super) fn link_miss_report(&self, wi: usize, x_phys: f64, y_phys: f64) -> Option<String> {
         let (idx, col, row) = self.cell_pos_at(wi, x_phys, y_phys)?;
         let focused = win!(self, wi).focused_idx == idx;
-        let pane = win!(self, wi).panes.get(idx)?;
+        let pane = self.shown_pane(wi, idx)?;
         let view_offset = pane.render_view_offset(focused);
         let sid = pane.shelld_session_id();
         let declared = sid.and_then(|s| self.pane_agent_tui.get(&s)).copied();

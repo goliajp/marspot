@@ -19,6 +19,7 @@ mod list_tests;
 pub(crate) mod panel_act_tests;
 mod server_tests;
 mod shadow_race_tests;
+mod view_typing_tests;
 
 fn temp(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("pc-{tag}-{}-{}", std::process::id(), marspot_peer::rand::hex(4)));

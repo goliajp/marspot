@@ -88,7 +88,7 @@ pub(super) const L2_REQ_UNTRACKED: u32 = L2_REQ_BASE;
 impl CoreApp {
     /// `PanePlace`: 0 into the shadows under `host_sid`, 1 into a
     /// window (the one holding the pane's parent, else the key window).
-    /// Peeking is not done by this core.
+    /// Viewing one in its parent's place is `peek`'s.
     pub(super) fn place_pane(&mut self, m: PanePlace) -> Route {
         let in_window = self.find_window_pane_by_sid(m.sid).is_some();
         let in_shadows = self.shadow_index(m.sid).is_some();
@@ -111,7 +111,9 @@ impl CoreApp {
                 answer(self, DoneCode::Other, LAST_PANE_STAYS)
             }
             PlaceWhere::Shadow => self.start_place(m, m.host_sid, 0),
-            _ => answer(self, DoneCode::Other, "not_supported"),
+            PlaceWhere::Peek => self.place_peek(m, true),
+            PlaceWhere::Unpeek => self.place_peek(m, false),
+            PlaceWhere::Unknown(_) => answer(self, DoneCode::Other, "not_supported"),
         }
     }
 
@@ -211,7 +213,7 @@ impl CoreApp {
         }
         let moved = match p.to {
             PlaceWhere::Window => self.shadow_index(p.sid).map(|i| {
-                let mut pane = self.shadows.remove(i);
+                let mut pane = self.take_shadow(i);
                 unwatched::set(p.sid, false);
                 // a shadow's frames were not read while it was one
                 pane.pump();
@@ -240,6 +242,7 @@ impl CoreApp {
                 return;
             }
             _ => self.find_window_pane_by_sid(p.sid).map(|(wi, idx)| {
+                self.unview(wi, idx);
                 let pane = self.take_out_of_window(wi, idx);
                 unwatched::set(p.sid, true);
                 self.shadows.push(pane);

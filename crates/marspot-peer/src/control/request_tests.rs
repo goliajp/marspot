@@ -67,7 +67,7 @@ fn pane_control_every_request_round_trips() {
         Op::Read(ReadArgs { target: "x".into(), history_lines: 0, wait: Some(Wait::Quiet(500)), since: None, timeout_s: 60 }),
         Op::Read(ReadArgs { target: "x".into(), history_lines: 0, wait: Some(Wait::CommandEnd), since: None, timeout_s: 60 }),
         Op::Resize { target: "x".into(), cols: 100, rows: 20 },
-        Op::Place { target: "x".into(), place: Where::Peek },
+        Op::Place { target: "x".into(), place: Where::Peek, force: true },
         Op::Close { target: "x".into() },
         Op::Audit { limit: 7 },
         Op::HelperList { all: true },

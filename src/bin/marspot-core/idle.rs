@@ -93,7 +93,8 @@ impl super::CoreApp {
             .windows
             .iter()
             .flat_map(|w| w.panes.iter())
-            .filter_map(|p| p.shelld_session_id())
+            .flat_map(|p| [p.shelld_session_id(), p.peeked()])
+            .flatten()
             .fold(0u64, |acc, sid| acc.wrapping_mul(0x100_0000_01b3).wrapping_add(sid + 1));
         let moved = PANES.swap(panes, Ordering::Relaxed) != panes;
         if soon || last || save || moved {
@@ -125,7 +126,7 @@ impl super::CoreApp {
                     wait = sooner(wait, Some(Duration::from_millis(250)));
                 }
             }
-            for pane in &w.panes {
+            for pane in w.panes.iter().map(|p| super::shown::shown_of(p, &self.shadows)) {
                 if let Some(t) = pane.search.as_ref().and_then(|s| s.bar.debounce_until) {
                     wait = sooner(wait, until(t));
                 }

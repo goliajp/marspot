@@ -41,7 +41,7 @@ impl CoreApp {
     /// in no window (mid-move, already closed) has nowhere to beep.
     pub(super) fn pane_bell(&mut self, sid: u64, queued: &AtomicBool, now: Instant) {
         queued.store(false, Ordering::Release);
-        if let Some((wi, _)) = self.find_window_pane_by_sid(sid) {
+        if let Some((wi, _)) = self.slot_showing(sid) {
             ring_window(&mut self.windows[wi].last_bell_at, now);
         }
     }

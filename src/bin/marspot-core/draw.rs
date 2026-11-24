@@ -184,6 +184,9 @@ impl CoreApp {
                 {
                     s.insert_str(0, "⇢ ");
                 }
+                if let Some(view) = self.view_label(wi, i) {
+                    s.push_str(&view);
+                }
                 s
             })
             .collect();
@@ -211,8 +214,10 @@ impl CoreApp {
             .iter()
             .take(cell_count)
             .enumerate()
-            .map(|(i, p)| {
-                let badge = p
+            .map(|(i, host)| {
+                // the slot's badge, title and dim; the rest is of what it shows
+                let p = shown::shown_of(host, &self.shadows);
+                let badge = host
                     .shelld_session_id()
                     .and_then(|sid| self.pane_badges.get(&sid).map(|s| s.as_str()))
                     .unwrap_or("");
@@ -232,7 +237,7 @@ impl CoreApp {
                     None => {
                         p.shelld_session_id()
                             .is_some_and(|sid| self.pane_wheel_keys.contains_key(&sid))
-                            || !badge.is_empty()
+                            || p.shelld_session_id().is_some_and(|sid| self.pane_badges.contains_key(&sid))
                     }
                 };
                 let pane_cwd = p
@@ -247,11 +252,12 @@ impl CoreApp {
                     agent_tui,
                     pane_cwd,
                 );
+                (v.recede, v.scrim) = host.slot_look();
                 // a panel has the keyboard: what is being composed is not the pane's
                 if i == focused && p.view_offset() == 0 && !win!(self, wi).panels.owns_pointer() {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
-                v.strip = self.strips.view(p.shelld_session_id());
+                v.strip = self.strips.view(host.shelld_session_id());
                 v.selection = win!(self, wi)
                     .selection
                     .as_ref()
@@ -294,7 +300,7 @@ impl CoreApp {
         win!(self, wi).needs_render = fading;
         frames::note_drawn(&mut win!(self, wi), cell_count);
 
-        win!(self, wi).panes.get(focused).and_then(|pane| {
+        self.shown_pane(wi, focused).and_then(|pane| {
             let (col, row) = pane.session().ime_caret_cell()?;
             win!(self, wi).layout
                 .caret_view_phys_rect(focused, col, row, cell_w, cell_h)

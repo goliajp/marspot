@@ -276,7 +276,7 @@ impl CoreApp {
     /// whichever window the user happened to be looking at — and leave
     /// the one that actually changed stale.
     pub(super) fn mark_sid_window_dirty(&mut self, sid: u64) {
-        if let Some((wi, _)) = self.find_window_pane_by_sid(sid) {
+        if let Some((wi, _)) = self.slot_showing(sid) {
             win!(self, wi).needs_render = true;
         }
     }
@@ -391,7 +391,11 @@ impl CoreApp {
             );
             return;
         }
+        (0..win!(self, i).panes.len()).for_each(|idx| _ = self.unview(i, idx));
         let gone = self.windows.remove(i);
+        for at in [&mut self.mouse_report_press, &mut self.mouse_report_last_cell] {
+            *at = at.filter(|a| a.0 != i).map(|(w, p, c, r)| (w - (w > i) as usize, p, c, r));
+        }
         let parked = gone.panes.iter().any(|p| !p.is_dormant());
         if parked {
             let record = self.window_layout_record(&gone);

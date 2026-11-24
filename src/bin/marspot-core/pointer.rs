@@ -28,15 +28,15 @@ impl CoreApp {
         let held = self.mouse_report_press.is_some();
         if !chrome_owns_pointer
             && let Some((idx, col, row)) = self.cell_pos_at(wi, x_phys, y_phys)
-            && win!(self, wi).panes.get(idx)
+            && self.shown_pane(wi, idx)
                 .map(|p| p.session().l3_mouse_motion_wanted(held))
                 .unwrap_or(false)
         {
             let (c1, r1) = (col as u32 + 1, row as u32 + 1);
-            if self.mouse_report_last_cell != Some((idx, c1, r1)) {
-                self.mouse_report_last_cell = Some((idx, c1, r1));
+            if self.mouse_report_last_cell != Some((wi, idx, c1, r1)) {
+                self.mouse_report_last_cell = Some((wi, idx, c1, r1));
                 let button = if held { 0 } else { 3 };
-                if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
+                if let Some(pane) = self.shown_pane_mut(wi, idx) {
                     pane.session_mut().l3_inject_mouse_motion(button, c1, r1);
                 }
             }

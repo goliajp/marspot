@@ -18,7 +18,7 @@ pub const USAGE: &str = "usage:
   marspot-peer pane read PANE [-n LINES] [--wait-text S | --wait-quiet MS | --wait-command-end
                               | --wait-prompt | --wait-change | --wait-exit] [--since POS] [--timeout S]
   marspot-peer pane resize PANE COLSxROWS
-  marspot-peer pane place PANE window|shadow|peek|unpeek
+  marspot-peer pane place PANE [--force] window|shadow|peek|unpeek   (peek: shown in its parent's place)
   marspot-peer pane close PANE
   marspot-peer pane audit [-n N]
 any of them takes --json for the answer as the app sent it";
@@ -179,6 +179,7 @@ pub fn parse(args: &[String]) -> Result<Op, String> {
                     "unpeek" => Where::Unpeek,
                     _ => return Err(format!("{w:?}: one of window, shadow, peek, unpeek")),
                 },
+                force,
             },
             _ => return Err(String::new()),
         },

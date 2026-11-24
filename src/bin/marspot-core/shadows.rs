@@ -35,6 +35,7 @@ pub(super) struct Shadows {
     pub(super) unsaid: super::spawn_said::SpawnsUnsaid,
     pub(super) closed: ClosedSlots,
     pub(super) places: super::shadow_place::Places,
+    pub(super) peeks: super::peek::Peeks,
     pub(super) family: super::helper_panel::Family,
     /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
     /// to open under the first pane, and when.
@@ -57,7 +58,7 @@ impl Shadows {
             t.saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(250))
         });
-        [self.places.wait(), self.unsaid.wait(), dev].into_iter().flatten().min()
+        [self.places.wait(), self.peeks.wait(), self.unsaid.wait(), dev].into_iter().flatten().min()
     }
 }
 
@@ -197,7 +198,7 @@ impl CoreApp {
             Ok(()) => self.answer_spawn_when_said(req_id, sid),
             Err(e) => {
                 if shadow && let Some(i) = self.shadow_index(sid) {
-                    let pane = self.shadows.remove(i);
+                    let pane = self.take_shadow(i);
                     self.retire_pane_session(sid, pane.is_l3());
                     self.shadows_changed();
                     if !pane.is_l3() {
@@ -229,7 +230,7 @@ impl CoreApp {
             if recycle {
                 recycle_session(sid);
             }
-            let pane = self.shadows.remove(i);
+            let pane = self.take_shadow(i);
             if !pane.is_l3() {
                 self.pane_control.shadows.closed.note(sid);
             }
@@ -242,17 +243,17 @@ impl CoreApp {
         self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::Ok, "")
     }
 
-    /// `PaneSize`: a shadow pane takes any size; a pane in a window
-    /// takes its window's layout.
+    /// `PaneSize`: a shadow pane takes any size; a pane in a window,
+    /// or viewed in one, takes its window's layout.
     fn size_pane(&mut self, req_id: u32, sid: u64, cols: u16, rows: u16) -> Route {
         if !size_ok(cols, rows) {
             return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Other, "size out of range");
         }
-        if let Some(i) = self.shadow_index(sid) {
+        if let Some(i) = self.shadow_index(sid).filter(|_| self.viewer_of(sid).is_none()) {
             self.shadows[i].resize(cols, rows);
             return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Ok, "");
         }
-        if self.find_window_pane_by_sid(sid).is_some() {
+        if self.slot_showing(sid).is_some() {
             return self.answer(MsgType::PaneSize, req_id, sid, DoneCode::Other, "not_resizable");
         }
         self.answer(MsgType::PaneSize, req_id, sid, DoneCode::NoSuchSession, "")

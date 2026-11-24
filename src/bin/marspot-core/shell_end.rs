@@ -41,7 +41,7 @@ impl CoreApp {
             if !self.shadows[idx].shell_ended() {
                 continue;
             }
-            let pane = self.shadows.remove(idx);
+            let pane = self.take_shadow(idx);
             if let Some(sid) = pane.shelld_session_id() {
                 lx_event!("SHADOW_SHELL_ENDED", "a shadow pane's shell ended; retiring it", session_id = sid);
                 self.retire_pane_session(sid, pane.is_l3());

@@ -31,7 +31,8 @@ fn pane_control_cli_reads_every_subcommand() {
         Ok(Op::Read(ReadArgs { target: "spg".into(), history_lines: 40, wait: Some(Wait::Text("done".into())), since: Some(12), timeout_s: 110 }))
     );
     assert_eq!(p("resize 3 100x30"), Ok(Op::Resize { target: "3".into(), cols: 100, rows: 30 }));
-    assert_eq!(p("place 3 peek"), Ok(Op::Place { target: "3".into(), place: Where::Peek }));
+    assert_eq!(p("place 3 peek"), Ok(Op::Place { target: "3".into(), place: Where::Peek, force: false }));
+    assert_eq!(p("place 3 --force unpeek"), Ok(Op::Place { target: "3".into(), place: Where::Unpeek, force: true }));
     assert_eq!(p("close 3"), Ok(Op::Close { target: "3".into() }));
     assert_eq!(p("audit -n 5"), Ok(Op::Audit { limit: 5 }));
 }

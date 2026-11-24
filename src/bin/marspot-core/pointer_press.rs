@@ -102,7 +102,7 @@ impl CoreApp {
         }
         if idx < win!(self, wi).panes.len() {
             self.set_focus(wi, idx);
-            let _ = win!(self, wi).focused_pane_mut().snap_to_live();
+            self.snap_focused_to_live(wi);
             win!(self, wi).selection = None;
             win!(self, wi).selection_dragging = false;
             win!(self, wi).needs_render = true;
@@ -162,8 +162,8 @@ impl CoreApp {
                         .get(idx)
                         .map(|c| (c.cols, c.rows))
                         .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
-                    let from = win!(self, wi)
-                        .try_focused_pane()
+                    let from = self
+                        .focused_shown(wi)
                         .and_then(|p| p.shelld_session_id())
                         .map(live_cwd_of)
                         .unwrap_or_default();
@@ -204,19 +204,19 @@ impl CoreApp {
         // untouched by this.
         if let Some((idx, col, row)) = cell_pos_hit
             && modifiers.shift
-            && win!(self, wi).panes.get(idx)
+            && self.shown_pane(wi, idx)
                 .map(|p| p.session().l3_mouse_tracking_active())
                 .unwrap_or(false)
         {
             self.set_focus(wi, idx);
             win!(self, wi).needs_render = true;
             let (c1, r1) = (col as u32 + 1, row as u32 + 1);
-            if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
+            if let Some(pane) = self.shown_pane_mut(wi, idx) {
                 // Both encodings count from one.
                 pane.session_mut().l3_inject_mouse_button(0, true, c1, r1);
             }
-            self.mouse_report_press = Some((idx, c1, r1));
-            self.mouse_report_last_cell = Some((idx, c1, r1));
+            self.mouse_report_press = Some((wi, idx, c1, r1));
+            self.mouse_report_last_cell = Some((wi, idx, c1, r1));
             return true;
         }
         false
@@ -224,7 +224,7 @@ impl CoreApp {
 
     /// Start a selection at a cell of pane `idx`, and focus the pane.
     pub(super) fn start_selection(&mut self, wi: usize, idx: usize, col: u16, row: u16, modifiers: Modifiers) -> bool {
-        let pane = &win!(self, wi).panes.get(idx);
+        let pane = self.shown_pane(wi, idx);
         if let Some(pane) = pane {
             let rows = pane.session().grid().rows() as u32;
             let vo = pane.view_offset() as u32;

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// test scenes that draw fixtures, and the tests that hold a scene at
 /// one display scale to the same scene at another.
 const NOT_INTERFACE: &[&str] =
-    &["_snapshot_tests.rs", "panel_script.rs", "density_kit.rs", "density_tests.rs", "centring_tests.rs", "_view_tests.rs"];
+    &["_snapshot_tests.rs", "panel_script.rs", "panel_script_tests.rs", "density_kit.rs", "density_tests.rs", "centring_tests.rs", "_view_tests.rs"];
 
 /// Literals in the component directories that are not sentences.
 const NOT_TEXT: &[(&str, &str)] = &[
@@ -303,6 +303,8 @@ fn nothing_hands_a_bare_literal_to_what_draws() {
         source("bin/marspot-core/links.rs"),
         source("bin/marspot-core/pane_forward.rs"),
         source("bin/marspot-core/pane_move.rs"),
+        source("bin/marspot-core/key_to_pane.rs"),
+        source("bin/marspot-core/peek.rs"),
         source("bin/marspot-core/pointer.rs"),
         source("bin/marspot-core/pointer_drag.rs"),
         source("bin/marspot-core/pointer_press.rs"),

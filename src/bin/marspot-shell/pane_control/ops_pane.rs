@@ -14,7 +14,7 @@ use marspot_peer::json::{Value, obj};
 
 use super::caller::CallerKey;
 use super::conn::{ANSWER_WITHIN, Asked, Conn, done_reject};
-use super::dispatch::{Ctx, audit, target};
+use super::dispatch::{Ctx, audit, target, typed_into, view_typing_reject};
 use super::limits::{SpawnCounts, check_spawn, session_cap};
 use super::recent::Opened;
 use super::shadow_gate::{GATE_WITHIN, Tree};
@@ -195,12 +195,28 @@ fn is_shadow(conn: &Conn, ctx: &Ctx, sid: u64) -> bool {
     }
 }
 
-pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where) -> Result<Value, Reject> {
+pub(super) fn place(conn: &mut Conn, ctx: &Ctx, t: &str, w: Where, force: bool) -> Result<Value, Reject> {
     let sid = target(ctx, t)?;
-    place_sid(conn, ctx, sid, w)
+    place_sid(conn, ctx, sid, w, force)
 }
 
-pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where) -> Result<Value, Reject> {
+/// The keys the user is typing would go to another session: those into
+/// the pane `sid` would be shown in or anything shown there, or, of one
+/// to be shown no longer, into `sid` itself.
+fn gate_view(conn: &Conn, ctx: &Ctx, sid: u64, w: Where) -> Result<(), Reject> {
+    if !matches!(w, Where::Peek | Where::Unpeek) || typed_into(conn).is_none() {
+        return Ok(());
+    }
+    let tree = conn.hub.shadow_gate.enter(GATE_WITHIN)?.tree(&ctx.view_now());
+    let root = |of| shadow_tree::root_and_depth(&|s| tree.parent_of(s), of).0;
+    let top = root(sid);
+    match typed_into(conn) {
+        Some(at) if at == sid || ((matches!(w, Where::Peek) || sid == top) && root(at) == top) => Err(view_typing_reject()),
+        _ => Ok(()),
+    }
+}
+
+pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where, force: bool) -> Result<Value, Reject> {
     let to = match w {
         Where::Window => PlaceWhere::Window,
         Where::Shadow => PlaceWhere::Shadow,
@@ -208,6 +224,9 @@ pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where) -> Resul
         Where::Unpeek => PlaceWhere::Unpeek,
     };
     conn.need_caps(if matches!(w, Where::Peek | Where::Unpeek) { CAP_PEEK } else { CAP_SHADOWS })?;
+    if !force {
+        gate_view(conn, ctx, sid, w)?;
+    }
     // only a move into the shadows can close a loop or add to a count
     let gate = if matches!(w, Where::Shadow) { Some(conn.hub.shadow_gate.enter(GATE_WITHIN)?) } else { None };
     let host_sid = match (w, ctx.caller, &gate) {
@@ -220,6 +239,8 @@ pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where) -> Resul
             c
         }
         (Where::Shadow, ..) => return Err(Reject::new(ErrorCode::BadRequest, "a shadow pane needs a parent: call from another pane")),
+        // viewed in the pane at the top of its parents, which the core knows
+        (Where::Peek | Where::Unpeek, ..) => 0,
         _ => ctx.obs.session(sid).map_or(0, |s| panes::shadow_of(&s.entry)),
     };
     // the core waits up to ANSWER_WITHIN for the session, then answers itself
@@ -227,7 +248,7 @@ pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where) -> Resul
         conn,
         sid,
         MsgType::PanePlace,
-        |req_id| Ok(encode_pane_place(&PanePlace { req_id, sid, to, host_sid })),
+        |req_id| Ok(encode_pane_place(&PanePlace { req_id, sid, to, host_sid, force })),
         Again::No,
         ANSWER_WITHIN + Duration::from_secs(2),
     );

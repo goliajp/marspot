@@ -120,7 +120,9 @@ impl CoreApp {
         use marspot::ui::components::MenuItem;
         let of_helpers = (helpers > 0)
             .then(|| MenuItem::entry(&strings::text(Arg::HelpersOf(helpers)), helper_panel::MENU_TAG));
-        let items = items.into_iter().map(|it| MenuItem::entry(&it.label, it.tag)).chain(of_helpers).collect();
+        let viewing = self.find_window_pane_by_sid(sid).is_some_and(|(wi, i)| win!(self, wi).panes[i].peek.is_some());
+        let back = viewing.then(|| MenuItem::entry(t(Msg::HelperViewBack), helper_panel::BACK_TAG));
+        let items = items.into_iter().map(|it| MenuItem::entry(&it.label, it.tag)).chain(of_helpers).chain(back).collect();
         win!(self, wi).context_menu = Some(ContextMenuState {
             items,
             anchor_x: marspot::ui::Units::from_px(anchor_x),
@@ -260,12 +262,12 @@ impl CoreApp {
             }
             ContextMenuAction::Paste => {
                 if let Some(txt) = marspot::input::read_clipboard_text()
-                    && let Some(pane) = win!(self, wi).try_focused_pane_mut() {
+                    && let Some(pane) = self.focused_shown_mut(wi) {
                         pane.session_mut().forward_paste(&txt);
                     }
             }
             ContextMenuAction::ClearScrollback => {
-                if let Some(pane) = win!(self, wi).try_focused_pane_mut() {
+                if let Some(pane) = self.focused_shown_mut(wi) {
                     pane.session_mut().forward_inject_input(b"\x1b[3J");
                 }
             }
@@ -274,6 +276,10 @@ impl CoreApp {
                     ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
                     _ => win!(self, wi).focused_idx,
                 };
+                // on a viewed shadow pane: back to the pane under it
+                if matches!(region, ContextRegion::Pane(_)) && self.unview(wi, idx) {
+                    return;
+                }
                 // No floor on the pane count: closing the last pane of
                 // a window closes the window, and closing the last
                 // pane of the last window quits marspot.  Both are

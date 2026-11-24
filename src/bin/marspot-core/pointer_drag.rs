@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// A cell a program was told the pointer is at: window, pane, and
+/// column and row from one.
+pub(super) type ReportedAt = (usize, usize, u32, u32);
+
 impl CoreApp {
     /// Finder file drop: insert the shell-quoted path(s) into the
     /// pane under the drop point — the "type the path for me" gesture
@@ -28,7 +32,7 @@ impl CoreApp {
         // Same focus motion as a click — the pane receiving the text
         // becomes the pane the user is typing into next.
         self.set_focus(wi, idx);
-        if win!(self, wi).panes[idx].snap_to_live() {
+        if self.shown_mut(wi, idx).snap_to_live() {
             win!(self, wi).needs_render = true;
         }
         // Trailing space after each path so the user can keep typing
@@ -39,7 +43,7 @@ impl CoreApp {
             text.push_str(&marspot_term::input_core::shell_quote_path(p));
             text.push(' ');
         }
-        win!(self, wi).panes[idx].session_mut().forward_paste(&text);
+        self.shown_mut(wi, idx).session_mut().forward_paste(&text);
         win!(self, wi).needs_render = true;
     }
 
@@ -124,7 +128,7 @@ impl CoreApp {
             };
             if may_step {
                 let up = raw_row < 0;
-                win!(self, wi).panes[target_idx].apply_scroll_lines(if up { 1 } else { -1 });
+                self.shown_mut(wi, target_idx).apply_scroll_lines(if up { 1 } else { -1 });
             }
         }
 
@@ -133,7 +137,7 @@ impl CoreApp {
         let row = raw_row.clamp(0, floor as i64);
 
         // Re-read view_offset AFTER any auto-scroll above.
-        let pane = &win!(self, wi).panes[target_idx];
+        let pane = self.shown(wi, target_idx);
         let rows = pane.session().grid().rows() as u32;
         let vo = pane.view_offset() as u32;
         let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
@@ -167,13 +171,13 @@ impl CoreApp {
         // pane's, at the last one it heard of.
         let last = self.mouse_report_last_cell.take();
         self.strips.pointer_at(drop_window_id, drop_x, drop_y);
-        if let Some(press @ (idx, _, _)) = self.mouse_report_press.take() {
+        if let Some(press @ (at, idx, _, _)) = self.mouse_report_press.take() {
             let here = self
                 .cell_pos_at(wi, drop_x, drop_y)
-                .filter(|(i, _, _)| *i == idx)
+                .filter(|(i, _, _)| (wi, *i) == (at, idx))
                 .map(|(_, c, r)| (c as u32 + 1, r as u32 + 1));
-            let (c1, r1) = here.unwrap_or_else(|| last_heard(press, last));
-            if let Some(pane) = win!(self, wi).panes.get_mut(idx) {
+            let (_, _, c1, r1) = here.map_or_else(|| last_heard(press, last), |(c, r)| (at, idx, c, r));
+            if let Some(pane) = self.shown_pane_mut(at, idx) {
                 pane.session_mut().l3_inject_mouse_button(0, false, c1, r1);
             }
             return;
@@ -258,7 +262,6 @@ impl CoreApp {
 /// The cell the program in a pane last heard the pointer was at: of the
 /// travel reported since the press if any was in its pane, else of the
 /// press.
-pub(super) fn last_heard(press: (usize, u32, u32), last: Option<(usize, u32, u32)>) -> (u32, u32) {
-    let (_, c, r) = last.filter(|l| l.0 == press.0).unwrap_or(press);
-    (c, r)
+pub(super) fn last_heard(press: ReportedAt, last: Option<ReportedAt>) -> ReportedAt {
+    last.filter(|l| (l.0, l.1) == (press.0, press.1)).unwrap_or(press)
 }

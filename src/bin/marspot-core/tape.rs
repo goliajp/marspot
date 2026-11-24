@@ -24,7 +24,7 @@ impl CoreApp {
             w.selection_tape = None;
             return;
         };
-        let Some(pane) = w.panes.get(idx) else {
+        let Some(pane) = w.panes.get(idx).map(|p| shown::shown_of(p, &self.shadows)) else {
             w.selection_tape = None;
             return;
         };

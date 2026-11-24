@@ -8,7 +8,7 @@ use marspot::shell_proto::{decode_pane_done, encode_pane_place};
 use marspot_term::session_registry as reg;
 
 fn place(req_id: u32, sid: u64, to: PlaceWhere, host_sid: u64) -> Frame {
-    frame(MsgType::PanePlace, encode_pane_place(&PanePlace { req_id, sid, to, host_sid }))
+    frame(MsgType::PanePlace, encode_pane_place(&PanePlace { req_id, sid, to, host_sid, force: false }))
 }
 
 #[test]

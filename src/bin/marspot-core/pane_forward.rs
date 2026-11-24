@@ -37,8 +37,7 @@ impl CoreApp {
     /// has any PaneSession (regardless of caps) — used for the Esc
     /// hatch + key routing.
     pub(super) fn focused_pane_active_session(&self, wi: usize) -> Option<u64> {
-        let p = win!(self, wi).try_focused_pane()?;
-        let sid = p.shelld_session_id()?;
+        let sid = self.focused_session(wi)?;
         if self.pane_sessions.contains_key(&sid) {
             Some(sid)
         } else {

@@ -86,6 +86,7 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
                 sid: 2,
                 to: PlaceWhere::Peek,
                 host_sid: 3,
+                force: true,
             }),
             |p| shown(decode_pane_place(p)),
         ),
@@ -253,8 +254,12 @@ fn pane_control_each_frame_round_trips() {
             sid: 2,
             to,
             host_sid: 9,
+            force: true,
         };
-        assert_eq!(decode_pane_place(&encode_pane_place(&m)).unwrap(), m);
+        let bytes = encode_pane_place(&m);
+        assert_eq!(decode_pane_place(&bytes).unwrap(), m);
+        // a build that did not say
+        assert_eq!(decode_pane_place(&bytes[..21]).unwrap(), PanePlace { force: false, ..m });
     }
     let m = PaneWatch {
         req_id: 4,
@@ -346,7 +351,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
         23 + cwd,
         15 + 7,
         13,
-        21,
+        22,
         12 + w + 12,
         31,
         16,
@@ -401,7 +406,7 @@ fn pane_control_truncated_payloads_are_refused_at_every_length() {
     for (t, p, decode) in samples() {
         assert!(decode(&p).is_ok(), "{t:?} decodes whole");
         // the last byte came later, and may be missing
-        let least = p.len() - usize::from(t == MsgType::HelperPanelAct);
+        let least = p.len() - usize::from(matches!(t, MsgType::HelperPanelAct | MsgType::PanePlace));
         for n in 0..least {
             assert!(
                 decode(&p[..n]).is_err(),

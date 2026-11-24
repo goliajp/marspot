@@ -14,7 +14,10 @@ impl CoreApp {
     /// per §6.9).  Narrow-pane fallback skips the open entirely.
     pub(super) fn handle_cmd_f(&mut self, wi: usize) -> bool {
         let idx = win!(self, wi).focused_idx;
-        let Some(pane) = win!(self, wi).panes.get_mut(idx) else { return false };
+        if self.focused_view_ended(wi) {
+            return true;
+        }
+        let Some(pane) = self.shown_pane_mut(wi, idx) else { return false };
         // Width gate (§6.7).
         let grid_cols = pane.session().grid().cols();
         if grid_cols < Self::SEARCH_MIN_PANE_COLS {
@@ -58,8 +61,8 @@ impl CoreApp {
         has_more: bool,
         hits: Vec<marspot::shell_proto::WireSearchHit>,
     ) {
-        let Some((wi, pi)) = self.find_window_pane_by_sid(shelld_session_id) else { return };
-        let Some(s) = win!(self, wi).panes[pi].search.as_mut() else { return };
+        let Some((wi, _)) = self.slot_showing(shelld_session_id) else { return };
+        let Some(s) = self.pane_by_sid_mut(shelld_session_id).and_then(|p| p.search.as_mut()) else { return };
         let changed = s.list.apply_results(query_id, hits, has_more);
         if changed {
             win!(self, wi).needs_render = true;
@@ -72,7 +75,7 @@ impl CoreApp {
     /// (idle = single `is_none` check per pane).
     pub(super) fn process_search_debounces(&mut self) {
         let now = std::time::Instant::now();
-        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
+        for pane in self.panes_mut() {
             let Some(s) = pane.search.as_mut() else { continue };
             let fire = matches!(s.bar.debounce_until, Some(t) if now >= t);
             if !fire {
@@ -128,7 +131,7 @@ impl CoreApp {
             Pass,
         }
         let outcome: Outcome = {
-            let Some(pane) = win!(self, wi).panes.get_mut(idx) else { return false };
+            let Some(pane) = self.shown_pane_mut(wi, idx) else { return false };
             let Some(search) = pane.search.as_mut() else { return false };
             if !search.bar.focused {
                 Outcome::NotOpen
@@ -199,7 +202,7 @@ impl CoreApp {
     /// HighlightSpan from the focused hit's WireSearchHit, store on
     /// the pane, and forward GridScroll if needed.
     pub(super) fn jump_to_focused_hit(&mut self, wi: usize, pane_idx: usize) {
-        let Some(pane) = win!(self, wi).panes.get_mut(pane_idx) else { return };
+        let Some(pane) = self.shown_pane_mut(wi, pane_idx) else { return };
         let Some(search) = pane.search.as_ref() else { return };
         let Some(hit) = search.list.focused_hit() else { return };
         let rows = pane.session().grid().rows();

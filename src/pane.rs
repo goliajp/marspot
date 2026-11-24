@@ -31,6 +31,8 @@ mod pointer;
 mod regions;
 mod control;
 pub use control::ControlReach;
+mod peek;
+pub use peek::Peek;
 mod scrim;
 pub use scrim::{ScrimFade, SCRIM_FADE};
 use crate::grid_shm::{
@@ -1075,6 +1077,8 @@ pub fn wheel_route(is_l3: bool, alt_screen: bool, mouse_tracking: bool) -> Wheel
 
 pub struct Pane {
     session: PaneBackend,
+    /// The session shown in this pane's place; see [`Peek`].
+    pub peek: Option<Peek>,
     /// How far this pane has receded from active use (0 live,
     /// 1 resting, 2 parked), set by L1 through `PaneRecede`.
     pub recede: u32,
@@ -1146,10 +1150,10 @@ impl PaneSearch {
 }
 
 impl Pane {
-    /// Wrap an already-spawned local Session (benches and tests).
-    pub fn new(session: Session) -> Self {
+    fn over(session: PaneBackend) -> Self {
         Self {
-            session: PaneBackend::Local(session),
+            session,
+            peek: None,
             recede: 0,
             scrim: ScrimFade::default(),
             view_offset: 0,
@@ -1160,21 +1164,17 @@ impl Pane {
         }
     }
 
+    /// Wrap an already-spawned local Session (benches and tests).
+    pub fn new(session: Session) -> Self {
+        Self::over(PaneBackend::Local(session))
+    }
+
     /// Wrap a per-session L3 process (target #4, behind `MARSPOT_L3=1`).
     /// The container assembles the `L3Conn` (spawn + shm + socket) and
     /// hands it here; the pane then behaves like any other — same render
     /// / scroll / focus path — reading its grid from the shm mirror.
     pub fn new_l3(conn: L3Conn) -> Self {
-        Self {
-            session: PaneBackend::L3(conn),
-            recede: 0,
-            scrim: ScrimFade::default(),
-            view_offset: 0,
-            last_seen_scroll_push: 0,
-            tools: Vec::new(),
-            active_highlight: None,
-            search: None,
-        }
+        Self::over(PaneBackend::L3(conn))
     }
 
     /// RFC-004 B.2 — a slot whose session failed to assemble at boot.
@@ -1183,16 +1183,7 @@ impl Pane {
     /// A slot rendering "starting…" while its session is spawned off
     /// the main loop.  Becomes a real L3 pane when the spawn lands.
     pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
-        Self {
-            session: PaneBackend::Vacant(VacantPane::new_pending(session_id, cols, rows)),
-            recede: 0,
-            scrim: ScrimFade::default(),
-            view_offset: 0,
-            last_seen_scroll_push: 0,
-            tools: Vec::new(),
-            active_highlight: None,
-            search: None,
-        }
+        Self::over(PaneBackend::Vacant(VacantPane::new_pending(session_id, cols, rows)))
     }
 
     /// Replace this pane's backend in place, keeping the pane shell
@@ -1214,16 +1205,7 @@ impl Pane {
     }
 
     pub fn new_vacant(session_id: u64, cols: u16, rows: u16) -> Self {
-        Self {
-            session: PaneBackend::Vacant(VacantPane::new(session_id, cols, rows)),
-            recede: 0,
-            scrim: ScrimFade::default(),
-            view_offset: 0,
-            last_seen_scroll_push: 0,
-            tools: Vec::new(),
-            active_highlight: None,
-            search: None,
-        }
+        Self::over(PaneBackend::Vacant(VacantPane::new(session_id, cols, rows)))
     }
 
     /// Vacant slot? (RFC-004 B.2) — the revive-on-keystroke path
@@ -1245,16 +1227,7 @@ impl Pane {
     }
 
     pub fn new_dormant(cols: u16, rows: u16) -> Self {
-        Self {
-            session: PaneBackend::Vacant(VacantPane::new_dormant(cols, rows)),
-            recede: 0,
-            scrim: ScrimFade::default(),
-            view_offset: 0,
-            last_seen_scroll_push: 0,
-            tools: Vec::new(),
-            active_highlight: None,
-            search: None,
-        }
+        Self::over(PaneBackend::Vacant(VacantPane::new_dormant(cols, rows)))
     }
 
     /// L3-backed?  Container input routing forwards key *events* to L3

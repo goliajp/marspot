@@ -2370,17 +2370,9 @@ impl WindowState {
         &mut self.panes[i]
     }
 
-    /// Tolerant variants, for the paths that legitimately run while
-    /// the pane list is empty or shrinking.
-    #[inline]
+    /// As above, while the pane list may be empty or shrinking.
     fn try_focused_pane(&self) -> Option<&Pane> {
         self.panes.get(self.focused_idx)
-    }
-
-    #[inline]
-    fn try_focused_pane_mut(&mut self) -> Option<&mut Pane> {
-        let i = self.focused_idx;
-        self.panes.get_mut(i)
     }
 }
 
@@ -2425,6 +2417,14 @@ mod idle;
 mod shell_end;
 #[path = "marspot-core/keys.rs"]
 mod keys;
+#[path = "marspot-core/key_to_pane.rs"]
+mod key_to_pane;
+#[path = "marspot-core/held_keys.rs"]
+mod held_keys;
+#[path = "marspot-core/shown.rs"]
+mod shown;
+#[path = "marspot-core/peek.rs"]
+mod peek;
 #[path = "marspot-core/probe_args.rs"]
 mod probe_args;
 #[path = "marspot-core/reattach.rs"]
@@ -2645,12 +2645,10 @@ struct CoreApp {
     /// landed in.  A program that was told a button went down has to
     /// be told it came up, even if the pointer left the pane first —
     /// otherwise it sits believing the button is still held.
-    mouse_report_press: Option<(usize, u32, u32)>,
+    mouse_report_press: Option<pointer_drag::ReportedAt>,
     /// The last cell a motion report named.  Motion is reported when
-    /// the pointer changes cell, not when the mouse moves: a program
-    /// wants to know it is over a different character, and the pixels
-    /// in between are the terminal's business.
-    mouse_report_last_cell: Option<(usize, u32, u32)>,
+    /// the pointer changes cell, not when the mouse moves.
+    mouse_report_last_cell: Option<pointer_drag::ReportedAt>,
     /// Where the active pane drag would land right now (None = over
     /// nothing droppable).  Drives the per-window `drop_preview`.
     drop_target: Option<DropTarget>,

@@ -4,8 +4,8 @@ use super::*;
 
 impl CoreApp {
     pub(super) fn spawn_session(&mut self, wi: usize) {
-        let from = win!(self, wi)
-            .try_focused_pane()
+        let from = self
+            .focused_shown(wi)
             .and_then(|p| p.shelld_session_id())
             .map(live_cwd_of)
             .unwrap_or_default();
@@ -121,6 +121,7 @@ impl CoreApp {
         if idx >= win!(self, wi).panes.len() {
             return;
         }
+        self.unview(wi, idx);
         if let Some(id) = win!(self, wi).panes[idx].shelld_session_id() {
             let pane = &win!(self, wi).panes[idx];
             let (is_l3, gone) = (pane.is_l3(), pane.is_exited());
