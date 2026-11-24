@@ -8,6 +8,10 @@
 //! the list: an exit reported for a pid that was reaped already, and
 //! taken since by another child, must not reap that child.  The list
 //! holds L3s that still run, so the session cap bounds it.
+//!
+//! An exiting process is not yet one to reap: XNU reports its exit, and
+//! refuses a watch on it with ESRCH, a moment before `waitpid` with
+//! WNOHANG finds it.  So a pid known to be exiting is waited for.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -21,9 +25,6 @@ static QUEUE: OnceLock<Option<libc::c_int>> = OnceLock::new();
 pub fn reap_when_exited(pid: u32) {
     let pid = pid as i32;
     let mut watched = watched();
-    if reaped(pid) {
-        return;
-    }
     let Some(kq) = queue() else { return };
     // SAFETY: plain kevent call on an open queue; an all-zero kevent is
     // a valid one to fill in.
@@ -37,26 +38,36 @@ pub fn reap_when_exited(pid: u32) {
     };
     if added != 0 {
         let e = std::io::Error::last_os_error();
-        // it may have exited since the first look
-        if !reaped(pid) {
+        if e.raw_os_error() == Some(libc::ESRCH) {
+            // exited, or exiting
+            reap_exiting(pid);
+        } else {
             lx_warn!("l3.reap.unwatched", &format!("{e}"), pid = pid);
         }
         return;
     }
     watched.push(pid);
-    // an exit between the first look and the watch may go unreported
-    if reaped(pid) {
-        watched.retain(|p| *p != pid);
-    }
 }
 
 fn watched() -> MutexGuard<'static, Vec<i32>> {
     WATCHED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn reaped(pid: i32) -> bool {
-    // SAFETY: plain libc call; `pid` is a child of this process
-    unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) == pid }
+/// Wait for `pid`, a child known to be exiting, to be reaped.  Only
+/// this process reaps it, and its pid is not reused before, so the wait
+/// is brief and for that process alone.
+fn reap_exiting(pid: i32) {
+    loop {
+        // SAFETY: plain libc call; `pid` is a child of this process
+        if unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } >= 0 {
+            return;
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            lx_warn!("l3.reap.wait_failed", &format!("{e}"), pid = pid);
+            return;
+        }
+    }
 }
 
 fn queue() -> Option<libc::c_int> {
@@ -91,14 +102,49 @@ fn run(kq: libc::c_int) {
             lx_warn!("l3.reap.queue_failed", &format!("{e}"));
             return;
         }
-        let mut watched = watched();
         for ev in &evs[..n as usize] {
             let pid = ev.ident as i32;
-            if let Some(i) = watched.iter().position(|p| *p == pid)
-                && reaped(pid)
-            {
-                watched.swap_remove(i);
+            let mut watched = watched();
+            let Some(i) = watched.iter().position(|p| *p == pid) else { continue };
+            watched.swap_remove(i);
+            drop(watched);
+            reap_exiting(pid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    fn gone(pid: i32) -> bool {
+        // SAFETY: plain libc call; a zombie still takes a signal
+        unsafe { libc::kill(pid, 0) != 0 }
+    }
+
+    /// Children handed over while they exit, and others that exit
+    /// later, are all reaped: none is left a zombie.
+    #[test]
+    fn every_child_handed_over_is_reaped() {
+        use std::io::Read;
+        let mut pids = Vec::new();
+        for i in 0..300 {
+            let mut child = match i % 3 {
+                0 => Command::new("/bin/sleep").arg("0.2").spawn().unwrap(),
+                // its output ends as it exits: handed over in the middle of that
+                _ => Command::new("/bin/echo").stdout(std::process::Stdio::piped()).spawn().unwrap(),
+            };
+            if let Some(mut out) = child.stdout.take() {
+                out.read_to_end(&mut Vec::new()).unwrap();
             }
+            pids.push(child.id() as i32);
+            super::reap_when_exited(child.id());
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while let Some(&pid) = pids.iter().find(|p| !gone(**p)) {
+            assert!(Instant::now() < deadline, "pid {pid} was not reaped");
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }

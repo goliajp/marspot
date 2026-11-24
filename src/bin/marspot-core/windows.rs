@@ -191,8 +191,7 @@ impl CoreApp {
         let wi = self.windows.len() - 1;
         self.key_window = wi;
         self.rebuild_layout(wi);
-        let closed = self.pane_control.shadows.closed.at_boot.clone();
-        assemble_restore_window_async(window_id, record, cols, rows, closed, &self.event_tx);
+        assemble_restore_window_async(window_id, record, cols, rows, &self.event_tx);
         lx_event!(
             "WINDOW_RESTORING",
             "saved window reopened; panes assembling off-loop",

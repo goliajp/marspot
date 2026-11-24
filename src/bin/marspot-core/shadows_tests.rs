@@ -170,7 +170,7 @@ fn shadow_sessions_go_back_to_the_shadows_at_boot_and_a_saved_window_wins() {
             .map(|&sid| SavedPane { sid, flags: 0, custom_title: String::new(), last_cwd: String::new() })
             .collect(),
     };
-    let (panes, _) = assemble_panes_at_boot(Some(&saved), 2, 60, 16, &tx, true, &Default::default(), &Default::default());
+    let (panes, _) = assemble_panes_at_boot(Some(&saved), 2, 60, 16, &tx, true, &Default::default());
     let window_sids: Vec<_> = panes.iter().filter_map(Pane::shelld_session_id).collect();
     assert_eq!(window_sids, [psid, bsid], "the saved window holds its panes, the shadow among them");
     let taken = window_sids.iter().copied().collect();

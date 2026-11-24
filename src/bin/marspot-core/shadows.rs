@@ -66,30 +66,25 @@ impl Shadows {
 /// session is closed then.  The oldest is forgotten past the cap, which
 /// leaves its session running.
 #[derive(Default)]
-pub(super) struct ClosedSlots {
-    recent: std::collections::VecDeque<u64>,
-    /// The sessions whose close was not finished when this core
-    /// started; read by every window restored later.
-    pub(super) at_boot: std::collections::HashSet<u64>,
-}
+pub(super) struct ClosedSlots(std::collections::VecDeque<u64>);
 
 impl ClosedSlots {
     const CAP: usize = 64;
 
     pub(super) fn note(&mut self, sid: u64) {
-        if sid == 0 || self.recent.contains(&sid) {
+        if sid == 0 || self.0.contains(&sid) {
             return;
         }
-        if self.recent.len() == Self::CAP {
-            self.recent.pop_front();
+        if self.0.len() == Self::CAP {
+            self.0.pop_front();
         }
-        self.recent.push_back(sid);
+        self.0.push_back(sid);
     }
 
     /// Whether the slot of `sid` was closed; asked once.
     pub(super) fn take(&mut self, sid: u64) -> bool {
-        let at = self.recent.iter().position(|s| *s == sid);
-        at.and_then(|i| self.recent.remove(i)).is_some()
+        let at = self.0.iter().position(|s| *s == sid);
+        at.and_then(|i| self.0.remove(i)).is_some()
     }
 }
 

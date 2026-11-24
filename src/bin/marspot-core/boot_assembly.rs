@@ -54,22 +54,6 @@ fn slot_specs<'a>(
     specs
 }
 
-/// The sessions whose close was not finished when this core started.
-/// Taken once, before the boot sweep finishes those closes.
-pub(super) fn closed_at_boot() -> std::collections::HashSet<u64> {
-    session_registry::closed_session_ids().into_iter().collect()
-}
-
-/// Every sid the saved windows other than the boot one own: those
-/// sessions are neither orphans to adopt nor junk to retire, they wait
-/// for their own window to be opened.
-pub(super) fn reserved_sids(
-    saved_windows: &std::collections::VecDeque<(usize, marspot::state::SavedWindowLayout)>,
-) -> std::collections::HashSet<u64> {
-    let panes = saved_windows.iter().flat_map(|(_, w)| w.panes.iter());
-    panes.map(|p| p.sid).filter(|sid| *sid != 0).collect()
-}
-
 /// RFC-004 B.1 — identity-keyed boot assembly.  Extracted from
 /// `main()` so the slot semantics (order preserved, never
 /// compacted, sid-stable, vacant on failure) are testable with a
@@ -84,7 +68,6 @@ pub(super) fn assemble_panes_at_boot(
     event_tx: &Sender<CoreEvent>,
     sweeps_registry: bool,
     reserved_sids: &std::collections::HashSet<u64>,
-    closed_at_boot: &std::collections::HashSet<u64>,
 ) -> (Vec<Pane>, Vec<u64>) {
     // entry.toml titles, collected during the registry scan below.
     // Last resort of the title fallback chain at the end of assembly.
@@ -107,12 +90,9 @@ pub(super) fn assemble_panes_at_boot(
     // titles/cwd mis-bound by index, and the first
     // save_session_state locked the damage in) and resurrected
     // dead ids in readdir order (错位 after a full crash).
-    // Closed sessions are no slot's and nobody's orphans.  Those closed
-    // when this core started count too: the boot sweep removed their
-    // directories, and a window restored later would start their slots
-    // afresh.
-    let mut closed = closed_at_boot.clone();
-    closed.extend(session_registry::closed_session_ids());
+    // Closed sessions are no slot's and nobody's orphans.
+    let closed: std::collections::HashSet<u64> =
+        session_registry::closed_session_ids().into_iter().collect();
     if sweeps_registry {
         marspot::session_close::finish_closed();
     }

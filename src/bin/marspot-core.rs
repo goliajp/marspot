@@ -2466,6 +2466,8 @@ use l3_reader::l3_reader_loop;
 mod scrollbar_input;
 #[path = "marspot-core/boot_assembly.rs"]
 mod boot_assembly;
+#[path = "marspot-core/saved_slots.rs"]
+mod saved_slots;
 use boot_assembly::assemble_panes_at_boot;
 #[path = "marspot-core/spawn.rs"]
 mod spawn;
@@ -2818,7 +2820,8 @@ fn main() {
     // RFC-005 step 6 — the file holds every window.  The boot window
     // takes windows[0]; the rest are restored as L1 opens them (each
     // `SurfaceAttachWindow` for an unseen id pops the next record).
-    let saved_state = marspot::state::read();
+    let mut saved_state = marspot::state::read();
+    saved_slots::forget_closed_slots(&mut saved_state);
     // Each record keeps the slot it was read from — that index is what
     // pairs it with `window-state.bin`'s geometry list, and it has to
     // survive windows being closed and parked.
@@ -2884,9 +2887,7 @@ fn main() {
     // The boot assembly is the sweeping one: it adopts orphaned
     // live sessions and retires unclaimed dirs.  Restored windows
     // (step 6b) run the same function with that turned off.
-    // Every sid the OTHER saved windows own is reserved.
-    let reserved_sids = boot_assembly::reserved_sids(&saved_windows);
-    let closed_at_boot = boot_assembly::closed_at_boot();
+    let reserved_sids = saved_slots::reserved_sids(&saved_windows);
     let (assembled, reattached_ids) = assemble_panes_at_boot(
         boot_window.as_ref(),
         n_sessions,
@@ -2895,7 +2896,6 @@ fn main() {
         &event_tx,
         true,
         &reserved_sids,
-        &closed_at_boot,
     );
     let mut panes = assembled;
     let taken: std::collections::HashSet<u64> =
@@ -2996,7 +2996,6 @@ fn main() {
         }],
         key_window: 0,
     };
-    app.pane_control.shadows.closed.at_boot = closed_at_boot;
     app.rebuild_layout(0);
     // RFC-005 step 6b — ask L1 to reopen the windows the last session
     // had past this one.  Frame index i+1 because the boot window is
