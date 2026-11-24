@@ -159,9 +159,14 @@ impl Ledger {
 /// `told_after`: whether the move is followed by a word asking the
 /// session to go on, which the session is then promised.
 pub(in crate::plugins) fn body(profile: u8, told_after: bool) -> String {
+    body_for(profile, "额度只剩不到 1%", told_after)
+}
+
+/// `body`, saying `what` of the account.
+pub(in crate::plugins) fn body_for(profile: u8, what: &str, told_after: bool) -> String {
     let after = if told_after { "切换完成后 marspot 会发消息让你接着做。" } else { "" };
     format!(
-        "marspot 提醒：这个会话所用的账号（P{profile}）额度只剩不到 1%，随时可能被换到另一个账号上重启。\
+        "marspot 提醒：这个会话所用的账号（P{profile}）{what}，随时可能被换到另一个账号上重启。\
          请照常继续手头的任务，不要因为这条提醒停下、收尾或者等待切换，也不要让子代理停下；在切换之前，这个账号还能正常使用。\
          切换会结束还在运行的后台任务和后台子代理，所以请做好随时被打断的准备：正在运行的和以后启动的后台任务，把命令和输出位置记下来，被打断后好接着做。\
          {after}这条消息不用回复。"
@@ -214,8 +219,8 @@ fn inbox_of(claude_pid: i32) -> Option<String> {
 }
 
 /// Off the drawing thread: it reads the registry and writes a socket.
-pub(super) fn send(sid: u64, claude_pid: i32, profile: u8, delivered: Arc<AtomicBool>) {
-    send_to(sid, profile, body(profile, true), delivered, "claudecode.quota.heads_up", move || inbox_of(claude_pid));
+pub(super) fn send(sid: u64, claude_pid: i32, profile: u8, body: String, delivered: Arc<AtomicBool>) {
+    send_to(sid, profile, body, delivered, "claudecode.quota.heads_up", move || inbox_of(claude_pid));
 }
 
 /// `body` for a session whose inbox is found by `inbox`.

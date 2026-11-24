@@ -66,7 +66,7 @@ impl Plugin for ClaudecodePlugin {
         let (res_tx, res_rx) = mpsc::channel::<ScanResult>();
         let ctx = WorkerCtx {
             projects_root,
-            caches: ScanCaches::default(),
+            caches: ScanCaches { trends: burn::TrendCache::at(host.state_dir()?.join(burn::TRENDS_FILE)), ..Default::default() },
             statusline_state: None,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),

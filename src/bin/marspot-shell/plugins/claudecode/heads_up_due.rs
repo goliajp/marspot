@@ -3,9 +3,10 @@
 use super::*;
 
 impl ClaudecodePlugin {
-    /// Tell a busy pane, once each time its account runs low, that the
-    /// account is one step from refusing it -- while it can still answer -- when there is
-    /// somewhere else for it to go.
+    /// Tell a busy pane, once each time its account runs short, that
+    /// the account cannot last two hours at its speed -- while it can
+    /// still answer -- when there is somewhere else for it to go. The
+    /// pane that stays on the account to use the rest is told too.
     ///
     /// A resting pane is not told: moving it ends nothing, and the
     /// message would start a turn of its own.
@@ -18,16 +19,19 @@ impl ClaudecodePlugin {
         result: &ScanResult,
         // what the pane is judged as: a pane refused Fable as Fable
         model: Option<&str>,
+        part: leave_early::Part,
     ) {
         let Some((_, room)) = rooms.iter().find(|(p, _)| *p == meta.profile_num) else { return };
         let week = room.reset_7d();
         // the account came back, at a new five hours or a new week: the
-        // next time it nears out the pane is told again
-        if self.heads_up.get(&sid).is_some_and(|h| h.renewed_on(meta.profile_num, room, model)) {
+        // next time it runs short the pane is told again. A speed read
+        // just over the line is not a recovery
+        let recovered = !part.short && part.hours.is_none_or(|h| h >= leave_early::RECOVERED_H);
+        if recovered && self.heads_up.get(&sid).is_some_and(|h| h.renewed_on(meta.profile_num, room, model)) {
             self.heads_up.remove(&sid);
         }
         if self.heads_up.get(&sid).is_some_and(|h| h.is_for(meta.profile_num, week))
-            || !heads_up::nearly_out(room, model)
+            || !part.short
             || !rooms.iter().any(|(p, r)| *p != meta.profile_num && !r.refused_for(model) && *r != quota::Room::Unknown)
         {
             return;
@@ -42,8 +46,9 @@ impl ClaudecodePlugin {
             return;
         }
         let delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid} P{} is nearly out; telling it", meta.profile_num));
-        heads_up::send(sid, meta.claude.pid, meta.profile_num, Arc::clone(&delivered));
+        host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid} P{} is running short; telling it", meta.profile_num));
+        let body = leave_early::heads_up_body(meta.profile_num, part);
+        heads_up::send(sid, meta.claude.pid, meta.profile_num, body, Arc::clone(&delivered));
         self.heads_up.insert(sid, heads_up::Sent { profile: meta.profile_num, week, delivered });
     }
 }

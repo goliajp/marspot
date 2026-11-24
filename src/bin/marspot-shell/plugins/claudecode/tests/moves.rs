@@ -168,7 +168,7 @@ fn a_resting_pane_moves_where_its_quota_is_worth_least_to_others() {
         home.join(".local/state/devops/claude-usage.json"),
         r#"{"generated_at": "2026-11-05T00:00:00+00:00", "accounts": [
                {"name":"A","email":"rest1@example","status":"rejected","utilization_5h":null,
-                "utilization_7d":0.98,"reset_5h":null,"reset_7d":4102444800,"tier":"default_claude_max_20x",
+                "utilization_7d":0.90,"reset_5h":null,"reset_7d":4102444800,"tier":"default_claude_max_20x",
                 "model_limits":[{"label":"Fable","utilization":1.0,"reset":4102444800}]},
                {"name":"B","email":"rest2@example","status":"allowed","utilization_5h":null,
                 "utilization_7d":0.02,"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x",

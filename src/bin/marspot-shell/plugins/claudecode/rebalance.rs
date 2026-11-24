@@ -43,10 +43,6 @@ pub(super) enum Why {
     KeepsFable,
     /// The other account's week renews this many hours sooner.
     RenewsSooner { hours: i64 },
-    /// Its account is one step from refusing it. Left there, a pane
-    /// that has stopped holds its place until the account runs out,
-    /// which for an account few panes use can be hours.
-    RunningOut,
 }
 
 impl std::fmt::Display for Why {
@@ -54,7 +50,6 @@ impl std::fmt::Display for Why {
         match self {
             Why::KeepsFable => write!(f, "leaves Fable to the panes that need it"),
             Why::RenewsSooner { hours } => write!(f, "its week renews {hours}h sooner"),
-            Why::RunningOut => write!(f, "its account is one step from out"),
         }
     }
 }
@@ -76,8 +71,10 @@ pub(super) fn better_home(rooms: &[(u8, Room)], current: u8, model: Option<&str>
     if there.refused_for(model) || !there.known_for(model) || nearly_out(there, model) {
         return None;
     }
+    // an account running short is left by `leave_early`, which keeps
+    // its slowest pane on it
     if nearly_out(here, model) {
-        return Some((target, Why::RunningOut));
+        return None;
     }
     if !needs_fable(model) {
         match (here.fable_spent(), there.fable_spent()) {
@@ -266,7 +263,7 @@ mod tests {
         let opus = Some("opus-5-5");
         assert_eq!(better_home(&rooms, 8, opus), None, "not onto P3 to keep P8's Fable");
         assert_eq!(best_profile(&rooms, 5, opus), Some(8), "P3 renews first but is one step from out");
-        assert_eq!(better_home(&rooms, 3, opus), Some((8, Why::RunningOut)));
+        assert_eq!(better_home(&rooms, 3, opus), None, "leaving it is not this function's business");
     }
 
     /// Where every pane running that afternoon is sent.
