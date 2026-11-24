@@ -158,16 +158,35 @@ fn set_before(path: &Path, cwd: &str, deny: Option<bool>, mut ready: impl FnMut(
             (Cover::Free, _) => Outcome::Denied,
             (Cover::Own, _) => Outcome::Allowed,
         };
-        let tmp = file.with_extension("tsv.tmp");
-        std::fs::write(&tmp, changed(&body, cwd, &out))?;
-        ready();
-        // what a person wrote meanwhile is read and changed instead
-        if stamp(&file) == was {
-            std::fs::rename(&tmp, &file)?;
+        if replace(&file, &changed(&body, cwd, &out), was, &mut ready)? {
             return Ok(out);
         }
     }
     Err(io::Error::other("the list keeps changing"))
+}
+
+/// Put `body` in `file`'s place, with `file`'s permissions, unless it
+/// is no longer the file stamped `was`.  The new file is left nowhere
+/// but there.
+fn replace(file: &Path, body: &str, was: Stamp, ready: &mut impl FnMut()) -> io::Result<bool> {
+    let tmp = file.with_extension("tsv.tmp");
+    let put = (|| {
+        std::fs::write(&tmp, body)?;
+        if let Ok(m) = std::fs::metadata(file) {
+            std::fs::set_permissions(&tmp, m.permissions())?;
+        }
+        ready();
+        // what a person wrote meanwhile is read and changed instead
+        if stamp(file) != was {
+            return Ok(false);
+        }
+        std::fs::rename(&tmp, file).map(|()| true)
+    })();
+    if !matches!(put, Ok(true)) {
+        // there may be none to remove
+        let _ = std::fs::remove_file(&tmp);
+    }
+    put
 }
 
 /// `body` with `cwd`'s own line dropped, or added.
@@ -269,6 +288,28 @@ mod tests {
             std::fs::write(&p, format!("{body}/w/x{n}\n")).unwrap();
         });
         assert!(out.is_err() && n == TRIES, "gives up");
+        done(&p);
+    }
+
+    #[test]
+    fn helper_panel_deny_keeps_the_files_mode_and_leaves_no_new_file_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = file("mode", Some("/w/a\n"));
+        let tmp = p.with_extension("tsv.tmp");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(set(&p, "/w/b", Some(true)).unwrap(), Outcome::Denied);
+        assert_eq!(mode(&p), 0o600);
+        assert_eq!(set(&p, "/w/b", Some(false)).unwrap(), Outcome::Allowed);
+        assert_eq!(mode(&p), 0o600);
+        // given up on: a list that changes at every try
+        let mut n = 0;
+        let out = set_before(&p, "/w/c", Some(true), || {
+            n += 1;
+            std::fs::write(&p, format!("/w/a\n/w/x{n}\n")).unwrap();
+        });
+        assert!(out.is_err());
+        assert!(!tmp.exists(), "nothing left beside the list");
         done(&p);
     }
 
