@@ -343,33 +343,6 @@ pub enum StepKind {
     },
 }
 
-/// The far end of an [`StepKind::AwaitJob`]: whoever does the work
-/// calls [`finish`](Self::finish) once, from any thread, optionally
-/// with text for a later [`StepKind::PasteJob`] to deliver.
-#[derive(Default)]
-pub struct Job {
-    result: std::sync::Mutex<Option<Result<Option<String>, String>>>,
-}
-
-impl Job {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-    /// Report the outcome.  Only the first report counts.
-    pub fn finish(&self, r: Result<Option<String>, String>) {
-        let mut slot = self.result.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(r);
-        }
-    }
-    fn poll(&self) -> Option<Result<(), String>> {
-        self.result.lock().unwrap().as_ref().map(|r| r.as_ref().map(|_| ()).map_err(Clone::clone))
-    }
-    fn text(&self) -> Option<String> {
-        self.result.lock().unwrap().as_ref().and_then(|r| r.as_ref().ok().cloned().flatten())
-    }
-}
-
 /// A quick effect run on the tick — see [`StepKind::Call`].
 pub type CallFn = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
@@ -1772,11 +1745,12 @@ impl PaneSession for OpRunner {
             let due = since >= if idle { PARKED_BADGE_EVERY } else { SPINNER_FRAME };
             if due {
                 self.badge_at = self.env.now();
-                let text = if idle {
-                    b.clone()
-                } else {
-                    format!("{b} {}", spinner_frame(self.spin_phase))
+                let note = match self.op.steps.get(self.at).map(|s| &s.kind) {
+                    Some(StepKind::AwaitJob(j)) => j.note().map(|n| format!(" {n}")),
+                    _ => None,
                 };
+                let note = note.as_deref().unwrap_or("");
+                let text = if idle { b.clone() } else { format!("{b}{note} {}", spinner_frame(self.spin_phase)) };
                 host.set_badge(&text);
             }
         }
@@ -1890,6 +1864,8 @@ impl PaneSession for OpRunner {
 }
 
 pub mod front;
+mod job;
+pub use job::Job;
 mod real_env;
 mod typing;
 pub use typing::Typed;
@@ -2129,6 +2105,8 @@ impl PtyOps {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod job_tests;
 
 #[cfg(test)]
 mod submit_deadline_tests;

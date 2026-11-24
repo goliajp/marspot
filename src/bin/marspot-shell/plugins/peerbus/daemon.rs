@@ -7,6 +7,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::Instant;
 
 use marspot_peer::json::Value;
+use marspot_peer::registry::Status;
 use marspot_peer::rpc::{self, Rpc, RpcError};
 use marspot_term::{lx_info, lx_warn};
 
@@ -80,5 +81,31 @@ impl Worker {
     pub(super) fn schedule_retry(&mut self) {
         self.retry_at = Some(Instant::now() + self.backoff);
         self.backoff = (self.backoff * 2).min(RETRY_MAX);
+    }
+}
+
+/// A thread status as the registry words it.
+pub(super) fn status_of(s: &Value) -> Option<Status> {
+    match s.str_at("type")? {
+        "idle" => Some(Status::Idle),
+        "active" => {
+            let waiting = s.get("activeFlags").map_or(&[][..], Value::arr).iter().filter_map(Value::str).any(|f| f.starts_with("waiting"));
+            Some(if waiting { Status::Waiting } else { Status::Busy })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use marspot_peer::json::parse;
+
+    #[test]
+    fn statuses_map_to_registry_words() {
+        assert_eq!(status_of(&parse(r#"{"type":"idle"}"#).unwrap()), Some(Status::Idle));
+        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":[]}"#).unwrap()), Some(Status::Busy));
+        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":["waitingOnApproval"]}"#).unwrap()), Some(Status::Waiting));
+        assert_eq!(status_of(&parse(r#"{"type":"systemError"}"#).unwrap()), None);
     }
 }

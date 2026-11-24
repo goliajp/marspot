@@ -3,9 +3,10 @@
 //! `CODEX_HOME`.
 //!
 //! Event-driven: it wakes when the set of Codex panes changes, when a
-//! message arrives, or when a daemon reports something.  Two timers:
-//! a retry after a daemon could not be reached, and the short wait of
-//! an idle subscription placed while the session was idle (`idle`).
+//! message arrives, or when a daemon reports something.  Timers
+//! (`clock`): a retry after a daemon could not be reached, the short
+//! wait of an idle subscription placed while the session was idle
+//! (`idle`), and a move's mark and wait for the old home (`moving`).
 //! The names check (`NAMES_EVERY`) is asked for by the plugin's tick,
 //! since a pane is renamed by a `cd` or a move that nothing here is
 //! told about.
@@ -19,8 +20,8 @@ use std::{sync::mpsc::{Receiver, RecvTimeoutError, SyncSender}, time::{Duration,
 use marspot::pidtree;
 use marspot_peer::envelope::Mode;
 use marspot_peer::frame::{IdleState, Priority, Receipt, UserFrame};
-use marspot_peer::{json::{obj, Value}, registry::{self, Record, Status}};
-use marspot_peer::rpc::{RpcError, RpcSender};
+use marspot_peer::{json::Value, registry::{self, Record, Status}};
+use marspot_peer::rpc::RpcSender;
 use marspot_term::{lx_info, lx_warn};
 
 use super::bind::Unbound;
@@ -88,6 +89,10 @@ pub(crate) enum Event {
     Subscribe { key: u64, from: String, msg_id: String },
     /// `peer_idle_notice` for a subscription this session placed.
     Notice { key: u64, from: String, state: String, finished_at: Option<i64> },
+    /// A codex pane moving to another account (`moving`).
+    Move(super::moving::Ask),
+    /// An end is waiting in `moving`'s list.
+    MoveEnded,
     Rpc { home: PathBuf, msg: Value },
     RpcClosed { home: PathBuf },
     Stop,
@@ -168,6 +173,7 @@ pub(crate) struct Worker {
     skill_notes: Vec<String>,
     /// Notes a change to the configuration that nobody here made.
     config_watch: Option<changes::Watch>,
+    pub(super) moves: super::moving::Moves,
 }
 
 impl Worker {
@@ -201,6 +207,7 @@ impl Worker {
             skill_notes: Vec::new(),
             config_watch: None,
             names_passes: 0,
+            moves: Default::default(),
         }
     }
 
@@ -238,31 +245,21 @@ impl Worker {
             self.config_watch = Some(changes::Watch::of_home(home.into(), changes::note));
         }
         self.reconcile_config();
+        self.serve();
+        self.teardown();
+        super::publish_threads(HashMap::new());
+    }
+
+    /// Handle events until told to stop or the channel closes.
+    pub(super) fn serve(&mut self) {
         loop {
-            let ev = match self.stash.pop_front() {
-                Some(e) => e,
-                None => {
-                    // with nothing owed on a clock, until the next event
-                    let due = [self.retry_at, self.idle_checks.iter().map(|(_, t)| *t).min()].into_iter().flatten().min();
-                    let got = match due {
-                        Some(due) => self.rx.recv_timeout(due.saturating_duration_since(Instant::now())),
-                        None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-                    };
-                    match got {
-                        Ok(e) => e,
-                        Err(RecvTimeoutError::Timeout) => {
-                            let now = Instant::now();
-                            if self.retry_at.is_some_and(|t| t <= now) {
-                                self.retry_at = None;
-                                self.refresh();
-                                self.publish();
-                            }
-                            self.idle_checks_due(now);
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+            let ev = match self.stash.pop_front().map_or_else(|| self.next_event(), Ok) {
+                Ok(e) => e,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.timers_due();
+                    continue;
                 }
+                Err(RecvTimeoutError::Disconnected) => break,
             };
             match ev {
                 Event::Want(w) => {
@@ -297,6 +294,8 @@ impl Worker {
                 Event::Inbound { key, frame, peer_pid } => self.deliver(key, frame, peer_pid),
                 Event::Subscribe { key, from, msg_id } => self.subscribe(key, from, msg_id),
                 Event::Notice { key, from, state, finished_at } => self.notice(key, &from, &state, finished_at),
+                Event::Move(a) => self.on_move(a),
+                Event::MoveEnded => {}
                 Event::Rpc { home, msg } => self.on_note(&home, &msg),
                 Event::RpcClosed { home } => {
                     if self.conns.remove(&home).is_some() {
@@ -307,10 +306,11 @@ impl Worker {
                 }
                 Event::Stop => break,
             }
+            self.take_ends();
+            // a steady stream of events never lets the wait time out
+            self.timers_due();
             self.publish();
         }
-        self.teardown();
-        super::publish_threads(HashMap::new());
     }
 
     /// What other plugins may read of the bindings: see `ThreadView`.
@@ -328,7 +328,7 @@ impl Worker {
 
     // ── daemon notifications ──────────────────────────────────────
 
-    fn on_note(&mut self, home: &Path, msg: &Value) {
+    pub(super) fn on_note(&mut self, home: &Path, msg: &Value) {
         let Some(method) = msg.str_at("method") else { return }; // stale answers
         if msg.get("id").is_some() {
             return; // a request meant for the TUI; the TUI answers it
@@ -344,10 +344,11 @@ impl Worker {
                     self.refresh();
                     return;
                 }
-                let Some(new) = status.and_then(status_of) else { return };
+                let Some(new) = status.and_then(super::daemon::status_of) else { return };
                 let Some(sid) = self.find(home, &thread) else { return };
-                // a thread that has now run a turn can be subscribed
-                if new == Status::Idle && !self.bindings[&sid].subscribed {
+                // a thread that has now run a turn can be subscribed,
+                // unless it is leaving this home
+                if new == Status::Idle && !self.bindings[&sid].subscribed && !self.moving(sid) {
                     let b = &self.bindings[&sid];
                     let (cwd, argv) = (b.record.cwd.clone(), b.argv.clone());
                     let (class, subscribed) = self.class_for(home, &thread, &cwd, &argv);
@@ -403,13 +404,13 @@ impl Worker {
         }
     }
 
-    fn find(&self, home: &Path, thread: &str) -> Option<u64> {
+    pub(super) fn find(&self, home: &Path, thread: &str) -> Option<u64> {
         self.bindings.iter().find(|(_, b)| b.home == home && b.thread == thread).map(|(sid, _)| *sid)
     }
 
     // ── delivery ──────────────────────────────────────────────────
 
-    fn deliver(&mut self, key: u64, frame: UserFrame, peer_pid: Option<i32>) {
+    pub(super) fn deliver(&mut self, key: u64, frame: UserFrame, peer_pid: Option<i32>) {
         let reply_to = deliver::reply_address(&frame);
         let pair = self.is_from_pair(key, &frame);
         let Some((sid, b)) = self.bindings.iter_mut().find(|(_, b)| b.key == key) else {
@@ -458,45 +459,4 @@ impl Worker {
             }
         }
     }
-
-    /// Put `text` into the thread: steering the running turn when asked
-    /// to and able, queued as the next input otherwise.
-    pub(super) fn hand_over(&mut self, home: &Path, thread: &str, text: String, steer_turn: Option<String>, id: String) -> (Result<Value, RpcError>, &'static str) {
-        let input = Value::Arr(vec![obj([("type", Value::from("text")), ("text", Value::from(text))])]);
-        if let Some(turn) = steer_turn {
-            let p = obj([("threadId", Value::from(thread)), ("expectedTurnId", Value::from(turn)), ("input", input.clone())]);
-            let r = self.call(home, "turn/steer", p);
-            if r.is_ok() {
-                return (r, "turn/steer");
-            }
-        }
-        let p = obj([("threadId", Value::from(thread)), ("clientUserMessageId", Value::from(id)), ("input", input)]);
-        (self.call(home, "thread/queue/add", p), "thread/queue/add")
-    }
-}
-
-fn status_of(s: &Value) -> Option<Status> {
-    match s.str_at("type")? {
-        "idle" => Some(Status::Idle),
-        "active" => {
-            let waiting = s.get("activeFlags").map_or(&[][..], Value::arr).iter().filter_map(Value::str).any(|f| f.starts_with("waiting"));
-            Some(if waiting { Status::Waiting } else { Status::Busy })
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use marspot_peer::json::parse;
-
-    #[test]
-    fn statuses_map_to_registry_words() {
-        assert_eq!(status_of(&parse(r#"{"type":"idle"}"#).unwrap()), Some(Status::Idle));
-        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":[]}"#).unwrap()), Some(Status::Busy));
-        assert_eq!(status_of(&parse(r#"{"type":"active","activeFlags":["waitingOnApproval"]}"#).unwrap()), Some(Status::Waiting));
-        assert_eq!(status_of(&parse(r#"{"type":"systemError"}"#).unwrap()), None);
-    }
-
 }

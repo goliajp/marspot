@@ -20,11 +20,14 @@ pub(in crate::plugins) mod context;
 mod hand_off;
 mod refresh;
 mod rollout;
+mod switch;
 mod update;
 #[cfg(test)]
 mod front_tests;
 #[cfg(test)]
 mod menu_tests;
+#[cfg(test)]
+mod switch_tests;
 pub(crate) use update::{install as install_cli, installed_cli, path_with_local_bin, tail};
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
@@ -33,7 +36,7 @@ use crate::plugins::{handoff, pidtree};
 use marspot::ui::strings::{self, Arg};
 
 use badge::{badge_text, publish_badge};
-use pane::{home_from, profile_from, profile_switch_op, PaneCodex};
+use pane::{home_from, profile_from, PaneCodex};
 use rollout::{codex_home, read_model_and_effort, RolloutIndex};
 
 pub(crate) use pane::{argv_thread_id, home_of, profile_dirs};
@@ -77,6 +80,7 @@ pub struct CodexPlugin {
     refresher: update::Refresher,
     /// The pane with the cursor; None until marspot has said.
     focused: Option<u64>,
+    switches: switch::Switches,
 }
 
 impl CodexPlugin {
@@ -90,6 +94,7 @@ impl CodexPlugin {
             follower: update::Follower::default(),
             refresher: update::Refresher::default(),
             focused: None,
+            switches: Default::default(),
         }
     }
 }
@@ -199,27 +204,7 @@ impl Plugin for CodexPlugin {
             );
             return;
         };
-        let Some(pane) = self.panes.get(&shelld_session_id).cloned() else {
-            host.log(
-                LogLevel::Warn,
-                "cycle.menu_no_codex",
-                &format!("menu pick on shelld_session={shelld_session_id} with no codex"),
-            );
-            return;
-        };
-        if pane.profile == Some(profile) {
-            return; // already there; a stale menu is not a request
-        }
-        let Some(op) = profile_switch_op(&pane, profile, &dir) else {
-            return;
-        };
-        if let Err(e) = host.submit_pty_op(shelld_session_id, op) {
-            host.log(
-                LogLevel::Warn,
-                "cycle.submit_failed",
-                &format!("shelld_session={shelld_session_id}: {e}"),
-            );
-        }
+        self.switch_profile(host, shelld_session_id, profile, dir);
     }
 
     /// With no codex in a pane and no badge left to clear, a tick does
@@ -245,6 +230,7 @@ impl Plugin for CodexPlugin {
         // The observer's view, up to its interval old; this runs on the
         // main thread, which must not walk the process table.  With no
         // codex anywhere and none left to clear there is nothing to do.
+        self.follow_switches(host);
         let obs = crate::observe::shared().latest();
         self.env.prune(&obs);
         // the CLI follows the daemon whether or not a pane runs codex
@@ -301,7 +287,7 @@ impl Plugin for CodexPlugin {
                 None => (pane_model, pane_effort),
             };
             let profile = codex_env.and_then(profile_from);
-            let text = badge_text(profile, model.as_deref(), effort.as_deref());
+            let text = self.hinted(sid, badge_text(profile, model.as_deref(), effort.as_deref()));
             if let Some(p) = codex {
                 codex_panes.push((sid, p.row.id(), p.argv.as_deref().map(<[String]>::to_vec)));
             }
@@ -312,6 +298,7 @@ impl Plugin for CodexPlugin {
                         codex: id,
                         shell_pid: shell,
                         profile,
+                        argv: codex.and_then(|p| p.argv.as_deref()).map(<[String]>::to_vec),
                     },
                 );
             } else {

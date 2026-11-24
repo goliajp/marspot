@@ -151,8 +151,7 @@ impl Worker {
 
     /// The daemon's loaded user threads with their cwds.
     pub(super) fn loaded_threads(&mut self, home: &Path) -> Result<Vec<(String, String)>, RpcError> {
-        let r = self.call(home, "thread/loaded/list", obj([]))?;
-        let ids: Vec<String> = r.get("data").map_or(&[][..], Value::arr).iter().filter_map(Value::str).map(str::to_string).collect();
+        let ids = self.loaded_ids(home)?;
         self.cwds.retain(|(h, id), _| h != home || ids.contains(id));
         let mut out = Vec::new();
         for id in ids {
@@ -203,6 +202,8 @@ impl Worker {
         let r = self.bind_with(p, thread, codex, argv, class, subscribed);
         if r.is_err() && subscribed {
             self.unsubscribe(&p.home, thread);
+        } else if r.is_ok() {
+            self.moved_in(p.sid, codex);
         }
         r
     }
@@ -285,6 +286,7 @@ impl Worker {
     }
 
     pub(super) fn unbind(&mut self, sid: u64, mut b: Binding) {
+        self.moved_out(sid, &b);
         send_notices(sid, &mut b, IdleState::Exited);
         super::records::remove_record(&b.record);
         if b.subscribed {
@@ -295,10 +297,9 @@ impl Worker {
     }
 
     /// Drop this connection's subscription.  Codex unloads a thread
-    /// only once it has had no subscriber for half an hour; a
-    /// subscription left behind would keep a quit TUI's thread loaded
-    /// for as long as marspot runs, and leave its directory ambiguous
-    /// for the next Codex started there.
+    /// about a minute after its last subscriber lets go (0.172.0, idle
+    /// threads); one left behind keeps a quit TUI's thread loaded while
+    /// marspot runs, and its directory ambiguous for the next Codex.
     pub(super) fn unsubscribe(&mut self, home: &Path, thread: &str) {
         if !self.conns.contains_key(home) {
             return; // the connection is gone, and its subscriptions with it

@@ -42,6 +42,7 @@ pub mod registry;
 pub mod relay;
 pub mod resolve;
 pub mod rpc;
-mod sha1;
+#[doc(hidden)]
+pub mod sha1;
 pub mod spool;
 pub mod ws;
