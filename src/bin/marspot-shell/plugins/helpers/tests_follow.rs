@@ -148,3 +148,41 @@ fn helpers_another_approval_prompt_after_a_start_is_told() {
     assert!(told(1, Some("Run make clean?\n❯ 1. Yes\n  2. No")));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn helpers_an_approval_prompt_is_the_same_whatever_changes_around_it() {
+    let dir = temp("promptonly");
+    let (s, _rx) = shared_at(&dir);
+    let screen = |around: &str, question: &str| {
+        format!("● Ran the tests {around}\n\n────────────────────\n Bash command\n\n   make {question}\n\n Do you want to proceed?\n❯ 1. Yes\n  2. No\n\n Esc to cancel · {around}\n")
+    };
+    let told_of = screen("12s", "clean");
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha(&told_of) }]].concat());
+    let told = |text: String| {
+        work::still_blocked(&s, 1, Some(text));
+        let h: Helper = s.table().map[&1].clone();
+        s.lock().undelivered.take(1).is_some() || h.suppressed > 0
+    };
+    assert!(!told(screen("13s, 40 lines more", "clean")), "only the text around it changed");
+    assert!(told(screen("13s", "install")));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn helpers_an_approval_prompt_whose_screen_was_not_read_is_read_again() {
+    let dir = temp("unread");
+    let (s, rx) = shared_at(&dir);
+    feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha("Run make?\n❯ 1. Yes") }]].concat());
+    let mut in_turn = turn::turns_at_start(&s.table());
+    let host = host_with(&[(1, PaneStatus::Busy(BusyKind::ToolAwaitingApproval))]);
+    let mut asked = || {
+        tick::tick(&s, &host, &mut in_turn, &mut tick::Parked::default());
+        rx.try_iter().filter(|j| matches!(j, Job::StillBlocked { sid: 1 })).count()
+    };
+    assert_eq!(asked(), 1);
+    work::still_blocked(&s, 1, None);
+    assert_eq!(asked(), 1, "not known to be the same prompt");
+    work::still_blocked(&s, 1, Some("Run make?\n❯ 1. Yes".into()));
+    assert_eq!(asked(), 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

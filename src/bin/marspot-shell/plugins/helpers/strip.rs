@@ -119,7 +119,7 @@ fn declare_in(decls: &mut PaneDecls<HelperStrip>, s: &Shared, m: &mut Memory, ob
     // a write to the log is the worker's
     for (sid, at_ms, ev) in facts {
         let word = ev.word();
-        if !s.queue(Job::Fact { sid, at_ms, ev }) {
+        if !s.queue(Job::Fact { sid, at_ms, ev: Box::new(ev) }) {
             marspot::lx_warn!("helpers.queue_full", &format!("sid={sid}: {word} not queued"));
         }
     }

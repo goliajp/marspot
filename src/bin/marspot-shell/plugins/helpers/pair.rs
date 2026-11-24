@@ -1,11 +1,12 @@
 //! Which two panes hold a helper and the session that started it, and
 //! what becomes of that when the parent pane is handed to another agent.
 
+use std::time::Duration;
+
 use marspot::pidtree::ProcId;
 
 use super::table::{Event, Helper, Table};
-use super::work::Job;
-use super::{SHARED, Shared};
+use super::{SHARED, Shared, records};
 use crate::plugins::peerbus::{Conversation, conversation_of};
 
 /// Whether one of two panes is a helper started by the conversation the
@@ -67,13 +68,20 @@ pub(in crate::plugins) fn leaving(sid: u64) -> Option<String> {
     now.map(|c| c.id)
 }
 
-/// The new agent of `m` is up.
+/// The new agent of `m` is up: noted on the main loop, written down by
+/// the worker.
 pub(in crate::plugins) fn moved(m: Moved) {
-    let Some(s) = SHARED.get() else { return };
-    let pane = m.pane;
-    if follows(&s.table(), &m).next().is_some() && !s.queue(Job::ParentMoved(m)) {
-        marspot::lx_warn!("helpers.not_queued", &format!("sid={pane} parent_moved"));
+    if let Some(s) = SHARED.get() {
+        note_move(s, m, records::now_ms() * 1000);
     }
+}
+
+/// Note move `m`, which happened at `at_us` (µs after the epoch), with
+/// the helpers that follow it as the table says now.
+pub(super) fn note_move(s: &Shared, m: Moved, at_us: u64) {
+    let sids: Vec<u64> = follows(&s.table(), &m).map(|h| h.sid).collect();
+    s.lock().moves.add(m, sids, at_us);
+    s.wake();
 }
 
 /// The helpers of the conversation `m` left.
@@ -81,20 +89,89 @@ fn follows<'a>(t: &'a Table, m: &'a Moved) -> impl Iterator<Item = &'a Helper> {
     t.under(m.pane).filter(|h| h.conv.is_some() && (h.conv == m.from || h.heir == Some(m.left)))
 }
 
-/// Write down what the helpers of `m`'s pane follow; `front` is the
-/// agent in front of it now.
-pub(super) fn parent_moved(s: &Shared, m: &Moved, front: Option<ProcId>) {
-    let ev = match (&m.resumed, front) {
+/// A move not yet written down: the helpers that follow it, and when it
+/// happened (µs after the epoch).
+#[derive(Debug)]
+pub(super) struct Pending {
+    pub m: Moved,
+    pub sids: Vec<u64>,
+    pub at_us: u64,
+}
+
+/// The moves not yet written down, oldest first.  None is dropped: a
+/// move that goes on from one still here takes that one's helpers along,
+/// and a helper is in one move only, so there are no more than helpers.
+#[derive(Debug, Default)]
+pub(super) struct Moves(Vec<Pending>);
+
+impl Moves {
+    fn add(&mut self, m: Moved, mut sids: Vec<u64>, at_us: u64) {
+        for p in self.0.iter_mut().filter(|p| p.m.pane == m.pane && goes_on_from(p, &m)) {
+            sids.append(&mut p.sids);
+        }
+        sids.sort_unstable();
+        sids.dedup();
+        for p in &mut self.0 {
+            p.sids.retain(|sid| !sids.contains(sid));
+        }
+        self.0.retain(|p| !p.sids.is_empty());
+        if !sids.is_empty() {
+            self.0.push(Pending { m, sids, at_us });
+        }
+    }
+}
+
+/// Whether `m` leaves what `p` handed the pane to: the conversation it
+/// resumed, or an agent that was running when it happened.
+fn goes_on_from(p: &Pending, m: &Moved) -> bool {
+    let resumed = p.m.resumed.is_some() && m.from == p.m.resumed;
+    resumed || (m.left != p.m.left && m.left.start_us <= p.at_us)
+}
+
+/// What the worker sees in front of a pane: the agent, and the
+/// conversation of the agent there.
+#[derive(Debug, Default)]
+pub(super) struct Look {
+    pub front: Option<ProcId>,
+    pub conv: Option<Conversation>,
+}
+
+/// The pane as it is now.
+pub(super) fn look_now(pane: u64) -> Look {
+    let obs = crate::observe::shared().fresh(Duration::ZERO);
+    let front = obs.session(pane).and_then(|x| x.front()).map(|p| p.row.id());
+    Look { front, conv: front.and_then(|_| conversation_of(pane)) }
+}
+
+/// Write down the moves noted, each with what `look` sees of its pane.
+pub(super) fn write_moves(s: &Shared, look: impl Fn(u64) -> Look) {
+    let pending = std::mem::take(&mut s.lock().moves.0);
+    for p in pending {
+        parent_moved(s, &p, &look(p.m.pane));
+    }
+}
+
+/// Write down what the helpers of `p` follow, with `look` of its pane.
+/// Only an agent that was running when the move happened is the one
+/// it was handed to, and the conversation it is in now is the one it
+/// goes on with: one it moves to later (a `/clear`) is another.
+pub(super) fn parent_moved(s: &Shared, p: &Pending, look: &Look) {
+    let front = look.front.filter(|f| *f != p.m.left && f.start_us <= p.at_us);
+    let ev = match (&p.m.resumed, front) {
         (Some(c), _) => Event::ConversationChanged(c.clone()),
-        (None, Some(p)) => Event::ParentAgent(p),
+        (None, Some(f)) => match look.conv.as_ref().filter(|c| c.agent == f) {
+            Some(c) => Event::ConversationChanged(c.id.clone()),
+            None => Event::ParentAgent(f),
+        },
         (None, None) => {
-            marspot::lx_warn!("helpers.parent_moved", &format!("sid={}: no agent in front", m.pane));
+            marspot::lx_warn!("helpers.parent_moved", &format!("sid={}: no agent in front that was there at the move", p.m.pane));
             return;
         }
     };
-    let sids: Vec<u64> = follows(&s.table(), m).map(|h| h.sid).collect();
-    for sid in sids {
-        s.record(sid, ev.clone());
+    for sid in &p.sids {
+        if s.table().under(p.m.pane).any(|h| h.sid == *sid) {
+            s.record(*sid, ev.clone());
+        }
     }
 }
 

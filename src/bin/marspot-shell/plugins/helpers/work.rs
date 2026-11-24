@@ -6,20 +6,17 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
-use std::time::Duration;
 
 use marspot_peer::control::AgentKind;
 
 use super::close::close;
 use super::notify::{self, Stop, Verdict};
-use super::pair::Moved;
 use super::pending::{Notice, front_of};
 use super::table::{Event, Helper};
 use super::{Shared, records};
 use crate::observe::Observation;
 use crate::pane_control::names::full_name_or_entry as full_name;
 use crate::plugins::claudecode::with_helpers::{NOTICE_HEAD, drain_account_changes};
-use crate::plugins::usage::for_helpers;
 
 const JOBS: usize = 64;
 
@@ -29,8 +26,6 @@ pub(super) enum Job {
     Stopped { sid: u64, stop: Stop, by_screen: bool },
     /// At an approval prompt, told of one before the shell started.
     StillBlocked { sid: u64 },
-    /// The pane of helpers' parent was handed to another agent.
-    ParentMoved(Moved),
     /// Tell the stops the rate held back.
     Release { sid: u64 },
     /// Close a helper; `tell`: say why to its parent.
@@ -41,7 +36,7 @@ pub(super) enum Job {
     /// Look at how large the codex helpers' contexts are.
     Contexts,
     /// Write down what the main loop saw at `at_ms`.
-    Fact { sid: u64, at_ms: u64, ev: Event },
+    Fact { sid: u64, at_ms: u64, ev: Box<Event> },
     /// Try an undelivered notice again.
     Redeliver { sid: u64 },
 }
@@ -51,7 +46,6 @@ impl Job {
     pub fn sid(&self) -> u64 {
         match self {
             Job::Wake | Job::Contexts => 0,
-            Job::ParentMoved(m) => m.pane,
             Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Fact { sid, .. } | Job::Redeliver { sid } => *sid,
         }
     }
@@ -61,7 +55,6 @@ impl Job {
             Job::Wake => "wake",
             Job::Stopped { .. } => "stopped",
             Job::StillBlocked { .. } => "still_blocked",
-            Job::ParentMoved(_) => "parent_moved",
             Job::Release { .. } => "release",
             Job::Close { .. } => "close",
             Job::Gone { .. } => "gone",
@@ -110,6 +103,7 @@ fn run(s: &Arc<Shared>, rx: Receiver<Job>, epoch: u64) {
             return;
         }
         account_changes(s);
+        super::pair::write_moves(s, super::pair::look_now);
         for job in super::timers::due_jobs(s, epoch, records::now_ms(), super::timers::no_agent_now) {
             if ended(s, epoch) {
                 return;
@@ -145,12 +139,7 @@ fn handle(s: &Arc<Shared>, job: Job) {
             marspot::lx_info!("helpers.job", &format!("sid={sid} stopped {stop:?} by_screen={by_screen}"));
             stopped(s, sid, stop, by_screen);
         }
-        Job::StillBlocked { sid } => still_blocked(s, sid, screen_end(sid, notify::SCREEN_LINES)),
-        Job::ParentMoved(m) => {
-            let obs = crate::observe::shared().fresh(Duration::ZERO);
-            let front = obs.session(m.pane).and_then(|x| x.front()).map(|p| p.row.id());
-            super::pair::parent_moved(s, &m, front);
-        }
+        Job::StillBlocked { sid } => still_blocked(s, sid, screen_of(sid)),
         Job::Release { sid } => {
             if let Some(h) = s.table().map.get(&sid).cloned().filter(|h| h.suppressed > 0 && h.may_notify(records::now_ms())) {
                 marspot::lx_info!("helpers.job", &format!("sid={sid} release"));
@@ -180,7 +169,7 @@ fn handle(s: &Arc<Shared>, job: Job) {
         Job::Contexts => s.look_at_contexts(&crate::plugins::peerbus::threads()),
         Job::Fact { sid, at_ms, ev } => {
             if s.table().map.contains_key(&sid) {
-                s.record_seen(sid, at_ms, ev);
+                s.record_seen(sid, at_ms, *ev);
             }
         }
         Job::Redeliver { sid } => {
@@ -253,33 +242,27 @@ fn stopped(s: &Arc<Shared>, sid: u64, stop: Stop, by_screen: bool) {
     }
 }
 
-/// The bottom of helper `sid`'s screen; None when it cannot be read.
-fn screen_end(sid: u64, lines: usize) -> Option<String> {
-    marspot::pane_read::screen(sid, 0).ok().map(|t| notify::screen_end(&t, lines))
+/// Helper `sid`'s screen; None when it cannot be read.
+fn screen_of(sid: u64) -> Option<String> {
+    marspot::pane_read::screen(sid, 0).ok()
 }
 
 /// Helper `sid`, told of at a prompt before the shell started, is at one
-/// with `screen`: told when that is known to be another.
+/// with `screen`: told when that is known to be another.  A screen that
+/// could not be read says nothing: the next look at the prompt reads it
+/// again.
 pub(super) fn still_blocked(s: &Arc<Shared>, sid: u64, screen: Option<String>) {
     let Some(h) = s.table().map.get(&sid).cloned() else { return };
-    let now = screen.map(|t| notify::prompt_sha(&t));
-    let same = h.blocked_prompt.is_empty() || now.is_none_or(|n| n == h.blocked_prompt);
+    let Some(screen) = screen else {
+        marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked: screen not read, looked at again"));
+        s.lock().prompt_unread.insert(sid);
+        return;
+    };
+    let same = h.blocked_prompt.is_empty() || notify::prompt_sha(&screen) == h.blocked_prompt;
     marspot::lx_info!("helpers.job", &format!("sid={sid} still_blocked same={same}"));
     if !same {
         stopped(s, sid, Stop::Blocked, false);
     }
-}
-
-/// What a claude helper's stop says when every account refuses its
-/// model; None while one can take it.
-fn refused_note(h: &Helper, stop: Stop) -> Option<String> {
-    if h.started.agent != AgentKind::Claude || h.contained() || stop.is_last() {
-        return None;
-    }
-    let model = Some(h.started.model.as_str()).filter(|m| *m != "default");
-    let r = for_helpers::claude_all_refused(model)?;
-    let earliest = for_helpers::earliest_text(&r).map_or_else(|| "at a time the usage feed does not give".to_string(), |t| format!("at {t}"));
-    Some(format!("All claude accounts are refusing it (out of quota); the earliest recovers {earliest}. Per account: {}.", for_helpers::recoveries_text(&r)))
 }
 
 /// Send the notice for a stop of `h`, and write down that it went.
@@ -294,13 +277,14 @@ fn tell(s: &Arc<Shared>, h: &Helper, stop: Stop) {
         (Stop::Idle, AgentKind::Claude) if !h.contained() => 0,
         _ => notify::SCREEN_LINES,
     };
-    let screen = (lines > 0).then(|| screen_end(sid, lines)).flatten();
+    let full = (lines > 0).then(|| screen_of(sid)).flatten();
+    let screen = full.as_deref().map(|t| notify::screen_end(t, lines));
     let over = super::container::at_stop(s, h, stop, screen.as_deref());
-    let note = over.as_ref().map(|o| o.note.clone()).or_else(|| refused_note(h, stop));
+    let note = over.as_ref().map(|o| o.note.clone()).or_else(|| notify::refused_note(h, stop));
     let body = notify::text(&full_name(sid, &obs), h, stop, &path, result.as_deref(), screen.as_deref(), note.as_deref());
     let mut events = vec![match stop {
         Stop::Idle => Event::IdleNoticed,
-        Stop::Blocked => Event::BlockedNoticed { prompt: screen.as_deref().map_or_else(String::new, notify::prompt_sha) },
+        Stop::Blocked => Event::BlockedNoticed { prompt: full.as_deref().map_or_else(String::new, notify::prompt_sha) },
         Stop::Exited => Event::ExitedNoticed,
         Stop::Budget => Event::BudgetExpired,
     }];

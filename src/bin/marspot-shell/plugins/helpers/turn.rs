@@ -145,6 +145,10 @@ pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now
         }
     }
     let seen = in_turn.entry(h.sid).or_default();
+    // a prompt whose screen could not be read is asked about again
+    if s.lock().prompt_unread.remove(&h.sid) && v.status == PaneStatus::Busy(BusyKind::ToolAwaitingApproval) && *seen == Turn::BlockedTold {
+        *seen = Turn::BlockedBefore;
+    }
     if let Some(Look::Over { began, at, quiet_after }) = look {
         if at > h.started_ms {
             s.lock().turned.insert(h.sid);

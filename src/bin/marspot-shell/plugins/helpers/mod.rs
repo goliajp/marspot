@@ -148,6 +148,10 @@ struct State {
     turned: HashSet<u64>,
     /// Those of them whose plugin reports one now.
     at_work: HashSet<u64>,
+    /// Helpers at a prompt whose screen could not be read.
+    prompt_unread: HashSet<u64>,
+    /// Parent panes handed to another agent, not yet written down.
+    moves: pair::Moves,
     /// What the records of the helpers' agents say of their context.
     used: HashMap<u64, strip::used::Known>,
     /// When the table was taken from the log (ms after the epoch).
@@ -226,6 +230,7 @@ impl Shared {
             st.turned.remove(&sid);
             st.at_work.remove(&sid);
             st.poked.remove(&sid);
+            st.prompt_unread.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
             st.turn_told.remove(&sid);
@@ -270,16 +275,6 @@ impl Shared {
     }
 }
 
-/// Start the worker and rebuild the table; how many helpers carried
-/// over.
-fn begin(s: &Arc<Shared>, live: impl FnOnce() -> HashSet<u64>) -> std::io::Result<usize> {
-    work::start(Arc::clone(s))?;
-    let n = rebuild::rebuild(s, live);
-    // the worker worked out its sleep before there was a table
-    s.wake();
-    Ok(n)
-}
-
 pub struct HelpersPlugin {
     /// Claude and kimi helpers: where their turn is, since their last stop.
     in_turn: HashMap<u64, turn::Turn>,
@@ -309,7 +304,7 @@ impl Plugin for HelpersPlugin {
         self.parked_parents = tick::Parked::default();
         let w = Arc::clone(&s);
         super::claudecode::with_helpers::on_account_changed(Arc::new(move || w.wake()));
-        let n = begin(&s, rebuild::live_shadows).map_err(|e| PluginError::Other(format!("helpers worker: {e}")))?;
+        let n = rebuild::begin(&s, rebuild::live_shadows).map_err(|e| PluginError::Other(format!("helpers worker: {e}")))?;
         self.in_turn = turn::turns_at_start(&s.table());
         s.publish_turns(&self.in_turn);
         // after the table: a rebuild closes what it finds half started

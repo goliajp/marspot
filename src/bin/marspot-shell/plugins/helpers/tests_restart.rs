@@ -98,7 +98,7 @@ fn helpers_a_carried_helper_past_its_deadline_is_closed_at_the_start() {
     let h = Helper { delivered_ms: Some(1_000), ..Helper::new(sid, started(10, "shell", AgentKind::Claude), 500) };
     records::append(&s.log, records::ROTATE_AT, &s.table(), sid, 1, &Event::Carried(Box::new(h)));
     // the worker may close it before `begin` returns, or once woken by it
-    let n = super::begin(&s, || HashSet::from([sid]));
+    let n = super::rebuild::begin(&s, || HashSet::from([sid]));
     assert_eq!(n.unwrap(), 1, "carried over");
     assert!(within(|| s.table().map.is_empty()), "its budget ran out long ago");
     assert!(records::replay(&s.log, &|_| None).unwrap().table.map.is_empty());
@@ -223,7 +223,7 @@ fn helpers_a_second_start_takes_over_what_the_first_left() {
 fn helpers_a_second_start_ends_the_first_worker_and_loses_no_fact() {
     let dir = temp("second");
     let s = Arc::new(Shared::at(dir.join("events.log")));
-    super::begin(&s, HashSet::new).unwrap();
+    super::rebuild::begin(&s, HashSet::new).unwrap();
     let first = s.epoch.load(Ordering::Acquire);
     let old = s.jobs.lock().unwrap().clone().unwrap();
     feed(&s, 100, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
@@ -234,7 +234,7 @@ fn helpers_a_second_start_ends_the_first_worker_and_loses_no_fact() {
             s2.record(100, Event::AccountChanged(format!("P{i}")));
         }
     });
-    assert_eq!(super::begin(&s, || HashSet::from([100])).unwrap(), 1);
+    assert_eq!(super::rebuild::begin(&s, || HashSet::from([100])).unwrap(), 1);
     writer.join().unwrap();
     assert_eq!(s.table().map[&100].account, "P399");
     assert_eq!(*s.table(), records::replay(&s.log, &|_| None).unwrap().table);
