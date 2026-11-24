@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.695"  # a reading already past the lookback starts no trend series
+shell   = "0.7.696"  # the account allocation is worked out each scan and logged, moving nothing
 core    = "0.12.684"  # the text lane writes a lone character after a wide one in place
 session = "0.11.443"  # the text lane writes a lone character after a wide one in place

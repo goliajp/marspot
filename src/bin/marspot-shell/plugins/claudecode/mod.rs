@@ -58,6 +58,13 @@ mod cycle;
 mod cycle_op;
 mod plugin;
 mod bind_meta;
+mod allocation_adapter;
+mod allocation_decide;
+mod allocation_events;
+mod allocation_inputs;
+mod allocation_line;
+mod allocation_usage;
+mod worker_loop;
 pub(in crate::plugins) mod with_helpers;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
@@ -106,7 +113,6 @@ use crate::plugins::{
     LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
     PLUGIN_API_VERSION,
 };
-
 
 pub struct ClaudecodePlugin {
     initialised: bool,
@@ -270,11 +276,7 @@ impl ClaudecodePlugin {
         }
     }
 
-
 }
-
-
-
 
 /// `CLAUDE_CONFIG_DIR` as a path, or the CLI's default when unset.
 pub(crate) fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
@@ -283,8 +285,6 @@ pub(crate) fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
         None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude"),
     }
 }
-
-
 
 /// Encode a filesystem path into claude's project directory naming
 /// convention (`/Users/foo/bar` → `-Users-foo-bar`).
@@ -326,13 +326,6 @@ pub(crate) fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
 pub(crate) fn pane_claude(s: &crate::observe::Session) -> Option<&crate::observe::Proc> {
     s.agent(|p| p.name() == "claude")
 }
-
-
-// ============================================================
-// Background scan worker — owns all disk IO + pidtree walks
-// that previously ran on the plugin tick.  See `ClaudecodePlugin`
-// field docs and `init()` for the wiring.
-// ============================================================
 
 /// What `WorkerCtx::scan_once` returns to `tick`.  Owned, Send-safe.
 /// Alias for the shared alphabet: what claudecode reports about a
@@ -455,4 +448,3 @@ mod tests {
     }
 
 }
-
