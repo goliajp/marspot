@@ -206,7 +206,7 @@ for run in claude:hangup claude:kill codex:hangup gemini:hangup kimi:kill; do
     check "inside: its access token and no refresh token" grep -qxF 'codex login "refresh_token":"" 1' "$R"
     check "inside: its own home and nothing of the account" grep -qxF "codex home auth.json config.toml" "$R"
     check "the login file is private" test "$(stat -f %Lp "$SB/$sid/home/auth.json")" = 600
-    check "the token is on no command line" bash -c "! grep -q ACCESS-SIG //run.sh //resume.sh"
+    check "the token is on no command line" bash -c "! grep -q ACCESS-SIG '$SB/$sid/run.sh' '$SB/$sid/resume.sh' && grep -q ACCESS-SIG '$SB/$sid/home/auth.json'"
   else
     check "inside: its login and nothing beside it" grep -qx "login a-login 0" "$R"
     creds="$SB/account/credentials/kimi-code.json" how="replaced"

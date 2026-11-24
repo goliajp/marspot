@@ -34,23 +34,28 @@ pub(super) fn refused(screen: &str) -> bool {
     WORDS.iter().any(|w| s.contains(w))
 }
 
-/// Judge a stop at `now`: the token in the container ended at `expires`,
-/// the account's login on the host ends at `newer`.
+/// Judge a stop at `now`: the token in the container ends at `expires`,
+/// the account's login on the host ends at `newer`.  A token may be
+/// refused before its end, as when the host renewed the account's login
+/// and the old one stopped being taken: then a newer one goes in as for
+/// one that ended.
 pub(super) fn judge(expires: i64, newer: Option<i64>, screen: &str, now: i64) -> Option<Over> {
-    if expires > now {
+    let refused = refused(screen);
+    if expires > now && !refused {
         return None;
     }
     let ago = (now - expires) / 60_000;
-    if !refused(screen) {
+    if !refused {
         return Some(Over { note: format!("The login in its container expired {ago} min ago: it may not be able to go on."), renewed: false });
     }
-    let renewed = newer.is_some_and(|n| n > now);
+    let when = if expires > now { format!("the login in its container still had {} min left", -ago) } else { format!("the login in its container expired {ago} min ago") };
+    let renewed = newer.is_some_and(|n| n > now.max(expires));
     let then = if renewed {
         "the account's login has been renewed on the host since, so the container is started again and goes on with the same conversation"
     } else {
         "the account's login on the host has not been renewed since, so it cannot go on"
     };
-    Some(Over { note: format!("It was refused: the login in its container expired {ago} min ago; {then}."), renewed })
+    Some(Over { note: format!("It was refused: {when}; {then}."), renewed })
 }
 
 /// What is to be said of `h`'s login at `stop`, `screen` being the
@@ -60,9 +65,9 @@ pub(in super::super) fn at_stop(s: &Shared, h: &Helper, stop: Stop, screen: Opti
     if !h.contained() || !matches!(agent, AgentKind::Claude | AgentKind::Codex) || stop.is_last() || h.result_new {
         return None;
     }
-    let (expires, now) = (login::expires_ms(&s.dir_of(h.sid))?, records::now_ms() as i64);
+    let (expires, now, screen) = (login::expires_ms(&s.dir_of(h.sid))?, records::now_ms() as i64, screen.unwrap_or_default());
     let newer = || login::of_label(agent, &h.account).and_then(|l| l.expires_at());
-    judge(expires, (expires <= now).then(newer).flatten(), screen.unwrap_or_default(), now)
+    judge(expires, (expires <= now || refused(screen)).then(newer).flatten(), screen, now)
 }
 
 /// Start helper `sid`'s container again with the login `account` has

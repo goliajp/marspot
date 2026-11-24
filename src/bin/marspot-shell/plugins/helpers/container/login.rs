@@ -77,9 +77,17 @@ pub(super) fn none_text(agent: AgentKind, left: &Left, budget_min: u32) -> Strin
     )
 }
 
+/// The numbered accounts, or the default one when there are none.
 fn homes(agent: AgentKind) -> Vec<(u8, PathBuf)> {
     let homes = handoff::profiles(agent_of(agent));
-    if homes.is_empty() && agent == AgentKind::Claude { vec![(0, crate::plugins::claudecode::config_dir_or_default(None))] } else { homes }
+    if !homes.is_empty() {
+        return homes;
+    }
+    match agent {
+        AgentKind::Claude => vec![(0, crate::plugins::claudecode::config_dir_or_default(None))],
+        AgentKind::Codex => std::env::var_os("HOME").map(|h| (0, PathBuf::from(h).join(".codex"))).into_iter().collect(),
+        _ => homes,
+    }
 }
 
 fn read(agent: AgentKind, home: &Path, within: Duration) -> Option<Login> {
@@ -137,10 +145,17 @@ pub(super) fn hand_over(dir: &Path, l: &Login) -> Result<(), Reject> {
     match l {
         Login::Claude(l) => write_env(dir, l),
         Login::Codex(a) => {
-            let wrote = codex_auth::write(&dir.join("home"), a).and_then(|()| std::fs::write(dir.join("expires"), a.expires_at.unwrap_or(0).to_string()));
+            let ends = ends(a.expires_at)?;
+            let wrote = codex_auth::write(&dir.join("home"), a).and_then(|()| std::fs::write(dir.join("expires"), ends.to_string()));
             wrote.map_err(|e| Reject::new(ErrorCode::Internal, format!("the login file: {e}")))
         }
     }
+}
+
+/// When a login to be handed over ends: one that does not say cannot be
+/// told apart from one that has ended.
+fn ends(expires_at: Option<i64>) -> Result<i64, Reject> {
+    expires_at.filter(|ms| *ms > 0).ok_or_else(|| Reject::new(ErrorCode::Internal, "the account's token has no end"))
 }
 
 /// Write `l` where `docker run --env-file` reads it, and when it ends.
@@ -149,6 +164,7 @@ pub(super) fn write_env(dir: &Path, l: &ClaudeLogin) -> Result<(), Reject> {
     if l.token.is_empty() || !l.token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(internal("the account's login cannot go into an env file".into()));
     }
+    let ends = ends(l.expires_at)?;
     let file = dir.join("env");
     let write = || {
         if file.exists() {
@@ -156,7 +172,7 @@ pub(super) fn write_env(dir: &Path, l: &ClaudeLogin) -> Result<(), Reject> {
         }
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&file)?;
         f.write_all(format!("CLAUDE_CODE_OAUTH_TOKEN={}\n", l.token).as_bytes())?;
-        std::fs::write(dir.join("expires"), l.expires_at.unwrap_or(0).to_string())
+        std::fs::write(dir.join("expires"), ends.to_string())
     };
     write().map_err(|e| internal(format!("the env file: {e}")))
 }

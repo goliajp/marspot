@@ -124,3 +124,70 @@ fn container_codex_refused_login_is_judged_like_claudes() {
     assert!(over.note.contains("the login in its container expired"), "{}", over.note);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn container_codex_login_refused_before_its_end_takes_the_newer_one() {
+    let refusal = "■ unexpected status 401 Unauthorized: Could not parse your authentication token. Please try signing in again.";
+    let now = 100 * 60_000;
+    let expires = now + 30 * 60_000;
+    assert!(expired::judge(expires, None, "• Working (3m 10s)", now).is_none(), "not refused, and not over");
+    let o = expired::judge(expires, Some(expires + 1), refusal, now).unwrap();
+    assert!(o.renewed && o.note.contains("still had 30 min left") && o.note.contains("started again"), "{}", o.note);
+    let o = expired::judge(expires, Some(expires), refusal, now).unwrap();
+    assert!(!o.renewed && o.note.contains("has not been renewed"), "the same login on the host: {}", o.note);
+}
+
+#[test]
+fn container_codex_ask_and_own_flags_run_without_its_sandbox() {
+    let (dir, run) = written(AgentKind::Codex, "ask");
+    assert!(run.contains(" codex -m 'a-model' '-s' 'danger-full-access' \"$(cat "), "{run}");
+    assert!(!run.contains("'-a'"), "it asks as codex does by default: {run}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let (dir, run) = written(AgentKind::Codex, "-c model_verbosity=low");
+    assert!(run.contains(" '-c' 'model_verbosity=low' '-s' 'danger-full-access' "), "{run}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    for kept in ["--dangerously-bypass-approvals-and-sandbox", "-a on-request --sandbox danger-full-access"] {
+        let (dir, run) = written(AgentKind::Codex, kept);
+        assert_eq!(run.matches("danger-full-access").count(), kept.matches("danger-full-access").count(), "{run}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    for refused in ["-s workspace-write", "--sandbox=read-only", "--full-auto", "-c sandbox_mode=\"workspace-write\""] {
+        let dir = temp("container-codex-sandbox");
+        super::tests::account(AgentKind::Codex, &dir.join("account"));
+        let r = write_files(&dir, 41, &super::tests::args(AgentKind::Codex), "proj#12", refused, &super::tests::ready(AgentKind::Codex, &dir.join("account")));
+        let e = r.err().unwrap_or_else(|| panic!("{refused} was taken"));
+        assert!(e.message.contains("the container is the sandbox"), "{}", e.message);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn container_codex_login_without_an_end_is_not_handed_over() {
+    let dir = temp("container-codex-no-end");
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    let a = codex_auth::parse(r#"{"tokens":{"id_token":"x","access_token":"not-a-jwt","refresh_token":"r"}}"#).unwrap();
+    assert!(a.expires_at.is_none());
+    let e = login::hand_over(&dir, &login::Login::Codex(a)).err().unwrap();
+    assert!(e.message.contains("has no end"), "{}", e.message);
+    assert!(!dir.join("expires").exists() && !dir.join("home/auth.json").exists());
+    // a file that cannot be put in place leaves no part of a token behind
+    std::fs::create_dir_all(dir.join("home/auth.json/x")).unwrap();
+    assert!(codex_auth::write(&dir.join("home"), &auth()).is_err());
+    assert!(!dir.join("home/.auth.json.marspot").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn container_codex_default_home_is_an_account() {
+    let dir = temp("container-codex-default");
+    account(&dir.join(".codex"));
+    let mut env = marspot_term::test_env::EnvGuard::new();
+    env.set("HOME", dir.display().to_string());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (a, l) = login::pick(AgentKind::Codex, None, None, 30, until).unwrap_or_else(|r| panic!("{}", r.message));
+    assert_eq!((a.n, a.home.clone()), (0, dir.join(".codex")));
+    assert!(l.expires_at().is_some());
+    assert!(login::of_label(AgentKind::Codex, &a.label()).is_some(), "found again by its label");
+    drop(env);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

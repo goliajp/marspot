@@ -92,6 +92,10 @@ pub(super) fn write(home: &Path, a: &Auth) -> std::io::Result<()> {
         std::fs::remove_file(&new)?;
     }
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&new)?;
-    f.write_all(text(a).as_bytes())?;
-    std::fs::rename(&new, home.join("auth.json"))
+    let done = f.write_all(text(a).as_bytes()).and_then(|()| std::fs::rename(&new, home.join("auth.json")));
+    if done.is_err() {
+        // a part of a token is still a part of one
+        let _ = std::fs::remove_file(&new);
+    }
+    done
 }

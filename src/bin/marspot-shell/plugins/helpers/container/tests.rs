@@ -27,7 +27,7 @@ pub(super) fn args(agent: AgentKind) -> HelperStartArgs {
     }
 }
 
-fn ready(agent: AgentKind, home: &Path) -> Ready {
+pub(super) fn ready(agent: AgentKind, home: &Path) -> Ready {
     Ready {
         docker: PathBuf::from("/usr/local/bin/docker"),
         image_there: true,
@@ -203,7 +203,8 @@ fn container_account_needs_a_login_that_outlives_the_budget() {
 fn container_stop_with_an_expired_login_says_so() {
     let refusal = "● Please run /login · API Error: 401 OAuth token has expired";
     let now = 100 * 60_000;
-    assert!(expired::judge(now + 1, None, refusal, now).is_none(), "the login is still good");
+    assert!(expired::judge(now + 1, None, "● Done.", now).is_none(), "the login is still good");
+    assert!(!expired::judge(now + 1, None, refusal, now).unwrap().renewed, "refused before its end, and nothing newer");
     let o = expired::judge(now - 5 * 60_000, None, refusal, now).unwrap();
     assert!(!o.renewed && o.note.contains("expired 5 min ago") && o.note.contains("has not been renewed"), "{}", o.note);
     assert!(!expired::judge(now - 1, Some(now - 1), refusal, now).unwrap().renewed, "the same login on the host");

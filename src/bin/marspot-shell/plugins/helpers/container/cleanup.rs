@@ -32,8 +32,11 @@ fn spawn(what: &str, f: impl FnOnce() + Send + 'static) {
 /// remove is the next start's to sweep.
 pub(in super::super) fn remove_later(sid: u64, root: PathBuf) {
     spawn("stop", move || {
-        // read when the container starts, and not after
-        let _ = std::fs::remove_file(root.join(sid.to_string()).join("env"));
+        // read when the container starts, and not after: claude's token,
+        // and codex's, which is in a directory the container writes to
+        let dir = root.join(sid.to_string());
+        let _ = std::fs::remove_file(dir.join("env"));
+        let _ = std::fs::remove_file(dir.join("home/auth.json"));
         let Some(d) = docker::find() else { return };
         let name = docker::container_name(sid);
         remove(&d, &name);

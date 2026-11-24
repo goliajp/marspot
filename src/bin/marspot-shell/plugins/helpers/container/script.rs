@@ -71,13 +71,14 @@ fn env(agent: AgentKind) -> &'static [&'static str] {
     }
 }
 
-fn mode_flags(agent: AgentKind, mode: &str) -> Vec<String> {
+fn mode_flags(agent: AgentKind, mode: &str) -> Result<Vec<String>, Reject> {
     let own: Vec<&str> = match (agent, mode) {
         (AgentKind::Claude, "auto") => vec!["--permission-mode", "bypassPermissions"],
         (AgentKind::Gemini, "auto") => vec!["--approval-mode", "yolo"],
         (AgentKind::Kimi, "auto") => vec!["--auto"],
-        // codex's own sandbox cannot start under docker's seccomp: the container is the sandbox
-        (AgentKind::Codex, "auto") => vec!["-a", "never", "-s", "danger-full-access"],
+        (AgentKind::Codex, "auto") => vec!["-a", "never", "-s", FULL],
+        (AgentKind::Codex, "ask") => vec!["-s", FULL],
+        (AgentKind::Codex, custom) => codex_custom(custom)?,
         (_, "ask") => Vec::new(),
         (_, custom) => custom.split_whitespace().collect(),
     };
@@ -85,7 +86,33 @@ fn mode_flags(agent: AgentKind, mode: &str) -> Vec<String> {
         AgentKind::Gemini => &["--skip-trust", "--include-directories", SHARE],
         AgentKind::Claude | AgentKind::Codex | AgentKind::Kimi => &[],
     };
-    own.iter().chain(more).map(|f| (*f).to_string()).collect()
+    Ok(own.iter().chain(more).map(|f| (*f).to_string()).collect())
+}
+
+/// codex's own sandbox cannot start under docker's seccomp, so every
+/// command in it would fail: in a container the container is the
+/// sandbox, and codex is told to use none.
+const FULL: &str = "danger-full-access";
+
+/// Arguments given for codex in a container, with no sandbox of its own.
+fn codex_custom(custom: &str) -> Result<Vec<&str>, Reject> {
+    let words: Vec<&str> = custom.split_whitespace().collect();
+    let other = |w: &[&str]| match w {
+        ["-s" | "--sandbox", v, ..] => *v != FULL,
+        [w, ..] => w.strip_prefix("--sandbox=").is_some_and(|v| v != FULL) || *w == "--full-auto" || (w.contains("sandbox_mode=") && !w.trim_end_matches(['"', '\'']).ends_with(FULL)),
+        [] => false,
+    };
+    if (0..words.len()).any(|i| other(&words[i..])) {
+        let why = "codex's own sandbox cannot start in a container, so every command in it would fail: in a container leave its sandbox out \
+                   (the container is the sandbox), or use isolation host";
+        return Err(bad(why));
+    }
+    let given = |w: &&str| matches!(*w, "-s" | "--sandbox" | "--dangerously-bypass-approvals-and-sandbox" | "--yolo") || w.starts_with("--sandbox=") || w.contains("sandbox_mode=");
+    let mut out = words.clone();
+    if !words.iter().any(given) {
+        out.extend(["-s", FULL]);
+    }
+    Ok(out)
 }
 
 /// The agent and its arguments in the container.
@@ -100,7 +127,7 @@ fn agent_words(s: &Spec, again: bool) -> Result<Vec<String>, Reject> {
         let flag = if s.agent == AgentKind::Claude { "--model" } else { "-m" };
         w.extend([flag.into(), word(m)?]);
     }
-    for f in mode_flags(s.agent, s.mode) {
+    for f in mode_flags(s.agent, s.mode)? {
         w.push(word(&f)?);
     }
     let task = if again { word(GO_ON)? } else { format!("\"$(cat {})\"", word(mountable(&s.dir.join("task.md"))?)?) };
