@@ -30,6 +30,8 @@ pub mod metric {
     /// The wide step, as the process monitor.
     pub const PANEL_W: f64 = 720.0;
     pub const ROW_H: f64 = spec::control::BUTTON_H + 2.0 * spec::card::ROW_PAD_Y;
+    /// A row with less room than this for its text has buttons below it.
+    pub const TEXT_MIN: f64 = 160.0;
     /// Room for how long a pane has run.
     pub const RAN_W: f64 = 72.0;
     pub const NAME: PanelText = PanelText::Label;
@@ -40,14 +42,16 @@ const MOVE: u32 = 1;
 const CLOSE_ONE: u32 = 2;
 const CLOSE_ALL: u32 = 3;
 const CONTROL: u32 = 4;
+const VIEW: u32 = 5;
 /// Widget ids: a row's or a group's number from its kind's base.
 const IDS_EACH: u32 = 10_000;
 
-/// What the panel was asked to do: `Move` and `Close` a row by its
+/// What the panel was asked to do: `View`, `Move` and `Close` a row by its
 /// number from the top, `CloseAll` and `Control` a group by its.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
     None,
+    View(usize),
     Move(usize),
     Close(usize),
     CloseAll(usize),
@@ -58,6 +62,7 @@ pub enum Ask {
 pub fn asked(a: Action) -> Ask {
     let i = a.arg as usize;
     match a.id {
+        VIEW => Ask::View(i),
         MOVE => Ask::Move(i),
         CLOSE_ONE => Ask::Close(i),
         CLOSE_ALL => Ask::CloseAll(i),
@@ -120,6 +125,23 @@ fn stacked(panel_w: f64, m: Measure<'_>) -> bool {
     both + spec::px(space::CONTROL_TO_CONTROL + 2.0 * content::PAD_X) > panel_w
 }
 
+/// What a row's buttons say, and the room beside them for the rest of
+/// the row in a panel `panel_w` wide.
+fn beside_buttons(panel_w: f64, m: Measure<'_>) -> ([&'static str; 3], f64) {
+    let labels = [t(Msg::HelperViewHere), t(Msg::HelperMoveToWindow), t(Msg::HelperClose)];
+    let buttons: f64 = labels.map(|label| controls::button_size(label, m).0).iter().sum();
+    let pads = spec::px(content::PAD_X + card::ROW_PAD_X);
+    (labels, panel_w - buttons - 2.0 * pads - 4.0 * spec::px(space::CONTROL_TO_CONTROL))
+}
+
+/// How tall a row is in a panel `panel_w` wide: with no room for its
+/// text beside its buttons, all but the first are below it.
+fn row_h(panel_w: f64, m: Measure<'_>) -> f64 {
+    let fits = beside_buttons(panel_w, m).1 >= spec::px(metric::TEXT_MIN);
+    let more = if fits { 0.0 } else { spec::px(control::BUTTON_H) + spec::px(card::ROW_PAD_Y) };
+    spec::px(metric::ROW_H) + more
+}
+
 /// How tall the content for `groups` is in a panel `panel_w` wide.
 pub fn content_h(groups: &[HelperGroup], panel_w: f64, m: Measure<'_>) -> f64 {
     if groups.is_empty() {
@@ -127,9 +149,10 @@ pub fn content_h(groups: &[HelperGroup], panel_w: f64, m: Measure<'_>) -> f64 {
     }
     let button_h = spec::px(control::BUTTON_H);
     let both = if stacked(panel_w, m) { 2.0 * button_h + spec::px(space::CONTROL_TO_CONTROL) } else { button_h };
+    let row_h = row_h(panel_w, m);
     let group = |g: &HelperGroup| {
         let buttons = if g.control == Control::DeniedAbove { button_h } else { both };
-        panel_chrome::heading_height() + g.rows.len() as f64 * spec::px(metric::ROW_H) + spec::px(space::CARD_TO_FOOTER) + buttons
+        panel_chrome::heading_height() + g.rows.len() as f64 * row_h + spec::px(space::CARD_TO_FOOTER) + buttons
     };
     groups.iter().map(group).sum::<f64>() + (groups.len() - 1) as f64 * spec::px(space::CARD_TO_HEADING)
 }
@@ -219,15 +242,17 @@ pub fn describe(ui: &mut Ui<'_>, fm: &FontMeasure<'_>, frame: (f64, f64), backdr
 
 /// One row, in a panel `panel_w` wide: number `i` from the top.
 fn row(ui: &mut Ui<'_>, m: Measure<'_>, panel_w: f64, i: usize, r: &HelperRow, now_unix: u64) {
-    let (move_to, close) = (t(Msg::HelperMoveToWindow), t(Msg::HelperClose));
-    let buttons = controls::button_size(move_to, m).0 + controls::button_size(close, m).0;
-    let pads = spec::px(content::PAD_X + card::ROW_PAD_X);
+    let ([view, move_to, close], room) = beside_buttons(panel_w, m);
+    let height = row_h(panel_w, m);
+    let below = height > spec::px(metric::ROW_H);
+    let view_w = controls::button_size(view, m).0;
+    let inside = panel_w - 2.0 * spec::px(content::PAD_X + card::ROW_PAD_X);
     let gaps = spec::px(space::CONTROL_TO_CONTROL);
-    // in a window with no room for all of it, the buttons stay
-    let room = panel_w - buttons - 2.0 * pads - 3.0 * gaps;
+    let room = if below { inside - view_w - 2.0 * gaps } else { room };
     let ran_w = Some(spec::px(metric::RAN_W)).filter(|w| *w < room);
+    let gap = Length::Pt(space::CONTROL_TO_CONTROL);
     let text_w = Length::Px((room - ran_w.unwrap_or(0.0)).max(0.0));
-    ui.hstack(|ui| {
+    let text = |ui: &mut Ui<'_>| {
         ui.vstack(|ui| {
             ui.text_copy(font_of(metric::NAME), Tone::Fg.into(), &r.name).truncate();
             ui.text_copy(font_of(metric::DOING), Tone::FgMuted.into(), &r.doing).truncate();
@@ -245,14 +270,32 @@ fn row(ui: &mut Ui<'_>, m: Measure<'_>, panel_w: f64, i: usize, r: &HelperRow, n
             })
             .width(Length::Px(w));
         }
+    };
+    let others = |ui: &mut Ui<'_>, m: Measure<'_>| {
         preset::button(ui, m, id(MOVE, i), Action::new(MOVE, i as u32), move_to, ButtonKind::Secondary, false);
         press_button(ui, m, id(CLOSE_ONE, i), Action::new(CLOSE_ONE, i as u32), close);
+    };
+    let pad = Edges::xy(Length::Pt(card::ROW_PAD_X), if below { Length::Pt(card::ROW_PAD_Y) } else { Length::ZERO });
+    ui.vstack(|ui| {
+        ui.hstack(|ui| {
+            text(ui);
+            preset::button(ui, m, id(VIEW, i), Action::new(VIEW, i as u32), view, ButtonKind::Secondary, false);
+            if !below {
+                others(ui, m);
+            }
+        })
+        .width(Length::Pct(1.0))
+        .height(if below { Length::Pt(control::BUTTON_H) } else { Length::Px(height) })
+        .gap(gap)
+        .align_cross(AlignCross::Center);
+        if below {
+            ui.hstack(|ui| others(ui, m)).gap(gap);
+        }
     })
     .width(Length::Pct(1.0))
-    .height(Length::Pt(metric::ROW_H))
-    .padding(Edges::xy(Length::Pt(card::ROW_PAD_X), Length::ZERO))
-    .gap(Length::Pt(space::CONTROL_TO_CONTROL))
-    .align_cross(AlignCross::Center)
+    .height(Length::Px(height))
+    .padding(pad)
+    .gap(Length::Pt(card::ROW_PAD_Y))
     .whole();
 }
 

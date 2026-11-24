@@ -51,8 +51,8 @@ impl CoreApp {
         if self.plugin_takes_wheel(wi, idx, lines) {
             return;
         }
-        let tui_scroll = win!(self, wi).panes[idx].session().is_l3()
-            && win!(self, wi).panes[idx].session().l3_mouse_tracking_active();
+        let tui_scroll = self.shown(wi, idx).session().is_l3()
+            && self.shown(wi, idx).session().l3_mouse_tracking_active();
         // A wheel tick during a drag moves OUR viewport — on a pane
         // that has one.  The anchor is an absolute line number, so it
         // stays on the line it was put on while the far end follows
@@ -65,9 +65,9 @@ impl CoreApp {
         self.note_wheel_over_selection(wi, idx, tui_scroll);
         if win!(self, wi).selection_dragging
             && win!(self, wi).selection.is_some_and(|s| s.session_idx == idx)
-            && !win!(self, wi).panes[idx].program_owns_scroll()
+            && !self.shown(wi, idx).program_owns_scroll()
         {
-            let moved = win!(self, wi).panes[idx].scroll_own_view(lines);
+            let moved = self.shown_mut(wi, idx).scroll_own_view(lines);
             if moved != 0 {
                 // The far end travels with the viewport; the anchor does
                 // not.  Both are absolute line numbers counted back from
@@ -109,13 +109,13 @@ impl CoreApp {
             }
             win!(self, wi).tape_scroll_gate =
                 Some(now + std::time::Duration::from_millis(120));
-            let rows = win!(self, wi).panes[idx].session().grid().rows() as i32;
+            let rows = self.shown(wi, idx).session().grid().rows() as i32;
             let cap = (rows / 8).max(1);
             lines.clamp(-cap, cap)
         } else {
             lines
         };
-        if win!(self, wi).panes[idx].apply_scroll_lines(lines) {
+        if self.shown_mut(wi, idx).apply_scroll_lines(lines) {
             // The program just repainted at a new position.  A tape
             // following this pane reads the shift off the next frame
             // and carries the selection with it; without one there is
@@ -185,19 +185,19 @@ impl CoreApp {
         // opening a history view is a surprise.  A closed view plus a
         // downward tick is therefore not ours: it falls through to the
         // pane's own routing untouched.
-        if let Some(sid) = win!(self, wi).panes[idx].session().shelld_session_id()
+        if let Some(sid) = self.shown(wi, idx).session().shelld_session_id()
             && self.pane_wheel_keys.contains_key(&sid) && lines != 0 {
                 let mut buf: Vec<u8> = Vec::new();
                 let ticks = lines.unsigned_abs().min(
-                    win!(self, wi).panes[idx].session().grid().rows().max(1) as u32,
+                    self.shown(wi, idx).session().grid().rows().max(1) as u32,
                 );
                 // Read the state, do not remember it — see `WheelKeys`.
                 let open = {
                     let k = &self.pane_wheel_keys[&sid];
                     // The program's own answer, when it gave one.
                     let alt_scroll =
-                        win!(self, wi).panes[idx].session().l3_alt_scroll_active();
-                    let grid = win!(self, wi).panes[idx].session().grid();
+                        self.shown(wi, idx).session().l3_alt_scroll_active();
+                    let grid = self.shown(wi, idx).session().grid();
                     marspot::wheel_marker::view_is_open(
                         alt_scroll,
                         grid.cols(),
@@ -267,7 +267,7 @@ impl CoreApp {
                         );
                         self.pane_wheel_open.insert(sid, open);
                     }
-                    win!(self, wi).panes[idx].session_mut().forward_program_keys(&buf);
+                    self.shown_mut(wi, idx).session_mut().forward_program_keys(&buf);
                     win!(self, wi).needs_render = true;
                     return true;
                 }
@@ -290,9 +290,9 @@ impl CoreApp {
                 idx,
                 win!(self, wi).selection_dragging,
                 tui_scroll,
-                win!(self, wi).panes[idx].session().l3_alt_screen_active(),
-                win!(self, wi).panes[idx].session().l3_scrollback_len(),
-                win!(self, wi).panes[idx].view_offset(),
+                self.shown(wi, idx).session().l3_alt_screen_active(),
+                self.shown(wi, idx).session().l3_scrollback_len(),
+                self.shown(wi, idx).view_offset(),
             );
             if self.wheel_sel_path.as_deref() != Some(here.as_str()) {
                 lx_info!("core.wheel.selection", &here);

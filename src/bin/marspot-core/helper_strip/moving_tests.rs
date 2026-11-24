@@ -132,9 +132,10 @@ fn the_wheel_on_it_does_not_reach_the_program() {
 
 #[test]
 fn a_button_let_go_on_it_is_up_where_the_program_last_heard_of() {
-    assert_eq!(last_heard((0, 4, 5), Some((0, 9, 2))), (9, 2));
-    assert_eq!(last_heard((0, 4, 5), Some((1, 9, 2))), (4, 5), "another pane's");
-    assert_eq!(last_heard((0, 4, 5), None), (4, 5));
+    assert_eq!(last_heard((0, 0, 4, 5), Some((0, 0, 9, 2))), (0, 0, 9, 2));
+    assert_eq!(last_heard((0, 0, 4, 5), Some((0, 1, 9, 2))), (0, 0, 4, 5), "another pane's");
+    assert_eq!(last_heard((0, 0, 4, 5), Some((1, 0, 9, 2))), (0, 0, 4, 5), "another window's");
+    assert_eq!(last_heard((0, 0, 4, 5), None), (0, 0, 4, 5));
 }
 
 /// The same text in a strip and printed in a terminal.

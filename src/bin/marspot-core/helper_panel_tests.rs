@@ -47,6 +47,7 @@ fn press(app: &mut CoreApp, want: Ask) {
 fn helper_panel_buttons_ask_the_shell_and_move_the_pane() {
     let sb = sandbox();
     let (mut app, rx, psid) = app_with_parent(&sb);
+    (app.windows[0].w_phys, app.windows[0].h_phys) = (1600.0, 1000.0);
     let a = open_shadow(&mut app, &rx, 7, psid);
     let b = open_shadow(&mut app, &rx, 8, a);
     assert_eq!(app.pane_control.shadows.family.count(psid), 2, "its own and the one below that");

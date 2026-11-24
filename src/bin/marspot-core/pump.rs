@@ -34,32 +34,21 @@ impl CoreApp {
             let mut window_total = 0usize;
             let w = &mut win!(self, wi);
             for (i, p) in w.panes.iter_mut().enumerate() {
-                // FREEZE_GRID: skip the pump entirely so the grid the
-                // renderer sees stays exactly as it was when the plugin
-                // took over.  PTY bytes still queue (shelld + client
-                // channel), they get consumed in one shot when the
-                // session ends and pump runs again.
-                let is_frozen = p
-                    .shelld_session_id()
-                    .is_some_and(|sid| frozen.contains(&sid));
-                if is_frozen {
-                    continue;
+                // the hidden host is read, so that it is as it would
+                // have been when it is shown again, and redraws nothing
+                let (n, pushed) = read_frame(p, &frozen);
+                let (shown_n, shown_pushed) = match p.peeked() {
+                    None if p.peek.is_some() => (0, 0),
+                    None => (n, pushed),
+                    Some(sid) => match self.shadows.iter_mut().find(|s| s.shelld_session_id() == Some(sid)) {
+                        Some(v) => read_frame(v, &frozen),
+                        None => (0, 0),
+                    },
+                };
+                if p.peek.is_some() {
+                    total += n;
                 }
-                let n = p.pump();
-                window_total += n;
-                let pushed = p.drain_scroll_push_delta();
-                // Auto-pin the viewport when a row scrolled into
-                // scrollback while the user is reading history.  L3 runs
-                // the symmetric bump in its publish loop so view_offset
-                // stays consistent across the L2↔L3 boundary without a
-                // round-trip.  Without this, every line the shell emits
-                // while the user is scrolled back slides the visible
-                // content downward by one row — the "老内容被新内容覆盖"
-                // symptom.
-                if pushed > 0 {
-                    let pushed_u16 = pushed.min(u16::MAX as u64) as u16;
-                    p.bump_view_offset_on_scroll_push(pushed_u16);
-                }
+                window_total += shown_n;
                 // Slide the selection anchor + focus when the PTY pushed
                 // rows into scrollback so the highlight tracks the same
                 // bytes as they roll up.  We do NOT clear the selection
@@ -70,8 +59,8 @@ impl CoreApp {
                 // Keyboard input + new clicks + focus changes still clear
                 // selection in their own paths; PTY autonomy doesn't.
                 if let Some(sel) = w.selection.as_mut()
-                    && sel.session_idx == i && pushed > 0 {
-                        let bump = pushed as u32;
+                    && sel.session_idx == i && shown_pushed > 0 {
+                        let bump = shown_pushed as u32;
                         sel.anchor.1 = sel.anchor.1.saturating_add(bump);
                         sel.focus.1 = sel.focus.1.saturating_add(bump);
                     }
@@ -85,6 +74,7 @@ impl CoreApp {
                 self.sync_selection_tape(wi);
             }
         }
+        self.advance_views(Instant::now());
         self.observe_shadow_exits();
         self.close_ended_panes();
         if self.every_session_lost() {
@@ -94,12 +84,39 @@ impl CoreApp {
         total
     }
 
-    /// A shadow's frames are not read: nobody draws them, and the pane
-    /// reads its newest one when it is placed into a window.  Only its
-    /// session's end is noticed.
+    /// The frames of a shadow nobody views are not read: the pane reads
+    /// its newest one when it is viewed or placed into a window.  Only
+    /// its session's end is noticed.
     fn observe_shadow_exits(&mut self) {
         for p in self.shadows.iter_mut() {
             p.observe_exit();
         }
     }
+}
+
+/// Read pane `p`'s newest frame: whether it took one, and how many rows
+/// that pushed into its history.
+fn read_frame(p: &mut Pane, frozen: &std::collections::HashSet<u64>) -> (usize, u64) {
+    // FREEZE_GRID: skip the pump entirely so the grid the
+    // renderer sees stays exactly as it was when the plugin
+    // took over.  PTY bytes still queue (shelld + client
+    // channel), they get consumed in one shot when the
+    // session ends and pump runs again.
+    if p.shelld_session_id().is_some_and(|sid| frozen.contains(&sid)) {
+        return (0, 0);
+    }
+    let n = p.pump();
+    let pushed = p.drain_scroll_push_delta();
+    // Auto-pin the viewport when a row scrolled into
+    // scrollback while the user is reading history.  L3 runs
+    // the symmetric bump in its publish loop so view_offset
+    // stays consistent across the L2↔L3 boundary without a
+    // round-trip.  Without this, every line the shell emits
+    // while the user is scrolled back slides the visible
+    // content downward by one row — the "老内容被新内容覆盖"
+    // symptom.
+    if pushed > 0 {
+        p.bump_view_offset_on_scroll_push(pushed.min(u16::MAX as u64) as u16);
+    }
+    (n, pushed)
 }

@@ -138,6 +138,9 @@ fn text(m: Msg) -> &'static str {
 
         Msg::PanelHelpers => "Helpers",
         Msg::HelpersEmpty => "No helpers are running",
+        Msg::HelperViewHere => "View here",
+        Msg::HelperViewBack => "Back to this session",
+        Msg::HelperEnded => "ended",
         Msg::HelperMoveToWindow => "Move to window",
         Msg::HelperClose => "Close",
         Msg::HelpersCloseAll => "Close all helpers of this session",

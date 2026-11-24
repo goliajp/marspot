@@ -25,7 +25,7 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("PaneSend", "Type into a pane: one of text (pasted, then Enter unless enter:false), keys (names: ctrl-c, up, enter...) or bytes_b64. pos is the pane's output position, for PaneRead since."),
     ("PaneRun", "Run one command at a pane's shell prompt and wait for it: exit_status and the screen. On reason:timeout, wait on with PaneRead wait:{command_end:true} since:pos."),
     ("PaneRead", "Read a pane's screen, history_lines more above it. wait: first wait, after since (a pos), for one of {text}, {quiet_ms}, {command_end:true}, {prompt:true}, {change:true}, {exit:true}; reason says what ended it."),
-    ("PaneSet", "Change a pane: cols+rows resize a shadow pane; where (window, shadow, peek, unpeek) moves it; close:true closes it."),
+    ("PaneSet", "Change a pane: cols+rows resize a shadow pane; where moves it (window, shadow) or shows it in its parent's place (peek, unpeek); close:true closes it."),
     ("HelperStart", "Start an agent (claude, codex, gemini, kimi) on a task in a shadow pane under yours; its result reaches your inbox when it stops. Optional: cwd, model, profile, mode (auto/ask), resume:\"last\", budget_minutes (30). If others_in_cwd names a session there, SendMessage it first."),
     ("Helpers", "List your helpers (all:true: every one): name, agent, account, state, time left, result_path."),
     ("HelperStop", "Stop a helper by name, or all:true for all of yours."),
@@ -74,6 +74,7 @@ fn schema(tool: &str, cap_s: u32) -> Value {
             ("rows", prop("integer")),
             ("where", obj([("type", Value::from("string")), ("enum", Value::Arr(["window", "shadow", "peek", "unpeek"].map(Value::from).to_vec()))])),
             ("close", prop("boolean")),
+            ("force", prop("boolean")),
         ],
         "HelperStart" => vec![
             ("agent", obj([("type", Value::from("string")), ("enum", Value::Arr(["claude", "codex", "gemini", "kimi"].map(Value::from).to_vec()))])),

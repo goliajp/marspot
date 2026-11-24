@@ -26,7 +26,7 @@ marspot-peer pane run PANE [--timeout S] [--force] COMMAND...
 marspot-peer pane read PANE [-n LINES] [--wait-text S | --wait-quiet MS | --wait-command-end
                             | --wait-prompt | --wait-change | --wait-exit] [--since POS] [--timeout S]
 marspot-peer pane resize PANE COLSxROWS            # shadow panes only
-marspot-peer pane place PANE window|shadow|peek|unpeek
+marspot-peer pane place PANE [--force] window|shadow|peek|unpeek  # peek: shown in its parent's place
 marspot-peer pane close PANE
 marspot-peer pane audit [-n N]
 ```
@@ -49,8 +49,9 @@ Add `--json` to any of them for the app's answer as JSON.
   `rows`, and `cursor` is a screen position, not a line of the text. `--wait-text` sees the raw screen,
   including that status line: right after a run, a wait for `marspot` or
   `run` can be met by it.
-- `send`/`run` refuse with `user_typing` when the person is typing in that pane;
-  `--force` sends anyway. Prefer waiting and trying again.
+- `send`/`run` refuse with `user_typing` when the person is typing in that pane,
+  and `place peek`/`unpeek` when they are typing where it is shown; `--force`
+  does it anyway. Prefer waiting and trying again.
 
 ## Exit codes
 

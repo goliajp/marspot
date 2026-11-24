@@ -49,6 +49,10 @@ impl CoreApp {
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);
+                // the one viewed in its place, with it
+                if let Some(v) = p.peeked().and_then(|sid| self.shadows.iter_mut().find(|s| s.shelld_session_id() == Some(sid))) {
+                    v.resize(rect.cols, rect.rows);
+                }
             }
         }
         win!(self, wi).layout = layout;
@@ -123,10 +127,7 @@ impl CoreApp {
     /// unless focus actually moved.
     pub(super) fn notify_pane_focus_changes(&mut self) {
         for wi in 0..self.windows.len() {
-            let sid = win!(self, wi)
-                .panes
-                .get(win!(self, wi).focused_idx)
-                .and_then(|p| p.shelld_session_id());
+            let sid = self.focused_session(wi);
             let Some(sid) = sid else { continue };
             if self.last_focus_notified.get(&wi) == Some(&sid) {
                 continue;
@@ -139,11 +140,10 @@ impl CoreApp {
         }
         // The keyboard is in one pane at most: the key window's focused
         // one, while the app is active.
-        let now = if self.renderer.window_focused() {
-            self.windows
-                .get(self.key_window)
-                .and_then(|w| w.panes.get(w.focused_idx))
-                .and_then(|p| p.shelld_session_id())
+        // A view that has ended takes no keys, and they are not the
+        // hidden pane's either.
+        let now = if self.renderer.window_focused() && !self.focused_view_ended(self.key_window) {
+            self.focused_session(self.key_window)
         } else {
             None
         };
@@ -167,7 +167,8 @@ impl CoreApp {
             let sids: Vec<u64> = win!(self, wi)
                 .panes
                 .iter()
-                .filter_map(|p| p.shelld_session_id())
+                .flat_map(|p| [p.shelld_session_id(), p.peeked()])
+                .flatten()
                 .collect();
             let mut window_changed = false;
             for sid in sids {

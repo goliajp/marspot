@@ -69,7 +69,7 @@ fn pane_control_shadow_crossed_places_cannot_make_a_loop() {
                     s.spawn(move || {
                         let mut conn = Conn::new(hub, Peer::default(), None);
                         start.wait();
-                        ops_pane::place_sid(&mut conn, c, *moved, Where::Shadow).map(|_| ())
+                        ops_pane::place_sid(&mut conn, c, *moved, Where::Shadow, false).map(|_| ())
                     })
                 })
                 .collect();

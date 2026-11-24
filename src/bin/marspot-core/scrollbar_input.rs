@@ -14,10 +14,16 @@ pub(super) struct ScrollbarDrag {
     grab: ScrollbarGrab,
 }
 
+impl ScrollbarDrag {
+    pub(super) fn is_of(&self, wi: usize, idx: usize) -> bool {
+        (self.wi, self.idx) == (wi, idx)
+    }
+}
+
 impl CoreApp {
     fn scrollbar_of(&self, wi: usize, idx: usize, held: bool) -> Option<Scrollbar> {
         let w = &win!(self, wi);
-        let pane = w.panes.get(idx)?;
+        let pane = self.shown_pane(wi, idx)?;
         let cell = w.layout.cells.get(idx)?;
         let rows = pane.session().grid().rows();
         let history = pane.history_view(idx == w.focused_idx);
@@ -55,7 +61,7 @@ impl CoreApp {
     }
 
     fn scroll_history_to(&mut self, wi: usize, idx: usize, offset: u16) {
-        let Some(pane) = win!(self, wi).panes.get_mut(idx) else { return };
+        let Some(pane) = self.shown_pane_mut(wi, idx) else { return };
         let delta = offset as i32 - pane.view_offset() as i32;
         if pane.scroll_own_view(delta) != 0 {
             win!(self, wi).needs_render = true;

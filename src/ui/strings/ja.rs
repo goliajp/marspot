@@ -134,6 +134,9 @@ fn text(m: Msg) -> &'static str {
 
         Msg::PanelHelpers => "ヘルパー",
         Msg::HelpersEmpty => "実行中のヘルパーはありません",
+        Msg::HelperViewHere => "ここで表示",
+        Msg::HelperViewBack => "このセッションに戻る",
+        Msg::HelperEnded => "終了",
         Msg::HelperMoveToWindow => "ウインドウに移動",
         Msg::HelperClose => "閉じる",
         Msg::HelpersCloseAll => "このセッションのヘルパーをすべて閉じる",

@@ -88,7 +88,7 @@ fn helper_panel_every_button_is_pressed_where_it_is_at_both_densities() {
         at_scale(scale, || {
             let mut got = pressed_all_over(&render((1600.0 * scale, 1000.0 * scale), groups(), 0.0));
             got.sort_by_key(|a| format!("{a:?}"));
-            let mut want: Vec<Ask> = (0..4).flat_map(|i| [Ask::Move(i), Ask::Close(i)]).collect();
+            let mut want: Vec<Ask> = (0..4).flat_map(|i| [Ask::View(i), Ask::Move(i), Ask::Close(i)]).collect();
             want.extend((0..2).flat_map(|g| [Ask::CloseAll(g), Ask::Control(g)]));
             want.sort_by_key(|a| format!("{a:?}"));
             assert_eq!(got, want, "at scale {scale}");
@@ -134,7 +134,7 @@ fn helper_panel_keeps_its_top_edge() {
 fn helper_panel_stacks_its_buttons_in_a_narrow_window() {
     at_scale(1.0, || {
         let got = pressed_all_over(&render((640.0, 1600.0), groups(), 0.0));
-        for want in [Ask::CloseAll(0), Ask::Control(0), Ask::CloseAll(1), Ask::Control(1), Ask::Move(3), Ask::Close(3)] {
+        for want in [Ask::CloseAll(0), Ask::Control(0), Ask::CloseAll(1), Ask::Control(1), Ask::View(3), Ask::Move(3), Ask::Close(3)] {
             assert!(got.contains(&want), "{want:?} in {got:?}");
         }
     });

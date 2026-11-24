@@ -132,6 +132,9 @@ fn text(m: Msg) -> &'static str {
 
         Msg::PanelHelpers => "帮手",
         Msg::HelpersEmpty => "没有正在运行的帮手",
+        Msg::HelperViewHere => "在这里查看",
+        Msg::HelperViewBack => "回到这个会话",
+        Msg::HelperEnded => "已结束",
         Msg::HelperMoveToWindow => "移到窗口",
         Msg::HelperClose => "关闭",
         Msg::HelpersCloseAll => "关闭这个会话的全部帮手",

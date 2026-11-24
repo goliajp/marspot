@@ -173,14 +173,20 @@ pub struct PanePlace {
     pub sid: u64,
     pub to: PlaceWhere,
     pub host_sid: u64,
+    /// Show it even if the user types while it waits to be shown.
+    pub force: bool,
 }
 
+/// The text of a `PaneDone` for a view given up because the user typed.
+pub const USER_TYPING_TEXT: &str = "user_typing";
+
 pub fn encode_pane_place(m: &PanePlace) -> Vec<u8> {
-    let mut v = Vec::with_capacity(21);
+    let mut v = Vec::with_capacity(22);
     v.extend_from_slice(&m.req_id.to_le_bytes());
     v.extend_from_slice(&m.sid.to_le_bytes());
     v.push(m.to.to_u8());
     v.extend_from_slice(&m.host_sid.to_le_bytes());
+    v.push(m.force as u8);
     v
 }
 
@@ -191,6 +197,8 @@ pub fn decode_pane_place(p: &[u8]) -> io::Result<PanePlace> {
         sid: r.u64()?,
         to: PlaceWhere::from_u8(r.u8()?),
         host_sid: r.u64()?,
+        // a build before this one, which did not say
+        force: p.len() > 21 && r.u8()? != 0,
     })
 }
 

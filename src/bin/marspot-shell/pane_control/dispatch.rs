@@ -96,7 +96,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
         Op::Open(a) => ops_pane::open(conn, ctx, a),
         Op::Close { target } => ops_pane::close(conn, ctx, target),
         Op::Resize { target, cols, rows } => ops_pane::resize(conn, ctx, target, *cols, *rows),
-        Op::Place { target, place } => ops_pane::place(conn, ctx, target, *place),
+        Op::Place { target, place, force } => ops_pane::place(conn, ctx, target, *place, *force),
         Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::helpers_port::serve(conn, ctx, op),
     }
 }
@@ -155,10 +155,19 @@ pub(super) fn alive(sid: u64) -> bool {
 
 /// The user typed into `sid` in the last second while it had the focus.
 pub(super) fn user_typing(conn: &Conn, sid: u64) -> bool {
+    typed_into(conn) == Some(sid)
+}
+
+/// The pane the user typed into in the last second.
+pub(super) fn typed_into(conn: &Conn) -> Option<u64> {
     use std::sync::atomic::Ordering;
     let h = conn.hub;
     let last = h.last_key_ms.load(Ordering::Relaxed);
-    h.focus.load(Ordering::Relaxed) == sid && last > 0 && h.now_ms().saturating_sub(last) < TYPING_MS
+    (last > 0 && h.now_ms().saturating_sub(last) < TYPING_MS).then(|| h.focus.load(Ordering::Relaxed))
+}
+
+pub(super) fn view_typing_reject() -> Reject {
+    Reject::new(ErrorCode::UserTyping, "the user is typing where it is shown; pass force to change what is shown anyway")
 }
 
 pub(super) fn typing_reject() -> Reject {

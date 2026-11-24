@@ -23,7 +23,7 @@
 //! | `click:outside` | clicks in a pane, outside the open panel |
 //! | `click:pane-under` | clicks inside the open panel's frame, over a pane |
 //! | `click:helpers-mark` | clicks the `+N` after the first pane's title |
-//! | `click:helpers-move`, `-close`, `-close-all`, `-control` | clicks the first such button of the open helper panel |
+//! | `click:helpers-view`, `-move`, `-close`, `-close-all`, `-control` | clicks the first such button of the open helper panel |
 //! | `click:pane` | clicks in the first pane |
 //! | `shift-click:<target>` | any of those clicks with shift held, the click a program that asked for mouse reports is sent |
 //! | `move:<target>` | moves the pointer there, pressing nothing |
@@ -31,6 +31,7 @@
 //! | `drag:header:<dx>,<dy>` | drags the open panel by its header |
 //! | `scroll:<lines>` | turns the wheel |
 //! | `wait:<ms>` | does nothing for that long |
+//! | `until:<name>` | waits until the state directory holds a file of that name |
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -47,6 +48,8 @@ const START_DELAY: Duration = Duration::from_secs(3);
 /// Between steps — long enough for the events of one to be handled,
 /// and drawn, before the next reads the layout.
 const STEP_GAP: Duration = Duration::from_millis(300);
+/// How often an `until` step looks again.
+const UNTIL_GAP: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
@@ -60,7 +63,7 @@ pub enum Target {
     Helpers(u8),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Step {
     Button(SurfaceKind),
     Key(ChordKey, Modifiers),
@@ -72,6 +75,7 @@ pub enum Step {
     DragHeader(f64, f64),
     Scroll(f64),
     Wait(u64),
+    Until(String),
 }
 
 /// The key of a `key:` step.
@@ -104,7 +108,7 @@ pub struct Scene<'a> {
     /// The renderer's cell size.
     pub cell: (f64, f64),
     /// Where `Target::Helpers` are.
-    pub helpers: [Option<(f64, f64)>; 5],
+    pub helpers: [Option<(f64, f64)>; 6],
 }
 
 pub fn parse(script: &str) -> Result<Vec<Step>, String> {
@@ -138,6 +142,7 @@ fn parse_step(text: &str) -> Result<Step, String> {
             Step::DragHeader(dx.parse().map_err(|_| bad())?, dy.parse().map_err(|_| bad())?)
         }
         ("scroll", n) => Step::Scroll(n.parse().map_err(|_| bad())?),
+        ("until", name) if !name.is_empty() && !name.contains('/') => Step::Until(name.to_string()),
         ("wait", ms) => Step::Wait(ms.parse().map_err(|_| bad())?),
         _ => return Err(bad()),
     })
@@ -191,6 +196,7 @@ fn parse_target(text: &str) -> Option<Target> {
         "helpers-close" => Target::Helpers(2),
         "helpers-close-all" => Target::Helpers(3),
         "helpers-control" => Target::Helpers(4),
+        "helpers-view" => Target::Helpers(5),
         _ => return None,
     })
 }
@@ -277,9 +283,9 @@ impl Scene<'_> {
 
     /// The events `step` is made of, in the order the window would
     /// send them.
-    pub fn resolve(&self, step: Step) -> Result<Vec<Input>, String> {
+    pub fn resolve(&self, step: &Step) -> Result<Vec<Input>, String> {
         let l = self.layout;
-        Ok(match step {
+        Ok(match *step {
             Step::Button(kind) => {
                 let rect = match kind {
                     SurfaceKind::Settings => l.settings_button_rect,
@@ -326,7 +332,7 @@ impl Scene<'_> {
                 ]
             }
             Step::Scroll(lines) => vec![Input::Scroll(lines * self.cell.1)],
-            Step::Wait(_) => Vec::new(),
+            Step::Wait(_) | Step::Until(_) => Vec::new(),
         })
     }
 }
@@ -383,11 +389,18 @@ impl Script {
             crate::lx_event!("DEV_PANELS_DONE", "the panel script has been played");
             return Vec::new();
         };
+        if let Step::Until(name) = &step
+            && !marspot_term::paths::state_root().join(name).exists()
+        {
+            self.steps.push_front(step);
+            self.next_at = now + UNTIL_GAP;
+            return Vec::new();
+        }
         self.next_at = now + match step {
             Step::Wait(ms) => Duration::from_millis(ms),
             _ => STEP_GAP,
         };
-        match scene.resolve(step) {
+        match scene.resolve(&step) {
             Ok(inputs) => {
                 crate::lx_event!("DEV_PANELS_STEP", "playing a step", step = format!("{step:?}"));
                 inputs
@@ -406,242 +419,5 @@ impl Script {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const CELL: (f64, f64) = (8.0, 16.0);
-
-    fn layout() -> Layout {
-        Layout::build(1600.0, 1000.0, 200.0, 56.0, 24.0, 2, 1, CELL.0, CELL.1)
-            .with_chrome(2.0, 2, None)
-    }
-
-    fn panel() -> PanelChrome {
-        PanelChrome::new(Rect { x: 400.0, y_top: 200.0, w: 800.0, h: 600.0 }, 56.0)
-    }
-
-    #[test]
-    fn a_script_parses_into_its_steps() {
-        let steps = parse(
-            "button:settings; esc;key:cmd-w;click:close;click:outside;click:pane-under;\
-             click:pane;click:header;shift-click:pane-under;drag:header:120,-40;scroll:3;type:x;wait:500;",
-        )
-        .unwrap();
-        assert_eq!(
-            steps,
-            [
-                Step::Button(SurfaceKind::Settings),
-                ESC,
-                Step::Key(ChordKey::Char('w'), cmd()),
-                Step::Click(Target::Close),
-                Step::Click(Target::Outside),
-                Step::Click(Target::PaneUnder),
-                Step::Click(Target::Pane),
-                Step::Click(Target::Header),
-                Step::ShiftClick(Target::PaneUnder),
-                Step::DragHeader(120.0, -40.0),
-                Step::Scroll(3.0),
-                Step::Type('x'),
-                Step::Wait(500),
-            ]
-        );
-        for kind in ["settings", "layout", "process", "accounts"] {
-            assert!(parse(&format!("button:{kind}")).is_ok(), "{kind}");
-        }
-        assert_eq!(parse(""), Ok(Vec::new()));
-    }
-
-    fn cmd() -> Modifiers {
-        Modifiers { super_: true, ..Default::default() }
-    }
-
-    #[test]
-    fn a_chord_is_its_modifiers_then_its_key() {
-        let chord = |text: &str| match parse(&format!("key:{text}")).unwrap()[..] {
-            [Step::Key(key, m)] => (key, (m.super_, m.shift, m.control, m.alt)),
-            ref other => panic!("{text}: {other:?}"),
-        };
-        let c = ChordKey::Char;
-        assert_eq!(chord("cmd-,"), (c(','), (true, false, false, false)));
-        assert_eq!(chord("cmd-shift-l"), (c('l'), (true, true, false, false)));
-        assert_eq!(chord("cmd-shift-L"), chord("cmd-shift-l"));
-        assert_eq!(chord("cmd-2"), (c('2'), (true, false, false, false)));
-        assert_eq!(chord("cmd-]"), (c(']'), (true, false, false, false)));
-        assert_eq!(chord("cmd--"), (c('-'), (true, false, false, false)));
-        assert_eq!(chord("-"), (c('-'), (false, false, false, false)));
-        assert_eq!(chord("ctrl-c"), (c('c'), (false, false, true, false)));
-        assert_eq!(chord("alt-b"), (c('b'), (false, false, false, true)));
-        assert_eq!(chord("ctrl-cmd-f"), (c('f'), (true, false, true, false)));
-        assert_eq!(chord("f"), (c('f'), (false, false, false, false)));
-        assert_eq!(chord("f5").0, ChordKey::Named(NamedKey::F5));
-        assert_eq!(chord("f12").0, ChordKey::Named(NamedKey::F12));
-        assert_eq!(chord("up").0, ChordKey::Named(NamedKey::ArrowUp));
-        assert_eq!(parse("key:esc").unwrap(), [ESC]);
-    }
-
-    #[test]
-    fn the_pointer_can_be_moved_onto_a_target_and_out_of_the_window() {
-        let l = layout();
-        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 5] };
-        let steps = parse("move:close;pointer-exit").unwrap();
-        assert_eq!(steps, [Step::Move(Target::Close), Step::PointerExit]);
-        let at = |step| match scene.resolve(step).unwrap()[..] {
-            [Input::Move(x, y)] => (x, y),
-            ref other => panic!("{other:?}"),
-        };
-        let (x, y) = at(steps[0]);
-        assert!(panel().close.contains(x, y));
-        let (x, y) = at(steps[1]);
-        assert!(!(0.0..l.window_w).contains(&x) && !(0.0..l.window_h).contains(&y));
-        assert!(parse("pointer-exit:now").is_err() && parse("move:nowhere").is_err());
-    }
-
-    #[test]
-    fn a_step_it_does_not_know_rejects_the_whole_script() {
-        for bad in [
-            "button:nope", "click", "click:middle", "shift-click:", "drag:120,40", "drag:header:1", "type:",
-            "type:xy", "scroll:x", "key:", "key:cmd-", "key:hyper-x", "key:cmd-xy", "key:f13", "key:f0", "esc:1",
-            "wait:soon",
-        ] {
-            let script = format!("esc;{bad};esc");
-            assert_eq!(parse(&script), Err(format!("unknown step `{bad}`")), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_button_step_presses_the_button_the_toolbar_hit_tests() {
-        let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
-        use crate::frame_build::chrome::{ChromeShape, ChromeSurfaces};
-        use crate::ui::components::chrome_target::ChromeTarget;
-        use crate::ui::components::title_strip_view::BadgesOnly;
-        let mut font = crate::font_cache::FontCache::build().expect("font");
-        let mut chrome = ChromeSurfaces::default();
-        let strips = BadgesOnly(0, |_| "");
-        let shape = ChromeShape { layout: &l, rows: 0, strips: &strips };
-        let hits = [
-            (SurfaceKind::Settings, 4),
-            (SurfaceKind::Layout, 1),
-            (SurfaceKind::Processes, 2),
-            (SurfaceKind::Accounts, 3),
-        ];
-        for (kind, button) in hits {
-            let inputs = scene.resolve(Step::Button(kind)).unwrap();
-            let [Input::Move(mx, my), Input::Down(x, y, mods), Input::Up(ux, uy)] = inputs[..] else {
-                panic!("{kind:?}: {inputs:?}");
-            };
-            let hit = chrome.at(&mut font, &shape, (x, y));
-            assert!(hit == Some(ChromeTarget::Toolbar(button)) && !mods.shift, "{kind:?}: {hit:?}");
-            assert_eq!(((mx, my), (ux, uy)), ((x, y), (x, y)), "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn targets_land_where_their_names_say() {
-        let l = layout();
-        let c = panel();
-        let scene = Scene { layout: &l, chrome: Some(c), cell: CELL, helpers: [None; 5] };
-        let at = |target| scene.point(target).unwrap();
-
-        let (x, y) = at(Target::Close);
-        assert!(c.hit_close(x, y));
-        let (x, y) = at(Target::Header);
-        assert!(c.hit_header(x, y));
-        let (x, y) = at(Target::Outside);
-        assert!(!c.frame.contains(x, y) && scene.on_a_pane(x, y));
-        let (x, y) = at(Target::PaneUnder);
-        assert!(c.frame.contains(x, y) && scene.on_a_pane(x, y));
-        assert!(!c.content.contains(x, y) && !c.header.contains(x, y), "on nothing of the panel's");
-        let (x, y) = at(Target::Pane);
-        assert_eq!(l.hit_test_cell_pos(x, y, CELL.0, CELL.1).map(|(i, _, _)| i), Some(0));
-    }
-
-    #[test]
-    fn a_panel_target_needs_a_panel() {
-        let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
-        for target in [Target::Close, Target::Header, Target::Outside, Target::PaneUnder] {
-            assert!(scene.resolve(Step::Click(target)).is_err(), "{target:?}");
-        }
-        assert!(scene.resolve(Step::DragHeader(1.0, 1.0)).is_err());
-        assert!(scene.resolve(Step::Click(Target::Pane)).is_ok());
-        let held = |step| match scene.resolve(step).unwrap()[1] {
-            Input::Down(_, _, mods) => mods.shift,
-            ref other => panic!("{other:?}"),
-        };
-        assert!(held(Step::ShiftClick(Target::Pane)) && !held(Step::Click(Target::Pane)));
-    }
-
-    #[test]
-    fn a_drag_ends_the_asked_distance_from_where_it_began() {
-        let l = layout();
-        let scene = Scene { layout: &l, chrome: Some(panel()), cell: CELL, helpers: [None; 5] };
-        let inputs = scene.resolve(Step::DragHeader(120.0, 40.0)).unwrap();
-        let (Some(Input::Down(x, y, _)), Some(Input::Up(ux, uy))) = (inputs.get(1), inputs.last())
-        else {
-            panic!("{inputs:?}");
-        };
-        assert_eq!((ux - x, uy - y), (120.0, 40.0));
-        assert!(matches!(inputs[inputs.len() - 2], Input::Drag(x, y) if (x, y) == (*ux, *uy)));
-    }
-
-    #[test]
-    fn keys_come_pressed_then_released() {
-        let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
-        let keys = |step| -> Vec<(KeyState, LogicalKey, Option<String>, bool)> {
-            scene
-                .resolve(step)
-                .unwrap()
-                .into_iter()
-                .map(|i| match i {
-                    Input::Key(e, m) => (e.state, e.logical, e.text, m.super_),
-                    other => panic!("{other:?}"),
-                })
-                .collect()
-        };
-        let pair = |logical: LogicalKey, text: Option<&str>, cmd| {
-            [KeyState::Pressed, KeyState::Released]
-                .map(|s| (s, logical.clone(), text.map(str::to_string), cmd))
-                .to_vec()
-        };
-        let step = |text: &str| parse(text).unwrap()[0];
-        assert_eq!(keys(ESC), pair(LogicalKey::Named(NamedKey::Escape), None, false));
-        assert_eq!(keys(step("key:cmd-w")), pair(LogicalKey::Char('w'), None, true));
-        assert_eq!(keys(step("key:ctrl-c")), pair(LogicalKey::Char('c'), None, false));
-        assert_eq!(keys(step("key:alt-b")), pair(LogicalKey::Char('b'), Some("b"), false));
-        assert_eq!(keys(step("key:shift-a")), pair(LogicalKey::Char('a'), Some("A"), false));
-        assert_eq!(keys(step("key:f5")), pair(LogicalKey::Named(NamedKey::F5), None, false));
-        assert_eq!(keys(Step::Type('x')), pair(LogicalKey::Char('x'), Some("x"), false));
-        assert!(matches!(scene.resolve(Step::Scroll(3.0)).unwrap()[..], [Input::Scroll(dy)] if dy == 48.0));
-    }
-
-    #[test]
-    fn steps_are_played_one_at_a_time_and_then_it_is_finished() {
-        let l = layout();
-        let scene = Scene { layout: &l, chrome: None, cell: CELL, helpers: [None; 5] };
-        let t0 = Instant::now();
-        let mut s = Script::new(parse("esc;wait:2000;click:close;type:x").unwrap(), t0);
-        assert!(!s.due(t0), "not before the window has had time to fill");
-        let t = t0 + START_DELAY;
-        assert!(s.due(t));
-
-        // No panes yet: nothing is consumed, and it looks again later.
-        let mut empty = layout();
-        empty.cells.clear();
-        assert!(s.play(t, &Scene { layout: &empty, chrome: None, cell: CELL, helpers: [None; 5] }).is_empty());
-        assert!(!s.due(t + STEP_GAP));
-        let t = t + START_DELAY;
-
-        assert_eq!(s.play(t, &scene).len(), 2);
-        assert!(!s.due(t) && s.due(t + STEP_GAP));
-        assert!(s.play(t, &scene).is_empty(), "the wait");
-        assert!(!s.due(t + STEP_GAP) && s.due(t + Duration::from_millis(2000)));
-        // A step with nowhere to go is skipped, not fatal.
-        assert!(s.play(t, &scene).is_empty());
-        assert_eq!(s.play(t, &scene).len(), 2);
-        assert!(!s.finished());
-        assert!(s.play(t, &scene).is_empty());
-        assert!(s.finished() && !s.due(t + START_DELAY));
-    }
-}
+#[path = "panel_script_tests.rs"]
+mod tests;

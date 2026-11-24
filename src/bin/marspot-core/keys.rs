@@ -7,6 +7,9 @@ use super::*;
 
 impl CoreApp {
     pub(super) fn preedit(&mut self, wi: usize, text: String) {
+        if !text.is_empty() {
+            self.typed_before_view(wi);
+        }
         if win!(self, wi).ime_preedit != text {
             win!(self, wi).ime_preedit = text;
             win!(self, wi).needs_render = true;
@@ -16,6 +19,9 @@ impl CoreApp {
     pub(super) fn key(&mut self, wi: usize, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
         let pressed = event.state == KeyState::Pressed;
+        if !pressed && self.release_follows_press(&event, modifiers) {
+            return;
+        }
 
         // RFC-006 §7 — Esc cancels an in-flight pane drag outright:
         // state cleared, ghost cleared, the release that follows is a
@@ -54,6 +60,9 @@ impl CoreApp {
         // panels and windows are not pane content.  What reads from or
         // types into the held pane stays the plugin's.
         let panel_open = win!(self, wi).panels.owns_pointer();
+        if pressed && !panel_open && self.view_leaves_on(wi, &event, modifiers) {
+            return;
+        }
         if let Some(row) = commands::for_key(&event, modifiers) {
             let held = row.command.acts_on_focused_pane()
                 && self
@@ -74,6 +83,12 @@ impl CoreApp {
             if pressed {
                 self.tree_panel_key(wi, &event, modifiers);
             }
+            return;
+        }
+        if pressed {
+            self.typed_before_view(wi);
+        }
+        if self.ended_view_takes_key(wi, &event) || (pressed && self.repeat_is_anothers(wi, &event)) {
             return;
         }
 
@@ -120,132 +135,7 @@ impl CoreApp {
             return;
         }
 
-        let Some(pane) = win!(self, wi).try_focused_pane() else { return };
-
-        // RFC-003 Phase 4 (frozen reattach minimum): an exited L3 pane
-        // shows whatever was last published; on key press we revive it
-        // by spawning a fresh L3 at the same session id.  The bytelog
-        // opens in append mode so the new shell's output continues the
-        // same on-disk record.  Only revive on a key press the user
-        // would actually mean as "wake up" (any printable / Enter /
-        // arrow / Tab etc); modifier-only key transitions don't fire.
-        //
-        // RFC-004 B.2 — vacant slots (boot-time assembly failures)
-        // revive through the exact same path: they hold their sid and
-        // report is_exited() = true.  A vacant slot with sid 0 (id
-        // allocation itself failed at boot) allocates one now.
-        if (pane.is_l3() || pane.is_vacant())
-            && !pane.is_dormant()
-            && pane.is_exited()
-            && pressed
-        {
-            let sid_opt = pane
-                .session()
-                .shelld_session_id()
-                .filter(|&s| s != 0)
-                .or_else(|| allocate_next_session_id().ok());
-            if let Some(sid) = sid_opt {
-                // Layout already sized the pane — keep its current
-                // cell dims so the new L3 boots at the same shape.
-                let (cols, rows) = win!(self, wi)
-                    .layout
-                    .cells
-                    .get(win!(self, wi).focused_idx)
-                    .map(|c| (c.cols, c.rows))
-                    .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
-                // Off-loop, same as [+]: a keystroke into a dead slot
-                // must not freeze the other fifteen panes while the
-                // replacement boots.
-                *win!(self, wi).focused_pane_mut() =
-                    spawn_l3_pane_async(cols, rows, sid, String::new(), &self.event_tx);
-                win!(self, wi).needs_render = true;
-                lx_event!(
-                    "L3_REVIVING",
-                    "user keystroke started an off-loop respawn at same id",
-                    session_id = sid
-                );
-                return;
-            }
-        }
-
-        // L3-backed pane: forward the key *event* to the session process,
-        // which encodes with its own modes + local-echoes, then republishes
-        // the grid (we re-read it on the GridReady wake).  No local write /
-        // predict here.
-        if pane.is_l3() {
-            // F1+12 — when the search overlay owns the keyboard, any key
-            // that fell through to here must not (a) snap_to_live (the
-            // F1+9 bouncer) or (b) forward_key into the PTY (would type
-            // search-bar shortcuts into the shell).  Cmd-C / Cmd-B
-            // already ran above; bar-bound printable / arrows / Enter
-            // were already consumed by search_consume_key on the press
-            // event.  Anything left (e.g. KeyState::Released, or a
-            // Cmd-? we don't recognise) is dropped silently.
-            if win!(self, wi).focused_pane_mut()
-                .search
-                .as_ref()
-                .is_some_and(|s| s.bar.focused)
-            {
-                return;
-            }
-            if win!(self, wi).focused_pane_mut().snap_to_live() {
-                win!(self, wi).needs_render = true;
-            }
-            if win!(self, wi).selection.is_some() {
-                win!(self, wi).selection = None;
-                win!(self, wi).selection_dragging = false;
-                win!(self, wi).needs_render = true;
-            }
-            win!(self, wi).focused_pane_mut()
-                .session_mut()
-                .forward_key(&event, modifiers);
-            return;
-        }
-
-        let modes = pane.session().terminal().input_modes();
-        if let Some(bytes) = key_event_to_bytes(
-            &event,
-            modifiers,
-            modes,
-            marspot::input::read_clipboard_text,
-        ) {
-            // Typing snaps the focused pane's view back to live.
-            if win!(self, wi).focused_pane_mut().snap_to_live() {
-                win!(self, wi).needs_render = true;
-            }
-            // Typing into the PTY clears any text selection.
-            if win!(self, wi).selection.is_some() {
-                win!(self, wi).selection = None;
-                win!(self, wi).selection_dragging = false;
-                win!(self, wi).needs_render = true;
-            }
-            let session = win!(self, wi).focused_pane_mut().session_mut();
-            let _ = session.write(&bytes);
-            // Local-echo: paint each printable-ASCII byte to the grid
-            // immediately, ahead of the PTY round trip — but only
-            // for plain text runs.  An escape sequence (ESC-leading)
-            // is a control code: the leading 0x1b isn't printable so
-            // predict_byte rejects it, but the sequence's tail
-            // (`[C`, `[A`, …) is ASCII printable and would smear
-            // literally into the grid.  Skip the whole run when it
-            // starts with ESC.
-            let mut predicted = false;
-            if !bytes.starts_with(&[0x1b]) {
-                for &b in bytes.as_ref() {
-                    if session.terminal_mut().predict_byte(b) {
-                        predicted = true;
-                    }
-                }
-            }
-            if predicted {
-                win!(self, wi).needs_render = true;
-            }
-            // No cwd refresh here on purpose: an Enter fires *before*
-            // the shell has run the line it submits, so reading the cwd
-            // on Enter can only ever report the directory the pane was
-            // in before the `cd`.  `sweep_pane_cwds` reads it after the
-            // fact instead.
-        }
+        self.key_to_pane(wi, &event, modifiers);
     }
 
     fn pane_session_holds_keys(&self, sid: u64) -> bool {
@@ -304,7 +194,7 @@ impl CoreApp {
     /// and sent to it; the session wraps it for a program that asked
     /// for bracketed paste and writes the PTY.
     fn paste_into_focused_pane(&mut self, wi: usize) -> bool {
-        let Some(pane) = win!(self, wi).try_focused_pane() else { return true };
+        let Some(pane) = self.focused_shown_mut(wi) else { return true };
         // A key into an exited pane revives it, and an in-process pane
         // pastes in its own encoder: both are the key path's.
         if !pane.is_l3() || pane.is_exited() {
@@ -314,10 +204,9 @@ impl CoreApp {
             return true;
         }
         if let Some(text) = marspot::input::read_clipboard_text() {
-            if win!(self, wi).focused_pane_mut().snap_to_live() {
-                win!(self, wi).needs_render = true;
-            }
-            win!(self, wi).focused_pane_mut().session_mut().forward_paste(&text);
+            let moved = pane.snap_to_live();
+            pane.session_mut().forward_paste(&text);
+            win!(self, wi).needs_render |= moved;
         }
         true
     }
@@ -357,7 +246,7 @@ impl CoreApp {
             return;
         }
         self.set_focus(wi, idx);
-        let _ = win!(self, wi).focused_pane_mut().snap_to_live();
+        self.snap_focused_to_live(wi);
     }
 
     /// The pane after or before the focused one, in sidebar order,

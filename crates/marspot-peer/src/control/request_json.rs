@@ -78,9 +78,10 @@ impl Request {
                 put(&mut a, "cols", *cols as i64);
                 put(&mut a, "rows", *rows as i64);
             }
-            Op::Place { target, place } => {
+            Op::Place { target, place, force } => {
                 put(&mut a, "target", target.as_str());
                 put(&mut a, "where", place.as_str());
+                put(&mut a, "force", *force);
             }
             Op::Close { target } => put(&mut a, "target", target.as_str()),
             Op::Audit { limit } => put(&mut a, "limit", *limit as i64),
