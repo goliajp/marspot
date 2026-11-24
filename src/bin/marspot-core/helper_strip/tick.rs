@@ -70,6 +70,7 @@ impl CoreApp {
         }
         if on {
             self.strips.all_told(&self.pane_control.strips, now);
+            self.strip_keys_tick(now);
         }
         if !on || (self.strips.hosts.is_empty() && self.strips.heard == self.pane_control.strips.changes()) {
             return;
@@ -232,6 +233,7 @@ impl CoreApp {
             return None;
         }
         let mut due = self.strips.due;
+        earlier(&mut due, self.strips.keys.due());
         earlier(&mut due, self.strips.by_sid.values().filter_map(Strip::due).min());
         for wi in 0..self.windows.len() {
             earlier(&mut due, self.second_due(wi));

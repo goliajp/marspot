@@ -19,8 +19,10 @@ mod dev;
 mod figures;
 mod height;
 mod host;
+mod keys;
 mod native_list;
 mod press;
+mod probe;
 mod sizes;
 mod strip;
 mod theme;
@@ -61,6 +63,7 @@ pub(super) struct Strips {
     clocks: clock::Clocks,
     /// Where the pointer last was, and in which window.
     pointer: Option<(u32, f64, f64)>,
+    keys: keys::Keys,
 }
 
 impl Strips {
@@ -137,6 +140,7 @@ struct Under<'a> {
     of: (u64, u64),
     scrolled: bool,
     viewing: bool,
+    selected: Option<Pick>,
 }
 
 /// Write what `record` says at `ms` into `strip`, if it lists anything.
@@ -147,7 +151,12 @@ fn list_into(strip: &mut Strip, host: &mut host::Host, record: &marspot::shell_p
     let viewed = if under.viewing { host.index_of(record, under.of.0).map_or(Pick::Main, Pick::Row) } else { Pick::Main };
     let mut rows = [NO_ROW; HELPER_STRIP_ROWS];
     let n = host.rows(record, ms, &mut rows);
-    host.drawn = compose::compose(strip, &List { rows: &rows[..n], selected: None, viewed, theme, native });
+    let selected = under.selected.map(|p| match p {
+        Pick::Row(i) => Pick::Row(i.min(n.saturating_sub(1))),
+        Pick::Main if native.is_some() => Pick::Row(0),
+        main => main,
+    });
+    host.drawn = compose::compose(strip, &List { rows: &rows[..n], selected, viewed, theme, native });
     n > 0
 }
 
@@ -193,7 +202,8 @@ impl CoreApp {
                     continue;
                 };
                 let of = (pane.shelld_session_id().unwrap_or(sid), pane.grid_seq());
-                if !list_into(strip, host, record, Under { screen, of, scrolled, viewing }, ms) {
+                let selected = strips.keys.selected(w.window_id, sid);
+                if !list_into(strip, host, record, Under { screen, of, scrolled, viewing, selected }, ms) {
                     strip.hide();
                     continue;
                 }
@@ -275,3 +285,5 @@ mod tests;
 mod sizes_tests;
 #[cfg(test)]
 mod view_tests;
+#[cfg(test)]
+mod keys_tests;

@@ -74,6 +74,11 @@ pub(in super::super) enum Spot {
 }
 
 impl Drawn {
+    /// Whether its `main` is the strip's own.
+    pub(in super::super) fn has_main(&self) -> bool {
+        self.line > 0
+    }
+
     pub(in super::super) fn at(&self, line: u16) -> Option<Spot> {
         let Some(i) = line.checked_sub(self.line) else {
             return (line + 1 == self.line).then_some(Spot::Main);

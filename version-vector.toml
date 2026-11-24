@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.655"  # the shell lets a strip's x past the input method
-core    = "0.12.658"  # the shell lets a strip's x past the input method
+shell   = "0.7.656"  # an input box says where it is
+core    = "0.12.659"  # a strip can be used from the keyboard as Claude's own list
 session = "0.11.430"  # a frame goes out early once for a watch, and only with a core to read it

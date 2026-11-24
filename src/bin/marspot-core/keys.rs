@@ -9,6 +9,7 @@ impl CoreApp {
     pub(super) fn preedit(&mut self, wi: usize, text: String) {
         if !text.is_empty() {
             self.typed_before_view(wi);
+            self.strip_keys_interrupted();
         }
         if win!(self, wi).ime_preedit != text {
             self.note_typing(wi);
@@ -136,12 +137,8 @@ impl CoreApp {
             return;
         }
 
-        self.key_to_pane(wi, &event, modifiers);
-    }
-
-    pub(super) fn note_typing(&mut self, wi: usize) {
-        if let Some(sid) = win!(self, wi).try_focused_pane().and_then(|p| p.shelld_session_id()) {
-            self.strips.typed(sid);
+        if !self.strip_key(wi, &event, modifiers) {
+            self.key_to_pane(wi, &event, modifiers);
         }
     }
 

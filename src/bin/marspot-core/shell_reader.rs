@@ -115,7 +115,8 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         | MsgType::PaneSpawn
         | MsgType::PaneRetire
         | MsgType::PanePlace
-        | MsgType::PaneSize => Some(CoreEvent::ShellPaneControl(f.clone())),
+        | MsgType::PaneSize
+        | MsgType::StripKeys => Some(CoreEvent::ShellPaneControl(f.clone())),
         MsgType::HelperStrip => marspot::shell_proto::decode_helper_strip(&f.payload)
             .ok()
             .map(CoreEvent::HelperStrip),

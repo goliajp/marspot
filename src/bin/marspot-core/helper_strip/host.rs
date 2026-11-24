@@ -90,7 +90,6 @@ impl Host {
     }
 
     /// Clear a row: it is listed no more in this batch.
-    #[cfg_attr(not(test), expect(dead_code, reason = "asked for by a key the strip does not take yet"))]
     pub(super) fn hide(&mut self, sid: u64) {
         if !self.hidden.contains(&sid) && self.hidden.len() < HELPER_STRIP_ROWS {
             self.hidden.push(sid);
@@ -150,6 +149,16 @@ impl Host {
     /// The helper listed `i`th of those `rows` lists.
     pub(super) fn sid_at(&self, record: &HelperStrip, i: usize) -> Option<u64> {
         record.rows.iter().filter(|r| self.shows(r.sid)).nth(i).map(|r| r.sid)
+    }
+
+    /// How the helper listed `i`th is.
+    pub(super) fn state_at(&self, record: &HelperStrip, i: usize) -> Option<State> {
+        record.rows.iter().filter(|r| self.shows(r.sid)).nth(i).map(state)
+    }
+
+    /// How many rows `record` lists.
+    pub(super) fn shown_rows(&self, record: &HelperStrip) -> usize {
+        record.rows.iter().filter(|r| self.shows(r.sid)).take(HELPER_STRIP_ROWS).count()
     }
 
     /// Where helper `sid` is listed of those `rows` lists.

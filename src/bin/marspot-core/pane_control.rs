@@ -100,6 +100,10 @@ fn code_name(code: DoneCode) -> &'static str {
 impl CoreApp {
     /// L1 asked to type into, or watch, session `sid`.
     pub(super) fn route_pane_control(&mut self, f: Frame) -> Route {
+        if f.msg_type == MsgType::StripKeys {
+            self.shell_takes_strip_x(&f.payload);
+            return Route::Unanswerable;
+        }
         let Some(req_id) = f.payload.first_chunk::<4>().map(|b| u32::from_le_bytes(*b)) else {
             lx_warn!(
                 "core.pane_control.unanswerable",

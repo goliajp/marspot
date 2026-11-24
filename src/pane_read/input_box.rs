@@ -30,15 +30,26 @@ pub(super) fn composer_of(grid: &marspot_term::grid::Grid) -> Option<String> {
     box_of(grid).filter(|t| !t.is_empty())
 }
 
-/// What the input box holds, empty for an empty one; None when the
-/// cursor is not in a box.
-pub(super) fn box_of(grid: &marspot_term::grid::Grid) -> Option<String> {
+/// Where an agent's input box is: the row of its prompt, and the row
+/// under its last, where its rule or its shade ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoxAt {
+    pub prompt_row: u16,
+    pub end: u16,
+    glyph_col: u16,
+    codex: bool,
+}
+
+fn bare(grid: &marspot_term::grid::Grid, r: u16) -> String {
+    let line = row_text_of(grid, r, 0, |c| grid.cell(c, r));
+    line.trim().trim_start_matches(SIDES).trim_start().to_string()
+}
+
+/// The input box the cursor is in, if it is in one.
+pub fn box_at(grid: &marspot_term::grid::Grid) -> Option<BoxAt> {
     use marspot_term::grid::Color;
     let bg = |r: u16| grid.cell(0, r).attrs.bg;
-    let bare = |r: u16| {
-        let line = row_text_of(grid, r, 0, |c| grid.cell(c, r));
-        line.trim().trim_start_matches(SIDES).trim_start().to_string()
-    };
+    let bare = |r: u16| bare(grid, r);
     // Up from the cursor to the prompt it is typing after.  A rule or a
     // change of shade on the way means the cursor is not in the box.
     let (_, cursor_row) = grid.cursor();
@@ -61,6 +72,13 @@ pub(super) fn box_of(grid: &marspot_term::grid::Grid) -> Option<String> {
     // Down to the box's end: the rule under it, or where the shade
     // stops.  Blank rows before that are the person's own blank lines.
     let end = (row + 1..grid.rows()).find(|&r| is_rule(&bare(r)) || bg(r) != bg(row))?;
+    Some(BoxAt { prompt_row: row, end, glyph_col, codex })
+}
+
+/// What the input box holds, empty for an empty one; None when the
+/// cursor is not in a box.
+pub fn box_of(grid: &marspot_term::grid::Grid) -> Option<String> {
+    let BoxAt { prompt_row: row, end, glyph_col, codex } = box_at(grid)?;
     let lines: Vec<Vec<Glyph>> = (row..end).map(|r| typed_glyphs(grid, r, glyph_col + 2)).collect();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
