@@ -23,6 +23,7 @@ mod typing;
 mod typing_after_exec;
 mod typing_run_end;
 mod typing_run_trailer;
+mod typing_run_unfinished;
 mod watch;
 mod watch_prompt;
 mod watch_swap;

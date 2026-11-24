@@ -84,6 +84,9 @@ pub(crate) fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> s
     }
     // written without one too: an image that knows runs' ends has seen none
     body.push_str(&format!("run_end={}\n", h.marks.ends.run.map_or("-".to_string(), end_value)));
+    if let Some(end) = h.marks.ends.hook {
+        body.push_str(&format!("hook_end={}\n", end_value(end)));
+    }
     if let Some(pos) = h.marks.input_start {
         body.push_str(&format!("input_start={pos}\n"));
     }
@@ -108,7 +111,7 @@ fn read_ends(fields: &std::collections::HashMap<String, String>) -> LatestEnds {
         Some((pos.parse().ok()?, status.parse().ok()))
     };
     let any = fields.get("command_end").and_then(end);
-    LatestEnds { any, run: fields.get("run_end").map_or(any, end) }
+    LatestEnds { any, run: fields.get("run_end").map_or(any, end), hook: fields.get("hook_end").and_then(end) }
 }
 
 pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
@@ -234,7 +237,7 @@ mod tests {
             cols: 132,
             rows: 43,
             control_stream_fd: 11,
-            marks: crate::pane_ctl::Marks { pos: 123_456, ends: LatestEnds { any: Some((120_000, Some(1))), run: Some((110_000, Some(7))) }, input_start: Some(119_000) },
+            marks: crate::pane_ctl::Marks { pos: 123_456, ends: LatestEnds { any: Some((120_000, Some(1))), run: Some((110_000, Some(7))), hook: Some((120_000, Some(1))) }, input_start: Some(119_000) },
             shadow: crate::shadow::ShadowCfg::default(),
         }
     }
@@ -245,7 +248,7 @@ mod tests {
         read_handoff_manifest(&path)
     }
 
-    const V2: &str = "version=2\nmaster_fd=7\nchild_pid=4242\nlisten_fd=9\ncols=132\nrows=43\ncontrol_stream_fd=11\npos=123456\ncommand_end=120000:1\nrun_end=110000:7\ninput_start=119000\n";
+    const V2: &str = "version=2\nmaster_fd=7\nchild_pid=4242\nlisten_fd=9\ncols=132\nrows=43\ncontrol_stream_fd=11\npos=123456\ncommand_end=120000:1\nrun_end=110000:7\nhook_end=120000:1\ninput_start=119000\n";
 
     /// What one image writes, the next reads back field for field, and
     /// the write leaves no temp file for a later boot to trip over.
@@ -267,7 +270,7 @@ mod tests {
         );
         let no_stream = L3Handoff {
             control_stream_fd: -1,
-            marks: crate::pane_ctl::Marks { pos: 9, ends: LatestEnds { any: Some((5, None)), run: None }, input_start: None },
+            marks: crate::pane_ctl::Marks { pos: 9, ends: LatestEnds { any: Some((5, None)), run: None, hook: None }, input_start: None },
             ..sample()
         };
         write_handoff_manifest(&no_stream, &path).unwrap();
@@ -324,11 +327,11 @@ mod tests {
     #[test]
     fn a_manifest_without_a_runs_end_takes_the_latest_for_it() {
         let dir = TempDir::new("handoff");
-        let old = V2.replace("run_end=110000:7\n", "");
+        let old = V2.replace("run_end=110000:7\nhook_end=120000:1\n", "");
         let end = Some((120_000, Some(1)));
-        assert_eq!(read_body(&dir, &old).unwrap().marks.ends, LatestEnds { any: end, run: end });
-        let none = V2.replace("run_end=110000:7", "run_end=-");
-        assert_eq!(read_body(&dir, &none).unwrap().marks.ends, LatestEnds { any: end, run: None });
+        assert_eq!(read_body(&dir, &old).unwrap().marks.ends, LatestEnds { any: end, run: end, hook: None });
+        let none = V2.replace("run_end=110000:7\nhook_end=120000:1", "run_end=-");
+        assert_eq!(read_body(&dir, &none).unwrap().marks.ends, LatestEnds { any: end, run: None, hook: None });
     }
 
     /// A required field that is missing or does not parse is an error,

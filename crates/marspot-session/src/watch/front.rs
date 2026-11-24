@@ -1,6 +1,6 @@
-//! When the pane's shell was back in front, as one `prompt` watch saw
-//! it.  The shell takes the terminal back before it draws its prompt
-//! and may be silent in between, so the quiet a prompt watch asks for
+//! When the pane's shell was back in front, as one watch saw it
+//! (`prompt`, or a run's end).  The shell takes the terminal back before it draws its prompt
+//! and may be silent in between, so the quiet such a watch asks for
 //! is measured from then, not from what a command printed before.
 
 use std::time::Instant;
@@ -35,6 +35,17 @@ impl Front {
             self.back = Some(now);
         }
         unseen
+    }
+
+    /// The quiet is over: whether the shell is in front, and was when
+    /// the quiet began.  `parked` when it is not in front: nothing is
+    /// due until the output or the process group changes.
+    pub(super) fn settled(&mut self, parked: &mut bool, shell: bool, now: Instant) -> bool {
+        *parked = !shell;
+        if *parked {
+            self.seen(false, now);
+        }
+        !*parked && !self.back_unseen(now)
     }
 
     /// Where the quiet starts.

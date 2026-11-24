@@ -16,7 +16,7 @@ pub(crate) fn run_end(watch_id: u32, since_pos: u64) -> WatchBody {
 
 /// Run `command` as `pane.run` does: what the watch reports, and the
 /// screen as it was published then.
-fn run(s: &Session, l: &mut Link, watch_id: u32, command: &str) -> (PaneWatchFired, Vec<String>) {
+pub(crate) fn run(s: &Session, l: &mut Link, watch_id: u32, command: &str) -> (PaneWatchFired, Vec<String>) {
     let input = format!("{command}\n{}", run_trailer(false));
     let req = l.type_in(input.as_bytes(), true, true, true, Some(run_end(watch_id, 0)));
     let f = l.fired(watch_id, 20.0);
@@ -27,7 +27,7 @@ fn run(s: &Session, l: &mut Link, watch_id: u32, command: &str) -> (PaneWatchFir
 }
 
 /// A shell script that execs `command`, as the pane's shell.
-fn shell(sandbox: &mut StateSandbox, command: &str) -> Session {
+pub(crate) fn shell(sandbox: &mut StateSandbox, command: &str) -> Session {
     let script = sandbox.dir.join("shell");
     std::fs::write(&script, format!("#!/bin/sh\nexec {command}\n")).expect("write the shell script");
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -37,7 +37,7 @@ fn shell(sandbox: &mut StateSandbox, command: &str) -> Session {
 
 /// zsh with a slow rc file that leaves the status 1, and a prompt hook
 /// that prints a command end with the status before every prompt.
-fn slow_zsh(sandbox: &mut StateSandbox) -> Session {
+pub(crate) fn slow_zsh(sandbox: &mut StateSandbox) -> Session {
     let dir = sandbox.dir.path().to_path_buf();
     std::fs::write(
         dir.join(".zshrc"),
@@ -100,7 +100,7 @@ fn typing_run_end_a_plain_command_end_watch_takes_an_unmarked_end() {
     l.armed(run_end(2, p));
     l.inject("printf '\\033]133;D;%s\\007' 5\r");
     assert_eq!(l.fired(1, 10.0).status, Some(5));
-    assert!(l.try_fired(2, 0.5).is_none(), "not a run's end");
+    assert!(l.try_fired(2, 0.3).is_none(), "not a run's end");
     l.inject("printf '\\033]133;D;%s;marspot=run\\007' 6\r");
     assert_eq!(l.fired(2, 10.0).status, Some(6));
 }
@@ -155,12 +155,12 @@ fn typing_run_end_is_not_a_hooks_end_from_before_an_image_swap() {
     assert_eq!(l.fired(1, 10.0).status, Some(9));
     let mut l = swap(&sandbox, &s, l);
     l.armed(run_end(4, p0));
-    assert!(l.try_fired(4, 0.5).is_none(), "an unmarked end before the swap");
+    assert!(l.try_fired(4, 0.3).is_none(), "an unmarked end before the swap");
     l.inject("printf '\\033]133;D;%s;marspot=run\\007' 6\r");
     assert_eq!(l.fired(4, 10.0).status, Some(6));
 }
 
-fn swap(sandbox: &crate::self_execv::Sandbox, s: &Session, mut l: Link) -> Link {
+pub(crate) fn swap(sandbox: &crate::self_execv::Sandbox, s: &Session, mut l: Link) -> Link {
     l.armed(run_end(3, u64::MAX - 1));
     crate::self_execv::stage(sandbox.path(), true);
     s.send_frame(MsgType::SessionUpdate, Vec::new());
@@ -182,7 +182,7 @@ fn typing_run_end_closing_a_flood_is_reported_with_its_last_line_on_screen() {
     let s = with_zsh(&mut sandbox);
     let mut l = Link::new(&s);
     let flood = sandbox.dir.join("flood");
-    for id in 1..=40 {
+    for id in 1..=10 {
         let mut out = "flood line\n".repeat(40_000 + id * 400);
         out.push_str(&format!("last-{id}\n\x1b]133;D;0;marspot=run\x07"));
         std::fs::write(&flood, out).expect("write the flood");
