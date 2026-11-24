@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::with_helpers::turns;
@@ -401,29 +400,7 @@ impl WorkerCtx {
     }
 }
 
-/// Worker thread entry.  Lives until the request channel is dropped
-/// (which `stop()` triggers by clearing `scan_req_tx`).
-pub(super) fn worker_main(
-    mut ctx: WorkerCtx,
-    req_rx: Receiver<()>,
-    res_tx: Sender<ScanResult>,
-) {
-    ctx.caches.trends.load();
-    while req_rx.recv().is_ok() {
-        // Deliberately outside `scan_once`: this one reaches out of
-        // marspot and edits Claude Code's settings, and `scan_once`
-        // is called directly by tests that have no business doing
-        // that to the machine they run on.  The tick owns it.
-        for line in ctx.reconcile_statusline() {
-            marspot::lx_info!("plugin.claudecode.statusline_hook", &line);
-        }
-        let result = ctx.scan_once(&crate::observe::shared().latest());
-        if res_tx.send(result).is_err() {
-            // Main side hung up; nothing left to do.
-            break;
-        }
-    }
-}
+pub(super) use super::worker_loop::worker_main;
 
 impl WorkerCtx {
     /// One full scan pass over an observation: find each live pane's
