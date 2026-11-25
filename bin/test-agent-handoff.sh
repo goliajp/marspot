@@ -317,11 +317,11 @@ switch_to claude "$TAG_TO_CLAUDE_P1"
 C2="$(last_start claude)"; C2_PID="$(pid_of "$C2")"
 kill -0 "$X1_PID" 2>/dev/null && fail "codex is still running after the switch"
 MCP_CONFIG="$MARSPOT_STATE_DIR/claude-mcp.json"
-grep -qF " argv=--mcp-config $MCP_CONFIG --resume $C_ID" <<<"$C2" && [[ $C2 == *" --resume $C_ID" ]] \
+grep -qF " argv=--mcp-config $MCP_CONFIG --allowedTools mcp__marspot --resume $C_ID" <<<"$C2" && [[ $C2 == *" --resume $C_ID" ]] \
   || fail "claude should resume $C_ID with marspot's MCP config: $C2"
 grep -q '"args": \[' "$MCP_CONFIG" && grep -q '"mcp"' "$MCP_CONFIG" && grep -q 'marspot-peer"' "$MCP_CONFIG" \
   || fail "the MCP config should name marspot-peer mcp: $(cat "$MCP_CONFIG" 2>&1)"
-ok "back to claude: it resumed the same session $C_ID, with the MCP config"
+ok "back to claude: it resumed the same session $C_ID, with the MCP config and its tools allowed"
 wait_file "input agent=claude pid=$C2_PID text=\[marspot handoff\]" 30 || fail "claude was never handed the message"
 grep -q "since you left" <<<"$(handoff_input claude "$C2_PID")" || fail "a resumed agent should be told what it missed"
 DOC="$(cat "$HANDOFF/$SID.md")"
