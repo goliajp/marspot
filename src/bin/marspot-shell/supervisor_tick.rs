@@ -398,12 +398,11 @@ impl ShellApp {
         }
 
         // after an exec of this shell: whether it is registered for
-        // Apple events (one load per tick otherwise)
-        let windows = &self.windows;
-        if let Some(n) = apple_events::tick(|| windows.iter().any(|w| w.presented), &self.proxy) {
-            // returns only if the exec failed
+        // Apple events (one load per tick otherwise); the exec returns only on failure
+        if let Some(n) = apple_events::tick(&self.proxy) {
             self.replace_image_for_apple_events(n);
         }
+        self.show_held_frames();
 
         // 6. Recompute the banner once per tick (no-op if nothing changed).
         self.refresh_banner(ctx);

@@ -26,7 +26,7 @@
 use std::os::unix::process::CommandExt;
 
 use marspot::{lx_event, lx_warn};
-use marspot_term::owner::{HEIR_ENV, RESIDENT_ENV};
+use marspot_term::owner::RESIDENT_ENV;
 use marspot_term::session_registry;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
@@ -35,6 +35,10 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationD
 
 use crate::supervisor::BinaryTree;
 use crate::{launch, ownership, sup_log};
+
+mod claim;
+pub(crate) use claim::replace_as_resident;
+use claim::{become_image, wait_for_image};
 
 /// Set for the app that a resident becomes when an update was staged
 /// while it had no core to hand it to.
@@ -62,36 +66,7 @@ fn live_sessions() -> Vec<i32> {
         .collect()
 }
 
-/// Replace this image with `exe`, same pid and coalition, as the app.
-/// Returns only when the exec failed.
-fn become_image(exe: &std::path::Path, extra: &[(&str, &str)]) -> std::io::Error {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let mut cmd = std::process::Command::new(exe);
-    if let Some(arg0) = args.first() {
-        cmd.arg0(arg0);
-    }
-    cmd.args(args.iter().skip(1)).env_remove(RESIDENT_ENV).env_remove(HEIR_ENV);
-    // the dev seams were for the app that was put away; the mark of a
-    // sandbox is not one of them
-    for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(|n| n.starts_with("MARSPOT_DEV_") && n != "MARSPOT_DEV_SANDBOX") {
-            cmd.env_remove(name);
-        }
-    }
-    for (k, v) in extra {
-        cmd.env(k, v);
-    }
-    // no launch may take the lock between the two images: it would be
-    // an app outside the sessions' coalition
-    crate::instance::carry_lock(&mut cmd);
-    crate::reclaim::carry_look(&mut cmd);
-    crate::apple_events::mark(&mut cmd);
-    let err = cmd.exec();
-    crate::instance::keep_lock_here();
-    err
-}
-
-fn own_image() -> std::path::PathBuf {
+pub(crate) fn own_image() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| ownership::successor_exe())
 }
 
@@ -125,6 +100,7 @@ const STAGED_SHELL_PATIENCE: std::time::Duration = std::time::Duration::from_sec
 /// This is the one moment a resident replaces its image, and the event
 /// of the app being opened is already in hand.
 fn resume(why: &'static str) {
+    wait_for_image();
     lx_event!("SHELL_RESIDENT_RESUME", "becoming the app again", why = why);
     let seams = crate::instance::asked_with();
     let mut extra: Vec<(&str, &str)> = seams.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -161,9 +137,9 @@ fn resume(why: &'static str) {
     lx_warn!("shell.resident.resume_failed", &format!("{err}"));
 }
 
-/// Exit for real: nothing is left to answer for, or the login session
-/// is ending.
+/// Exit for real: nothing is left to answer for, or the login session ends.
 fn leave(why: &'static str) -> ! {
+    wait_for_image();
     lx_event!("SHELL_RESIDENT_EXIT", "the resident shell is exiting", why = why);
     land_staged_bundle();
     std::process::exit(0)
@@ -330,12 +306,13 @@ static RESIDENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// Whether this process is, right now, the shell with no window.
 pub(crate) fn is_resident() -> bool {
-    RESIDENT.load(std::sync::atomic::Ordering::Acquire)
+    RESIDENT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Watch the sessions and wait for the app to be opened.
 fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker) -> ! {
-    RESIDENT.store(true, std::sync::atomic::Ordering::Release);
+    RESIDENT.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::apple_events::as_resident();
     crate::reclaim::watch();
     if let Err(e) = std::thread::Builder::new().name("l1-resident".into()).spawn(move || {
         watch(sessions);

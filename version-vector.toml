@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.717"  # proc.stop lets a session end processes of its own pane by pid and start time
+shell   = "0.7.718"  # an image started by an exec shows no frame until it is found registered for Apple events, within a bounded wait
 core    = "0.12.692"  # the process panel shows real CPU% on Apple silicon: pidtree converts mach ticks to nanoseconds
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it
