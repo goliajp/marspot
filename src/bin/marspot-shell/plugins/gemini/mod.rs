@@ -16,16 +16,24 @@
 //!   session file could not carry the report anyway: a reply is
 //!   recorded before its tool calls are, so "the model has finished"
 //!   and "a tool is waiting for approval" are the same last record.
-//! - Automatic account switching.  gemini writes no usage figures to
-//!   disk for a switch to be decided on.
+//!
+//! A pane whose account refused its model for the day is moved by the
+//! shared allocation (`alloc`) only when `gemini.allocation` says so;
+//! off, the default, leaves every pane where it is.
 
+mod alloc;
+mod alloc_helper;
+mod alloc_wire;
 mod badge;
 mod hand_off;
 mod model;
 mod others;
 mod pane;
 mod peer;
+mod quota;
+mod screen;
 mod session;
+mod session_files;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -39,6 +47,7 @@ use badge::{badge_text, publish_badge};
 use pane::{argv_facts, profile_of, profile_switch_op, root_from, ArgvFacts, PaneGemini};
 use session::{Asker, SessionIndex};
 
+pub(in crate::plugins) use alloc_helper::helper_pick;
 pub(crate) use model::is_model;
 pub(crate) use others::look as look_at_processes;
 pub(crate) use pane::{config_dir, handoff_homes, launch, profile_dirs, profile_dirs_in};
@@ -123,6 +132,7 @@ pub struct GeminiPlugin {
     /// A tick has run since the last gemini left the panes: what it
     /// publishes is what a tick with no gemini publishes.
     looked: bool,
+    alloc: alloc_wire::AllocPass,
 }
 
 impl GeminiPlugin {
@@ -135,6 +145,7 @@ impl GeminiPlugin {
             env: crate::observe::EnvCache::default(),
             starts: model::Starts::default(),
             looked: false,
+            alloc: alloc_wire::AllocPass::default(),
         }
     }
 
@@ -199,6 +210,10 @@ impl Plugin for GeminiPlugin {
         Ok(())
     }
 
+    fn on_pane_focused(&mut self, _host: &dyn PluginHost, sid: u64) {
+        self.alloc.focused = Some(sid);
+    }
+
     /// Right-click on the badge: the account profiles, then the other
     /// agents this conversation can be handed to.  A pane that is not
     /// gemini's gets no rows from here; every plugin is asked about
@@ -235,7 +250,10 @@ impl Plugin for GeminiPlugin {
             return;
         };
         let profile = match pick {
-            handoff::Pick::HandOff(to, n) => return self.hand_off(host, shelld_session_id, &pane, to, n),
+            handoff::Pick::HandOff(to, n) => {
+                self.hand_off(host, shelld_session_id, &pane, to, n);
+                return;
+            }
             handoff::Pick::Profile(n) => n,
         };
         if pane.profile == Some(profile) {
@@ -297,6 +315,9 @@ impl Plugin for GeminiPlugin {
         self.starts.retain(&live);
         self.panes.retain(|sid, _| seen.iter().any(|s| s.sid == *sid));
         let mut peers = Peers { bound: Vec::new(), all_known: true, unbound: Vec::new() };
+        let mode = marspot::settings::get().gemini_allocation;
+        self.sessions.set_quota(mode != marspot::settings::AgentAllocation::Off);
+        let mut gather = alloc_wire::Gather::new(mode, &obs);
 
         for s in &seen {
             let cfg = config_dir(&s.root);
@@ -327,6 +348,8 @@ impl Plugin for GeminiPlugin {
                 }
             }
             let profile = profile_of(&s.root);
+            let refused = facts.as_ref().and_then(|f| f.said.as_ref()).and_then(|x| x.refused.as_ref());
+            gather.push(s.sid, s.gemini, s.worker, refused, self.sessions.written(s.gemini));
             // What the process started with holds until its session file
             // says otherwise, so it is used alone only while a file is
             // still to come: not for a process whose file cannot be told,
@@ -353,6 +376,7 @@ impl Plugin for GeminiPlugin {
             );
         }
         peer::publish(peers);
+        self.allocate(host, mode, gather.seen, crate::plugins::claudecode::rooms::unix_now());
         // gemini left these panes: clear the badge this plugin set, and
         // only that one — another plugin may own the pane now.
         let gone: Vec<u64> = self.last_badge.keys().copied().filter(|sid| !self.panes.contains_key(sid)).collect();
@@ -364,109 +388,5 @@ impl Plugin for GeminiPlugin {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::observe::tests::session_with;
-    use std::sync::Arc;
-
-    fn proc(pid: i32, ppid: i32, argv: &[&str]) -> Proc {
-        let argv: Arc<[String]> = argv.iter().map(|a| a.to_string()).collect::<Vec<_>>().into();
-        Proc {
-            row: pidtree::ProcRow {
-                pid,
-                ppid,
-                comm: "x".into(),
-                start_unix: 0,
-                start_us: pid as u64,
-                pgid: pid,
-                tty_dev: 1,
-                tty_fg_pgid: 1,
-                status: libc::SSLEEP,
-            },
-            argv: Some(argv),
-        }
-    }
-
-    fn is(argv: &[&str]) -> bool {
-        argv_is_gemini(&argv.iter().map(|a| a.to_string()).collect::<Vec<_>>())
-    }
-
-    #[test]
-    fn the_standalone_build_and_the_npm_install_are_both_gemini() {
-        assert!(is(&["gemini"]));
-        assert!(is(&["/opt/gem/bin/gemini", "-m", "flash"]));
-        // the relaunched child of the standalone build
-        assert!(is(&["/opt/gem/bin/gemini", "/opt/gem/bin/gemini", "-m", "flash"]));
-        assert!(is(&["node", "/opt/homebrew/bin/gemini"]));
-        assert!(is(&[
-            "/opt/homebrew/bin/node",
-            "--max-old-space-size=32768",
-            "/opt/homebrew/lib/node_modules/@google/gemini-cli/bundle/gemini.js",
-            "-r",
-            "latest"
-        ]));
-    }
-
-    #[test]
-    fn a_look_alike_is_not_gemini() {
-        assert!(!is(&["gemini-helper"]));
-        assert!(!is(&["/usr/local/bin/gemini-helper", "gemini"]));
-        assert!(!is(&["node", "/x/gemini-helper.js"]));
-        assert!(!is(&["node", "/x/server.js", "gemini"]), "the script is what counts, not a later word");
-        assert!(!is(&["node"]));
-        assert!(!is(&["python3", "gemini"]));
-        assert!(!is(&[]));
-    }
-
-    /// Neither of the other two plugins takes a gemini for its own:
-    /// both match on this name.
-    #[test]
-    fn a_gemini_process_is_not_named_claude_or_codex() {
-        for argv in [&["/opt/gem/bin/gemini"][..], &["node", "/opt/homebrew/bin/gemini"][..]] {
-            let p = proc(10, 1, argv);
-            assert!(!matches!(p.name(), "claude" | "codex"), "{argv:?}");
-        }
-    }
-
-    #[test]
-    fn the_parent_and_its_relaunched_child_are_one_agent() {
-        let procs = [
-            proc(10, 1, &["/opt/gem/bin/gemini", "-m", "flash"]),
-            proc(11, 10, &["/opt/gem/bin/gemini", "/opt/gem/bin/gemini", "-m", "flash"]),
-            proc(12, 11, &["/bin/zsh", "-c", "ls"]),
-        ];
-        let pane = session_with(procs.to_vec(), 10);
-        let (outer, worker) = agent_in(&pane).expect("one agent");
-        assert_eq!(outer.row.pid, 10, "bound to the one in front");
-        assert_eq!(worker.pid, 11, "and the child is the one that works");
-
-        // listed child first: the order of the table is not the tree
-        let pane = session_with(vec![procs[1].clone(), procs[0].clone()], 10);
-        let (outer, worker) = agent_in(&pane).expect("one agent");
-        assert_eq!((outer.row.pid, worker.pid), (10, 11));
-
-        let pane = session_with(vec![proc(10, 1, &["node", "/opt/homebrew/bin/gemini"])], 10);
-        let (outer, worker) = agent_in(&pane).expect("one agent");
-        assert_eq!((outer.row.pid, worker.pid), (10, 10), "no relaunch: one process is both");
-    }
-
-    #[test]
-    fn a_gemini_run_by_another_program_is_not_the_pane_s_agent() {
-        for front in ["claude", "/usr/bin/make", "/bin/zsh"] {
-            let procs = vec![
-                proc(10, 1, &[front]),
-                proc(11, 10, &["/bin/zsh", "-c", "gemini -p hi"]),
-                proc(12, 11, &["/opt/gem/bin/gemini", "-p", "hi"]),
-            ];
-            assert!(agent_in(&session_with(procs, 10)).is_none(), "{front}");
-        }
-        let helper = vec![proc(10, 1, &["/bin/zsh"]), proc(11, 10, &["gemini-helper"])];
-        assert!(agent_in(&session_with(helper, 11)).is_none());
-    }
-
-    #[test]
-    fn a_gemini_the_shell_has_put_aside_is_not_the_pane_s_agent() {
-        let procs = vec![proc(10, 1, &["/opt/gem/bin/gemini"])];
-        assert!(agent_in(&session_with(procs, 0)).is_none(), "suspended or in the background");
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

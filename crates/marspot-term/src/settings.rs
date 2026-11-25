@@ -32,8 +32,7 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, atomic::{AtomicU8, Ordering}};
 use std::time::SystemTime;
 
 use crate::language::LangId;
@@ -44,8 +43,7 @@ mod agent_allocation;
 mod rebalance;
 mod values;
 
-pub use agent_allocation::AgentAllocation;
-pub use rebalance::Rebalance;
+pub use {agent_allocation::AgentAllocation, rebalance::Rebalance};
 
 /// Every user-owned decision, resolved.
 ///
@@ -153,8 +151,9 @@ pub struct Settings {
     /// input that chose it and moves nothing; only `live` moves; `off`/`false` do neither.
     /// Leaving an account that runs short and moving a refused pane are not this setting's.
     pub cc_rebalance: Rebalance,
-    /// What the kimi plugin does with the shared allocation, see [`AgentAllocation`].
+    /// What the kimi and gemini plugins do with the shared allocation, see [`AgentAllocation`].
     pub kimi_allocation: AgentAllocation,
+    pub gemini_allocation: AgentAllocation,
     /// List a pane's helpers in rows at its bottom, as the agent in it
     /// lists its own.  The program in the pane is made shorter while
     /// there are any; a pane without helpers is not touched.
@@ -182,6 +181,7 @@ impl Default for Settings {
             agents_install: true,
             cc_rebalance: Rebalance::DryRun,
             kimi_allocation: AgentAllocation::Off,
+            gemini_allocation: AgentAllocation::Off,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
