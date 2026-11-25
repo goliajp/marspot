@@ -13,7 +13,8 @@
 # install the three CLIs, keep its state where the docs say, put
 # ~/.local/bin on the pane's PATH, and write its hooks and skill into
 # the config dirs the installers create.  And what it must not do: put
-# anything on screen but its main window.
+# anything on screen but its main window, or ask for more than one
+# system permission at its first run.
 #
 # It reaches the network (three vendor downloads) and takes a few
 # minutes.  Everything it starts carries the scratch HOME in its
@@ -29,6 +30,7 @@ RUN_ID="fresh-$$-$(date +%s)"
 REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"
 
 scp -q "$DMG" "$HOST:$REMOTE_DMG"
+scp -q "$(dirname "$0")/_tcc-prompts.sh" "$HOST:/tmp/marspot-$RUN_ID-tcc.sh"
 
 ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT ${FRESH_ENV:-}" <<'REMOTE'
 set -uo pipefail
@@ -40,6 +42,7 @@ MNT="$FRESH/mnt"
 STATE="$FRESH/Library/Application Support/marspot"
 LOG="$FRESH/Library/Logs/Marspot/marspot.log"
 SETTINGS="$FRESH/.claude/settings.json"
+TCC_PROMPTS="/tmp/marspot-$RUN_ID-tcc.sh"
 fail=0
 check() { if "${@:2}"; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=1; fi; }
 ours() { ps -axww -E -o pid=,command= | grep -F "HOME=$FRESH" | grep -v grep; }
@@ -50,7 +53,7 @@ cleanup() {
     sleep 2
   done
   hdiutil detach "$MNT" -quiet 2>/dev/null
-  rm -rf "$FRESH" "$DMG"
+  rm -rf "$FRESH" "$DMG" "$TCC_PROMPTS"
 }
 trap cleanup EXIT
 
@@ -76,6 +79,19 @@ cat > "$FRESH/pane-shell" <<'SH'
 exec /bin/zsh "$@"
 SH
 chmod +x "$FRESH/pane-shell"
+# The system's own dialogs on screen, by window number, so the ones
+# already up are not counted as this run's.  Seen on mini (macOS 27):
+# with older dialogs left unanswered, a new permission prompt shows no
+# window at all, so these are reported and the log decides.
+prompt_windows() {
+  /usr/bin/osascript -l JavaScript -e 'ObjC.import("CoreGraphics");
+  var all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0)));
+  var owners = ["UserNotificationCenter", "universalAccessAuthWarn", "CoreServicesUIAgent", "tccd"];
+  all.filter(function (w) { return owners.indexOf(w.kCGWindowOwnerName) >= 0; })
+    .map(function (w) { return w.kCGWindowNumber + " " + w.kCGWindowOwnerName; }).join("\n")' | sort
+}
+prompt_windows > "$FRESH/prompt-windows.before"
+STARTED="$(date '+%Y-%m-%d %H:%M:%S')"
 env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$FRESH/pane-shell" \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$FRESH/tmp" LANG=en_US.UTF-8 "$EXTRA" \
   "$APP/Contents/MacOS/marspot-shell" >"$FRESH/stdout.log" 2>&1 &
@@ -120,6 +136,21 @@ ours | awk '{n=split($2,a,"/"); print "  " $1 "  " a[n]}'
 for p in $(pane_shells); do echo "  $p  $(ps -o comm= -p "$p") (pane shell)"; done
 echo "==> what is on screen"
 app_windows | sed 's/^/  /'
+echo "==> system permission prompts since $STARTED"
+# the log names the app's copy by its real path, /private/tmp/...
+"$TCC_PROMPTS" "$STARTED" com.goliajp.marspot "$(cd "$FRESH" && pwd -P)/" > "$FRESH/prompts" 2>&1
+sed '$d' "$FRESH/prompts" | sed 's/^/  asked: /'
+prompts="$(tail -1 "$FRESH/prompts")"
+prompt_windows | comm -13 "$FRESH/prompt-windows.before" - > "$FRESH/prompt-windows.new"
+echo "  $prompts asked for the app (unified log, tccd AUTHREQ_PROMPTING);" \
+  "$(grep -c . "$FRESH/prompt-windows.new") new system dialogs on screen"
+sed 's/^/  new dialog: /' "$FRESH/prompt-windows.new"
+# A request the login user's TCC database already answers, allowed or
+# denied, is not asked again.  That database is the user's, not HOME's,
+# so the empty HOME does not make it new.
+echo "  note: what $(id -un) already allowed or denied com.goliajp.marspot here is not asked or counted;" \
+  "a Mac that never ran marspot may be asked more"
+at_most_one_prompt() { [[ $prompts =~ ^[0-9]+$ ]] && (( prompts <= 1 )); }
 echo "==> what it did"
 check "shell is still running" kill -0 $SHELL_PID
 check "one window on screen, the main one" one_main_window
@@ -141,6 +172,7 @@ check "profiles skill in the claude config" test -x "$FRESH/.claude/skills/marsp
 check "codex has the peer server" grep -q 'mcp_servers.marspot' "$FRESH/.codex/config.toml"
 check "no panic" no_panic
 check "no ERROR lines" no_errors
+check "at most one system permission prompt" at_most_one_prompt
 
 echo "==> warnings in the log"
 awk -F'\t' '$3=="WARN"{print "  " $7 "  " substr($8,1,140)}' "$LOG" | sort | uniq -c | sort -rn | head -20
