@@ -19,7 +19,11 @@
 #   - `open` is not refused, not once
 #   - the app answers on its command socket within ten seconds
 #   - it is the same process as before the quit, and the only shell
-# Nothing is retried: a refused open is the failure.
+# The next quit is asked once the window is up and the shell has
+# checked that it is still registered for Apple events: becoming the
+# app again replaces the shell's image, and until that check an image
+# can be one whose registration the old image's exit took with it.
+# Nothing is retried: a refused open, or a refused quit, is the failure.
 #
 # Sandbox-only: the installed app is never touched.  Exits 0 on pass.
 
@@ -72,13 +76,14 @@ echo "==> app $L1 up; $ROUNDS quits and opens for each delay"
 
 cycles=0
 cycle() { # delay ms, how (path|app), label
-  local d=$1 how=$2 i q ans t0 t1 shown
+  local d=$1 how=$2 i q ans t0 t1 shown checks
   q=$(count SHELL_QUIT_CLEANUP); shown=$(count WINDOW_FIRST_PRESENT)
   ans="$(osascript -l JavaScript -e "ObjC.import('AppKit');
     \$.NSRunningApplication.runningApplicationWithProcessIdentifier($L1).terminate" 2>&1)"
   [[ $ans == true ]] || fail "[$3] the quit request was not taken: $ans"
   for (( i = 0; i < 2000; i++ )); do (( $(count SHELL_QUIT_CLEANUP) > q )) && break; sleep 0.005; done
   (( $(count SHELL_QUIT_CLEANUP) > q )) || fail "[$3] the app did not act on the quit"
+  checks=$(count SHELL_AE_CHECKED)
   t0=$(ms)
   perl -e "select(undef,undef,undef,$d/1000)"
   t1=$(ms)
@@ -90,6 +95,11 @@ cycle() { # delay ms, how (path|app), label
   # person asks it
   for (( i = 0; i < 200; i++ )); do (( $(count WINDOW_FIRST_PRESENT) > shown )) && break; sleep 0.05; done
   (( $(count WINDOW_FIRST_PRESENT) > shown )) || fail "[$3] the app came back and showed no window"
+  # and once the new image has checked that appleeventsd still has it:
+  # until then a quit can go to an image whose registration the old
+  # image's exit took with it, and the shell is about to replace
+  for (( i = 0; i < 600; i++ )); do (( $(count SHELL_AE_CHECKED) > checks )) && break; sleep 0.05; done
+  (( $(count SHELL_AE_CHECKED) > checks )) || fail "[$3] the app came back and never reported its registration check"
   cycles=$((cycles + 1))
   sleep 0.3
 }

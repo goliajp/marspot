@@ -369,7 +369,7 @@ fn publish_and_poke(
         // Best-effort: a dead socket just means L2 went away; the next
         // read EOF tears the reader down and the session keeps running.
         // Queued, never written inline — see `ControlWriter`.
-        let _ = w.send(Frame::new(MsgType::GridReady, Vec::new()));
+        w.poke();
     }
 }
 

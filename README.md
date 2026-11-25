@@ -91,18 +91,19 @@ it holds the headless benchmarks (`marspot --bench <mode>:<arg>`).
 
 ## Performance
 
-Measured 2026-11-22 on a Mac mini at load 1.6 to 2.5 (M-series, macOS
-27.2.1), every terminal driven through its own GUI, four rounds each; the
+Measured on a Mac mini at load 1.4 to 2.5 (M-series, macOS 27.2.1),
+marspot and Ghostty on 2026-11-25, iTerm2 and Terminal on 2026-11-22,
+every terminal driven through its own GUI, four rounds each; the
 first round is a warm-up and each number is the median of the other
 three. Throughput of `cat`-ing a prepared byte stream, MB/s, higher is
 better:
 
 | stream | marspot | Ghostty 1.4.0 | iTerm2 3.7.9 | Terminal 2.15 |
 |---|---:|---:|---:|---:|
-| ASCII | **302.7** | 282.2 | 81.8 | 38.5 |
-| mixed | **268.6** | 255.5 | 21.6 | 37.3 |
-| CJK | **289.3** | 269.1 | 9.5 | 36.0 |
-| emoji | **297.2** | 279.1 | 0.4 | 39.7 |
+| ASCII | **302.5** | 283.4 | 81.8 | 38.5 |
+| mixed | **269.4** | 246.2 | 21.6 | 37.3 |
+| CJK | **291.1** | 262.0 | 9.5 | 36.0 |
+| emoji | **297.0** | 275.7 | 0.4 | 39.7 |
 
 Read that table with its limits in mind, which are real:
 
@@ -110,8 +111,8 @@ Read that table with its limits in mind, which are real:
   It says nothing about frame rate or input latency. A terminal that
   coalesces frames does less drawing work here, and that is a
   legitimate design choice rather than cheating.
-- One machine, one day. Between rounds neither marspot nor Ghostty
-  moved by more than about 2 %, and on every stream marspot's slowest
+- One machine; marspot and Ghostty in one run. Between rounds neither
+  moved by more than about 5 %, and on every stream marspot's slowest
   round was faster than Ghostty's fastest. marspot and Ghostty ran in
   windows of the same 99 by 35 cells; iTerm2 and Terminal opened at
   their own default sizes.

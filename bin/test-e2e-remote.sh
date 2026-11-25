@@ -28,8 +28,10 @@
 # Contract:
 #   - shares the host     : every suite holds the host's bench lock,
 #                           shared (`heavy`), so a measurement waits for
-#                           it; `E2E_LOCK=bench` takes it exclusively
-#                           for a suite that is itself a measurement
+#                           it; a measuring suite (is_measurement) takes
+#                           it exclusively, and `E2E_LOCK=bench` takes it
+#                           exclusively for every suite and builds inside
+#                           that hold
 #   - bounded             : each suite is stopped after E2E_SUITE_TIMEOUT
 #                           seconds (default 900); the build after
 #                           E2E_BUILD_TIMEOUT (default 1800)
@@ -41,8 +43,9 @@
 #                           there and nothing else on the host
 #   - honest              : exits 1 when any suite failed; 3 when none
 #                           failed but a measuring suite was read next
-#                           to other work, which is neither a pass nor
-#                           a regression: take it again on a quiet host
+#                           to other work or never got the exclusive
+#                           lock, which is neither a pass nor a
+#                           regression: take it again on a quiet host
 set -euo pipefail
 
 DEFAULT_SUITES=(
@@ -82,6 +85,7 @@ DEFAULT_SUITES=(
   test-adversarial-update.sh
   test-idle-wakeups.sh
   test-idle-exit-codes.sh
+  test-awake-cost.sh
 )
 
 # The suites that are measurements.  Their exit codes are the four of
@@ -90,6 +94,12 @@ DEFAULT_SUITES=(
 is_measurement() {
   [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh || $1 == test-awake-cost.sh \
     || $1 == measure-active.sh ]]
+}
+
+# Exit 3 from these means a measurement in them was read on a busy host
+# and everything else passed.
+may_be_unmeasured() {
+  is_measurement "$1" || [[ $1 == soak-l3.sh ]]
 }
 
 # One tool does the copying, for every session and every repo: it takes
@@ -186,9 +196,11 @@ trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
-# A measurement builds inside its own exclusive hold (bin/_build_then.sh):
-# built under a shared hold first, it would wait behind every queued
-# measurement and then queue again itself.
+# With E2E_LOCK=bench every suite builds inside its own exclusive hold
+# (bin/_build_then.sh): built under a shared hold first, it would wait
+# behind every queued measurement and then queue again itself.  By
+# default the build is one shared hold here, and a measuring suite then
+# queues once for the exclusive hold it is read under.
 if [[ ${E2E_LOCK:-heavy} != bench ]]; then
   echo "==> building release on $HOST"
   remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
@@ -224,6 +236,11 @@ for suite in "${SUITES[@]}"; do
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
     lock="bench --max-wait $MAX_WAIT $UNTIL"
     run="bin/_build_then.sh $BUILD_TIMEOUT $SUITE_TIMEOUT ${E2E_FEATURES:--} $suite"
+  elif is_measurement "$suite"; then
+    # built above already; a reading taken next to other heavy work
+    # would only ever come back busy
+    lock="bench --max-wait $MAX_WAIT $UNTIL"
+    run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   else
     lock="heavy --max-wait $MAX_WAIT $UNTIL"
     run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
@@ -260,10 +277,18 @@ for suite in "${SUITES[@]}"; do
     results+=("PASS  ${secs}s  $suite")
     # said now as well: a run that is cut short prints no summary
     echo "==> PASS  ${secs}s  $suite"
-  elif (( suite_rc == 3 )) && is_measurement "$suite"; then
+  elif (( suite_rc == 3 )) && may_be_unmeasured "$suite"; then
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
     results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
     echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"
+    unmeasured=1
+  elif (( suite_rc == 75 )) && is_measurement "$suite"; then
+    # the exclusive hold waits for every other heavy job on the host;
+    # not getting it in time says the host was busy, not the suite failed
+    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+    results+=("BUSY  ${secs}s  $suite  (not measured: no exclusive hold of $HOST's lock within ${MAX_WAIT}s)")
+    echo "==> BUSY  ${secs}s  $suite: not measured, the exclusive lock was not free within ${MAX_WAIT}s;" \
+      "neither a pass nor a regression"
     unmeasured=1
   else
     case $suite_rc in

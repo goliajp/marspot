@@ -13,12 +13,16 @@
 # install the three CLIs, keep its state where the docs say, put
 # ~/.local/bin on the pane's PATH, and write its hooks and skill into
 # the config dirs the installers create.  And what it must not do: put
-# anything on screen but its main window.
+# anything on screen but its main window, or ask for more than one
+# system permission at its first run.
 #
 # It reaches the network (three vendor downloads) and takes a few
 # minutes.  Everything it starts carries the scratch HOME in its
 # environment, and that is how the cleanup finds it: nothing else on
 # the host is touched.
+#
+# Exit 0 every check passed, 1 one failed, 3 none failed but the prompt
+# count could not be measured on this host.
 set -euo pipefail
 
 DMG="${1:?usage: $0 <Marspot.dmg>}"
@@ -29,6 +33,7 @@ RUN_ID="fresh-$$-$(date +%s)"
 REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"
 
 scp -q "$DMG" "$HOST:$REMOTE_DMG"
+scp -q "$(dirname "$0")/_tcc-prompts.sh" "$HOST:/tmp/marspot-$RUN_ID-tcc.sh"
 
 ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT ${FRESH_ENV:-}" <<'REMOTE'
 set -uo pipefail
@@ -40,7 +45,9 @@ MNT="$FRESH/mnt"
 STATE="$FRESH/Library/Application Support/marspot"
 LOG="$FRESH/Library/Logs/Marspot/marspot.log"
 SETTINGS="$FRESH/.claude/settings.json"
+TCC_PROMPTS="/tmp/marspot-$RUN_ID-tcc.sh"
 fail=0
+unmeasured=0
 check() { if "${@:2}"; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=1; fi; }
 ours() { ps -axww -E -o pid=,command= | grep -F "HOME=$FRESH" | grep -v grep; }
 
@@ -50,7 +57,7 @@ cleanup() {
     sleep 2
   done
   hdiutil detach "$MNT" -quiet 2>/dev/null
-  rm -rf "$FRESH" "$DMG"
+  rm -rf "$FRESH" "$DMG" "$TCC_PROMPTS"
 }
 trap cleanup EXIT
 
@@ -76,6 +83,19 @@ cat > "$FRESH/pane-shell" <<'SH'
 exec /bin/zsh "$@"
 SH
 chmod +x "$FRESH/pane-shell"
+# The system's own dialogs on screen, by window number, so the ones
+# already up are not counted as this run's.  Seen on mini (macOS 27):
+# with older dialogs left unanswered, a new permission prompt shows no
+# window at all, so these are reported and the log decides.
+prompt_windows() {
+  /usr/bin/osascript -l JavaScript -e 'ObjC.import("CoreGraphics");
+  var all = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0)));
+  var owners = ["UserNotificationCenter", "universalAccessAuthWarn", "CoreServicesUIAgent", "tccd"];
+  all.filter(function (w) { return owners.indexOf(w.kCGWindowOwnerName) >= 0; })
+    .map(function (w) { return w.kCGWindowNumber + " " + w.kCGWindowOwnerName; }).join("\n")' | sort
+}
+prompt_windows > "$FRESH/prompt-windows.before"
+STARTED="$(date '+%Y-%m-%d %H:%M:%S')"
 env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$FRESH/pane-shell" \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$FRESH/tmp" LANG=en_US.UTF-8 "$EXTRA" \
   "$APP/Contents/MacOS/marspot-shell" >"$FRESH/stdout.log" 2>&1 &
@@ -120,6 +140,18 @@ ours | awk '{n=split($2,a,"/"); print "  " $1 "  " a[n]}'
 for p in $(pane_shells); do echo "  $p  $(ps -o comm= -p "$p") (pane shell)"; done
 echo "==> what is on screen"
 app_windows | sed 's/^/  /'
+echo "==> system permission requests since $STARTED"
+# the log names the app's copy by its real path, /private/tmp/...
+"$TCC_PROMPTS" "$STARTED" "$(cd "$FRESH" && pwd -P)/" > "$FRESH/prompts" 2>&1
+tcc_rc=$?
+sed '/^requests=/d' "$FRESH/prompts" | sed 's/^/  /'
+tally="$(grep '^requests=' "$FRESH/prompts" || true)"
+prompts="$(sed -n 's/.*prompts=\([0-9]*\).*/\1/p' <<<"$tally")"
+stored="$(sed -n 's/.*stored=\([0-9]*\).*/\1/p' <<<"$tally")"
+prompt_windows | comm -13 "$FRESH/prompt-windows.before" - > "$FRESH/prompt-windows.new"
+echo "  ${tally:-no tally} (unified log, tccd AUTHREQ_*; exit $tcc_rc);" \
+  "$(grep -c . "$FRESH/prompt-windows.new") new system dialogs on screen"
+sed 's/^/  new dialog: /' "$FRESH/prompt-windows.new"
 echo "==> what it did"
 check "shell is still running" kill -0 $SHELL_PID
 check "one window on screen, the main one" one_main_window
@@ -141,6 +173,27 @@ check "profiles skill in the claude config" test -x "$FRESH/.claude/skills/marsp
 check "codex has the peer server" grep -q 'mcp_servers.marspot' "$FRESH/.codex/config.toml"
 check "no panic" no_panic
 check "no ERROR lines" no_errors
+# A request the login user's TCC database already answers, allowed or
+# denied, is not asked again, and that database is the user's, not
+# HOME's: the empty HOME does not make it new.  So the count is a
+# verdict only when the log is readable and tccd answered none of the
+# app's requests from a stored decision; otherwise it is not measured
+# (exit 3), which is neither a pass nor a failure.  More than one prompt
+# fails either way.
+# redaction can only hide requests, so a count over one fails even then
+if [[ $prompts =~ ^[0-9]+$ ]] && (( prompts > 1 )); then
+  echo "  FAIL  at most one system permission prompt ($prompts asked)"; fail=1
+elif [[ $tcc_rc != 0 || ! $prompts =~ ^[0-9]+$ ]]; then
+  echo "  NOT MEASURED  at most one system permission prompt" \
+    "(the log cannot be read, or tccd logged nothing readable: the instrument cannot see)"
+  unmeasured=1
+elif (( stored > 0 )); then
+  echo "  NOT MEASURED  at most one system permission prompt ($prompts asked;" \
+    "$stored answered from $(id -un)'s stored decisions, which a Mac that never ran marspot does not have)"
+  unmeasured=1
+else
+  echo "  ok    at most one system permission prompt ($prompts asked; tccd evaluated every request afresh)"
+fi
 
 echo "==> warnings in the log"
 awk -F'\t' '$3=="WARN"{print "  " $7 "  " substr($8,1,140)}' "$LOG" | sort | uniq -c | sort -rn | head -20
@@ -150,5 +203,5 @@ echo "==> installs"
 awk -F'\t' '$7 ~ /agents\./{print "  " $1 "  " $7 "  " $8 "  " $9 "  " $10}' "$LOG"
 echo "==> stdout/stderr of the app (tail)"
 tail -5 "$FRESH/stdout.log" | sed 's/^/  /'
-exit $fail
+exit $(( fail ? 1 : unmeasured ? 3 : 0 ))
 REMOTE

@@ -27,18 +27,73 @@
 //! here, since a half-written frame would desynchronise the protocol
 //! stream permanently.
 
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use marspot_term::frame_writer::FrameWriter;
-use marspot_term::shell_proto::Frame;
+use marspot_term::frame_writer::{BoundedWriter, Queued};
+use marspot_term::shell_proto::{Frame, HEADER_LEN, MsgType, PaneAwake, encode_pane_awake};
+
+/// The `PaneAwake` waiting in the queue, with what was said since it
+/// was queued folded in; the writer takes it when its turn comes.
+type AwakeSlot = Arc<Mutex<Option<PaneAwake>>>;
+
+/// What the writer thread puts on the wire.
+enum Item {
+    Frame(Frame),
+    /// A `GridReady` poke.  The flag is the one `ControlWriter::poke`
+    /// sets; it is cleared just before the poke is written, so a
+    /// publish that finds it set happened before the core was woken and
+    /// is read by the shm read that wake starts.
+    Poke(Arc<AtomicBool>),
+    /// A `PaneAwake` and its wire length.
+    Awake(AwakeSlot, usize),
+}
+
+impl Queued for Item {
+    fn queued_len(&self) -> usize {
+        match self {
+            Item::Frame(f) => f.wire_len(),
+            Item::Poke(_) => HEADER_LEN,
+            Item::Awake(_, len) => *len,
+        }
+    }
+
+    fn write_all_to(&self, sink: &mut dyn Write) -> io::Result<()> {
+        match self {
+            Item::Frame(f) => f.write_all_to(sink),
+            Item::Poke(queued) => {
+                queued.store(false, Ordering::SeqCst);
+                Frame::new(MsgType::GridReady, Vec::new()).write_all_to(sink)
+            }
+            Item::Awake(slot, _) => {
+                let said = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+                match said {
+                    Some(a) => Frame::new(MsgType::PaneAwake, encode_pane_awake(&a)).write_all_to(sink),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
+}
 
 /// L3's end of the control socket.  The queueing lives in
-/// [`FrameWriter`]; this adds the fd bookkeeping the execv handoff
-/// needs, which is specific to L3's self-update path.
+/// [`BoundedWriter`]; this folds pokes and awake reports into the one
+/// still queued and adds the fd bookkeeping the execv handoff needs.
 pub struct ControlWriter {
-    inner: FrameWriter,
+    inner: BoundedWriter<Item>,
+    /// A poke is queued and not yet written.  A core that stops reading
+    /// would otherwise collect one twelve-byte poke per publish until
+    /// the queue's cap, a third of a million of them, and every one but
+    /// the first says nothing the first does not.
+    poke_queued: Arc<AtomicBool>,
+    /// The same for `PaneAwake`: a shell loop that runs a short command
+    /// after another changes the foreground group on every one, a
+    /// report each time.
+    awake_queued: AwakeSlot,
+    awake_len: usize,
     /// The stream's fd, kept so the execv handoff can pass it on.
     fd: RawFd,
     /// Held only so the fd stays open for `fd`'s lifetime; the writer
@@ -60,7 +115,18 @@ impl ControlWriter {
             stream.as_raw_fd()
         };
         Ok(Self {
-            inner: FrameWriter::new("l3-control-writer", thread_half, marspot_term::frame_writer::cap::CONTROL_SOCKET),
+            inner: BoundedWriter::new("l3-control-writer", thread_half, marspot_term::frame_writer::cap::CONTROL_SOCKET),
+            poke_queued: Arc::new(AtomicBool::new(false)),
+            awake_queued: Arc::new(Mutex::new(None)),
+            awake_len: HEADER_LEN
+                + encode_pane_awake(&PaneAwake {
+                    session_id: 0,
+                    output: false,
+                    foreground: false,
+                    shell_in_front: false,
+                    fg_pgid: 0,
+                })
+                .len(),
             fd,
             stream: Some(stream),
         })
@@ -68,7 +134,39 @@ impl ControlWriter {
 
     /// Queue `frame` for L2.  Never blocks.  `false` = dropped.
     pub fn send(&mut self, frame: Frame) -> bool {
-        self.inner.send(frame)
+        self.inner.send(Item::Frame(frame))
+    }
+
+    /// Tell the core the grid changed.  Folded into a poke still
+    /// waiting in the queue, which wakes the core to the same shm.
+    pub fn poke(&mut self) {
+        if self.poke_queued.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if !self.inner.send(Item::Poke(Arc::clone(&self.poke_queued))) {
+            self.poke_queued.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Report `said`, or fold it into the report still queued: the
+    /// output and foreground changes of both, the foreground group as
+    /// it is now.  `false` = dropped.
+    pub fn awake(&mut self, said: PaneAwake) -> bool {
+        let mut slot = self.awake_queued.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(q) = slot.as_mut() {
+            q.output |= said.output;
+            q.foreground |= said.foreground;
+            q.shell_in_front = said.shell_in_front;
+            q.fg_pgid = said.fg_pgid;
+            return true;
+        }
+        *slot = Some(said);
+        drop(slot);
+        if self.inner.send(Item::Awake(Arc::clone(&self.awake_queued), self.awake_len)) {
+            return true;
+        }
+        *self.awake_queued.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        false
     }
 
     pub fn backlog(&self) -> usize {
@@ -94,3 +192,7 @@ impl ControlWriter {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "control_writer_tests.rs"]
+mod tests;

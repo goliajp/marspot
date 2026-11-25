@@ -8,12 +8,14 @@
 # a real SIGTERM, and a resume line typed back into the same shell.
 # What the handoff said about it was "命令形状正确, 端到端未证".
 #
-# codex itself is not in the chain.  `CODEX_HOME` and
-# `resume --last` are asserted as the arguments the plugin hands over
-# — what codex then does with them is codex's, and driving the real
-# CLI would sign into the user's accounts and end their sessions.  The
-# flag shapes are checked against the installed `codex resume --help`
-# separately; this pins OUR half.
+# codex itself is not in the chain, and neither is its app-server
+# daemon: with no daemon to name the pane's thread, the switch has only
+# the terminal to go by.  It holds a pick while the terminal is still
+# drawing, and once the pane has been quiet it hands the conversation
+# off to a codex started under the other profile's `CODEX_HOME`.  The
+# resume-by-id path needs the daemon and is pinned by unit tests
+# against a stand-in daemon; driving the real CLI would sign into the
+# user's accounts and end their sessions.
 #
 # Sandbox-only: MARSPOT_STATE_DIR *and* HOME are redirected, so the
 # profile directories this reads are its own and the user's real
@@ -206,17 +208,48 @@ wait_for "codex.*sid=$SID" 30 \
   || fail "the plugin never recognised the pane's agent"
 ok "the plugin bound the pane to it"
 
-echo "==> picking profile 2 from the badge menu"
-# Renamed into place, so the tick that reads it cannot catch it
-# half-written — a plain `>` redirect once lost the pick that way.
 # the tag `handoff::profile_tag` gives codex's P2 row:
 # 0x4F48_0000 | owner << 12 | profile, codex = 2
-echo "$SID $(( 0x4F480000 | 2 << 12 | 2 ))" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
-wait_for 'DEV_BADGE_MENU' 20 || fail "the seam never fired"
+PICK="$SID $(( 0x4F480000 | 2 << 12 | 2 ))"
+picks() { grep -c 'DEV_BADGE_MENU' "$APPLOG" 2>/dev/null; }
+# Renamed into place, so the tick that reads it cannot catch it
+# half-written — a plain `>` redirect once lost the pick that way.
+pick() {
+  local n i; n="$(picks)"
+  echo "$PICK" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
+  for (( i = 0; i < 100; i++ )); do
+    (( $(picks) > n )) && return 0
+    sleep 0.2
+  done
+  fail "the seam never fired"
+}
 
-# What the switch must do: end the running one, and bring the session
-# back under the other profile's CODEX_HOME.
-for (( i = 0; i < 150; i++ )); do
+echo "==> picking profile 2 while the terminal has just drawn"
+# The pane drew the echoed command line moments ago, and no daemon
+# says whether a turn is running: the pick is held, not acted on.
+pick
+wait_for "switch\.held.*pane $SID: BadgeCodexTerminalBusy" 10 \
+  || fail "a pick on a terminal that just drew was not held as busy"
+sleep 1
+(( $(starts) == BEFORE )) || fail "a held pick still started a codex"
+kill -0 "$LIVE_PID" 2>/dev/null || fail "a held pick still ended the running codex"
+ok "the pick was held: the terminal had just drawn"
+
+echo "==> waiting for the pane to read quiet"
+# The pane state machine calls a silent foreground job quiet after
+# 30 s without output, and the switch wants it quiet 3 s more.
+wait_for "pane_state\.changed.*sid=$SID.*to=busy:fg_job" 45 \
+  || fail "the pane never settled into a quiet foreground job"
+sleep 4
+
+echo "==> picking profile 2 from the badge menu"
+pick
+wait_for "switch\.no_thread.*pane $SID: thread not known, handing off to P2" 10 \
+  || fail "the pick on a quiet pane was not handed off"
+
+# What the switch must do: end the running one, and start codex under
+# the other profile's CODEX_HOME.
+for (( i = 0; i < 200; i++ )); do
   (( $(starts) > BEFORE )) && break
   sleep 0.2
 done
@@ -228,8 +261,10 @@ SECOND="$(grep '^start ' "$CODEX_LOG" | tail -1)"
 grep -q "CODEX_HOME=$HOME/.codex-profile-2" <<<"$SECOND" \
   || fail "the new codex did not get profile 2's home: $SECOND"
 ok "it came back under profile 2's CODEX_HOME"
-grep -q 'argv=resume --last' <<<"$SECOND" \
-  || fail "the new codex was not a resume: $SECOND"
-ok "it resumed the session rather than starting a new one"
+# the stand-in wrote no rollout, so there is no session to carry and
+# none to resume
+grep -q 'argv=$' <<<"$SECOND" \
+  || fail "with no session written, the new codex should start fresh: $SECOND"
+ok "with no session written, it started fresh"
 
 echo "PASS — a badge-menu pick moves a live codex pane to another profile"

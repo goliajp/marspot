@@ -149,18 +149,19 @@
     <table>
       <caption>
         Throughput reading a prepared byte stream, MB/s, higher is better. Measured
-        2026-11-22 on a Mac mini at load 1.6 to 2.5, macOS 27.2.1, every terminal
-        driven through its own interface, four rounds each; the first round is a
+        on a Mac mini at load 1.4 to 2.5, macOS 27.2.1, Marspot and Ghostty on
+        2026-11-25, iTerm2 and Terminal on 2026-11-22, every terminal driven
+        through its own interface, four rounds each; the first round is a
         warm-up and each number is the median of the other three.
       </caption>
       <thead>
         <tr><th>stream</th><th>Marspot</th><th>Ghostty 1.4.0</th><th>iTerm2 3.7.9</th><th>Terminal 2.15</th></tr>
       </thead>
       <tbody>
-        <tr><td>ASCII</td><td class="win">302.7</td><td>282.2</td><td>81.8</td><td>38.5</td></tr>
-        <tr><td>mixed</td><td class="win">268.6</td><td>255.5</td><td>21.6</td><td>37.3</td></tr>
-        <tr><td>CJK</td><td class="win">289.3</td><td>269.1</td><td>9.5</td><td>36.0</td></tr>
-        <tr><td>emoji</td><td class="win">297.2</td><td>279.1</td><td>0.4</td><td>39.7</td></tr>
+        <tr><td>ASCII</td><td class="win">302.5</td><td>283.4</td><td>81.8</td><td>38.5</td></tr>
+        <tr><td>mixed</td><td class="win">269.4</td><td>246.2</td><td>21.6</td><td>37.3</td></tr>
+        <tr><td>CJK</td><td class="win">291.1</td><td>262.0</td><td>9.5</td><td>36.0</td></tr>
+        <tr><td>emoji</td><td class="win">297.0</td><td>275.7</td><td>0.4</td><td>39.7</td></tr>
       </tbody>
     </table>
 
@@ -174,8 +175,8 @@
         than cheating.
       </p>
       <p>
-        One machine, one day, four rounds. Between rounds neither Marspot nor Ghostty
-        moved by more than about 2 %, and on every stream Marspot's slowest round was
+        One machine, four rounds, Marspot and Ghostty in one run. Between rounds
+        neither moved by more than about 5 %, and on every stream Marspot's slowest round was
         faster than Ghostty's fastest. Marspot and Ghostty ran in windows of the
         same 99 by 35 cells; iTerm2 and Terminal opened at their own default sizes.
         The machine was not perfectly idle, and load can only depress a reading, so

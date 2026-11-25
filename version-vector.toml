@@ -30,4 +30,4 @@
 
 shell   = "0.7.713"  # the shell starts the madcawl host on the first connection to its socket
 core    = "0.12.690"  # settings learn gemini.allocation beside kimi.allocation
-session = "0.11.447"  # settings learn gemini.allocation beside kimi.allocation
+session = "0.11.451"  # the control writer documents its folding; main.rs comment shortened

@@ -102,6 +102,9 @@ fn main() {
         samples.iter().min().unwrap(),
         samples.iter().max().unwrap()
     );
+    // the whole curve, so a failure tells a late plateau from a climb
+    let curve: Vec<String> = samples.iter().map(u64::to_string).collect();
+    println!("samples (KiB, every {interval:.0}s): {}", curve.join(" "));
     if ratio > drift_max {
         die(format!(
             "RSS drift {ratio:.3}x over {drift_max:.2}x -- it is still climbing at the end \

@@ -143,12 +143,16 @@ restart() { # the app of a refused quit is stopped and opened afresh
 # The shell checks, a second after its first frame, that it is still
 # registered for Apple events, and replaces its image once more when it
 # is not.  A quit is asked once that check has come out registered.
+# `checks` is counted before the step that replaces the image, so only
+# a check of the new image counts: a check left over from an earlier
+# image once let a quit go to an image whose check later found it
+# unregistered.  Every image a round starts is waited for, so none is
+# left over.
 checks=0
 checked() { # label
   local i
   for (( i = 0; i < 600; i++ )); do (( $(count SHELL_AE_CHECKED) > checks )) && break; sleep 0.05; done
   (( $(count SHELL_AE_CHECKED) > checks )) || fail "[$1] the shell never reported its registration check"
-  checks=$(count SHELL_AE_CHECKED)
 }
 quit() { # label; returns 1 when the quit was refused (counting only)
   local q ans since
@@ -170,6 +174,7 @@ quit() { # label; returns 1 when the quit was refused (counting only)
 
 for (( r = 1; r <= ROUNDS; r++ )); do
   shown=$(count WINDOW_FIRST_PRESENT); updates=$(count SHELL_SELF_UPDATE)
+  checks=$(count SHELL_AE_CHECKED)
   mkdir -p "$MARSPOT_STATE_DIR/binaries/pending"
   cp "$SHELL_BIN" "$MARSPOT_STATE_DIR/binaries/pending/marspot-shell"
   "$SHELL_BIN" --trigger >/dev/null || fail "[round $r] the update trigger found no shell"
@@ -181,6 +186,7 @@ for (( r = 1; r <= ROUNDS; r++ )); do
   quit "round $r, after the update" || continue
 
   shown=$(count WINDOW_FIRST_PRESENT)
+  checks=$(count SHELL_AE_CHECKED)
   open -g "$APP" 2>"$SB/err" || fail "[round $r] open was refused: $(head -1 "$SB/err")"
   answers || fail "[round $r] the app did not come back"
   [[ "$(dev_shell_pid)" == "$L1" ]] || fail "[round $r] the app came back as another process"
@@ -189,10 +195,11 @@ for (( r = 1; r <= ROUNDS; r++ )); do
   quit "round $r, after opening again" || continue
 
   shown=$(count WINDOW_FIRST_PRESENT)
+  checks=$(count SHELL_AE_CHECKED)
   open -g "$APP" 2>"$SB/err" || fail "[round $r] open was refused: $(head -1 "$SB/err")"
   answers || fail "[round $r] the app did not come back"
   wait_more WINDOW_FIRST_PRESENT "$shown" 30 || fail "[round $r] the app came back and showed no window"
-  sleep 0.3
+  checked "round $r, after the last open"
 done
 
 if (( COUNTING )); then
