@@ -47,6 +47,7 @@ pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
         "agents.install" => s.agents_install.to_string(),
         "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
         "kimi.allocation" => s.kimi_allocation.as_str().to_string(),
+        "gemini.allocation" => s.gemini_allocation.as_str().to_string(),
         _ => return None,
     })
 }
@@ -58,7 +59,32 @@ pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
         "agents.install" => s.agents_install = parse_bool(v, s.agents_install),
         "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v),
         "kimi.allocation" => s.kimi_allocation = AgentAllocation::parse(v),
+        "gemini.allocation" => s.gemini_allocation = AgentAllocation::parse(v),
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+
+    #[test]
+    fn gemini_allocation_is_off_unless_written_dryrun_or_live() {
+        assert_eq!(Settings::default().gemini_allocation, AgentAllocation::Off);
+        for (word, want) in [
+            ("live", AgentAllocation::Live),
+            ("DryRun", AgentAllocation::DryRun),
+            ("off", AgentAllocation::Off),
+            ("on", AgentAllocation::Off),
+            ("true", AgentAllocation::Off),
+            ("maybe", AgentAllocation::Off),
+        ] {
+            let body = format!("gemini.allocation = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.gemini_allocation, want, "{word}");
+            assert_eq!(parse(&render(&s, &body)).gemini_allocation, want, "{word} after a rewrite");
+        }
+        assert_eq!(value_of(&parse("gemini.allocation = live\n"), "gemini.allocation"), "live");
+    }
 }

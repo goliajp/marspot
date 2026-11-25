@@ -215,7 +215,7 @@ pub(super) fn carried(started: Option<&str>, said: Option<&Said>) -> Option<Stri
 }
 
 /// gemini's own name for a router setting.
-fn router_name(model: &str) -> Option<&'static str> {
+pub(super) fn router_name(model: &str) -> Option<&'static str> {
     match model {
         "auto" => Some("Auto"),
         "auto-gemini-3" => Some("Auto (Gemini 3)"),
@@ -385,7 +385,7 @@ mod tests {
     }
 
     fn said(chosen: Option<&str>, fallback: Option<&str>, reply: Option<&str>) -> Said {
-        Said { chosen: chosen.map(Into::into), fallback: fallback.map(Into::into), reply: reply.map(Into::into), unreadable: false }
+        Said { chosen: chosen.map(Into::into), fallback: fallback.map(Into::into), reply: reply.map(Into::into), unreadable: false, refused: None }
     }
 
     #[test]

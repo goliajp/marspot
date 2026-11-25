@@ -33,3 +33,33 @@ impl Rebalance {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+
+    /// The three rebalance modes read back as written and a rewrite
+    /// keeps them.  The words an older build wrote for a rule that is
+    /// gone, `on` and `true`, read as a dry run, as does a word that is
+    /// none of them: only `live` moves.
+    #[test]
+    fn rebalance_moves_only_when_live() {
+        for (word, want) in [
+            ("live", Rebalance::Live),
+            ("dryrun", Rebalance::DryRun),
+            ("off", Rebalance::Off),
+            ("on", Rebalance::DryRun),
+            ("true", Rebalance::DryRun),
+            ("ON", Rebalance::DryRun),
+            ("false", Rebalance::Off),
+            ("maybe", Rebalance::DryRun),
+        ] {
+            let body = format!("claudecode.rebalance = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.cc_rebalance, want, "{word}");
+            assert_eq!(parse(&render(&s, &body)).cc_rebalance, want, "{word} after a rewrite");
+        }
+        assert_eq!(parse("claudecode.rebalance = off\nclaudecode.rebalance = maybe\n").cc_rebalance, Rebalance::DryRun, "unknown is a dry run, not the line before");
+        assert_eq!(value_of(&parse("claudecode.rebalance = live\n"), "claudecode.rebalance"), "live");
+    }
+}

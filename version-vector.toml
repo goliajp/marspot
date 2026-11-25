@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.709"  # kimi panes join the shared allocation behind kimi.allocation, off by default
-core    = "0.12.689"  # settings learn kimi.allocation; the agent settings keys move to a file of their own
-session = "0.11.446"  # settings learn kimi.allocation; the agent settings keys move to a file of their own
+shell   = "0.7.710"  # gemini panes refused for the day get refused and would_move rows, and move only when gemini.allocation is live
+core    = "0.12.690"  # settings learn gemini.allocation beside kimi.allocation
+session = "0.11.447"  # settings learn gemini.allocation beside kimi.allocation

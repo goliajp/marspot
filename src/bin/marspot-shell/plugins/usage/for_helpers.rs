@@ -2,8 +2,9 @@
 //!
 //! Claude, Kimi and Codex by their usage feeds, with the allocation's
 //! rule for helpers (`quota::helper_pick`); Gemini writes no usage
-//! anywhere, so its homes take turns.  Every call reads the profiles and feeds from disk, so
-//! it belongs off the shell's main loop.
+//! anywhere, so the gemini plugin places its helpers.  Every call reads
+//! the profiles and feeds from disk, so it belongs off the shell's main
+//! loop.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,7 +76,7 @@ pub(in crate::plugins) fn pick_among(agent: Agent, homes: Vec<(u8, PathBuf)>, mo
     let model = feed_model(agent, model);
     let model = model.as_deref();
     let (pool, accounts, scene) = match agent {
-        Agent::Gemini => return take_turns(agent, &homes),
+        Agent::Gemini => return crate::plugins::gemini::helper_pick(&homes, model, now),
         Agent::Claude => {
             let (a, usage) = helper_pick::claude_accounts(&numbers, now);
             let scene = helper_pick::claude_scene(&numbers, &a.rooms, usage.as_ref(), now);
@@ -181,7 +182,7 @@ pub(in crate::plugins) fn claude_all_refused(model: Option<&str>) -> Option<Vec<
     }
 }
 
-fn account(agent: Agent, number: u8, dir: PathBuf) -> HelperAccount {
+pub(in crate::plugins) fn account(agent: Agent, number: u8, dir: PathBuf) -> HelperAccount {
     let var = match agent {
         Agent::Claude => "CLAUDE_CONFIG_DIR",
         Agent::Codex => "CODEX_HOME",
@@ -211,7 +212,7 @@ fn default_home(agent: Agent) -> Pick {
 
 static GEMINI_NEXT: AtomicUsize = AtomicUsize::new(0);
 
-fn take_turns(agent: Agent, homes: &[(u8, PathBuf)]) -> Pick {
+pub(in crate::plugins) fn take_turns(agent: Agent, homes: &[(u8, PathBuf)]) -> Pick {
     if homes.is_empty() {
         return Pick::NoAccount(Vec::new());
     }

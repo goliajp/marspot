@@ -16,73 +16,10 @@ use std::time::{Duration, Instant, SystemTime};
 use marspot_peer::json;
 
 use super::model::is_model;
-use super::pane::is_session_id;
+pub(crate) use super::session_files::{by_id, head_id};
+use super::session_files::newest_since;
+use super::quota::{self, How, Refusal};
 use crate::plugins::pidtree::ProcId;
-
-/// `<config>/tmp/<project>/chats` for the project rooted at `cwd`.
-fn chats_dir(config_dir: &Path, cwd: &str) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(config_dir.join("projects.json")).ok()?;
-    let registry = json::parse(&text).ok()?;
-    let slug = registry.get("projects")?.str_at(cwd)?;
-    // a path component out of a file another program writes
-    let plain = !slug.is_empty() && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    plain.then(|| config_dir.join("tmp").join(slug).join("chats"))
-}
-
-/// The main-session files in `chats`, with when each was last written.
-/// Subagent sessions live in subdirectories and are not listed.
-fn session_files(chats: &Path) -> Vec<(SystemTime, PathBuf)> {
-    let Ok(rd) = std::fs::read_dir(chats) else { return Vec::new() };
-    rd.flatten()
-        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("session-") && n.ends_with(".jsonl")))
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            meta.is_file().then(|| meta.modified().ok().map(|m| (m, e.path()))).flatten()
-        })
-        .collect()
-}
-
-/// How much of a session file's first line to read.  The metadata
-/// record is a few hundred bytes; a line that does not end inside this
-/// is not one.
-const HEAD_BYTES: u64 = 16 * 1024;
-
-/// The session id a file opens with.
-pub(crate) fn head_id(path: &Path) -> Option<String> {
-    let mut buf = Vec::new();
-    std::fs::File::open(path).ok()?.take(HEAD_BYTES).read_to_end(&mut buf).ok()?;
-    let end = buf.iter().position(|b| *b == b'\n')?;
-    let head = json::parse(std::str::from_utf8(&buf[..end]).ok()?).ok()?;
-    head.str_at("sessionId").filter(|id| is_session_id(id)).map(str::to_string)
-}
-
-/// The file of session `id` in the project at `cwd`.
-///
-/// The name carries the id's first eight characters, which narrows the
-/// directory to a file or two; the first line then has to name the
-/// whole id.
-pub(crate) fn by_id(config_dir: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
-    let suffix = format!("-{}.jsonl", id.get(..8).unwrap_or(id));
-    session_files(&chats_dir(config_dir, cwd)?)
-        .into_iter()
-        .map(|(_, p)| p)
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)))
-        .find(|p| head_id(p).as_deref() == Some(id))
-}
-
-/// How many of the newest files are opened before giving up.
-const NEWEST_TRIED: usize = 8;
-
-/// The session written most recently since `started`, with its id.
-/// Not a moment before: a file last written just before this process
-/// started is the session of the gemini that was quit there a moment
-/// earlier.
-fn newest_since(config_dir: &Path, cwd: &str, started: SystemTime) -> Option<(PathBuf, String)> {
-    let mut files = session_files(&chats_dir(config_dir, cwd)?);
-    files.retain(|(written, _)| *written >= started);
-    files.sort_by_key(|f| std::cmp::Reverse(f.0));
-    files.into_iter().take(NEWEST_TRIED).find_map(|(_, p)| head_id(&p).map(|id| (p, id)))
-}
 
 /// How much of a session file is read in one go.  The file is read
 /// from its start, because a `/model set` stays in force however long
@@ -104,6 +41,10 @@ pub(super) struct Said {
     /// The last change named a model this code will not repeat, so
     /// what the session is set to is not known.
     pub unreadable: bool,
+    /// The latest quota refusal the file records, until a reply on a
+    /// model it covers shows it over.  A fallback's lasts its day: the
+    /// replies after it are the fallback model's.
+    pub refused: Option<Refusal>,
 }
 
 /// What gemini's interface records when the model is changed by hand
@@ -111,17 +52,20 @@ pub(super) struct Said {
 /// nothing.
 const SET: &str = "Model set to ";
 const SET_SAVED: &str = " (persisted)";
-const FELL_BACK: &str = "Switched to fallback model ";
+use quota::FELL_BACK;
 
 impl Said {
     /// Take in one record.  Parsed, not matched as text: a tool call's
     /// arguments are JSON inside the same line and may carry a `model`
-    /// key of their own.
-    fn note(&mut self, line: &str) {
-        if !line.contains(r#""type":"gemini""#) && !line.contains(r#""type":"info""#) {
+    /// key of their own.  Refusals are read only when `quota` asks.
+    fn note(&mut self, line: &str, quota: bool) {
+        if !line.contains(r#""type":"gemini""#) && !line.contains(r#""type":"info""#) && !(quota && line.contains(r#""type":"error""#)) {
             return;
         }
         let Ok(record) = json::parse(line) else { return };
+        if quota {
+            self.note_refusal(&record);
+        }
         match record.str_at("type") {
             // a record gemini wrote for bookkeeping names no model
             Some("gemini") => {
@@ -140,6 +84,33 @@ impl Said {
                     self.fallback = is_model(name).then(|| name.to_string());
                     self.unreadable = self.fallback.is_none();
                     self.reply = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The refusal a record shows, or the end of the one it answers on.
+    /// Read before the record's own change of model, which `was` must
+    /// not see yet.
+    fn note_refusal(&mut self, record: &json::Value) {
+        #[cfg(test)]
+        tests::REFUSAL_READS.with(|n| n.set(n.get() + 1));
+        let at = record.str_at("timestamp").and_then(|t| marspot::cc_usage::parse_iso_utc(t.to_string()));
+        let was = self.reply.clone().or_else(|| self.fallback.clone()).or_else(|| self.chosen.clone());
+        let text = record.str_at("content").unwrap_or_default();
+        match record.str_at("type") {
+            Some("gemini") => {
+                let Some(model) = record.str_at("model") else { return };
+                let over = |r: &Refusal| r.how == How::Error && at.is_some_and(|t| t > r.at) && r.scope.covers(Some(model));
+                if self.refused.as_ref().is_some_and(over) {
+                    self.refused = None;
+                }
+            }
+            Some("error") => self.refused = at.and_then(|t| quota::from_error(text, t, was.as_deref())).or(self.refused.take()),
+            Some("info") => {
+                if let Some(r) = at.and_then(|t| quota::from_info(text, t, was.as_deref())) {
+                    self.refused = Some(r);
                 }
             }
             _ => {}
@@ -180,16 +151,18 @@ struct Bound {
     said: Said,
     /// The end of the file has been reached at least once.
     whole: bool,
+    /// When the file was last written, as of the last look.
+    written: Option<SystemTime>,
 }
 
 impl Bound {
     fn new(path: PathBuf, id: String, said: Said) -> Self {
-        Self { path, id, at: 0, mid_record: false, said, whole: false }
+        Self { path, id, at: 0, mid_record: false, said, whole: false, written: None }
     }
 
     /// Read on from where the last read stopped.  `None` when the file
     /// cannot be read.
-    fn read_on(&mut self) -> Option<()> {
+    fn read_on(&mut self, quota: bool) -> Option<()> {
         let mut f = std::fs::File::open(&self.path).ok()?;
         let len = f.metadata().ok()?.len();
         if len < self.at {
@@ -209,7 +182,7 @@ impl Bound {
                 let text = String::from_utf8_lossy(&buf[..end]);
                 // the first piece is the rest of a record already given up on
                 let skip = usize::from(std::mem::take(&mut self.mid_record));
-                text.split('\n').skip(skip).for_each(|line| self.said.note(line));
+                text.split('\n').skip(skip).for_each(|line| self.said.note(line, quota));
                 self.at += end as u64 + 1;
             }
             // A record larger than one read.  Only a reply or a tool
@@ -238,6 +211,8 @@ impl Bound {
 pub(super) struct SessionIndex {
     bound: HashMap<ProcId, Bound>,
     searched_at: HashMap<ProcId, Instant>,
+    /// Read quota refusals: only while the allocation is on.
+    quota: bool,
 }
 
 impl SessionIndex {
@@ -245,6 +220,23 @@ impl SessionIndex {
     /// while it has none: `/clear` starts another file under the same
     /// process, and the binding has to follow it.
     const SEARCH_EVERY: Duration = Duration::from_secs(20);
+
+    /// When the session `proc` writes was last written.
+    pub(super) fn written(&self, proc: ProcId) -> Option<SystemTime> {
+        self.bound.get(&proc)?.written
+    }
+
+    /// Read quota refusals or not.  Turned on, every file is read again
+    /// from its start, so a refusal written while off is seen.
+    pub(super) fn set_quota(&mut self, on: bool) {
+        if on && !self.quota {
+            for b in self.bound.values_mut() {
+                (b.at, b.mid_record, b.whole) = (0, false, false);
+                b.said.refused = None;
+            }
+        }
+        self.quota = on;
+    }
 
     pub(super) fn retain(&mut self, live: &[ProcId]) {
         self.bound.retain(|id, _| live.contains(id));
@@ -260,11 +252,13 @@ impl SessionIndex {
             self.search(who);
         }
         let bound = self.bound.get_mut(&who.proc)?;
-        let Ok(len) = std::fs::metadata(&bound.path).map(|m| m.len()) else {
+        let Ok(meta) = std::fs::metadata(&bound.path) else {
             self.bound.remove(&who.proc);
             return None;
         };
-        if (len != bound.at || !bound.whole) && bound.read_on().is_none() {
+        let len = meta.len();
+        bound.written = meta.modified().ok();
+        if (len != bound.at || !bound.whole) && bound.read_on(self.quota).is_none() {
             self.bound.remove(&who.proc);
             return None;
         }
@@ -295,73 +289,20 @@ impl SessionIndex {
 }
 
 #[cfg(test)]
-pub(crate) mod fixture {
-    use std::path::{Path, PathBuf};
-
-    /// The opening record, as a v0.67 build wrote it for a session
-    /// started with `--session-id`.
-    pub(crate) fn head(id: &str) -> String {
-        format!(
-            r#"{{"sessionId":"{id}","projectHash":"1a2fd07c4d49eacee98ce19e4fb41321035bb110963bb85856985c06736f09a4","startTime":"2026-11-10T06:10:20.221Z","lastUpdated":"2026-11-10T06:10:20.221Z","kind":"main"}}"#
-        ) + "\n"
-    }
-
-    /// The context gemini records as a user message before the first
-    /// real one.
-    pub(crate) fn context() -> String {
-        r#"{"id":"c0","timestamp":"2026-11-10T06:10:20.221Z","type":"user","content":[{"text":"<session_context>\nThis is the Gemini CLI.\n</session_context>"}]}"#.to_string()
-            + "\n"
-            + &touched()
-    }
-
-    /// The `lastUpdated` record gemini appends after every message.
-    pub(crate) fn touched() -> String {
-        r#"{"$set":{"lastUpdated":"2026-11-10T06:10:20.222Z"}}"#.to_string() + "\n"
-    }
-
-    pub(crate) fn user(id: &str, text: &str) -> String {
-        format!(r#"{{"id":"{id}","timestamp":"2026-11-10T06:11:00.000Z","type":"user","content":[{{"text":"{text}"}}]}}"#)
-            + "\n"
-            + &touched()
-    }
-
-    pub(crate) fn reply(id: &str, text: &str, model: &str) -> String {
-        format!(
-            r#"{{"id":"{id}","timestamp":"2026-11-10T06:11:02.000Z","type":"gemini","content":"{text}","thoughts":[],"tokens":{{"input":1,"output":1,"cached":0,"thoughts":0,"tool":0,"total":2}},"model":"{model}"}}"#
-        ) + "\n"
-            + &touched()
-    }
-
-    /// What the interface records beside the conversation: a line it
-    /// printed, such as the answer to `/model set`.
-    pub(crate) fn info(id: &str, text: &str) -> String {
-        format!(r#"{{"id":"{id}","timestamp":"2026-11-10T06:11:04.000Z","type":"info","content":"{text}"}}"#) + "\n" + &touched()
-    }
-
-    /// A config directory whose registry maps `cwd` to `slug`; returns
-    /// the project's chats directory.
-    pub(crate) fn project(config_dir: &Path, cwd: &str, slug: &str) -> PathBuf {
-        let chats = config_dir.join("tmp").join(slug).join("chats");
-        std::fs::create_dir_all(&chats).unwrap();
-        std::fs::write(
-            config_dir.join("projects.json"),
-            format!("{{\n  \"projects\": {{\n    \"{cwd}\": \"{slug}\"\n  }}\n}}"),
-        )
-        .unwrap();
-        chats
-    }
-
-    /// The name gemini gives a session's file.
-    pub(crate) fn file_name(id: &str) -> String {
-        format!("session-2026-11-10T06-10-{}.jsonl", &id[..8])
-    }
-}
+#[path = "session_fixture.rs"]
+pub(crate) mod fixture;
 
 #[cfg(test)]
 mod tests {
     use super::fixture::*;
     use super::*;
+    use super::super::session_files::chats_dir;
     use crate::plugins::handoff::history::tmp;
+
+    thread_local! {
+        /// Records looked at for a refusal, on this thread.
+        pub(super) static REFUSAL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     const A: &str = "11111111-2222-4333-8444-555555555555";
     const B: &str = "99999999-2222-4333-8444-555555555555";
@@ -444,7 +385,7 @@ mod tests {
             let cfg = tmp(name);
             let file = project(&cfg, "/w/a", "a").join(file_name(A));
             std::fs::write(&file, head(A) + &context()).unwrap();
-            Self { cfg, file, idx: SessionIndex::default() }
+            Self { cfg, file, idx: SessionIndex { quota: true, ..SessionIndex::default() } }
         }
         fn append(&self, text: &str) {
             use std::io::Write;
@@ -506,14 +447,18 @@ mod tests {
         s.append(&info("i1", "Model set to pro"));
         s.append(&(user("u1", "hi") + &reply("g1", "hello", "gemini-3-pro-preview")));
         s.append(&info("i2", "Switched to fallback model gemini-3-flash-preview"));
+        // the model it left is refused on this account for the day
+        let refused = s.said().refused;
+        assert_eq!(refused.as_ref().map(|r| (r.scope.word(), r.how)), Some(("gemini-3-pro-preview".into(), How::Fallback)));
         assert_eq!(
             s.said(),
-            Said { chosen: Some("pro".into()), fallback: Some("gemini-3-flash-preview".into()), ..Said::default() }
+            Said { chosen: Some("pro".into()), fallback: Some("gemini-3-flash-preview".into()), refused: refused.clone(), ..Said::default() }
         );
         s.append(&reply("g2", "retried", "gemini-3-flash-preview"));
         assert_eq!(s.said().reply.as_deref(), Some("gemini-3-flash-preview"));
         s.append(&info("i3", "Model set to pro"));
-        assert_eq!(s.said(), Said { chosen: Some("pro".into()), ..Said::default() }, "choosing again ends the fallback");
+        let fresh = Said { chosen: Some("pro".into()), refused, ..Said::default() };
+        assert_eq!(s.said(), fresh, "choosing again ends the fallback, not the account's refusal");
     }
 
     /// A change typed long ago is still found, a megabyte at a time,
@@ -591,6 +536,31 @@ mod tests {
         assert_eq!(idx.facts(&asker(&cfg, None, true)), None, "a first line still being written");
         let mut idx = SessionIndex::default();
         assert_eq!(idx.facts(&asker(&tmp("gemini-empty-home"), None, true)), None, "no registry at all");
+    }
+
+    /// Off, a record is not looked at for a refusal at all: no time
+    /// parsed, no model copied.  Turned on, the file is read again from
+    /// its start and a refusal written while off is seen.
+    #[test]
+    fn gemini_quota_off_reads_no_refusal_and_turning_it_on_reads_the_file_again() {
+        let mut s = Followed::new("gemini-quota-switch");
+        s.idx.set_quota(false);
+        s.append(&(user("u1", "hi") + &reply_at("g1", "2026-11-25T01:00:00Z", "gemini-3-pro-preview")));
+        s.append(&info_at("i1", "2026-11-25T01:01:00Z", "Switched to fallback model gemini-3-flash-preview"));
+        s.append(&error_at("e1", "2026-11-25T01:02:00Z", "[API Error: You have exhausted your daily quota on this model.]"));
+        REFUSAL_READS.with(|n| n.set(0));
+        let off = s.said();
+        assert_eq!((off.refused, off.fallback.as_deref()), (None, Some("gemini-3-flash-preview")));
+        assert_eq!(REFUSAL_READS.with(|n| n.get()), 0, "off: no record is looked at for a refusal");
+        s.idx.set_quota(true);
+        let on = s.said();
+        assert!(REFUSAL_READS.with(|n| n.get()) > 0);
+        assert_eq!(on.refused.map(|r| r.how), Some(How::Error), "the error written while off");
+        assert_eq!(on.fallback.as_deref(), Some("gemini-3-flash-preview"), "what the file says of the model is unchanged");
+        REFUSAL_READS.with(|n| n.set(0));
+        s.idx.set_quota(true);
+        s.said();
+        assert_eq!(REFUSAL_READS.with(|n| n.get()), 0, "on and on again: nothing read again");
     }
 
     #[test]
