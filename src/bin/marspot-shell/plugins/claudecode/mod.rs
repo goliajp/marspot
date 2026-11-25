@@ -46,6 +46,7 @@ mod argv;
 mod records;
 mod context;
 mod continued;
+mod sessions_view;
 mod wake;
 mod monitors;
 mod due;
@@ -100,6 +101,7 @@ use cycle_op::*;
 use bind_meta::*;
 pub(crate) use cycle_op::badge_menu_for;
 pub(crate) use api_error::retryable_error_kind;
+pub(crate) use sessions_view::{ClaudePane, pane_of_session, sessions};
 #[cfg(test)]
 use api_error::strip_ansi;
 

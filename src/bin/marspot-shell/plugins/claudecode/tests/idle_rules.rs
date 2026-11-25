@@ -216,12 +216,12 @@ fn a_waiting_candidate_can_say_what_it_is_waiting_on() {
 
     // Past the threshold, window fine, but something is running.
     let e = IdleEvidence {
-        cpu_delta_ns: 900_000_000,
+        cpu_delta_ns: 2_500_000_000,
         ..idle_for(7200)
     };
     let (cat, line) = blocking_reason(e, HOUR).expect("a reason");
     assert_eq!(cat, "cpu_busy");
-    assert!(line.contains("900ms of cpu"), "got {line:?}");
+    assert!(line.contains("2500ms of cpu"), "got {line:?}");
 
     // Not a candidate at all → silence, not noise.  Every busy pane
     // in the window would otherwise explain itself once a second.

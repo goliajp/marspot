@@ -176,6 +176,15 @@ pub fn proc_env_value(pid: i32, key: &str) -> Option<String> {
     })
 }
 
+/// Several environment variables of `pid` from one read, in the order
+/// of `keys`.  None when the call is denied or the pid is gone.
+pub fn proc_env_values(pid: i32, keys: &[&str]) -> Option<Vec<Option<String>>> {
+    with_procargs(pid, |block| {
+        let (_, env) = split_argv(block)?;
+        Some(keys.iter().map(|k| env_lookup(env, k).map(|v| String::from_utf8_lossy(v).into_owned())).collect())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
