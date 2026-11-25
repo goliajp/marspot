@@ -146,15 +146,19 @@ mod tests {
     const LONG: Duration = Duration::from_secs(45);
     const PAD: &str = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-    /// Lines a `Feed::Lines` writes at a time.
-    const BATCH: usize = 1000;
-    /// A `Feed::Lines` stops here, lent or not: about 109 megabytes.
-    const MOST_LINES: usize = 1_000_000;
+    /// Bytes a `Feed::Lines` writes at a time.
+    const CHUNK: usize = 64 << 10;
+    /// A `Feed::Lines` stops here, lent or not: the lines eight times.
+    const MOST_BYTES: usize = 8 * LINES * 109;
 
-    /// The numbered lines `lines`, 109 bytes each; `LINES` of them are
-    /// thirteen megabytes.
-    fn numbered(lines: std::ops::Range<usize>) -> Vec<u8> {
-        lines.flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect()
+    /// `LINES` numbered lines of 109 bytes, thirteen megabytes in all.
+    fn numbered() -> Vec<u8> {
+        (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect()
+    }
+
+    /// The first `n` bytes of the numbered lines written over and over.
+    fn repeated(n: usize) -> Vec<u8> {
+        numbered().into_iter().cycle().take(n).collect()
     }
 
     fn taken() -> Vec<u8> {
@@ -194,9 +198,9 @@ mod tests {
     struct Feeder {
         slave: Option<std::os::fd::OwnedFd>,
         stop: Arc<AtomicBool>,
-        /// Lines a `Feed::Lines` has written, a batch at a time.
-        lines: Arc<AtomicUsize>,
-        /// A `Feed::Lines` has written its last batch.
+        /// Bytes a `Feed::Lines` has written, a chunk at a time.
+        bytes: Arc<AtomicUsize>,
+        /// A `Feed::Lines` has written its last chunk.
         done: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
@@ -206,14 +210,14 @@ mod tests {
         /// itself since `before` and at least `LINES` lines have gone
         /// out.
         fn stop_once_lent(&self, before: usize) {
-            if READ_HERE.get() > before && self.lines.load(Ordering::SeqCst) >= LINES {
+            if READ_HERE.get() > before && self.bytes.load(Ordering::SeqCst) >= LINES * 109 {
                 self.stop.store(true, Ordering::SeqCst);
             }
         }
 
-        /// The lines written in all, once the last batch is out.
+        /// The bytes written in all, once the last chunk is out.
         fn written(&self) -> Option<usize> {
-            self.done.load(Ordering::SeqCst).then(|| self.lines.load(Ordering::SeqCst))
+            self.done.load(Ordering::SeqCst).then(|| self.bytes.load(Ordering::SeqCst))
         }
     }
 
@@ -260,21 +264,26 @@ mod tests {
         let keep = matches!(feed, Feed::Lines { then_open: true } | Feed::Endless(_));
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
-        let (lines, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
-        let (written, finished) = (Arc::clone(&lines), Arc::clone(&done));
+        let (bytes, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let (written, finished) = (Arc::clone(&bytes), Arc::clone(&done));
         let thread = thread::spawn(move || {
             // SAFETY: sets this thread's own QoS.
             assert_eq!(unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) }, 0);
             match feed {
                 // an error is the session gone: nobody reads any more
                 Feed::Lines { .. } => {
-                    let mut next = 0;
-                    while !stopping.load(Ordering::SeqCst)
-                        && next < MOST_LINES
-                        && out.write_all(&numbered(next..next + BATCH)).is_ok()
-                    {
-                        next += BATCH;
-                        written.store(next, Ordering::SeqCst);
+                    // made before the first write: a pause to make more
+                    // is the end of a flood to the reader
+                    let lines = numbered();
+                    let mut sent = 0;
+                    while !stopping.load(Ordering::SeqCst) && sent < MOST_BYTES {
+                        let at = sent % lines.len();
+                        let chunk = &lines[at..(at + CHUNK).min(lines.len())];
+                        if out.write_all(chunk).is_err() {
+                            break;
+                        }
+                        sent += chunk.len();
+                        written.store(sent, Ordering::SeqCst);
                     }
                     finished.store(true, Ordering::SeqCst);
                 }
@@ -310,7 +319,7 @@ mod tests {
             cols: COLS,
             rows: 24,
         };
-        (Feeder { slave: keep.then_some(slave), stop, lines, done, thread: Some(thread) }, session)
+        (Feeder { slave: keep.then_some(slave), stop, bytes, done, thread: Some(thread) }, session)
     }
 
     fn pace(follow: Option<Follow>, key_waiting: &AtomicBool) -> Pace<'_> {
@@ -365,7 +374,7 @@ mod tests {
         lent_since(before);
         s.pump();
         let got = taken();
-        let want = numbered(0..feeder.written().expect("the feed ended with the pty"));
+        let want = repeated(feeder.written().expect("the feed ended with the pty"));
         let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
         let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
         assert!(
@@ -389,7 +398,7 @@ mod tests {
         turn_until(&mut s, None, |s, total| {
             feeder.stop_once_lent(before);
             if all.is_none() {
-                all = feeder.written().map(|n| numbered(0..n).len());
+                all = feeder.written();
             }
             all == Some(total) && !lent(s)
         });
