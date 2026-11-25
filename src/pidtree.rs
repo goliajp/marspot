@@ -342,13 +342,24 @@ pub struct ProcStat {
     /// Resident set size in bytes (RSS).
     pub rss_bytes: u64,
     /// Total CPU time consumed since the process started, in
-    /// nanoseconds.  Sum of user + system time across all threads.
-    /// Two samples taken `dt_ns` apart give CPU% via
-    /// `(cur - prev) / dt_ns * 100.0` (per core).
+    /// nanoseconds, user + system across all threads.  The kernel
+    /// reports mach ticks (125/3 ns each on Apple silicon); this is
+    /// already converted.  Two samples give CPU% via `cpu_pct_since`.
     pub total_cpu_ns: u64,
     /// Number of threads at sample time (a "this pid spawned 30
     /// rustc workers" hint without walking the descendants list).
     pub threads: u32,
+}
+
+impl ProcStat {
+    /// CPU% (100 = one core) since an earlier sample that read
+    /// `prev_cpu_ns` and was taken `dt_ns` ago; 0 when either is unusable
+    pub fn cpu_pct_since(&self, prev_cpu_ns: u64, dt_ns: u64) -> f32 {
+        if dt_ns == 0 {
+            return 0.0;
+        }
+        (self.total_cpu_ns.saturating_sub(prev_cpu_ns) as f64 / dt_ns as f64 * 100.0) as f32
+    }
 }
 
 /// Sample one pid's stats via `proc_pidinfo(PROC_PIDTASKINFO)`.
@@ -370,12 +381,7 @@ pub fn proc_stat(pid: i32) -> Option<ProcStat> {
     }
     Some(ProcStat {
         rss_bytes: info.pti_resident_size,
-        // `pti_total_user` / `pti_total_system` are absolute
-        // nanoseconds since the process forked (libc::proc_taskinfo
-        // documents the unit as ns — confirmed against `top -l 1`
-        // matched within 0.1 %).
-        total_cpu_ns: info.pti_total_user
-            .saturating_add(info.pti_total_system),
+        total_cpu_ns: probes::ticks_to_ns(info.pti_total_user.saturating_add(info.pti_total_system)),
         threads: info.pti_threadnum as u32,
     })
 }

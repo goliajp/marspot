@@ -124,3 +124,21 @@ fn cpu_with_children_of_no_process_is_none() {
     child.wait().unwrap();
     assert_eq!(cpu_with_children(pid), None);
 }
+
+#[test]
+fn proc_stat_cpu_of_a_spinning_child_tracks_wall_time() {
+    let child = Reaped(Command::new("/bin/sh").arg("-c").arg("while :; do :; done").spawn().unwrap());
+    let pid = child.0.id() as i32;
+    let first = crate::pidtree::proc_stat(pid).unwrap();
+    let t = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    let second = crate::pidtree::proc_stat(pid).unwrap();
+    let wall = t.elapsed().as_nanos() as u64;
+    let spent = second.total_cpu_ns - first.total_cpu_ns;
+    // one spinning thread: about its wall time, less only on a loaded host
+    assert!(spent * 10 >= wall * 3 && spent * 10 <= wall * 12, "spent {spent} ns in {wall} ns");
+    let pct = second.cpu_pct_since(first.total_cpu_ns, wall);
+    assert!((30.0..=120.0).contains(&pct), "panel CPU% {pct}");
+    assert_eq!(second.cpu_pct_since(first.total_cpu_ns, 0), 0.0);
+    assert_eq!(first.cpu_pct_since(second.total_cpu_ns, wall), 0.0);
+}

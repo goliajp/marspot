@@ -55,7 +55,7 @@ pub fn cpu_with_children(pid: i32) -> Option<u64> {
 
 /// The task and rusage times are mach ticks, not nanoseconds: on Apple silicon
 /// one tick is 125/3 ns.
-fn ticks_to_ns(ticks: u64) -> u64 {
+pub(super) fn ticks_to_ns(ticks: u64) -> u64 {
     #[repr(C)]
     struct MachTimebase {
         numer: u32,

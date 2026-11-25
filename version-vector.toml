@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.715"  # pidtree reads zombies, file paths and CPU with reaped children; the shell places a process outside every pane by its environment
-core    = "0.12.691"  # pidtree reads zombies, file paths, CPU with reaped children in nanoseconds and several environment keys at once
+shell   = "0.7.716"  # pidtree reports a process's CPU time in nanoseconds, not mach ticks
+core    = "0.12.692"  # the process panel shows real CPU% on Apple silicon: pidtree converts mach ticks to nanoseconds
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it
