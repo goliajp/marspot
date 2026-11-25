@@ -5,6 +5,12 @@
 //! and on every config pass, so a server installed or removed since
 //! is in or out of the next claude started.
 //!
+//! Each server's tools are allowed on the same command line
+//! (`--allowedTools mcp__<server>`), so a pane or helper tool call
+//! does not stop on a permission prompt.  This holds only for the
+//! claude processes marspot starts; the user's own settings are not
+//! touched.
+//!
 //! The accounts' own `.claude.json` files are left alone.  Claude Code
 //! rewrites them continually while a session runs, one per account,
 //! and a second writer would race it for the same file.
@@ -20,13 +26,13 @@ use crate::plugins::pty_op::{PtyCommand, quotable};
 
 const FILE: &str = "claude-mcp.json";
 
-/// `cmd` with `--mcp-config <state root>/claude-mcp.json` added, the
-/// file brought up to date first.  Unchanged when there is no
+/// `cmd` with `--mcp-config <state root>/claude-mcp.json` and the
+/// servers' tools allowed, the file brought up to date first.  Unchanged when there is no
 /// `marspot-peer` to point at or the file cannot be written: claude
 /// then starts as it did before, without the pane tools.
 pub(crate) fn with_config(cmd: PtyCommand) -> PtyCommand {
     match write() {
-        Ok(Some((path, _))) => add(cmd, &path),
+        Ok(Some((path, _, names))) => add(cmd, &path, &names),
         Ok(None) => cmd,
         Err((path, e)) => {
             lx_warn!("peerbus.claude_mcp.write_failed", &e.to_string(), path = path.display().to_string());
@@ -39,32 +45,43 @@ pub(crate) fn with_config(cmd: PtyCommand) -> PtyCommand {
 /// logging.
 pub(super) fn reconcile() -> Vec<String> {
     match write() {
-        Ok(Some((path, true))) => vec![format!("{}: MCP servers for claude written", path.display())],
+        Ok(Some((path, true, _))) => vec![format!("{}: MCP servers for claude written", path.display())],
         Ok(_) => Vec::new(),
         Err((path, e)) => vec![format!("{}: {e}", path.display())],
     }
 }
 
-/// The file and whether it had to be written; None when there is no
-/// `marspot-peer` to point at.
-fn write() -> Result<Option<(PathBuf, bool)>, (PathBuf, std::io::Error)> {
+/// The file, whether it had to be written and the names of the
+/// servers in it; None when there is no `marspot-peer` to point at.
+type Written = (PathBuf, bool, Vec<&'static str>);
+
+fn write() -> Result<Option<Written>, (PathBuf, std::io::Error)> {
     let Some(bin) = super::inbox::peer_bin() else { return Ok(None) };
     let Some(bin) = bin.to_str() else { return Ok(None) };
     let path = marspot_term::paths::state_root().join(FILE);
-    match write_if_changed(&path, &text(&servers(bin))) {
-        Ok(written) => Ok(Some((path, written))),
+    let table = servers(bin);
+    let names = table.list.iter().map(|s| s.name).collect();
+    match write_if_changed(&path, &text(&table)) {
+        Ok(written) => Ok(Some((path, written, names))),
         Err(e) => Err((path, e)),
     }
 }
 
-/// The flag and its value, next to each other.  `--mcp-config` takes
-/// several values, so whatever follows it on the line must be another
-/// flag or `--`, never a bare word.
-fn add(cmd: PtyCommand, path: &Path) -> PtyCommand {
+/// The flags and their values, next to each other.  `--mcp-config`
+/// and `--allowedTools` take several values, so whatever follows them
+/// on the line must be another flag or `--`, never a bare word.  The
+/// tools are allowed only together with the config that names them.
+fn add(cmd: PtyCommand, path: &Path, names: &[&str]) -> PtyCommand {
     match path.to_str().filter(|p| quotable(p)) {
-        Some(p) => cmd.arg("--mcp-config").quoted_arg(p),
+        Some(p) => cmd.arg("--mcp-config").quoted_arg(p).arg("--allowedTools").quoted_arg(allowed(names)),
         None => cmd,
     }
+}
+
+/// One permission rule per server: `mcp__<server>` allows every tool
+/// the server lists.
+fn allowed(names: &[&str]) -> String {
+    names.iter().map(|n| format!("mcp__{n}")).collect::<Vec<_>>().join(",")
 }
 
 pub(super) fn text(table: &Servers) -> String {
@@ -108,7 +125,7 @@ mod tests {
         env.set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer").set("HOME", state.path());
         let path = state.join(FILE);
         let line = String::from_utf8(with_config(PtyCommand::new("claude")).to_bytes().unwrap()).unwrap();
-        assert_eq!(line, format!("claude --mcp-config '{}'\r", path.display()));
+        assert_eq!(line, format!("claude --mcp-config '{}' --allowedTools 'mcp__marspot'\r", path.display()));
         let v = marspot_peer::json::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v.at(&["mcpServers", "marspot", "command"]).and_then(Value::str), Some("/a/marspot-peer"));
         assert_eq!(v.at(&["mcpServers", "marspot", "args"]), Some(&Value::Arr(vec![Value::from("mcp")])));
@@ -125,7 +142,36 @@ mod tests {
     /// rather than breaking the line that starts claude.
     #[test]
     fn switch_mcp_config_that_cannot_be_quoted_is_left_off() {
-        let line = add(PtyCommand::new("claude"), Path::new("/tmp/it's/claude-mcp.json")).to_bytes().unwrap();
+        let line = add(PtyCommand::new("claude"), Path::new("/tmp/it's/claude-mcp.json"), &["marspot"]).to_bytes().unwrap();
         assert_eq!(line, b"claude\r");
+    }
+
+    /// Every server in the table has its tools allowed, and only those:
+    /// the madcawl tools join the marspot ones while madcawl is
+    /// registered.
+    #[test]
+    fn the_tools_of_every_registered_server_are_allowed() {
+        assert_eq!(allowed(&["marspot"]), "mcp__marspot");
+        assert_eq!(allowed(&["marspot", "madcawl"]), "mcp__marspot,mcp__madcawl");
+        let line = add(PtyCommand::new("claude"), Path::new("/s/claude-mcp.json"), &["marspot", "madcawl"]).to_bytes().unwrap();
+        assert_eq!(line, b"claude --mcp-config '/s/claude-mcp.json' --allowedTools 'mcp__marspot,mcp__madcawl'\r");
+    }
+
+    /// The allowed servers are the ones the written table names: with
+    /// madcawl installed under HOME its tools are allowed too.
+    #[test]
+    fn a_claude_start_allows_madcawl_once_it_is_installed() {
+        let home = TempDir::new("claude-mcp-allow-home");
+        let state = TempDir::new("claude-mcp-allow-state");
+        let mut env = EnvGuard::new();
+        env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer");
+        let line = || String::from_utf8(with_config(PtyCommand::new("claude")).to_bytes().unwrap()).unwrap();
+        assert!(line().ends_with(" --allowedTools 'mcp__marspot'\r"), "{}", line());
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for p in ["madcawl-mcp", "madcawl-shell"] {
+            std::fs::write(bin.join(p), "#!/bin/sh\n").unwrap();
+        }
+        assert!(line().ends_with(" --allowedTools 'mcp__marspot,mcp__madcawl'\r"), "{}", line());
     }
 }

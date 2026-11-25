@@ -371,7 +371,7 @@ fn a_switch_or_reclaim_starts_claude_with_the_mcp_config() {
             })
             .expect("the resume step writes a command line")
     };
-    let flag = format!(" --mcp-config '{}' --resume u-1 ", state.join("claude-mcp.json").display());
+    let flag = format!(" --mcp-config '{}' --allowedTools 'mcp__marspot' --resume u-1 ", state.join("claude-mcp.json").display());
     let cycle = typed(
         profile_cycle_op(Some(&resume_word()), "u-1", true, 4, fid(4242), None, 4200, None, &CliChoice::default()).unwrap(),
     );
