@@ -81,7 +81,7 @@ fn b1(w: &mut Watch, s: &Scene, p: &PaneIn, tasks: &[Task], probe: &mut dyn Prob
         let written = probe.written(&t.out);
         let silent = written.is_some_and(|w| s.now.saturating_sub(w) >= l.b1_silent);
         let cpu = if silent { w.cpu_over(s, t.row, l.b1_window, probe) } else { None };
-        bg.push((t, command, written, cpu, rec.is_some()));
+        bg.push((t, command, written, cpu, rec.is_some_and(|r| r.said_background())));
     }
     let views: Vec<BgTask> = bg
         .iter()
@@ -90,12 +90,12 @@ fn b1(w: &mut Watch, s: &Scene, p: &PaneIn, tasks: &[Task], probe: &mut dyn Prob
         .collect();
     let mut hits = Vec::new();
     for (old, newer) in rules::b1(&views, s.now, &l) {
-        let (t, command, written, cpu, recorded) = bg.iter().find(|b| b.0.id == old).expect("a hit is one of the tasks");
+        let (t, command, written, cpu, said_bg) = bg.iter().find(|b| b.0.id == old).expect("a hit is one of the tasks");
         if excluded(s, t.row, probe) {
             continue;
         }
         let n = bg.iter().find(|b| b.0.id == newer).expect("so is its newer copy").0;
-        let kind = if *recorded { "后台任务" } else { "任务" };
+        let kind = if *said_bg { "后台任务" } else { "任务" };
         let evidence = format!(
             "{kind} {old}（pid {}），命令：{command}\n   已跑 {}；输出文件 {} 没写过；最近 {} 子树 CPU（含已退出的子进程）约 {}；同一条命令还有更新的一份在跑：{newer}（pid {}）。这只说明它很久没有产出，轮询脚本可能还在按时检查",
             proc_key(t.row),
@@ -115,8 +115,10 @@ fn b3(w: &Watch, s: &Scene, p: &PaneIn, tasks: &[Task], probe: &mut dyn Probe) -
     for t in tasks {
         let told = p.log.tasks.ended.get(&t.id).copied();
         if rules::b3(told, true, s.now, &w.limits) && !excluded(s, t.row, probe) {
+            let bg = p.log.tasks.started.get(&t.id).is_some_and(|r| r.said_background());
             let evidence = format!(
-                "任务 {}（pid {}）：{} 前已通知结束，进程还在",
+                "{} {}（pid {}）：{} 前已通知结束，进程还在",
+                if bg { "后台任务" } else { "任务" },
                 t.id,
                 proc_key(t.row),
                 span(s.now.saturating_sub(told.unwrap_or(0)))

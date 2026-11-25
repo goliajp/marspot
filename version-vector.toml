@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.724"  # helper notices reach a caller its pane name misses and give up after 30 minutes
-core    = "0.12.696"  # links the missed-pane-name constant the peer crate now exports
+shell   = "0.7.725"  # the zombie watch tells an idle claude session about its suspects when zombie.notify is live (default dryrun)
+core    = "0.12.697"  # links the zombie notice body, which lists at most 12 items within 4 KiB and says how many it showed
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

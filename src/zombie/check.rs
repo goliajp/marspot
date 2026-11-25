@@ -84,6 +84,8 @@ pub fn proc_key(row: &ProcRow) -> String {
 #[derive(Default)]
 pub struct Watch {
     pub limits: Limits,
+    /// `STABLE` is divided by this (0 reads as 1); see `limits::scale`.
+    pub scale: u64,
     cpu: HashMap<ProcId, VecDeque<(u64, u64)>>,
     seen: HashMap<Key, u64>,
 }
@@ -117,7 +119,7 @@ impl Watch {
         let mut out = Vec::new();
         for h in hits {
             let since = *self.seen.entry(h.key.clone()).or_insert(s.now);
-            if s.now >= since + STABLE {
+            if s.now >= since + STABLE / self.scale.max(1) {
                 out.push(Suspect { hit: h, since });
             }
         }

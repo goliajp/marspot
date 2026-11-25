@@ -47,6 +47,7 @@ mod records;
 mod context;
 mod continued;
 mod sessions_view;
+mod reach;
 mod wake;
 mod monitors;
 mod due;
@@ -99,10 +100,9 @@ pub use client::InjectInputProxy;
 use monitors::MonitorState;
 use cycle_op::*;
 use bind_meta::*;
-pub(crate) use cycle_op::badge_menu_for;
-pub(crate) use api_error::retryable_error_kind;
+pub(crate) use {api_error::retryable_error_kind, cycle_op::badge_menu_for, idle::is_resting_helper};
 pub(crate) use sessions_view::{ClaudePane, pane_of_session, sessions};
-pub(crate) use idle::is_resting_helper;
+pub(crate) use reach::{PaneReach, reach};
 #[cfg(test)]
 use api_error::strip_ansi;
 

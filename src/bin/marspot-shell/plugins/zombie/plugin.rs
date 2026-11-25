@@ -8,6 +8,7 @@
 //! seconds, so it never runs on the supervisor's thread.  The thread
 //! starts with the first check and sleeps on its channel in between.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -21,6 +22,23 @@ use crate::plugins::{PLUGIN_API_VERSION, Plugin, PluginHost, PluginMetadata, Tic
 /// The shortest time between two checks.
 pub(crate) const EVERY: Duration = Duration::from_secs(300);
 
+/// `zombie.scale_for_tests` as the last check read it; 1 outside a sandbox.
+static SCALE: AtomicU64 = AtomicU64::new(1);
+
+pub(super) fn set_scale(k: u64) {
+    SCALE.store(k.max(1), Ordering::Relaxed);
+}
+
+fn every() -> Duration {
+    EVERY / SCALE.load(Ordering::Relaxed).max(1) as u32
+}
+
+/// A window test shrinks the watch's times; the installed app never
+/// reads this.
+pub(super) fn sandboxed() -> bool {
+    std::env::var_os("MARSPOT_DEV_SANDBOX").is_some()
+}
+
 pub struct ZombiePlugin {
     next: Instant,
     /// Wakes the thread with the check's unix time; dropping it ends the thread.
@@ -29,7 +47,10 @@ pub struct ZombiePlugin {
 
 impl ZombiePlugin {
     pub fn new() -> ZombiePlugin {
-        ZombiePlugin { next: Instant::now() + EVERY, wake: None }
+        if sandboxed() {
+            set_scale(marspot::zombie::limits::scale(&std::fs::read_to_string(marspot::settings::path()).unwrap_or_default()));
+        }
+        ZombiePlugin { next: Instant::now() + every(), wake: None }
     }
 
     fn wake(&mut self, unix: u64) {
@@ -69,7 +90,8 @@ fn run(dir: std::path::PathBuf, now: u64, rx: Receiver<u64>) {
 
 impl Plugin for ZombiePlugin {
     fn metadata(&self) -> PluginMetadata {
-        PluginMetadata { name: "zombie", api_version: PLUGIN_API_VERSION, tick_interval_ms: EVERY.as_millis() as u32 }
+        // the registry ticks no plugin more often than this, whatever its tick_due says
+        PluginMetadata { name: "zombie", api_version: PLUGIN_API_VERSION, tick_interval_ms: every().as_millis() as u32 }
     }
 
     fn tick_due(&self) -> TickDue {
@@ -81,7 +103,7 @@ impl Plugin for ZombiePlugin {
         if now < self.next || crate::plugins::claudecode::sessions().is_empty() {
             return;
         }
-        self.next = now + EVERY;
+        self.next = now + every();
         let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         self.wake(unix);
     }

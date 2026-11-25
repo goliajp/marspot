@@ -231,3 +231,37 @@ fn zombie_check_never_names_codex_servers_or_marspot() {
         assert!(w.hits(&outside_scene(&t, &log, r, true), &mut probe).is_empty(), "pid {pid}");
     }
 }
+
+fn told_ended(mut log: ClaudeLog) -> ClaudeLog {
+    let note = super::super::records::Note { task: "b00000000".into(), ended: true, waiting: false };
+    log.main.feed(&Rec::Queued { at: NOW - 31 * 60, notes: vec![note] }, &mut log.tasks);
+    log
+}
+
+#[test]
+fn zombie_check_says_background_task_only_when_the_record_says_so() {
+    let (t, mut probe, log) = pane_with(&["bash w.sh", "bash w.sh"]);
+    let hits = two_checks(&t, &mut probe, &log, 0);
+    assert!(hits[0].evidence.starts_with("后台任务 b00000000"), "{}", hits[0].evidence);
+    // no record of either call: the command is the root's argv, and the word is task
+    let hits = two_checks(&t, &mut probe, &ClaudeLog::default(), 0);
+    assert_eq!(keys(&hits), vec![(Rule::B1, "100@1000000000".into())]);
+    assert!(hits[0].evidence.starts_with("任务 b00000000"), "{}", hits[0].evidence);
+    let b3 = |l: &ClaudeLog, probe: &mut MapProbe| Watch::default().hits(&scene(&t, l, NOW), probe);
+    let recorded = told_ended(log.clone());
+    assert!(b3(&recorded, &mut probe).iter().any(|h| h.key.rule == Rule::B3 && h.evidence.starts_with("后台任务 b00000000")));
+    let unread = told_ended(ClaudeLog::default());
+    assert!(b3(&unread, &mut probe).iter().any(|h| h.key.rule == Rule::B3 && h.evidence.starts_with("任务 b00000000")));
+}
+
+#[test]
+fn zombie_check_stability_shrinks_with_the_scale() {
+    let (t, mut probe, mut log) = pane_with(&[]);
+    let mut sub = SubLog::born(Some(500));
+    sub.feed(&Rec::Assistant { at: NOW - HOUR, uses: vec![], end: true }, &mut log.tasks);
+    log.subs.insert("a1".into(), (sub, SubMeta::default()));
+    log.main.feed(&Rec::TurnEnd { at: NOW - HOUR }, &mut log.tasks);
+    let mut w = Watch { scale: 60, ..Watch::default() };
+    assert!(w.check(&scene(&t, &log, NOW), &mut probe).is_empty());
+    assert_eq!(w.check(&scene(&t, &log, NOW + STABLE / 60), &mut probe).len(), 1);
+}
