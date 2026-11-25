@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.711"  # peerbus writes one table of MCP servers to every agent, madcawl-mcp included
+shell   = "0.7.712"  # claude started by marspot allows the tools of the MCP servers it is given
 core    = "0.12.690"  # settings learn gemini.allocation beside kimi.allocation
 session = "0.11.447"  # settings learn gemini.allocation beside kimi.allocation

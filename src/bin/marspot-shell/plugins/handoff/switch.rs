@@ -324,7 +324,7 @@ mod tests {
         let mut env = marspot_term::test_env::EnvGuard::new();
         env.set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer");
         let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
-        let mcp = format!("--mcp-config '{}'", state.join("claude-mcp.json").display());
+        let mcp = format!("--mcp-config '{}' --allowedTools 'mcp__marspot'", state.join("claude-mcp.json").display());
         let claude = s(command(Agent::Claude, Path::new("/Users/x/.claude-profile-3"), Some("u-1"), None).unwrap());
         assert!(claude.ends_with(&format!(" claude {mcp} --resume u-1\r")), "{claude}");
         let fresh = s(command(Agent::Claude, Path::new("/Users/x/.claude-profile-3"), None, None).unwrap());
