@@ -48,6 +48,19 @@
 # Usage:
 #   bin/measure-idle.sh --app marspot --sessions 9 [--window 60]
 #   bin/measure-idle.sh --list            # what it knows how to find
+#   --pane-pids DIR   count the panes by the live pids named by the files
+#                     in DIR (a pane's shell writes its own pid there)
+#                     instead of finding the shells under the app
+#   --out FILE        write the result there instead of the default name
+#
+# Every result names the process match it was read with
+# (`pattern_version`).  iTerm2 is at 2 since 2026-11-25: version 1
+# matched only the iTerm2 binary; version 2 adds iTermServer, which
+# owns the ptys outside the bundle, and the bundle's helpers.  An
+# `--app iterm2` number from before that date is of version 1 and is
+# not comparable with a later one.  pidinfo, a helper iTerm2 starts and
+# stops on demand, is left out of the changed-set check: its CPU is
+# counted while it runs, and whether it came or went is in the result.
 #
 # Other terminals are opened by hand -- the same posture as
 # bin/measure-other.sh, for the same reason (AppleScript driving is too
@@ -63,6 +76,8 @@ APP=""
 SESSIONS=""
 WINDOW="${MARSPOT_IDLE_WINDOW:-60}"
 FOCUS="unknown"
+PANE_PIDS=""
+OUT=""
 
 # app -> the ERE its processes' command lines match.  Anchored on the
 # bundle or install path so a checkout's build never counts as the
@@ -71,7 +86,9 @@ app_pattern() {
   case "$1" in
     marspot)       echo '(\.local/Marspot\.app/Contents/MacOS/marspot-shell|Application Support/marspot/binaries/[^/]+/marspot-(core|session))' ;;
     marspot-dev)   echo "$ROOT/target/(debug|release)/marspot(-shell|-core|-session)?( |\$)" ;;
-    iterm2)        echo 'iTerm\.app/Contents/MacOS/iTerm2' ;;
+    # iTermServer owns the ptys and lives outside the bundle; [i] keeps
+    # the grep from matching its own command line
+    iterm2)        echo '(iTerm\.app/Contents/|Application Support/iTerm2/[i]TermServer)' ;;
     terminal)      echo 'Terminal\.app/Contents/MacOS/Terminal' ;;
     warp)          echo 'Warp\.app/Contents/MacOS/(stable|Warp)' ;;
     ghostty)       echo 'Ghostty\.app/Contents/MacOS/ghostty' ;;
@@ -90,10 +107,12 @@ while (( $# )); do
     --app)      APP="${2:-}"; shift 2 ;;
     --sessions) SESSIONS="${2:-}"; shift 2 ;;
     --window)   WINDOW="${2:-}"; shift 2 ;;
+    --pane-pids) PANE_PIDS="${2:-}"; shift 2 ;;
+    --out)      OUT="${2:-}"; shift 2 ;;
     --focused)  FOCUS="focused"; shift ;;
     --unfocused) FOCUS="unfocused"; shift ;;
     --list)     echo "$KNOWN" | tr ' ' '\n'; exit 0 ;;
-    -h|--help)  sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,70p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)          die "unknown arg: $1" ;;
   esac
 done
@@ -118,12 +137,17 @@ print(f"{secs:.2f}")
 PY
 }
 
-# pid cputime rss, one per line, for every process in the set.
+pattern_version() { if [[ $1 == iterm2 ]]; then echo 2; else echo 1; fi; }
+# helpers an app starts and stops by itself while nothing happens
+ON_DEMAND='/pidinfo([.]xpc/| |$)'
+
+# pid cputime rss on-demand(0/1), one per line, for every process in
+# the set.
 sample() {
   ps -Ao pid=,cputime=,rss=,command= \
     | grep -E "$PATTERN" \
     | grep -v "measure-idle" \
-    | awk '{printf "%s %s %s\n", $1, $2, $3}'
+    | awk -v od="$ON_DEMAND" '{printf "%s %s %s %d\n", $1, $2, $3, ($0 ~ od)}'
 }
 
 # Shells running under the set, which is how "N panes are open" is
@@ -132,6 +156,12 @@ count_shells() {
   local pids e s n=0
   pids=$(sample | awk '{print $1}' | paste -sd, -)
   [[ -n "$pids" ]] || { echo 0; return; }
+  if [[ -n $PANE_PIDS ]]; then
+    for s in "$PANE_PIDS"/*; do
+      [[ -f $s ]] && kill -0 "${s##*/}" 2>/dev/null && n=$((n + 1))
+    done
+    echo "$n"; return
+  fi
   # marspot has launchd start a pane's shell, so it is nobody's child:
   # the session registry names it
   if [[ $APP == marspot* ]]; then
@@ -196,22 +226,24 @@ ELAPSED=$(python3 -c "print(f'{$T1 - $T0:.3f}')")
 python3 -c "import sys; sys.exit(0 if $ELAPSED >= $WINDOW * 0.95 else 1)" \
   || die "window was ${ELAPSED}s, expected ~${WINDOW}s -- the host was not idle enough to measure"
 
-PIDS_BEFORE=$(echo "$FIRST" | awk '{print $1}' | sort | paste -sd, -)
-PIDS_AFTER=$(echo "$SECOND" | awk '{print $1}' | sort | paste -sd, -)
+PIDS_BEFORE=$(echo "$FIRST" | awk '$4 == 0 {print $1}' | sort | paste -sd, -)
+PIDS_AFTER=$(echo "$SECOND" | awk '$4 == 0 {print $1}' | sort | paste -sd, -)
 [[ "$PIDS_BEFORE" == "$PIDS_AFTER" ]] \
   || die "the process set changed during the window (before: $PIDS_BEFORE / after: $PIDS_AFTER) -- the CPU delta would be meaningless"
 
-OUT="$RESULTS_DIR/idle-${APP}-${SESSIONS}-${FOCUS}.json"
-python3 - "$APP" "$SESSIONS" "$FOCUS" "$ELAPSED" "$OUT" "${IDLE_BUSY_LOAD:-5.0}" "$LOADS" <<PY
+[[ -n $OUT ]] || OUT="$RESULTS_DIR/idle-${APP}-${SESSIONS}-${FOCUS}.json"
+python3 - "$APP" "$SESSIONS" "$FOCUS" "$ELAPSED" "$OUT" "${IDLE_BUSY_LOAD:-5.0}" "$T0" "$T1" \
+  "$(pattern_version "$APP")" "$LOADS" <<PY
 import json, sys
 app, sessions, focus, elapsed, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4]), sys.argv[5]
 busy_load = float(sys.argv[6])
-loads = [float(x) for x in sys.argv[7].split()] if len(sys.argv) > 7 and sys.argv[7].strip() else []
+t0, t1, pattern_version = float(sys.argv[7]), float(sys.argv[8]), int(sys.argv[9])
+loads = [float(x) for x in sys.argv[10].split()] if len(sys.argv) > 10 and sys.argv[10].strip() else []
 
 def parse(block):
     rows = {}
     for line in block.strip().splitlines():
-        pid, cpu, rss = line.split()
+        pid, cpu, rss, _ = line.split()
         parts = [float(x) for x in cpu.split(':')]
         secs = 0.0
         for p in parts:
@@ -222,8 +254,13 @@ def parse(block):
 before = parse("""$FIRST""")
 after = parse("""$SECOND""")
 per = []
+# only on-demand helpers can be in one sample and not the other: one
+# that started inside the window spent all its CPU there, one that
+# ended took its CPU of the window with it
+came = sorted(set(after) - set(before))
+went = sorted(set(before) - set(after))
 for pid in sorted(after):
-    d = after[pid][0] - before[pid][0]
+    d = after[pid][0] - before.get(pid, (0.0, 0))[0]
     # CPU time cannot run backwards; if it does, the pid was reused and
     # the sample is not of the same process.
     if d < 0:
@@ -235,9 +272,14 @@ total_cpu = round(sum(p["cpu_secs"] for p in per), 2)
 total_rss = sum(p["rss_kib"] for p in per)
 doc = {
     "app": app,
+    "pattern_version": pattern_version,
     "sessions": sessions,
     "focus": focus,
     "window_secs": round(elapsed, 3),
+    "window_start_epoch": t0,
+    "window_end_epoch": t1,
+    "on_demand_started": came,
+    "on_demand_ended": went,
     "processes": len(per),
     "cpu_secs_total": total_cpu,
     "cpu_percent_of_one_core": round(100.0 * total_cpu / elapsed, 2),
@@ -247,6 +289,7 @@ doc = {
     "host_load1_first": loads[0] if loads else None,
     "host_load1_last": loads[-1] if loads else None,
     "host_load1_samples": len(loads),
+    "host_load1_series": loads,
     "per_process": per,
 }
 with open(out, "w") as f:
