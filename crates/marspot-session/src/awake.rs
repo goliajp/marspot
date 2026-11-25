@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use marspot_term::shell_proto::{Frame, MsgType, PaneAwake, encode_pane_awake};
+use marspot_term::shell_proto::PaneAwake;
 
 use crate::SessionEvent;
 use crate::control_writer::ControlWriter;
@@ -101,7 +101,7 @@ impl Awake {
         // SAFETY: getpgid only reads the process table.
         let shell_in_front = fg > 0 && fg == unsafe { libc::getpgid(self.shell) };
         let said = PaneAwake { session_id: self.sid, output, foreground, shell_in_front, fg_pgid: fg };
-        if !w.send(Frame::new(MsgType::PaneAwake, encode_pane_awake(&said))) {
+        if !w.awake(said) {
             return;
         }
         if output {

@@ -30,11 +30,15 @@
 use std::io::{self, Write};
 use std::os::fd::{IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use marspot_term::frame_writer::{BoundedWriter, Queued};
-use marspot_term::shell_proto::{Frame, HEADER_LEN, MsgType};
+use marspot_term::shell_proto::{Frame, HEADER_LEN, MsgType, PaneAwake, encode_pane_awake};
+
+/// The `PaneAwake` waiting in the queue, with what was said since it
+/// was queued folded in; the writer takes it when its turn comes.
+type AwakeSlot = Arc<Mutex<Option<PaneAwake>>>;
 
 /// What the writer thread puts on the wire.
 enum Item {
@@ -44,6 +48,8 @@ enum Item {
     /// publish that finds it set happened before the core was woken and
     /// is read by the shm read that wake starts.
     Poke(Arc<AtomicBool>),
+    /// A `PaneAwake` and its wire length.
+    Awake(AwakeSlot, usize),
 }
 
 impl Queued for Item {
@@ -51,6 +57,7 @@ impl Queued for Item {
         match self {
             Item::Frame(f) => f.wire_len(),
             Item::Poke(_) => HEADER_LEN,
+            Item::Awake(_, len) => *len,
         }
     }
 
@@ -60,6 +67,13 @@ impl Queued for Item {
             Item::Poke(queued) => {
                 queued.store(false, Ordering::SeqCst);
                 Frame::new(MsgType::GridReady, Vec::new()).write_all_to(sink)
+            }
+            Item::Awake(slot, _) => {
+                let said = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+                match said {
+                    Some(a) => Frame::new(MsgType::PaneAwake, encode_pane_awake(&a)).write_all_to(sink),
+                    None => Ok(()),
+                }
             }
         }
     }
@@ -75,6 +89,11 @@ pub struct ControlWriter {
     /// the queue's cap, a third of a million of them, and every one but
     /// the first says nothing the first does not.
     poke_queued: Arc<AtomicBool>,
+    /// The same for `PaneAwake`: a shell loop that runs a short command
+    /// after another changes the foreground group on every one, a
+    /// report each time.
+    awake_queued: AwakeSlot,
+    awake_len: usize,
     /// The stream's fd, kept so the execv handoff can pass it on.
     fd: RawFd,
     /// Held only so the fd stays open for `fd`'s lifetime; the writer
@@ -98,6 +117,16 @@ impl ControlWriter {
         Ok(Self {
             inner: BoundedWriter::new("l3-control-writer", thread_half, marspot_term::frame_writer::cap::CONTROL_SOCKET),
             poke_queued: Arc::new(AtomicBool::new(false)),
+            awake_queued: Arc::new(Mutex::new(None)),
+            awake_len: HEADER_LEN
+                + encode_pane_awake(&PaneAwake {
+                    session_id: 0,
+                    output: false,
+                    foreground: false,
+                    shell_in_front: false,
+                    fg_pgid: 0,
+                })
+                .len(),
             fd,
             stream: Some(stream),
         })
@@ -117,6 +146,27 @@ impl ControlWriter {
         if !self.inner.send(Item::Poke(Arc::clone(&self.poke_queued))) {
             self.poke_queued.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Report `said`, or fold it into the report still queued: the
+    /// output and foreground changes of both, the foreground group as
+    /// it is now.  `false` = dropped.
+    pub fn awake(&mut self, said: PaneAwake) -> bool {
+        let mut slot = self.awake_queued.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(q) = slot.as_mut() {
+            q.output |= said.output;
+            q.foreground |= said.foreground;
+            q.shell_in_front = said.shell_in_front;
+            q.fg_pgid = said.fg_pgid;
+            return true;
+        }
+        *slot = Some(said);
+        drop(slot);
+        if self.inner.send(Item::Awake(Arc::clone(&self.awake_queued), self.awake_len)) {
+            return true;
+        }
+        *self.awake_queued.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        false
     }
 
     pub fn backlog(&self) -> usize {

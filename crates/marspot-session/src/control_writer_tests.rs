@@ -51,3 +51,36 @@ fn other_frames_are_not_folded() {
     }
     assert_eq!(kinds, [MsgType::GridReady, MsgType::PaneBell, MsgType::PaneBell]);
 }
+
+fn said(output: bool, foreground: bool, fg_pgid: i32) -> PaneAwake {
+    PaneAwake { session_id: 7, output, foreground, shell_in_front: false, fg_pgid }
+}
+
+#[test]
+fn reports_to_a_core_that_stopped_reading_stay_one_frame() {
+    let (ours, _theirs) = UnixStream::pair().expect("a socket pair");
+    let mut w = ControlWriter::new(ours).expect("a writer");
+    for i in 0..200_000 {
+        assert!(w.awake(said(i % 2 == 0, true, i)));
+    }
+    assert!(w.backlog() <= 2 * w.awake_len, "backlog {} bytes", w.backlog());
+}
+
+#[test]
+fn a_folded_report_keeps_every_change_and_the_latest_group() {
+    let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+    let mut w = ControlWriter::new(ours).expect("a writer");
+    // the slot as the writer would find it with one report queued
+    *w.awake_queued.lock().unwrap() = Some(said(true, false, 1));
+    assert!(w.awake(said(false, true, 2)));
+    assert!(w.awake(said(false, false, 3)));
+    let queued = w.awake_queued.lock().unwrap().take().expect("still one queued");
+    assert_eq!(queued, said(true, true, 3));
+    // with nothing queued a report goes out as it is
+    assert!(w.awake(said(false, true, 4)));
+    drop(w);
+    let f = Frame::read_from(&mut theirs).expect("read").expect("a frame");
+    assert_eq!(f.msg_type, MsgType::PaneAwake);
+    let got = marspot_term::shell_proto::decode_pane_awake(&f.payload).expect("decodes");
+    assert_eq!(got, said(false, true, 4));
+}
