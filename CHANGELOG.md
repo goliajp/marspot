@@ -4,6 +4,23 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.18.0
+
+- The helper rows under a Claude Code pane take only the rows they
+  draw: under Claude's own subagent list they sit right below it with
+  no empty rows. Each row names the agent and the model it runs on,
+  shows the short title the caller gave the helper (HelperStart and
+  `marspot-peer helper start` take `title`), and says `idle` when a
+  helper has finished its turn and can be talked to again.
+- An agent session can end processes of its own pane that it no longer
+  needs, by pid and start time, with the `ProcStop` tool or
+  `marspot-peer procs stop`; another pane's processes are refused and
+  every stop is written to the control audit log.
+- Quitting from the Dock right after an update or a reopen is no
+  longer refused.
+- The process panel shows real CPU percentages on Apple silicon (they
+  read about 1/42 of the real value before).
+
 ## 0.17.0
 
 - Claude Code sessions Marspot starts itself (account switches,
