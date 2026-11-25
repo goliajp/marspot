@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.708"  # usage samples log the readings marspot collects itself
-core    = "0.12.688"  # the settings panel write-back test is named as a view test, outside the interface text check
-session = "0.11.445"  # the pty reader tests stop timing the machine instead of the reader
+shell   = "0.7.709"  # kimi panes join the shared allocation behind kimi.allocation, off by default
+core    = "0.12.689"  # settings learn kimi.allocation; the agent settings keys move to a file of their own
+session = "0.11.446"  # settings learn kimi.allocation; the agent settings keys move to a file of their own

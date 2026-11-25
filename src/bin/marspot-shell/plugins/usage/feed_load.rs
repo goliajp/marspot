@@ -41,6 +41,7 @@ fn account_of(row: &Value) -> Account {
         limit_reached: false,
         five_hour: own("utilization_5h", "reset_5h"),
         seven_day: own("utilization_7d", "reset_7d"),
+        month: own("utilization_month", "reset_month"),
         models: models.iter().filter_map(|m| model_of(m, limits_seen)).collect(),
         credits_seen: if credits.is_some() { collected } else { 0 },
         credits,

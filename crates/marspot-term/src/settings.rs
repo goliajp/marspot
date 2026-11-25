@@ -40,9 +40,11 @@ use crate::language::LangId;
 use crate::palette::ThemeId;
 use values::{fmt_f32, parse_bool, parse_f32};
 
+mod agent_allocation;
 mod rebalance;
 mod values;
 
+pub use agent_allocation::AgentAllocation;
 pub use rebalance::Rebalance;
 
 /// Every user-owned decision, resolved.
@@ -151,6 +153,8 @@ pub struct Settings {
     /// input that chose it and moves nothing; only `live` moves; `off`/`false` do neither.
     /// Leaving an account that runs short and moving a refused pane are not this setting's.
     pub cc_rebalance: Rebalance,
+    /// What the kimi plugin does with the shared allocation, see [`AgentAllocation`].
+    pub kimi_allocation: AgentAllocation,
     /// List a pane's helpers in rows at its bottom, as the agent in it
     /// lists its own.  The program in the pane is made shorter while
     /// there are any; a pane without helpers is not touched.
@@ -177,6 +181,7 @@ impl Default for Settings {
             codex_follow_updates: true,
             agents_install: true,
             cc_rebalance: Rebalance::DryRun,
+            kimi_allocation: AgentAllocation::Off,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
@@ -336,10 +341,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "appearance.helper_strip" => s.helper_strip.to_string(),
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
-        "codex.follow_updates" => s.codex_follow_updates.to_string(),
-        "agents.install" => s.agents_install.to_string(),
-        "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
-        _ => String::new(),
+        _ => agent_allocation::value_of(s, key).unwrap_or_default(),
     }
 }
 
@@ -380,11 +382,7 @@ pub fn parse(body: &str) -> Settings {
             "claudecode.statusline_hook" => {
                 s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)
             }
-            "codex.follow_updates" => {
-                s.codex_follow_updates = parse_bool(v, s.codex_follow_updates)
-            }
-            "agents.install" => s.agents_install = parse_bool(v, s.agents_install),
-            "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v),
+            _ if agent_allocation::parse_key(&mut s, k, v) => {}
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -530,6 +528,26 @@ mod tests {
         }
         assert_eq!(parse("claudecode.rebalance = off\nclaudecode.rebalance = maybe\n").cc_rebalance, Rebalance::DryRun, "unknown is a dry run, not the line before");
         assert_eq!(value_of(&parse("claudecode.rebalance = live\n"), "claudecode.rebalance"), "live");
+    }
+
+    /// The kimi allocation is off unless the file says `dryrun` or
+    /// `live`, and a rewrite keeps the word.
+    #[test]
+    fn kimi_allocation_is_off_unless_named() {
+        assert_eq!(Settings::default().kimi_allocation, AgentAllocation::Off);
+        for (word, want) in [
+            ("live", AgentAllocation::Live),
+            ("DryRun", AgentAllocation::DryRun),
+            ("off", AgentAllocation::Off),
+            ("on", AgentAllocation::Off),
+            ("true", AgentAllocation::Off),
+        ] {
+            let body = format!("kimi.allocation = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.kimi_allocation, want, "{word}");
+            assert_eq!(parse(&render(&s, &body)).kimi_allocation, want, "{word} after a rewrite");
+        }
+        assert_eq!(value_of(&parse("kimi.allocation = dryrun\n"), "kimi.allocation"), "dryrun");
     }
 
     /// The theme is dark until the file names another, `system` is a
