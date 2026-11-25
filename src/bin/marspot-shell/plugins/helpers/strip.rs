@@ -30,6 +30,9 @@ mod helper_strip_tests;
 #[cfg(test)]
 #[path = "strip/helper_strip_restart_tests.rs"]
 mod helper_strip_restart_tests;
+#[cfg(test)]
+#[path = "strip/helper_strip_row_tests.rs"]
+mod helper_strip_row_tests;
 
 use rows::Live;
 

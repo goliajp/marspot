@@ -6,7 +6,9 @@
 //! for as long as the screen stays as it was.  There `↑ ↓` select,
 //! `Enter` views, `x` stops a helper and then clears its row, and `Esc`
 //! or `↑` on the first row go back to the input box; any other key goes
-//! back there too, and to the agent.
+//! back there too, and to the agent.  While a helper is viewed, `↑` on
+//! the first row selects `main` even where none is drawn, and `Enter`
+//! on `main` or on the row in view goes back to the pane itself.
 
 use super::compose::Pick;
 use super::native_list;
@@ -62,7 +64,8 @@ impl Keys {
     }
 }
 
-/// `selected` within `rows` rows, and a strip with no `main` of its own.
+/// `selected` within `rows` rows, and a strip where `main` cannot be
+/// selected.
 fn clamped(selected: Pick, rows: usize, main: bool) -> Pick {
     match selected {
         Pick::Main if main => Pick::Main,
@@ -264,26 +267,14 @@ impl CoreApp {
         true
     }
 
-    /// How many helpers the strip of `at` lists, and whether it draws a
-    /// `main` of its own.
+    /// How many helpers the strip of `at` lists, and whether `main` can
+    /// be selected: the strip draws one, or a helper is viewed in the
+    /// pane's place under a strip that has rows only.
     pub(super) fn strip_rows_at(&self, at: At) -> Option<(usize, bool)> {
         let host = self.strips.hosts.get(&at.host)?;
         let record = self.pane_control.strips.of(at.host)?;
         let rows = host.shown_rows(record);
-        (rows > 0).then_some((rows, host.drawn.has_main()))
-    }
-
-    fn strip_enter(&mut self, at: At, selected: Pick, key: &LogicalKey) -> bool {
-        self.pane_control.shadows.peeks.held.swallowed(key);
-        self.leave_strip_keys();
-        let helper = match selected {
-            Pick::Main => None,
-            Pick::Row(i) => self.pane_control.strips.of(at.host).and_then(|r| self.strips.hosts.get(&at.host)?.sid_at(r, i)),
-        };
-        if helper != Some(at.shown) && (helper.is_some() || at.shown != at.host) {
-            self.view_helper(at.host, helper);
-        }
-        true
+        (rows > 0).then_some((rows, host.drawn.has_main() || at.shown != at.host))
     }
 
     /// Something other than a key happened in the strip's pane: what

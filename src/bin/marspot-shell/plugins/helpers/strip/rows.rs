@@ -4,6 +4,7 @@ use marspot::shell_proto::{StripAgent, StripRow, StripState};
 use marspot_peer::control::AgentKind;
 
 use super::super::pending::Notice;
+use super::super::service::first_line;
 use super::super::table::{Event, Helper};
 use super::super::turn::{Turn, turn_reported};
 use super::batch::Ended;
@@ -83,14 +84,26 @@ fn plain(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// What a row calls a helper: its agent and the model in use, so that it
+/// never reads as one of the agent's own subagents.
+fn name_of(agent: AgentKind, model: &str) -> String {
+    let short = model.strip_prefix(agent.as_str()).and_then(|m| m.strip_prefix('-')).unwrap_or(model);
+    if short.is_empty() { agent.as_str().to_string() } else { format!("{} {short}", agent.as_str()) }
+}
+
+/// What a row says the helper does: the caller's title for it, else
+/// the name it was given, else the task: the first line of either.
+fn summary_of(h: &Helper) -> String {
+    let given = [&h.started.title, &h.started.label].into_iter().find(|t| !t.trim().is_empty());
+    plain(&first_line(given.unwrap_or(&h.started.task_line)))
+}
+
 pub(super) fn row(h: &Helper, state: StripState, number: Option<u16>, used: Used) -> StripRow {
-    let model = if h.started.model == "default" { String::new() } else { plain(&h.started.model) };
-    let label = plain(&h.started.label);
-    let named = !label.is_empty();
-    let name = match (named, model.is_empty()) {
-        (true, _) => label,
-        (false, true) => h.started.agent.as_str().to_string(),
-        (false, false) => format!("{} {model}", h.started.agent.as_str()),
+    // the model its records name, else the one it was started with
+    let model = match used.model {
+        Some(m) => m.as_str().to_string(),
+        None if h.started.model == "default" => String::new(),
+        None => plain(&h.started.model),
     };
     StripRow {
         sid: h.sid,
@@ -99,15 +112,14 @@ pub(super) fn row(h: &Helper, state: StripState, number: Option<u16>, used: Used
         agent: agent(h.started.agent),
         gone: false,
         had_tool: used.had_tool.unwrap_or(true),
-        named,
         started_ms: h.started_ms,
         worked_ms: h.clock.worked_ms,
         running_since_ms: h.clock.since_ms,
         ended_ms: (!h.clock.runs()).then_some(h.clock.ended_ms),
         tokens: used.tokens,
-        name,
+        name: name_of(h.started.agent, &model),
         model,
-        task: plain(&h.started.task_line),
+        task: summary_of(h),
     }
 }
 

@@ -26,7 +26,7 @@ pub const HELPER_STRIP_TASK_MAX: usize = 480;
 const TOKENS_UNKNOWN: u64 = u64::MAX;
 const ROW_GONE: u8 = 1;
 const ROW_HAD_TOOL: u8 = 1 << 1;
-const ROW_NAMED: u8 = 1 << 2;
+// 1 << 2 is set by older shells and read by no one
 
 wire_enum!(
     /// What a row's helper is doing.
@@ -83,8 +83,6 @@ pub struct StripRow {
     pub gone: bool,
     /// A tool was called, or it is not known that none was.
     pub had_tool: bool,
-    /// `name` was given when it was started.
-    pub named: bool,
     /// Ms after the epoch.
     pub started_ms: u64,
     /// How long it was at work before `running_since_ms`.
@@ -110,7 +108,7 @@ impl StripRow {
     }
 
     fn flags(&self) -> u8 {
-        (self.gone as u8 * ROW_GONE) | (self.had_tool as u8 * ROW_HAD_TOOL) | (self.named as u8 * ROW_NAMED)
+        (self.gone as u8 * ROW_GONE) | (self.had_tool as u8 * ROW_HAD_TOOL)
     }
 }
 
@@ -148,7 +146,6 @@ fn decode_row(p: &[u8]) -> io::Result<StripRow> {
         agent: StripAgent::from_u8(agent),
         gone: flags & ROW_GONE != 0,
         had_tool: flags & ROW_HAD_TOOL != 0,
-        named: flags & ROW_NAMED != 0,
         started_ms: r.u64()?,
         worked_ms: r.u64()?,
         running_since_ms: Some(r.u64()?).filter(|t| *t != 0),

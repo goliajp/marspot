@@ -18,11 +18,13 @@
 #   3. one helper ending resizes nothing;
 #   4. a swap of the core and one of the shell resize nothing, and the
 #      list is there again;
-#   5. the last one stopped: in view for a while longer, and not drawn
-#      again; then the rows go back in one resize;
+#   5. the last two stopped: in view for a while longer, and not drawn
+#      again; then each gives its row back as it leaves the list, the
+#      last with the rest;
 #   6. with one that only waits for an answer nothing wakes the core;
 #   7. nothing is resized under the user's hands;
-#   8. claude on the main screen: every row at once, then none;
+#   8. claude on the main screen: its rows and a blank one under them,
+#      one more row for a second helper, and none given back;
 #   9. a click on a helper's row views it and one on main comes back;
 #      down in the stand-in's empty input box takes the keys, enter
 #      views, x stops a helper, and keys the strip takes never reach
@@ -109,6 +111,15 @@ one_resize_to() { # how many there were, rows, seconds
   wait_rows "$2" "$3" || { echo "    rows are $(rows_now), wanted $2"; return 1; }
   sleep 2
   [[ $(sizes) == $(( $1 + 1 )) && $(rows_now) == "$2" ]] || { echo "    $(( $(sizes) - $1 )) resizes, rows now $(rows_now)"; return 1; }
+}
+# `$3` more sizes since `$1` of them, each taller than the one before,
+# the last `$2` rows.
+grows_back_to() { # how many there were, rows, how many more, seconds
+  wait_rows "$2" "$4" || { echo "    rows are $(rows_now), wanted $2"; return 1; }
+  sleep 2
+  [[ $(sizes) == $(( $1 + $3 )) ]] || { echo "    $(( $(sizes) - $1 )) resizes, rows now $(rows_now)"; return 1; }
+  tail -n "$3" "$SIZES" | awk 'NR > 1 && $3 <= last { bad = 1 } { last = $3 } END { exit bad }' \
+    || { echo "    not each taller: $(tail -n "$3" "$SIZES" | awk '{ print $3 }' | tr '\n' ' ')"; return 1; }
 }
 strip_now() { grep -a $'\tDEV_STRIP\t' "$LOG" | tail -1 | grep -o $'\tlines=.*' | tr '_' ' '; } # the log writes a space as _
 strip_has() { # text…
@@ -253,7 +264,8 @@ shown=$(count "$SD" DEV_STRIP)
 sleep 8
 check "nothing more is drawn" test "$(count "$SD" DEV_STRIP)" = "$shown"
 check "the rows are still taken" test "$(sizes)" = "$n"
-check "then they are given back, in one resize" one_resize_to "$n" "$FULL" 60
+# on the alternate screen a stopped row leaving the list gives its row back
+check "then each stopped one's row goes as it leaves the list" grows_back_to "$n" "$FULL" 2 60
 
 echo "════ 6. one that waits for an answer ════"
 n=$(sizes)
@@ -298,12 +310,15 @@ start_parent
 n=$(sizes)
 rm -f "$SB"/end7*
 started codex "One. FAKE-WORK=$SB/end7 FAKE-EXIT" >/dev/null || die "no helper"
-check "every row at once" one_resize_to "$n" $(( FULL - 8 )) 30
+check "a blank row, main, its row and a blank row under it" one_resize_to "$n" $(( FULL - 4 )) 30
 n=$(sizes)
 started codex "Two. FAKE-WORK=$SB/end7 FAKE-EXIT" >/dev/null || die "no helper"
-check "a second is listed" wait_strip 30 'One.' 'Two.'
+check "a second: one more row" one_resize_to "$n" $(( FULL - 5 )) 30
+check "both are listed" wait_strip 30 'One.' 'Two.'
+n=$(sizes)
+touch "$SB/end7"
 sleep 3
-check "and resizes nothing" test "$(sizes)" = "$n"
+check "the rows are kept once they are over" test "$(sizes)" = "$n"
 
 echo "════ 9. viewing from the strip, and its keyboard ════"
 SETTING=true

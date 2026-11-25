@@ -35,7 +35,7 @@ pub(super) fn panes(list: &[(u64, i32)]) -> Observation {
 fn helpers_tick_due_leaves_a_parked_parent_alone() {
     let dir = temp("parked");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
     let now = records::now_ms();
     let shell = panes(&[(10, 0)]);
     let none = HashSet::new();
@@ -127,7 +127,7 @@ fn helpers_undelivered_notice_waits_for_a_new_program_and_gives_up() {
 #[test]
 fn helpers_held_stop_at_a_prompt_keeps_its_kind() {
     let mut t = super::table::Table::default();
-    t.apply(1, 0, &Event::Started(started(10, "shell", AgentKind::Codex)));
+    t.apply(1, 0, &Event::started(started(10, "shell", AgentKind::Codex)));
     t.apply(1, 1, &Event::NoticeSuppressed { blocked: false });
     assert!(!t.map[&1].held_blocked);
     t.apply(1, 2, &Event::NoticeSuppressed { blocked: true });
@@ -143,7 +143,7 @@ fn helpers_held_stop_at_a_prompt_keeps_its_kind() {
 fn helpers_claude_and_kimi_stop_at_an_approval_once() {
     let dir = temp("approval");
     let (s, rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
     let mut in_turn = HashMap::new();
     for _ in 0..3 {
         tick::tick(&s, &host_with(&[(1, PaneStatus::Busy(BusyKind::ToolAwaitingApproval))]), &mut in_turn, &mut tick::Parked::default());
@@ -166,7 +166,7 @@ fn helpers_a_failed_stop_keeps_a_live_helper_and_forgets_a_gone_one() {
     let (s, _rx) = shared_at(&dir);
     // no such session anywhere: gone, so it counts as stopped
     let sid = u64::MAX - 3;
-    feed(&s, sid, vec![Event::Started(started(10, "shell", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&s, sid, vec![Event::started(started(10, "shell", AgentKind::Codex)), Event::TaskDelivered]);
     assert!(stop_all::stop_one(&s, sid, || Err(Reject::new(ErrorCode::Internal, "x"))).is_ok());
     assert!(s.table().map.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
@@ -176,7 +176,7 @@ fn helpers_a_failed_stop_keeps_a_live_helper_and_forgets_a_gone_one() {
 fn helpers_account_change_is_where_it_runs_now() {
     let dir = temp("account");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 4, vec![Event::Started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 4, vec![Event::started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
     use crate::plugins::claudecode::with_helpers::{AccountChanged, account_changed};
     account_changed(AccountChanged { sid: 4, agent: "claude", from: 2, to: 5, at: 0 });
     account_changed(AccountChanged { sid: 99, agent: "claude", from: 1, to: 3, at: 0 });

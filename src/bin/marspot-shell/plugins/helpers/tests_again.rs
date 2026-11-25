@@ -28,7 +28,7 @@ fn stops(rx: &Receiver<Job>) -> Vec<(u64, Stop)> {
 fn helpers_one_given_keys_that_open_no_turn_is_not_waited_for() {
     let dir = temp("keys");
     let (s, rx) = shared_at(&dir);
-    let begun = |parent| vec![Event::Started(started(parent, "claude", AgentKind::Claude)), Event::TaskDelivered];
+    let begun = |parent| vec![Event::started(started(parent, "claude", AgentKind::Claude)), Event::TaskDelivered];
     // 1's own helper 2 stopped long ago, and 1 was told
     feed(&s, 1, begun(10));
     let now = records::now_ms();
@@ -65,9 +65,9 @@ fn helpers_one_given_keys_before_a_start_is_not_waited_for_either() {
     let dir = temp("keysstart");
     let (s, _rx) = shared_at(&dir);
     for agent in [AgentKind::Claude, AgentKind::Kimi, AgentKind::Codex] {
-        feed(&s, agent as u64 + 1, vec![Event::Started(started(9, "claude", agent)), Event::TaskDelivered, Event::IdleNoticed, Event::InputSeen]);
+        feed(&s, agent as u64 + 1, vec![Event::started(started(9, "claude", agent)), Event::TaskDelivered, Event::IdleNoticed, Event::InputSeen]);
     }
-    feed(&s, 20, vec![Event::Started(started(9, "claude", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 20, vec![Event::started(started(9, "claude", AgentKind::Claude)), Event::TaskDelivered]);
     s.lock().poked.clear();
     rebuild::rebuild(&s, || s.table().map.keys().copied().collect());
     let mut poked: Vec<u64> = s.lock().poked.keys().copied().collect();
@@ -84,7 +84,7 @@ fn helpers_an_approval_told_before_a_start_is_not_told_after_it() {
     for agent in [AgentKind::Claude, AgentKind::Kimi] {
         let dir = temp("blocked");
         let (s, rx) = shared_at(&dir);
-        feed(&s, 1, vec![Event::Started(started(10, "shell", agent)), Event::TaskDelivered, Event::BlockedNoticed { prompt: String::new() }]);
+        feed(&s, 1, vec![Event::started(started(10, "shell", agent)), Event::TaskDelivered, Event::BlockedNoticed { prompt: String::new() }]);
         // a rotation between the two keeps it
         let carried = Event::Carried(Box::new(s.table().map[&1].clone()));
         let (_, _, back) = records::parse(&records::line(1, 1, 1, &carried)).unwrap();

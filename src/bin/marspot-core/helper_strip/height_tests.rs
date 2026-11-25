@@ -21,7 +21,11 @@ impl Rig {
     }
 
     fn rows(&mut self, works: bool, n: usize) {
-        self.s.said = Said::Rows { works, need: rows_for(n) };
+        self.s.said = Said::Rows { works, need: rows_for(n, false, self.s.inline) };
+    }
+
+    fn merged_rows(&mut self, works: bool, n: usize) {
+        self.s.said = Said::Rows { works, need: rows_for(n, true, self.s.inline) };
     }
 
     fn due_ms(&self) -> Option<u128> {
@@ -31,8 +35,63 @@ impl Rig {
 
 #[test]
 fn rows_for_helpers() {
-    assert_eq!([0, 1, 5, 6, 24].map(rows_for), [0, 3, 7, 8, 8]);
-    assert_eq!([0, 1, 2, 3, 8, 9].map(Height::could_be), [false, false, false, true, true, false]);
+    assert_eq!([0, 1, 5, 6, 24].map(|n| rows_for(n, false, false)), [0, 3, 7, 8, 8], "a blank row and main, then them");
+    assert_eq!([0, 1, 5, 6, 24].map(|n| rows_for(n, true, false)), [0, 1, 5, 6, 6], "under the agent's own list");
+    assert_eq!([0, 1, 4, 5, 6].map(|n| rows_for(n, false, true)), [0, 4, 7, 8, 8], "a blank row under them on the main screen");
+    assert_eq!([0, 1, 5].map(|n| rows_for(n, true, true)), [0, 2, 6]);
+    assert_eq!([0, 1, 2, 8, 9].map(Height::could_be), [false, true, true, true, false]);
+}
+
+#[test]
+fn on_the_alternate_screen_it_is_as_high_as_the_rows_drawn() {
+    let mut r = Rig::new(Height::default());
+    r.rows(true, 2);
+    assert_eq!(r.at(0), Some(4));
+    r.merged_rows(true, 2);
+    assert_eq!(r.at(10), Some(2), "the agent's own list has the head");
+    r.merged_rows(true, 3);
+    assert_eq!(r.at(20), Some(3));
+    r.rows(true, 3);
+    assert_eq!(r.at(30), Some(5), "its list went: a head of its own");
+}
+
+#[test]
+fn on_the_main_screen_it_only_grows() {
+    let mut r = Rig::new(Height::default());
+    r.s.inline = true;
+    r.rows(true, 2);
+    assert_eq!(r.at(0), Some(5));
+    r.merged_rows(true, 2);
+    assert_eq!(r.at(10), None, "each resize leaves rows twice in the history");
+    r.merged_rows(true, 5);
+    assert_eq!(r.at(20), Some(6));
+}
+
+#[test]
+fn the_agents_own_list_is_taken_a_second_after_it_came_and_three_after_it_went() {
+    let t = Instant::now();
+    let mut m = Merge::default();
+    m.saw(true, t);
+    assert!(m.merged(), "what is there at the first look is taken as it is");
+    assert_eq!(m.due(), None);
+    m.saw(false, t + MS * 100);
+    m.settle(t + MS * 1_600);
+    assert!(m.merged(), "a prompt or a menu hides it for a while");
+    assert_eq!(m.due(), Some(t + MS * 3_100));
+    m.saw(true, t + MS * 2_700);
+    m.settle(t + MS * 4_000);
+    assert!(m.merged(), "back before three seconds were over");
+    assert_eq!(m.due(), None);
+    m.saw(false, t + MS * 4_100);
+    m.settle(t + MS * 7_000);
+    assert!(m.merged());
+    m.settle(t + MS * 7_100);
+    assert!(!m.merged());
+    assert_eq!(m.due(), None, "nothing is owed once it is taken");
+    m.saw(true, t + MS * 8_000);
+    assert_eq!(m.due(), Some(t + MS * 9_000), "it is taken back a second after it came");
+    m.settle(t + MS * 9_000);
+    assert!(m.merged());
 }
 
 #[test]
@@ -46,8 +105,8 @@ fn it_grows_a_step_a_helper_and_goes_once_all_have_ended() {
     r.rows(true, 2);
     assert_eq!(r.at(20), Some(4));
     r.rows(true, 1);
-    assert_eq!(r.at(30), None, "one left the list");
-    r.rows(false, 2);
+    assert_eq!(r.at(30), Some(3), "one left the list");
+    r.rows(false, 1);
     assert_eq!(r.at(1_000), None);
     assert_eq!(r.due_ms(), None, "the shell says when");
     assert_eq!(r.at(3_900), None);
@@ -115,13 +174,13 @@ fn a_pane_something_else_has_is_left_alone() {
 }
 
 #[test]
-fn on_the_main_screen_all_is_taken_at_once_and_kept() {
+fn on_the_main_screen_it_is_kept_for_the_next_ones() {
     let mut r = Rig::new(Height::default());
     r.s.inline = true;
     r.rows(true, 1);
-    assert_eq!(r.at(0), Some(MAX_ROWS));
+    assert_eq!(r.at(0), Some(4));
     r.rows(true, 7);
-    assert_eq!(r.at(10), None);
+    assert_eq!(r.at(10), Some(MAX_ROWS));
     r.rows(false, 7);
     r.at(20);
     r.s.said = Said::Nothing;
@@ -156,7 +215,7 @@ fn what_an_earlier_core_left_is_kept_until_the_shell_has_spoken() {
     let mut r = Rig::new(Height::found(5));
     assert_eq!((r.at(0), r.at(60_000), r.due_ms()), (None, None, None));
     r.rows(true, 2);
-    assert_eq!(r.at(60_100), None, "never less while helpers work");
+    assert_eq!(r.at(60_100), Some(4), "the rows drawn, once the shell has spoken");
     let mut r = Rig::new(Height::found(5));
     r.s.said = Said::Nothing;
     assert_eq!(r.at(0), None);

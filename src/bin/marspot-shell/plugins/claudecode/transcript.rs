@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use super::CcActivity;
-use super::context::used_in;
+use super::context::used_of_tail;
 use crate::plugins::helpers::used::Used;
 
 /// How much of a transcript's end the cheap checks read.  A single
@@ -214,7 +214,7 @@ impl TailCache {
     /// What the window last read says of the context; None when none was.
     pub(super) fn used(&mut self, path: &Path) -> Option<Used> {
         let t = self.map.get_mut(path)?;
-        Some(*t.used.get_or_insert_with(|| used_in(&t.text, t.len <= TAIL)))
+        Some(*t.used.get_or_insert_with(|| used_of_tail(path, &t.text, t.len, TAIL)))
     }
 
     pub(super) fn retain(&mut self, keep: impl Fn(&PathBuf) -> bool) {

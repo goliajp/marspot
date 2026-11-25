@@ -2,7 +2,7 @@
 //! listed in it.
 
 use super::compose::{Arrow, Drawn, Row, State};
-use super::height::{rows_for, Height, Said};
+use super::height::{rows_for, Height, Merge, Said};
 use super::native_list::{self, Columns};
 use super::theme::Theme;
 use marspot::shell_proto::{HelperStrip, StripAgent, StripRow, StripState, HELPER_STRIP_ROWS};
@@ -29,6 +29,8 @@ pub(super) struct Host {
     /// Those of the batch the user cleared.
     hidden: Vec<u64>,
     look: Look,
+    /// Whether the agent's own list is there, as the height takes it.
+    pub merge: Merge,
     pub drawn: Drawn,
     /// One is at work and its figures change by the second.
     pub ticks: bool,
@@ -53,7 +55,8 @@ fn state(r: &StripRow) -> State {
     match r.state {
         StripState::Preparing | StripState::Working => State::Running,
         StripState::Waiting => State::Awaiting,
-        StripState::Idle | StripState::Exited => State::Done,
+        StripState::Idle => State::Idle,
+        StripState::Exited => State::Done,
         StripState::Stopped => State::Stopped,
         StripState::Unknown(_) if r.running_since_ms.is_some() => State::Running,
         StripState::Unknown(_) => State::Done,
@@ -108,8 +111,8 @@ impl Host {
     }
 
     /// What `record` comes to; `told`: that there is none means there
-    /// are no helpers.
-    pub(super) fn said(&self, record: Option<&HelperStrip>, told: bool) -> Said {
+    /// are no helpers; `inline`: the agent draws on its main screen.
+    pub(super) fn said(&self, record: Option<&HelperStrip>, told: bool, inline: bool) -> Said {
         let Some(record) = record else {
             return if told { Said::Nothing } else { Said::Unknown };
         };
@@ -122,7 +125,7 @@ impl Host {
         }
         let works = rows.any(|r| r.running_since_ms.is_some());
         let ready = self.listed.iter().filter(|l| l.ready && self.shows(l.sid)).count();
-        Said::Rows { works, need: if self.alive { rows_for(ready) } else { 0 } }
+        Said::Rows { works, need: if self.alive { rows_for(ready, self.merge.merged(), inline) } else { 0 } }
     }
 
     /// The rows to list at `now_ms`, with the panes they are of.
@@ -131,7 +134,7 @@ impl Host {
         for (r, l) in record.rows.iter().zip(&self.listed).filter(|(r, _)| self.shows(r.sid)) {
             out[n] = Row {
                 name: &l.label,
-                named: r.named,
+                named: false,
                 task: &r.task,
                 state: state(r),
                 elapsed_ms: r.elapsed_ms(now_ms),
@@ -169,6 +172,16 @@ impl Host {
     /// Whether what `record` lists changes by the second.
     pub(super) fn ticking(&self, record: &HelperStrip) -> bool {
         record.rows.iter().any(|r| self.shows(r.sid) && r.running_since_ms.is_some() && state(r) == State::Running)
+    }
+
+    /// Look at the screen of the pane: whether the agent's own list is
+    /// on it.  Once per frame of it, as for drawing.
+    pub(super) fn glance(&mut self, agent: StripAgent, screen: &Grid, of: (u64, u64), scrolled: bool, now: std::time::Instant) {
+        let native = self.look(agent, screen, of, scrolled).1;
+        if !scrolled {
+            self.merge.saw(native.is_some(), now);
+        }
+        self.merge.settle(now);
     }
 
     /// The theme to draw in and the columns of the agent's own list,

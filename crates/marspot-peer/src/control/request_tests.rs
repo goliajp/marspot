@@ -85,6 +85,7 @@ fn pane_control_every_request_round_trips() {
             resume_last: true,
             budget_minutes: 45,
             name: Some("reviewer".into()),
+            title: Some("review the parser".into()),
         }),
     ];
     for op in reqs {

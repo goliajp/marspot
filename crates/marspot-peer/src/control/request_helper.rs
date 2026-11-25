@@ -68,6 +68,8 @@ pub struct HelperStartArgs {
     pub budget_minutes: u32,
     /// A short label for people.
     pub name: Option<String>,
+    /// A few words on the task, shown under the caller's pane.
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +116,7 @@ pub(super) fn start(a: &Args) -> Result<HelperStartArgs, Reject> {
         resume_last,
         budget_minutes,
         name: a.str("name")?.filter(|n| !n.trim().is_empty()),
+        title: a.str("title")?.filter(|t| !t.trim().is_empty()),
     })
 }
 
@@ -140,6 +143,7 @@ pub(super) fn start_json(h: &HelperStartArgs) -> Vec<(String, Value)> {
     opt("model", &h.model);
     opt("mode", &h.mode);
     opt("name", &h.name);
+    opt("title", &h.title);
     if let Some(p) = h.profile {
         kv.push(("profile".into(), i64::from(p).into()));
     }

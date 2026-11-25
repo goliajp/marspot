@@ -13,7 +13,7 @@ use super::work::{self, Job};
 use super::{close, rebuild, records, service, stop_all, tell, tick, timers, turn};
 
 fn delivered(agent: AgentKind) -> Vec<Event> {
-    vec![Event::Started(started(10, "shell", agent)), Event::TaskDelivered]
+    vec![Event::started(started(10, "shell", agent)), Event::TaskDelivered]
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn helpers_a_turn_that_ended_over_a_restart_is_told() {
     feed(&s, 1, delivered(AgentKind::Claude));
     feed(&s, 2, delivered(AgentKind::Kimi));
     feed(&s, 3, [delivered(AgentKind::Claude), vec![Event::IdleNoticed]].concat());
-    feed(&s, 4, vec![Event::Started(started(10, "shell", AgentKind::Kimi))]);
+    feed(&s, 4, vec![Event::started(started(10, "shell", AgentKind::Kimi))]);
     feed(&s, 5, [delivered(AgentKind::Claude), vec![Event::NoticeSuppressed { blocked: false }]].concat());
     let mut turns = turn::turns_at_start(&s.table());
     assert_eq!(turns, HashMap::from([(1, turn::Turn::Working), (2, turn::Turn::Working)]), "told, not delivered and held ones are left out");
@@ -69,7 +69,7 @@ fn helpers_a_turn_that_ended_over_a_restart_is_told() {
 fn helpers_a_notice_refused_by_an_unchanging_front_is_tried_slowly_a_few_times() {
     let dir = temp("slow");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", AgentKind::Codex))]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Codex))]);
     let agent = panes(&[(10, 55)]);
     let mut now = super::records::now_ms();
     let n = Notice { parent: 10, body: "x".into(), tries: 1, ..Notice::default() };

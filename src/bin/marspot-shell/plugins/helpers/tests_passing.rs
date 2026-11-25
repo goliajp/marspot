@@ -24,7 +24,7 @@ pub(super) fn helper(tag: &str, agent: AgentKind, mode: &str) -> (PathBuf, Arc<S
     let (s, _rx) = shared_at(&dir);
     let mut st = started(10, "shell", agent);
     st.mode = mode.into();
-    feed(&s, 1, vec![Event::Started(st), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(st), Event::TaskDelivered]);
     std::fs::create_dir_all(s.dir_of(1)).unwrap();
     let f = First { epoch: s.epoch(), s: Arc::clone(&s), sid: 1, agent };
     (dir, s, f)

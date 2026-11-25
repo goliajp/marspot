@@ -18,7 +18,7 @@ use crate::plugins::helpers::{Shared, timers};
 fn waiting(s: &Arc<Shared>, sessions: &std::path::Path, heir: ProcId) {
     std::fs::create_dir_all(sessions).unwrap();
     s.lock().names.dirs = Some(vec![sessions.to_path_buf()]);
-    feed(s, 10, vec![Event::Started(Started { conv: Some("one".into()), ..started(1, "claude", AgentKind::Codex) })]);
+    feed(s, 10, vec![Event::started(Started { conv: Some("one".into()), ..started(1, "claude", AgentKind::Codex) })]);
     let left = ProcId { pid: 50, start_us: 5 };
     note_move(s, Move { m: Moved { pane: 1, from: Some("one".into()), left, resumed: None }, to: heir });
     write_moves(s);

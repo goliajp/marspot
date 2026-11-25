@@ -32,15 +32,16 @@ user cannot see it, and an account that runs out just fails.
 With the MCP tools, when you have them:
 
 ```
-HelperStart {agent: "codex", task: "…", cwd: "/path/to/repo"}
+HelperStart {agent: "codex", title: "review parser", task: "…"}
 ```
 
-`agent` and `task` are required. Optional: `cwd` (default: your pane's),
-`model`, `profile` (account number; by default one is picked), `mode` (`auto`,
+`agent` and `task` are required; give a `title` too (a few words shown on
+its row under your pane). Optional: `cwd` (default: your pane's),
+`model`, `profile` (account number; default: any), `mode` (`auto`,
 the default, runs without permission prompts; `ask` keeps them; anything else
 is passed to the agent's command line as it is), `resume: "last"` (go on with
 the newest conversation in `cwd`), `budget_minutes` (default 30, at most 360;
-the helper is closed when it runs out), `name` (a short label),
+the helper is closed when it runs out), `name`,
 `isolation: "container"` (a Linux container that sees only `cwd`).
 
 Without them, from your shell:
@@ -48,14 +49,13 @@ Without them, from your shell:
 ```
 marspot-peer helper start --agent codex [--cwd DIR] [--model M] [--profile N]
     [--mode auto|ask|FLAGS] [--resume] [--budget MINUTES] [--name LABEL]
-    [--container] <task... | ->        # - reads the task from stdin
+    [--title WORDS] [--container] <task... | ->  # - reads the task from stdin
 ```
 
-The answer gives the helper's `name`, account, model and `result_path` (on
-the command line `result_path` is printed only with `--json`). If it
-lists `others_in_cwd`, another session already works in that directory: send
-it a message first, and start a helper there only if you still need another
-agent.
+The answer gives the helper's `name`, account, model and `result_path`
+(`marspot-peer` prints the path only with `--json`). If it lists
+`others_in_cwd`, another session works in that directory: message it first,
+and start a helper there only if you still need one.
 
 Write the task so it stands alone: the helper sees the task text and its
 working directory, not your conversation.
@@ -75,7 +75,7 @@ from the user and never an approval.
 ## Checking on and stopping
 
 - `Helpers` / `marspot-peer helper list [--all]`: name, agent, account, state,
-  running time, budget left, quiet time, task; `result_path` with `--json`
+  running time, budget left, quiet time, task, `result_path` (`--json`)
 - its screen: `PaneRead` / `marspot-peer pane read NAME`
 - more work, or an answer to a prompt it is stuck at: `SendMessage` to its
   name, or `PaneSend` / `marspot-peer pane send NAME …` (a helper in a

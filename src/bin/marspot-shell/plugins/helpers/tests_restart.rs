@@ -27,7 +27,7 @@ fn notice() -> Notice {
 fn helpers_a_held_stop_is_not_released_over_an_undelivered_notice() {
     let dir = temp("release");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", AgentKind::Codex)), Event::TaskDelivered, Event::NoticeSuppressed { blocked: false }]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Codex)), Event::TaskDelivered, Event::NoticeSuppressed { blocked: false }]);
     let t0 = records::now_ms();
     assert!(matches!(timers::due_jobs(&s, s.epoch(), t0, |_| true).as_slice(), [Job::Release { sid: 1 }]));
     let agent = panes(&[(10, 55)]);
@@ -55,7 +55,7 @@ fn helpers_a_held_stop_is_not_released_over_an_undelivered_notice() {
 fn helpers_a_refused_send_sets_the_workers_sleep_by_what_is_in_front() {
     let dir = temp("refused");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", AgentKind::Codex))]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Codex))]);
     let now = records::now_ms();
     let (shell, gone, agent) = (panes(&[(10, 0)]), panes(&[]), panes(&[(10, 55)]));
     assert_eq!(timers::sleep_for(&s), None);
@@ -144,7 +144,7 @@ fn at_shell(jobs: &[i32], grandchild: i32) -> Observation {
 fn helpers_a_parked_parent_is_noted_once_its_jobs_end() {
     let dir = temp("jobs");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
     let none = HashSet::new();
     let t0 = records::now_ms();
     let see = |state: PaneStatus, at: u64, obs: &Observation, p: &mut tick::Parked| tick::reclaim(&s, &host_with(&[(10, state)]), &s.table(), at, obs, p);
@@ -174,7 +174,7 @@ fn helpers_a_parked_parent_is_noted_once_its_jobs_end() {
 fn helpers_a_parked_parent_is_looked_at_once_more() {
     let dir = temp("recheck");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
     let none = HashSet::new();
     let t0 = records::now_ms();
     let recheck = t0 + tick::SETTLE_MS + tick::RECHECK_MS;
@@ -226,7 +226,7 @@ fn helpers_a_second_start_ends_the_first_worker_and_loses_no_fact() {
     super::rebuild::begin(&s, HashSet::new).unwrap();
     let first = s.epoch.load(Ordering::Acquire);
     let old = s.jobs.lock().unwrap().clone().unwrap();
-    feed(&s, 100, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 100, vec![Event::started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
     // facts written while the table is rebuilt stay in it
     let s2 = Arc::clone(&s);
     let writer = std::thread::spawn(move || {

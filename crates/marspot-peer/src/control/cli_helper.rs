@@ -9,7 +9,7 @@ use crate::json::Value;
 pub const USAGE: &str = "usage:
   marspot-peer helper start --agent claude|codex|gemini|kimi [--parent PANE] [--model M] [--cwd DIR]
                             [--profile N] [--mode auto|ask|FLAGS] [--resume] [--budget MINUTES]
-                            [--name LABEL] [--container] <task... | ->
+                            [--name LABEL] [--title WORDS] [--container] <task... | ->
   marspot-peer helper list [--all]
   marspot-peer helper stop <NAME | --all>
 any of them takes --json for the answer as the app sent it";
@@ -63,6 +63,7 @@ fn start(rest: &mut Vec<String>) -> Result<HelperStartArgs, String> {
     let cwd = take_value(rest, "--cwd")?;
     let mode = take_value(rest, "--mode")?;
     let name = take_value(rest, "--name")?;
+    let title = take_value(rest, "--title")?;
     let profile = number(take_value(rest, "--profile")?, "--profile")?;
     let budget_minutes = number(take_value(rest, "--budget")?, "--budget")?.unwrap_or(DEFAULT_BUDGET_MIN);
     let isolation = if take_flag(rest, "--container") { Isolation::Container } else { Isolation::Host };
@@ -71,7 +72,7 @@ fn start(rest: &mut Vec<String>) -> Result<HelperStartArgs, String> {
         return Err("the task is missing".into());
     }
     let task = text_or_stdin(rest)?;
-    Ok(HelperStartArgs { agent, task, cwd, parent, model, profile, isolation, mode, resume_last, budget_minutes, name })
+    Ok(HelperStartArgs { agent, task, cwd, parent, model, profile, isolation, mode, resume_last, budget_minutes, name, title })
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -151,6 +152,8 @@ mod helpers_cli_tests {
     fn helpers_cli_parses_the_three_commands() {
         let Op::HelperStart(a) = parse(&words("start --agent codex --budget 5 --resume --profile 2 fix the bug")).unwrap() else { panic!() };
         assert_eq!((a.agent, a.budget_minutes, a.resume_last, a.profile, a.task.as_str()), (AgentKind::Codex, 5, true, Some(2), "fix the bug"));
+        let Op::HelperStart(a) = parse(&words("start --agent claude --title fix-parser --name p fix it")).unwrap() else { panic!() };
+        assert_eq!((a.title.as_deref(), a.name.as_deref(), a.task.as_str()), (Some("fix-parser"), Some("p"), "fix it"));
         assert_eq!(parse(&words("list --all")).unwrap(), Op::HelperList { all: true });
         assert_eq!(parse(&words("stop --all")).unwrap(), Op::HelperStop(HelperStop::All));
         assert_eq!(parse(&words("stop spg#1")).unwrap(), Op::HelperStop(HelperStop::Name("spg#1".into())));

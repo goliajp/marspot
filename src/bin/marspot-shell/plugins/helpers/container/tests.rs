@@ -24,6 +24,7 @@ pub(super) fn args(agent: AgentKind) -> HelperStartArgs {
         resume_last: false,
         budget_minutes: 30,
         name: None,
+        title: None,
     }
 }
 
@@ -214,7 +215,7 @@ fn container_stop_with_an_expired_login_says_so() {
 
     let dir = temp("container-expired");
     let (s, _rx) = shared_at(&dir);
-    s.record(41, Event::Started(boxed(AgentKind::Gemini)));
+    s.record(41, Event::started(boxed(AgentKind::Gemini)));
     let h = s.table().map[&41].clone();
     std::fs::create_dir_all(s.dir_of(41)).unwrap();
     std::fs::write(s.dir_of(41).join("expires"), "5").unwrap();
@@ -227,7 +228,7 @@ fn container_helper_is_judged_from_its_screen_and_read_from_its_share() {
     let dir = temp("container-judge");
     let (s, _rx) = shared_at(&dir);
     for (sid, st) in [(41, boxed(AgentKind::Claude)), (42, started(3, "claude", AgentKind::Claude))] {
-        s.record(sid, Event::Started(st));
+        s.record(sid, Event::started(st));
     }
     let t = s.table();
     assert!(!turn::turn_reported(&t.map[&41]) && turn::turn_reported(&t.map[&42]));
@@ -267,7 +268,7 @@ fn container_sweep_takes_only_sessions_that_are_gone() {
     assert_eq!(cleanup::orphans(listing, |sid| sid == 42), vec!["marspot-helper-ab-41"]);
     let dir = temp("container-sweep");
     let (s, _rx) = shared_at(&dir);
-    s.record(42, Event::Started(started(3, "claude", AgentKind::Claude)));
+    s.record(42, Event::started(started(3, "claude", AgentKind::Claude)));
     assert!(!pending::place(&s.root()).exists(), "no container ever: docker is not asked");
     begin(&s, 41, &args(AgentKind::Claude), "p", "auto", &ready(AgentKind::Claude, &dir)).unwrap();
     assert_eq!(pending::all(&s.root()), [41].into());

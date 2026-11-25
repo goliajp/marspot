@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use marspot_peer::json::{self, Value};
 
 use crate::plugins::handoff::history::codex_rollout;
-use crate::plugins::helpers::used::Used;
+use crate::plugins::helpers::used::{Model, Used};
 
 /// How much of a rollout's end is read at first: a thread gone on with
 /// can have hundreds of megabytes before it.
@@ -19,9 +19,15 @@ const READ_BYTES: u64 = 1024 * 1024;
 /// How often a rollout that is not there yet is looked for.
 const SEARCH_EVERY: Duration = Duration::from_secs(20);
 
-/// Take in one record.
+/// Take in one record.  The model is that of the last turn, or of the
+/// last choice made in the thread since.
 fn note(used: &mut Used, line: &str) {
-    if line.contains(r#""type":"token_count""#) {
+    if line.contains(r#""type":"turn_context""#) || line.contains(r#""thread_settings_applied""#) {
+        let Ok(v) = json::parse(line) else { return };
+        let p = v.get("payload");
+        let model = p.and_then(|p| p.get("model").or_else(|| p.at(&["thread_settings", "model"]))).and_then(Value::str);
+        used.model = model.and_then(Model::new).or(used.model);
+    } else if line.contains(r#""type":"token_count""#) {
         let Ok(v) = json::parse(line) else { return };
         if v.at(&["payload", "type"]).and_then(Value::str) == Some("token_count") {
             let total = v.at(&["payload", "info", "last_token_usage", "total_tokens"]).and_then(Value::i64);
@@ -155,7 +161,7 @@ mod tests {
         append(&path, &format!("{META}\n{}\n", count(23_183)));
         assert_eq!(c.look(7, &home, ID, t), None, "not looked for again at once");
         let t = t + SEARCH_EVERY;
-        let used = |tokens, had_tool| Some(Used { tokens: Some(tokens), had_tool: Some(had_tool) });
+        let used = |tokens, had_tool| Some(Used { tokens: Some(tokens), had_tool: Some(had_tool), model: None });
         assert_eq!(c.look(7, &home, ID, t), used(23_183, false));
         // a model that writes about it calls nothing
         append(&path, "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"text\":\"a \\\"x_call\\\", \"}}\n");
@@ -180,7 +186,7 @@ mod tests {
         append(&path, &format!("{}\n{}{}\n", count(1), filler.repeat(400), count(2)));
         let mut c = Contexts::default();
         let t = Instant::now();
-        assert_eq!(c.look(7, &home, ID, t), Some(Used { tokens: Some(2), had_tool: None }));
+        assert_eq!(c.look(7, &home, ID, t), Some(Used { tokens: Some(2), had_tool: None, model: None }));
         let reached = c.0[&7].rollout.as_ref().unwrap().at;
         assert_eq!(reached, std::fs::metadata(&path).unwrap().len());
         // more than one read: on the next looks
@@ -193,6 +199,24 @@ mod tests {
             c.look(7, &home, ID, t);
         }
         assert_eq!(c.look(7, &home, ID, t).unwrap().tokens, Some(4));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn codex_context_names_the_model_of_the_last_turn_or_choice() {
+        let home = tmp("codex-context-model");
+        let path = rollout(&home);
+        let turn = |m: &str| format!("{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"/w\",\"model\":\"{m}\",\"effort\":\"high\"}}}}\n");
+        append(&path, &format!("{META}\n{}{}\n", turn("gpt-5.1-codex"), count(5)));
+        let mut c = Contexts::default();
+        let model = |c: &mut Contexts| c.look(7, &home, ID, Instant::now()).and_then(|u| u.model).map(|m| m.as_str().to_string());
+        assert_eq!(model(&mut c), Some("gpt-5.1-codex".into()));
+        let picked = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"cwd\":\"/w\",\"model\":\"gpt-5.2\"}}}\n";
+        append(&path, picked);
+        assert_eq!(model(&mut c), Some("gpt-5.2".into()), "a choice made before any turn");
+        append(&path, &count(6));
+        append(&path, "\n");
+        assert_eq!(model(&mut c), Some("gpt-5.2".into()), "kept over records that name none");
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

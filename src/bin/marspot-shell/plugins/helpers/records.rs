@@ -14,7 +14,6 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use marspot::pidtree::ProcId;
-use marspot_peer::control::{AgentKind, Isolation};
 
 use super::strip::batch::{Above, Batches};
 use super::strip::clock::Clock;
@@ -52,25 +51,6 @@ fn unesc(s: &str) -> String {
     out
 }
 
-fn started_kv(s: &Started) -> Vec<(&'static str, String)> {
-    let mut v = vec![
-        ("parent", s.parent.to_string()),
-        ("caller", s.caller.clone()),
-        ("agent", s.agent.as_str().into()),
-        ("account", s.account.clone()),
-        ("model", s.model.clone()),
-        ("mode", s.mode.clone()),
-        ("isolation", s.isolation.as_str().into()),
-        ("budget", s.budget_min.to_string()),
-        ("task", s.task_line.clone()),
-        ("sha256", s.task_sha.clone()),
-        ("label", s.label.clone()),
-    ];
-    v.extend(s.conv.clone().map(|c| ("conv", c)));
-    v.extend(s.root.map(|r| ("root", r.to_string())));
-    v
-}
-
 fn proc_text(p: &ProcId) -> String {
     format!("{}:{}", p.pid, p.start_us)
 }
@@ -82,7 +62,7 @@ fn proc_of(text: &str) -> Option<ProcId> {
 
 fn kv(ev: &Event) -> Vec<(&'static str, String)> {
     match ev {
-        Event::Started(s) => started_kv(s),
+        Event::Started(s) => Started::kv(s),
         Event::ResultDelivered { sha } if !sha.is_empty() => vec![("sha256", sha.clone())],
         Event::AccountChanged(a) => vec![("account", a.clone())],
         Event::BlockedNoticed { prompt } if !prompt.is_empty() => vec![("prompt", prompt.clone())],
@@ -92,7 +72,7 @@ fn kv(ev: &Event) -> Vec<(&'static str, String)> {
         Event::Stopped { exited: true } => vec![("exited", "true".into())],
         Event::NoticeSuppressed { blocked: true } => vec![("stop", "blocked".into())],
         Event::Carried(h) => {
-            let mut v = started_kv(&h.started);
+            let mut v = Started::kv(&h.started);
             let list = |n: &[u64]| n.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
             v.extend([
                 ("started_ms", h.started_ms.to_string()),
@@ -134,26 +114,8 @@ pub(super) fn line(recorded_ms: u64, at_ms: u64, sid: u64, ev: &Event) -> String
     l
 }
 
-fn started_of(get: &dyn Fn(&str) -> Option<String>) -> Option<Started> {
-    Some(Started {
-        parent: get("parent")?.parse().ok()?,
-        caller: get("caller")?,
-        agent: AgentKind::parse(&get("agent")?)?,
-        account: get("account").unwrap_or_default(),
-        model: get("model").unwrap_or_default(),
-        mode: get("mode").unwrap_or_default(),
-        isolation: if get("isolation").as_deref() == Some("container") { Isolation::Container } else { Isolation::Host },
-        budget_min: get("budget")?.parse().ok()?,
-        task_line: get("task").unwrap_or_default(),
-        task_sha: get("sha256").unwrap_or_default(),
-        label: get("label").unwrap_or_default(),
-        conv: get("conv"),
-        root: get("root").and_then(|r| r.parse().ok()),
-    })
-}
-
 fn carried_of(sid: u64, get: &dyn Fn(&str) -> Option<String>) -> Option<Helper> {
-    let started = started_of(get)?;
+    let started = Started::of(get)?;
     let flag = |k: &str| get(k).as_deref() == Some("true");
     let mut h = Helper::new(sid, started, get("started_ms")?.parse().ok()?);
     h.preparing = flag("preparing");
@@ -191,7 +153,7 @@ pub(super) fn parse(l: &str) -> Option<(u64, u64, Event)> {
     let pairs: Vec<(&str, String)> = f.filter_map(|p| p.split_once('=')).map(|(k, v)| (k, unesc(v))).collect();
     let get = |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
     let ev = match word {
-        "started" => Event::Started(started_of(&get)?),
+        "started" => Event::started(Started::of(&get)?),
         "preparing" => Event::Preparing,
         "task_delivered" => Event::TaskDelivered,
         "result_changed" => Event::ResultChanged,

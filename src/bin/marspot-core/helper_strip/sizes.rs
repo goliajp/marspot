@@ -35,16 +35,13 @@ impl CoreApp {
         let c = self.windows[wi].layout.cells.get(i)?;
         let total = c.rows + c.strip_rows;
         let record = self.pane_control.strips.of(root);
-        let listed = record.map_or(0, |r| {
-            let host = self.strips.hosts.get(&root);
-            r.rows.iter().filter(|r| host.is_none_or(|h| h.shows(r.sid))).count()
-        });
-        let to_come = if self.strip_inline(root, Some(&self.windows[wi].panes[i]), record) {
-            MAX_ROWS
-        } else {
-            rows_for(listed + more)
-        };
-        let strip = if total < STRIP_MIN_TOTAL_ROWS || to_come >= total { 0 } else { to_come.max(c.strip_rows) };
+        let host = self.strips.hosts.get(&root);
+        let listed = record.map_or(0, |r| r.rows.iter().filter(|r| host.is_none_or(|h| h.shows(r.sid))).count());
+        let inline = self.strip_inline(root, Some(&self.windows[wi].panes[i]), record);
+        let to_come = rows_for(listed + more, host.is_some_and(|h| h.merge.merged()), inline);
+        // on the main screen the strip does not give rows back
+        let to_come = if inline { to_come.max(c.strip_rows) } else { to_come };
+        let strip = if total < STRIP_MIN_TOTAL_ROWS || to_come >= total { 0 } else { to_come };
         Some((c.cols, total - strip))
     }
 

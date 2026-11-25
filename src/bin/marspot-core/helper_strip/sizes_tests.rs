@@ -23,12 +23,12 @@ fn helper_strip_a_helper_is_sized_for_the_strip_it_will_be_listed_in() {
 }
 
 #[test]
-fn helper_strip_claude_on_its_main_screen_has_its_helpers_sized_for_the_whole_strip() {
+fn helper_strip_claude_on_its_main_screen_has_its_helpers_sized_for_the_rows_with_a_blank_one() {
     let sb = Sandbox::new();
     let (mut app, s) = app(&sb);
     let c = app.windows[0].layout.cells[0];
     app.pane_agent_tui.insert(s.sid, true);
-    assert_eq!(app.helper_size(s.sid), Some((c.cols, c.rows - MAX_ROWS)));
+    assert_eq!(app.helper_size(s.sid), Some((c.cols, c.rows - 4)), "a head, its row and a blank row");
 }
 
 #[test]

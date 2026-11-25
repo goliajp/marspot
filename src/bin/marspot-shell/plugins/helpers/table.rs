@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use marspot::pidtree::ProcId;
-use marspot_peer::control::{AgentKind, Isolation};
 
+pub(super) use super::started::Started;
 use super::strip::clock::Clock;
 use super::turn::turn_reported;
 
@@ -13,38 +13,6 @@ use super::turn::turn_reported;
 pub(super) const NOTICE_WINDOW_MS: u64 = 10 * 60 * 1000;
 /// Notices one helper sends within the window at most.
 pub(super) const NOTICES_PER_WINDOW: usize = 3;
-
-/// What `started` records: everything decided before the agent runs.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct Started {
-    pub parent: u64,
-    /// The agent that asked (`claude`, …) or `shell`.
-    pub caller: String,
-    pub agent: AgentKind,
-    pub account: String,
-    pub model: String,
-    pub mode: String,
-    pub isolation: Isolation,
-    pub budget_min: u32,
-    /// The task's first line, 120 characters at most.
-    pub task_line: String,
-    pub task_sha: String,
-    pub label: String,
-    /// The conversation in the parent pane when it was started; None:
-    /// not known then, or an older build started it.
-    pub conv: Option<String>,
-    /// The pane at the top of its chain of parents; None: an older
-    /// build started it.
-    pub root: Option<u64>,
-}
-
-impl Started {
-    /// Whether an agent asked for it: only those go when their parent
-    /// pane has had no agent for a while.
-    pub fn agent_caller(&self) -> bool {
-        self.caller != "shell"
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Helper {
@@ -150,7 +118,7 @@ impl Helper {
 /// One fact about one helper.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Event {
-    Started(Started),
+    Started(Box<Started>),
     Preparing,
     TaskDelivered,
     ResultChanged,
@@ -181,6 +149,10 @@ pub(super) enum Event {
 }
 
 impl Event {
+    pub fn started(s: Started) -> Self {
+        Event::Started(Box::new(s))
+    }
+
     pub fn word(&self) -> &'static str {
         match self {
             Event::Started(_) => "started",
@@ -218,7 +190,7 @@ impl Table {
     pub fn apply(&mut self, sid: u64, at_ms: u64, ev: &Event) {
         match ev {
             Event::Started(s) => {
-                self.map.insert(sid, Helper::new(sid, s.clone(), at_ms));
+                self.map.insert(sid, Helper::new(sid, (**s).clone(), at_ms));
                 return;
             }
             Event::Carried(h) => {

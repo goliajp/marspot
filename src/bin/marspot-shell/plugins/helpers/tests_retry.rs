@@ -67,7 +67,7 @@ fn helpers_a_stop_not_queued_is_queued_on_the_next_tick() {
     let s = Arc::new(Shared::at(dir.join("events.log")));
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     s.arm(tx);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
     let mut in_turn = HashMap::new();
     let mut parked = tick::Parked::default();
     let _ = rx.try_iter().count();

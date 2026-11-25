@@ -193,7 +193,7 @@ fn helpers_task_file_says_the_directory() {
 fn helpers_a_turn_counts_only_as_the_plugin_reports_it() {
     let dir = temp("turned");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", Claude)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", Claude)), Event::TaskDelivered]);
     let mut in_turn = std::collections::HashMap::new();
     let mut see = |kind| tick::tick(&s, &host_with(&[(1, PaneStatus::Busy(kind))]), &mut in_turn, &mut tick::Parked::default());
     // a dialog being drawn, and a program nothing is known of
