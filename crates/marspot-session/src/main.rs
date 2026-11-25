@@ -22,6 +22,7 @@
 //! (self-creates the region, no input source) for the dev/test path.
 
 mod awake;
+mod control_fd;
 mod control_reader;
 mod control_writer;
 mod frames;
@@ -57,12 +58,12 @@ mod upkeep;
 mod watch;
 mod watch_text;
 
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
+use marspot_term::{lx_debug, lx_error, lx_event, lx_warn};
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
 use marspot_term::scrollback_search::{
@@ -70,7 +71,6 @@ use marspot_term::scrollback_search::{
 };
 use marspot_term::shell_proto::{
     encode_search_results, encode_selection_text, Frame, MsgType, WireSearchHit,
-    DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::session_state::{PendingPage, SessionState};
 
@@ -403,66 +403,6 @@ fn state_str(s: SessionState) -> &'static str {
     }
 }
 
-/// If L2 handed us a control socket (fd `MARSPOT_SHELL_CONTROL_FD`,
-/// default 3), spawn a reader thread that decodes forwarded `KeyEvent`
-/// frames and feeds them to the main loop, and return a write half so
-/// the loop can poke L2 with `GridReady` after each publish. EOF / error
-/// on the read side means L2/core is gone, so we signal the main loop to
-/// exit (`CoreGone`): the surviving shelld session is re-attached by the
-/// next core, so an orphaned engine would only leak (see `CoreGone`).
-/// No env var → standalone, no input source, no writer.
-fn setup_control_socket(readers: &mut ControlReaders, tx: Sender<SessionEvent>) -> Option<ControlWriter> {
-    let fd: RawFd = match std::env::var(ENV_CONTROL_FD) {
-        Ok(s) => match s.parse() {
-            Ok(fd) => fd,
-            Err(_) => {
-                lx_warn!(
-                    "session.control_fd.parse_failed",
-                    "bad control fd env; ignoring",
-                    env_var = ENV_CONTROL_FD,
-                    value = s
-                );
-                return None;
-            }
-        },
-        Err(_) => {
-            let _ = DEFAULT_CONTROL_FD; // standalone: no control socket
-            return None;
-        }
-    };
-    let stream = unsafe { UnixStream::from_raw_fd(fd) };
-    let writer = match stream.try_clone() {
-        Ok(w) => w,
-        Err(e) => {
-            lx_error!(
-                "session.control_socket.try_clone_failed",
-                &format!("{e}"),
-                fd = fd
-            );
-            return None;
-        }
-    };
-    lx_info!("session.control_socket.attached", "control socket fd inherited", fd = fd);
-    // The inherited-fd path runs at generation 0; if it dies, that's a
-    // genuine "no client left" (not a stale-reader race).
-    readers.spawn(stream, tx, 0);
-    match ControlWriter::new(writer) {
-        Ok(w) => Some(w),
-        Err((e, _)) => {
-            // Without a writer thread the only alternative is writing
-            // inline, which is the wedge this replaced.  Better to run
-            // pokeless: L2 falls back to its own polling and the pane
-            // stays responsive.
-            lx_error!(
-                "session.control_socket.writer_spawn_failed",
-                &format!("{e}; running without a poke channel"),
-                fd = fd
-            );
-            None
-        }
-    }
-}
-
 fn main() {
     // `--version` answers before anything else touches the machine.
     // The execv self-update probes a freshly-staged binary with it so
@@ -475,6 +415,7 @@ fn main() {
 
     // before logx starts its threads: the variables leave the environment
     let mut shadow_cfg = shadow::take_env();
+    let control_fd = control_fd::take_env();
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
@@ -740,10 +681,11 @@ fn main() {
 
     // keys from L2 over the control socket, GridReady back per publish; a
     // resumed image takes only the handoff's stream, the env's fd is stale
-    let mut poke = match resumed_poke.take() {
-        Some(s) => Some(s),
-        None if resumed => None,
-        None => setup_control_socket(&mut readers, ev_tx.clone()),
+    let mut poke = if resumed {
+        control_fd::ignore_on_resume(control_fd);
+        resumed_poke.take()
+    } else {
+        control_fd::setup_control_socket(control_fd, &mut readers, ev_tx.clone())
     };
     frames.follow_scroll_from(&session);
     frames.publish(&mut session, poke.as_mut());
