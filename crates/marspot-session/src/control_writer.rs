@@ -80,8 +80,8 @@ impl Queued for Item {
 }
 
 /// L3's end of the control socket.  The queueing lives in
-/// [`FrameWriter`]; this adds the fd bookkeeping the execv handoff
-/// needs, which is specific to L3's self-update path.
+/// [`BoundedWriter`]; this folds pokes and awake reports into the one
+/// still queued and adds the fd bookkeeping the execv handoff needs.
 pub struct ControlWriter {
     inner: BoundedWriter<Item>,
     /// A poke is queued and not yet written.  A core that stops reading

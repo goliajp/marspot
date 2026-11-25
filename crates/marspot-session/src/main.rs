@@ -738,10 +738,8 @@ fn main() {
         );
     }
 
-    // Input source + L2 wake channel: L2 forwards keystrokes over the
-    // control socket; we poke it back with GridReady after each publish.
-    // A resumed image takes only the stream the handoff passed: the env's
-    // fd number names whatever an earlier image left open there.
+    // keys from L2 over the control socket, GridReady back per publish; a
+    // resumed image takes only the handoff's stream, the env's fd is stale
     let mut poke = match resumed_poke.take() {
         Some(s) => Some(s),
         None if resumed => None,
