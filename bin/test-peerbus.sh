@@ -172,11 +172,14 @@ EOF
 # the package's own bin/ on PATH, not a link to it: Codex finds the
 # rest of its package next to the path it was started from
 export PATH="$(dirname "$(codex_entry)"):$SB/bin:$PATH"
-# a stand-in madcawl-mcp where marspot looks for it: the claude MCP
-# config marspot writes must register it with a socket in the state root
+# stand-ins for madcawl-mcp and the host it needs where marspot looks
+# for them: the claude MCP config marspot writes must register it with a
+# socket in the state root, and does so only while both are installed
 mkdir -p "$HOME/.local/bin"
-printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/madcawl-mcp"
-chmod +x "$HOME/.local/bin/madcawl-mcp"
+for p in madcawl-mcp madcawl-shell; do
+  printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/$p"
+  chmod +x "$HOME/.local/bin/$p"
+done
 
 echo "==> launching with two panes"
 dev_kill_shell_core
