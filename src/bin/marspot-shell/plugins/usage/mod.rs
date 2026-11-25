@@ -15,8 +15,10 @@
 mod claude;
 mod codex;
 mod feed;
+mod feed_load;
 mod http;
 mod kimi;
+mod samples;
 mod sha256;
 pub(in crate::plugins) mod for_helpers;
 
@@ -120,19 +122,32 @@ struct Collector {
     kimi_state: kimi::Kimi,
     /// Ask only a kimi API on this machine, and nothing else.
     kimi_only: bool,
+    /// `usage_samples/` beside the feeds: the history of each feed
+    /// marspot writes itself.
+    samples: samples::Samples,
+    /// Who wrote the Claude and the Codex feed at the last pass: true
+    /// for devops.  Logged when it changes.
+    by_devops: [Option<bool>; 2],
 }
 
 impl Collector {
     /// Starts from what the last run wrote, so an account that cannot
     /// be read right now still has its last numbers.
     fn new(sources: Sources, own_claude: PathBuf, own_codex: PathBuf) -> Collector {
-        let held = |path: &Path| feed::load(&std::fs::read_to_string(path).unwrap_or_default());
+        let held = |path: &Path| feed_load::load(&std::fs::read_to_string(path).unwrap_or_default());
         // where `marspot::kimi_usage` reads it
         let own_kimi = own_claude.with_file_name("kimi-usage.json");
+        let (claude, codex, kimi) = (held(&own_claude), held(&own_codex), held(&own_kimi));
+        let samples = samples::Samples::new(
+            own_claude.with_file_name("usage_samples"),
+            [("claude", &claude), ("codex", &codex), ("kimi", &kimi)],
+        );
         Collector {
-            claude: held(&own_claude),
-            codex: held(&own_codex),
-            kimi: held(&own_kimi),
+            claude,
+            codex,
+            kimi,
+            samples,
+            by_devops: [None; 2],
             kimi_state: kimi::Kimi::default(),
             kimi_only: false,
             sources,
@@ -149,21 +164,38 @@ impl Collector {
         self.kimi = self.kimi_state.pass(home, &waits, std::mem::take(&mut self.kimi), now, self.kimi_only);
         // a machine with no kimi home gets no kimi feed
         if !self.kimi.is_empty() {
+            // samples before the feed: a restart takes the feed's readings as
+            // already sampled, so a death between the two must not lose rows
+            sample(&mut self.samples, "kimi", &self.kimi, now);
             write("kimi", &self.own_kimi, &self.kimi, now);
         }
         if self.kimi_only {
             return;
         }
-        if !cc_usage::devops_is_collecting(&self.sources.claude, now) {
+        if !devops_collects("claude", &self.sources.claude, &mut self.by_devops[0], now) {
             let waits = self.own_claude.with_file_name("claude-waits.json");
             self.claude = claude::pass(home, &waits, std::mem::take(&mut self.claude), now);
+            sample(&mut self.samples, "claude", &self.claude, now);
             write("claude", &self.own_claude, &self.claude, now);
         }
-        if !cc_usage::devops_is_collecting(&self.sources.codex, now) {
+        if !devops_collects("codex", &self.sources.codex, &mut self.by_devops[1], now) {
             self.codex = codex::pass(home, std::mem::take(&mut self.codex), now);
+            sample(&mut self.samples, "codex", &self.codex, now);
             write("codex", &self.own_codex, &self.codex, now);
         }
     }
+}
+
+/// Whether devops writes `provider`'s feed at `source` right now;
+/// `last` holds the answer of the previous pass, logged when it changes.
+fn devops_collects(provider: &str, source: &Path, last: &mut Option<bool>, now: i64) -> bool {
+    let devops = cc_usage::devops_is_collecting(source, now);
+    if *last != Some(devops) {
+        *last = Some(devops);
+        let by = if devops { "devops" } else { "marspot" };
+        lx_info!("usage.collector", "feed collector", provider = provider, by = by);
+    }
+    devops
 }
 
 fn write(provider: &str, path: &Path, accounts: &[Account], now: i64) {
@@ -172,6 +204,18 @@ fn write(provider: &str, path: &Path, accounts: &[Account], now: i64) {
         Err(e) => lx_warn!("usage.feed.write_failed", &format!("{}: {e}", path.display()), provider = provider),
     }
 }
+
+fn sample(samples: &mut samples::Samples, agent: &'static str, accounts: &[Account], now: i64) {
+    match samples.record(agent, accounts, now) {
+        Ok(0) => {}
+        Ok(rows) => lx_info!("usage.samples.written", "own readings sampled", provider = agent, rows = rows),
+        Err(e) => lx_warn!("usage.samples.write_failed", &e.to_string(), provider = agent),
+    }
+}
+
+#[cfg(test)]
+#[path = "samples_tests.rs"]
+mod samples_tests;
 
 #[cfg(test)]
 mod tests {

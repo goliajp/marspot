@@ -71,23 +71,11 @@ impl EventLog {
         fs::create_dir_all(&self.dir)?;
         let day = ymd(ev.at);
         if self.pruned_day.as_deref() != Some(day.as_str()) {
-            self.prune(ev.at)?;
+            prune_days(&self.dir, ev.at)?;
             self.pruned_day = Some(day.clone());
         }
         let mut f = fs::OpenOptions::new().create(true).append(true).open(self.dir.join(format!("{day}.tsv")))?;
         f.write_all(ev.line(self.agent).as_bytes())
-    }
-
-    /// Delete the day files older than `KEEP_DAYS` as of `now`.
-    fn prune(&self, now: i64) -> std::io::Result<()> {
-        let oldest = ymd(now - (KEEP_DAYS - 1) * DAY);
-        for entry in fs::read_dir(&self.dir)? {
-            let path = entry?.path();
-            if day_of(&path).is_some_and(|d| d < oldest.as_str()) {
-                remove_old(&path)?;
-            }
-        }
-        Ok(())
     }
 
     /// The events appended since the last call, oldest first: only the
@@ -169,6 +157,19 @@ fn whole_end(path: &Path) -> u64 {
 #[derive(Debug, Default)]
 pub(super) struct Tail {
     at: Option<(String, u64)>,
+}
+
+/// Delete the `YYYYMMDD.tsv` files in `dir` older than `KEEP_DAYS` as
+/// of `now`.
+pub(in crate::plugins) fn prune_days(dir: &Path, now: i64) -> std::io::Result<()> {
+    let oldest = ymd(now - (KEEP_DAYS - 1) * DAY);
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if day_of(&path).is_some_and(|d| d < oldest.as_str()) {
+            remove_old(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Remove an old day file.  The main thread and the scan worker each
