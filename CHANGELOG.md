@@ -4,6 +4,32 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.16.0
+
+- When the account a Claude Code pane runs on will not last
+  two more hours at its current pace, its idle panes move to another
+  account before they are refused; the slowest pane stays to use up
+  what is left.
+- Claude Code panes refused on their account, and clicks on the
+  account badge, now choose the next account by how long each account
+  can carry the pane and when it renews, keeping Fable for the panes
+  that need it. Moving resting panes ahead of time to balance the
+  accounts runs as a rehearsal for now: it is written to the log and
+  nothing is moved (`claudecode.rebalance = dryrun`, the default; an
+  older `on` reads as `dryrun`).
+- New helpers spread over the accounts that have room, instead of all
+  going to the one with the most left; a helper is not turned away
+  when the accounts are short.
+- Switching a Codex pane's account from its badge waits until the
+  session may move and resumes the same conversation; while a turn is
+  running it says why it does not switch.
+- Codex panes are told ahead of time when their account is about to
+  run out, and refusals are recorded; Codex panes are not moved
+  automatically yet.
+- Each Codex account's conversation write locks are shared, so one
+  conversation cannot be written from two accounts at once; the
+  change is made only while that account's Codex is not running.
+
 ## 0.15.0
 
 - How many helpers can run at once now follows the machine's memory:
