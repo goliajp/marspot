@@ -1,6 +1,9 @@
 //! The MCP config every claude marspot starts itself is given on its
 //! command line (`--mcp-config`): one file in the state root naming
-//! `marspot-peer mcp`.
+//! the servers of marspot's table, `marspot-peer mcp` and, while it is
+//! installed, `madcawl-mcp`.  Brought up to date at each such start
+//! and on every config pass, so a server installed or removed since
+//! is in or out of the next claude started.
 //!
 //! The accounts' own `.claude.json` files are left alone.  Claude Code
 //! rewrites them continually while a session runs, one per account,
@@ -8,28 +11,50 @@
 
 use std::path::{Path, PathBuf};
 
-use marspot_peer::json::{Value, obj};
+use marspot_peer::json::obj;
 use marspot_term::lx_warn;
 
 use super::claude_hooks::pretty;
+use super::mcp_servers::{Servers, json_reconcile, servers};
 use crate::plugins::pty_op::{PtyCommand, quotable};
 
 const FILE: &str = "claude-mcp.json";
-const SERVER: &str = "marspot";
 
 /// `cmd` with `--mcp-config <state root>/claude-mcp.json` added, the
 /// file brought up to date first.  Unchanged when there is no
 /// `marspot-peer` to point at or the file cannot be written: claude
 /// then starts as it did before, without the pane tools.
 pub(crate) fn with_config(cmd: PtyCommand) -> PtyCommand {
-    let Some(bin) = super::inbox::peer_bin() else { return cmd };
-    let Some(bin) = bin.to_str() else { return cmd };
-    let path = marspot_term::paths::state_root().join(FILE);
-    if let Err(e) = write_if_changed(&path, &text(bin)) {
-        lx_warn!("peerbus.claude_mcp.write_failed", &e.to_string(), path = path.display().to_string());
-        return cmd;
+    match write() {
+        Ok(Some((path, _))) => add(cmd, &path),
+        Ok(None) => cmd,
+        Err((path, e)) => {
+            lx_warn!("peerbus.claude_mcp.write_failed", &e.to_string(), path = path.display().to_string());
+            cmd
+        }
     }
-    add(cmd, &path)
+}
+
+/// The file brought up to date on a config pass.  Returns lines worth
+/// logging.
+pub(super) fn reconcile() -> Vec<String> {
+    match write() {
+        Ok(Some((path, true))) => vec![format!("{}: MCP servers for claude written", path.display())],
+        Ok(_) => Vec::new(),
+        Err((path, e)) => vec![format!("{}: {e}", path.display())],
+    }
+}
+
+/// The file and whether it had to be written; None when there is no
+/// `marspot-peer` to point at.
+fn write() -> Result<Option<(PathBuf, bool)>, (PathBuf, std::io::Error)> {
+    let Some(bin) = super::inbox::peer_bin() else { return Ok(None) };
+    let Some(bin) = bin.to_str() else { return Ok(None) };
+    let path = marspot_term::paths::state_root().join(FILE);
+    match write_if_changed(&path, &text(&servers(bin))) {
+        Ok(written) => Ok(Some((path, written))),
+        Err(e) => Err((path, e)),
+    }
 }
 
 /// The flag and its value, next to each other.  `--mcp-config` takes
@@ -42,9 +67,10 @@ fn add(cmd: PtyCommand, path: &Path) -> PtyCommand {
     }
 }
 
-fn text(bin: &str) -> String {
-    let server = obj([("command", Value::from(bin)), ("args", Value::Arr(vec![Value::from("mcp")]))]);
-    let mut s = pretty(&obj([("mcpServers", obj([(SERVER, server)]))]));
+pub(super) fn text(table: &Servers) -> String {
+    let mut servers = obj([]);
+    json_reconcile(&mut servers, table);
+    let mut s = pretty(&obj([("mcpServers", servers)]));
     s.push('\n');
     s
 }
@@ -68,6 +94,7 @@ fn write_if_changed(path: &Path, text: &str) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marspot_peer::json::Value;
     use marspot_term::test_env::{EnvGuard, TempDir};
 
     /// What a switched-to claude is started with: the flag, its file
@@ -78,15 +105,15 @@ mod tests {
     fn switch_mcp_config_is_written_once_and_follows_the_helper() {
         let state = TempDir::new("claude-mcp");
         let mut env = EnvGuard::new();
-        env.set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer");
+        env.set("MARSPOT_STATE_DIR", state.path()).set("MARSPOT_PEER_BIN", "/a/marspot-peer").set("HOME", state.path());
         let path = state.join(FILE);
         let line = String::from_utf8(with_config(PtyCommand::new("claude")).to_bytes().unwrap()).unwrap();
         assert_eq!(line, format!("claude --mcp-config '{}'\r", path.display()));
         let v = marspot_peer::json::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v.at(&["mcpServers", SERVER, "command"]).and_then(Value::str), Some("/a/marspot-peer"));
-        assert_eq!(v.at(&["mcpServers", SERVER, "args"]), Some(&Value::Arr(vec![Value::from("mcp")])));
+        assert_eq!(v.at(&["mcpServers", "marspot", "command"]).and_then(Value::str), Some("/a/marspot-peer"));
+        assert_eq!(v.at(&["mcpServers", "marspot", "args"]), Some(&Value::Arr(vec![Value::from("mcp")])));
 
-        assert!(!write_if_changed(&path, &text("/a/marspot-peer")).unwrap(), "same text, no write");
+        assert!(!write_if_changed(&path, &text(&super::super::mcp_servers::of("/a/marspot-peer", None))).unwrap(), "same text, no write");
         env.set("MARSPOT_PEER_BIN", "/b/marspot-peer");
         with_config(PtyCommand::new("claude"));
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"/b/marspot-peer\""));

@@ -5,7 +5,8 @@ use std::path::Path;
 
 use marspot_term::lx_info;
 
-use super::codex_config::{APPROVAL, APPROVED, OPEN, TABLE, closes, header, opened_by, scan, string_token, string_value, toml_string};
+use super::codex_config::{APPROVAL, APPROVED, OPEN, TABLE, scan};
+use super::codex_toml::{closes, header, opened_by, string_token, string_value, toml_string};
 
 /// The codex arguments under which a session in `home` is asked about
 /// no tool of marspot's MCP server, however its config has the server:

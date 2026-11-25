@@ -22,6 +22,10 @@ mod claude_hooks;
 mod clock;
 pub(crate) mod codex_approval;
 mod codex_config;
+mod codex_entry;
+mod codex_inline;
+mod codex_scan;
+mod codex_toml;
 mod codex_locks;
 mod daemon;
 mod deliver;
@@ -35,6 +39,7 @@ mod kimi_bind;
 mod kimi_config;
 mod leftovers;
 mod lifecycle;
+mod mcp_servers;
 pub(crate) mod moving;
 mod moving_checks;
 mod moving_release;
@@ -42,6 +47,8 @@ mod moving_release;
 mod moving_release_tests;
 #[cfg(test)]
 mod moving_tests;
+#[cfg(test)]
+mod mcp_table_tests;
 mod names;
 mod others;
 mod pair;
