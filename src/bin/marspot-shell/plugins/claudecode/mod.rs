@@ -60,7 +60,7 @@ mod plugin;
 mod bind_meta;
 mod allocation_adapter;
 mod allocation_decide;
-mod allocation_events;
+pub(in crate::plugins) mod allocation_events;
 mod allocation_inputs;
 mod allocation_line;
 mod allocation_prices;

@@ -81,7 +81,7 @@ fn dev_threads(home: &std::path::Path, panes: &[(u64, pidtree::ProcId, Option<Ve
             let (sid, thread) = l.trim().split_once(' ')?;
             let sid: u64 = sid.parse().ok()?;
             let (_, codex, _) = panes.iter().find(|(s, ..)| *s == sid)?;
-            Some((sid, ThreadView { codex: *codex, home: home.to_path_buf(), thread: thread.trim().to_string(), idle: true }))
+            Some((sid, ThreadView { codex: *codex, home: home.to_path_buf(), thread: thread.trim().to_string(), idle: true, ends: Default::default() }))
         })
         .collect()
 }

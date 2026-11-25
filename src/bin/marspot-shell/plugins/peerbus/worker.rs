@@ -313,19 +313,6 @@ impl Worker {
         }
     }
 
-    /// What other plugins may read of the bindings: see `ThreadView`.
-    pub(super) fn publish(&self) {
-        let views = self
-            .bindings
-            .iter()
-            .map(|(sid, b)| {
-                let idle = b.subscribed && b.record.status == Status::Idle && b.active_turn.is_none();
-                (*sid, super::ThreadView { codex: b.codex, home: b.home.clone(), thread: b.thread.clone(), idle })
-            })
-            .collect();
-        super::publish_threads(views);
-    }
-
     // ── daemon notifications ──────────────────────────────────────
 
     pub(super) fn on_note(&mut self, home: &Path, msg: &Value) {
@@ -372,6 +359,7 @@ impl Worker {
                 let turn = params.and_then(|p| p.at(&["turn", "id"])).and_then(Value::str).map(str::to_string);
                 let b = self.bindings.get_mut(&sid).expect("found above");
                 if method == "turn/completed" {
+                    b.replies.ends.completed(params.and_then(|p| p.get("turn")), crate::plugins::claudecode::rooms::unix_now());
                     if let Some(t) = &turn {
                         let owed = b.replies.completed(t);
                         self.answer(sid, owed);

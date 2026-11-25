@@ -207,13 +207,7 @@ fn recent_rollouts(codex_home: &std::path::Path) -> Vec<PathBuf> {
 }
 
 fn read_dirs(at: &std::path::Path) -> Vec<PathBuf> {
-    let Ok(rd) = std::fs::read_dir(at) else {
-        return Vec::new();
-    };
-    rd.flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect()
+    std::fs::read_dir(at).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
 }
 
 /// Read the last `ROLLOUT_TAIL_BYTES` of a file as text.
@@ -307,6 +301,11 @@ impl RolloutIndex {
                 self.facts.insert(d.cwd, (d.mtime, f));
             }
         }
+    }
+
+    /// The rollout matched to `cwd`, once one was found.
+    pub(super) fn path_for_cwd(&self, cwd: &str) -> Option<&PathBuf> {
+        self.by_cwd.get(cwd)
     }
 
     pub(super) fn facts_for_cwd(
