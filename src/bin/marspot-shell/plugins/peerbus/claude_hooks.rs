@@ -24,6 +24,7 @@ impl super::worker::Worker {
         notes.extend(super::codex_locks::reconcile());
         notes.extend(super::gemini_config::reconcile());
         notes.extend(super::kimi_config::reconcile());
+        notes.extend(super::claude_mcp::reconcile());
         if notes == self.hook_notes {
             return;
         }
@@ -44,6 +45,11 @@ pub(super) fn config_files() -> Vec<PathBuf> {
         files.extend(super::kimi_config::homes(&home).iter().flat_map(|d| [d.join("mcp.json"), d.join("config.toml")]));
     }
     files.extend(crate::plugins::skills::files());
+    // installing or removing it adds or takes out its entries; the watch
+    // sees that only while ~/.local/bin exists, which it does wherever
+    // install-local put marspot-peer, and otherwise the next minute's
+    // config pass picks it up
+    files.extend(super::mcp_servers::madcawl_path());
     files
 }
 

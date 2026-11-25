@@ -2,6 +2,11 @@ use super::*;
 
 const CONFIG: &str = "model = \"gpt-5\"\n\n[projects.\"/w/x\"]\ntrust_level = \"trusted\"\n";
 
+/// The table as it was before madcawl: the peer server alone.
+fn old(bin: &str) -> Servers {
+    super::super::mcp_servers::of(bin, None)
+}
+
 fn dir() -> PathBuf {
     let d = std::env::temp_dir().join(format!("pb-codex-config-{}", marspot_peer::rand::hex(6)));
     std::fs::create_dir_all(&d).unwrap();
@@ -13,10 +18,10 @@ fn an_absent_table_is_appended_and_a_present_one_is_not_touched() {
     let d = dir();
     let f = d.join("config.toml");
     std::fs::write(&f, CONFIG).unwrap();
-    assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some(edit_note(CONFIG)));
+    assert_eq!(reconcile_file(&f, &old("/a/marspot-peer")).as_deref(), Some(edit_note(CONFIG, PEER).as_str()));
     let text = std::fs::read_to_string(&f).unwrap();
     assert_eq!(text, format!("{CONFIG}\n[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\ndefault_tools_approval_mode = \"approve\"\n"));
-    assert_eq!(reconcile_file(&f, "/a/marspot-peer"), None);
+    assert_eq!(reconcile_file(&f, &old("/a/marspot-peer")), None);
     assert_eq!(std::fs::read_to_string(&f).unwrap(), text, "byte for byte");
     std::fs::remove_dir_all(&d).unwrap();
 }
@@ -25,7 +30,7 @@ fn an_absent_table_is_appended_and_a_present_one_is_not_touched() {
 fn a_missing_file_is_created_and_one_without_a_final_newline_gains_it() {
     let d = dir();
     let f = d.join("config.toml");
-    reconcile_file(&f, "/a/marspot-peer");
+    reconcile_file(&f, &old("/a/marspot-peer"));
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\ndefault_tools_approval_mode = \"approve\"\n");
     let new = with_server("model = \"gpt-5\"", "/a/marspot-peer").unwrap().unwrap();
     assert_eq!(new, "model = \"gpt-5\"\n\n[mcp_servers.marspot]\ncommand = \"/a/marspot-peer\"\nargs = [\"mcp\"]\ndefault_tools_approval_mode = \"approve\"\n");
@@ -69,7 +74,7 @@ fn an_entry_in_another_form_is_refused() {
     let f = d.join("config.toml");
     let text = "mcp_servers.marspot.command = \"/x\"\n";
     std::fs::write(&f, text).unwrap();
-    assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some(UNREADABLE));
+    assert_eq!(reconcile_file(&f, &old("/a/marspot-peer")).as_deref(), Some(UNREADABLE));
     assert_eq!(std::fs::read_to_string(&f).unwrap(), text);
     std::fs::remove_dir_all(&d).unwrap();
 }
@@ -93,7 +98,7 @@ fn a_config_reached_by_several_names_is_edited_once() {
     let files = config_files(&home);
     assert_eq!(files, vec![shared.join("config.toml"), home.join(".codex-profile-3/config.toml")]);
     for f in &files {
-        reconcile_file(f, "/a/marspot-peer");
+        reconcile_file(f, &old("/a/marspot-peer"));
     }
     let text = std::fs::read_to_string(shared.join("config.toml")).unwrap();
     assert_eq!(text.matches("[mcp_servers.marspot]").count(), 1);
@@ -181,7 +186,7 @@ fn a_mode_inside_a_multi_line_string_is_not_the_servers() {
 fn each_kind_of_edit_has_a_note_of_its_own() {
     let entry = "[mcp_servers.marspot]\ncommand = \"/a\"\n";
     let with_mode = format!("{entry}default_tools_approval_mode = \"prompt\"\n");
-    assert!(edit_note(CONFIG).starts_with("marspot MCP server set"));
-    assert!(edit_note(entry).starts_with("marspot MCP server's tools approved"));
-    assert_eq!(edit_note(&with_mode), "marspot MCP server repointed");
+    assert!(edit_note(CONFIG, PEER).starts_with("marspot MCP server set"));
+    assert!(edit_note(entry, PEER).starts_with("marspot MCP server's tools approved"));
+    assert_eq!(edit_note(&with_mode, PEER), "marspot MCP server repointed");
 }

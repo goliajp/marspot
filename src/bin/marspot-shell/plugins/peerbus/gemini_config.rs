@@ -1,7 +1,8 @@
 //! What a Gemini session needs in its `settings.json` to be a peer,
 //! kept in every Gemini home the way the Claude Code hooks are kept in
-//! its settings: the MCP server that gives it the peer tools
-//! (`mcpServers.marspot`, running `marspot-peer mcp`), and the hook
+//! its settings: the MCP servers of marspot's table (`mcp_servers`:
+//! `mcpServers.marspot`, running `marspot-peer mcp`, and
+//! `mcpServers.madcawl` while that is installed), and the hook
 //! that hands it the messages waiting for it (`marspot-peer
 //! gemini-hook`, before each prompt and after each tool call).
 //!
@@ -19,8 +20,7 @@ use marspot_peer::gemini_hook::EVENTS;
 use marspot_peer::json::{self, Value, obj};
 
 use super::claude_hooks::{pretty, slot};
-
-const SERVER: &str = "marspot";
+use super::mcp_servers::{PEER, Servers, and_kept, json_fits, json_kept, json_reconcile, servers};
 /// What the entry is called in Gemini's `/hooks` panel.
 const HOOK_NAME: &str = "marspot-peer";
 
@@ -36,9 +36,10 @@ pub(super) fn reconcile() -> Vec<String> {
         return Vec::new();
     };
     let Some(bin) = bin.to_str() else { return Vec::new() };
+    let table = servers(bin);
     settings_files(Path::new(&home))
         .iter()
-        .filter_map(|f| reconcile_file(f, bin).map(|note| format!("{}: {note}", f.display())))
+        .filter_map(|f| reconcile_file(f, &table).map(|note| format!("{}: {note}", f.display())))
         .collect()
 }
 
@@ -70,7 +71,7 @@ pub(super) fn settings_files(home: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn reconcile_file(path: &Path, bin: &str) -> Option<String> {
+pub(super) fn reconcile_file(path: &Path, table: &Servers) -> Option<String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         // a home gemini has not written settings in yet
@@ -80,47 +81,39 @@ fn reconcile_file(path: &Path, bin: &str) -> Option<String> {
     let Ok(mut v) = json::parse(&text) else {
         return Some("not plain JSON; the marspot entries are left out".into());
     };
-    if !fits(&v) {
+    if !fits(&v, table) {
         return Some("not the shape of Gemini settings; the marspot entries are left out".into());
     }
-    if !with_entries(&mut v, bin) {
-        return None;
+    let kept = json_kept(v.get("mcpServers"), table);
+    if !with_entries(&mut v, table) {
+        return kept;
     }
     let mut new_text = pretty(&v);
     if text.ends_with('\n') {
         new_text.push('\n');
     }
-    match crate::plugins::claudecode::write_through_symlink(path, &new_text) {
-        Ok(()) => Some("peer tools and inbox hook set".into()),
-        Err(e) => Some(e.to_string()),
-    }
+    let done = match crate::plugins::claudecode::write_through_symlink(path, &new_text) {
+        Ok(()) => "peer tools and inbox hook set".to_string(),
+        Err(e) => e.to_string(),
+    };
+    Some(and_kept(done, kept))
 }
 
 /// Whether everything `with_entries` steps through is an object, or a
 /// list where Gemini keeps a list, or absent.
-fn fits(v: &Value) -> bool {
+fn fits(v: &Value, table: &Servers) -> bool {
     let obj_or_absent = |x: Option<&Value>| x.is_none_or(|x| matches!(x, Value::Obj(_)));
     matches!(v, Value::Obj(_))
-        && obj_or_absent(v.get("mcpServers"))
-        && obj_or_absent(v.at(&["mcpServers", SERVER]))
+        && json_fits(v.get("mcpServers"), table)
         && obj_or_absent(v.get("hooks"))
         && EVENTS.iter().all(|event| v.at(&["hooks", *event]).is_none_or(|l| matches!(l, Value::Arr(_))))
 }
 
-/// Our server and hooks in `v`, added or repointed at `bin`.  True when
-/// anything changed.
-fn with_entries(v: &mut Value, bin: &str) -> bool {
-    let mut changed = false;
-    let server = slot(slot(v, "mcpServers", || obj([])), SERVER, || obj([]));
-    let args = Value::Arr(vec![Value::from("mcp")]);
-    if server.str_at("command") != Some(bin) {
-        server.set("command", Value::from(bin));
-        changed = true;
-    }
-    if server.get("args") != Some(&args) {
-        server.set("args", args);
-        changed = true;
-    }
+/// Our servers and hooks in `v`, added or repointed; the hooks run the
+/// peer helper of the table.  True when anything changed.
+fn with_entries(v: &mut Value, table: &Servers) -> bool {
+    let mut changed = json_reconcile(slot(v, "mcpServers", || obj([])), table);
+    let bin = table.list.iter().find(|s| s.name == PEER).map_or("", |s| s.command.as_str());
 
     // gemini runs a hook's command through the shell
     let command = format!("{} gemini-hook", crate::plugins::claudecode::sh_quote(bin));
@@ -166,6 +159,11 @@ mod tests {
 
     const OTHERS: &str = "{\n  \"general\": {\n    \"enableAutoUpdate\": false\n  },\n  \"mcpServers\": {\n    \"files\": {\n      \"command\": \"node\",\n      \"args\": [\n        \"server.js\"\n      ]\n    }\n  },\n  \"hooks\": {\n    \"BeforeAgent\": [\n      {\n        \"matcher\": \"*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/x/log-prompt.sh\"\n          }\n        ]\n      }\n    ],\n    \"SessionEnd\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"say bye\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
 
+    /// The table as it was before madcawl: the peer server alone.
+    fn old(bin: &str) -> Servers {
+        super::super::mcp_servers::of(bin, None)
+    }
+
     fn dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("pb-gemini-cfg-{}", marspot_peer::rand::hex(6)));
         std::fs::create_dir_all(&d).unwrap();
@@ -191,7 +189,7 @@ mod tests {
     #[test]
     fn a_home_with_no_settings_file_gets_one() {
         let f = dir().join("settings.json");
-        assert_eq!(reconcile_file(&f, "/a/marspot-peer").as_deref(), Some("peer tools and inbox hook set"));
+        assert_eq!(reconcile_file(&f, &old("/a/marspot-peer")).as_deref(), Some("peer tools and inbox hook set"));
         let text = std::fs::read_to_string(&f).unwrap();
         assert!(text.starts_with("{\n  \"mcpServers\": {\n    \"marspot\": {\n      \"command\": \"/a/marspot-peer\",\n      \"args\": [\n        \"mcp\"\n      ]\n    }\n  },\n  \"hooks\": {"), "{text}");
         assert!(text.ends_with("}\n"));
@@ -202,7 +200,7 @@ mod tests {
     fn an_empty_object_gets_the_entries() {
         let f = dir().join("settings.json");
         std::fs::write(&f, "{}").unwrap();
-        assert!(reconcile_file(&f, "/a/marspot-peer").is_some());
+        assert!(reconcile_file(&f, &old("/a/marspot-peer")).is_some());
         assert_ours(&read(&f), "/a/marspot-peer");
         assert!(!std::fs::read_to_string(&f).unwrap().ends_with('\n'), "no newline was there, none is added");
     }
@@ -212,7 +210,7 @@ mod tests {
         let f = dir().join("settings.json");
         std::fs::write(&f, OTHERS).unwrap();
         let before = json::parse(OTHERS).unwrap();
-        assert!(reconcile_file(&f, "/a/marspot-peer").is_some());
+        assert!(reconcile_file(&f, &old("/a/marspot-peer")).is_some());
         let first = std::fs::read_to_string(&f).unwrap();
         let v = read(&f);
         assert_ours(&v, "/a/marspot-peer");
@@ -224,7 +222,7 @@ mod tests {
         assert_eq!(Some(&prompt[0]), before.at(&["hooks", "BeforeAgent"]).map(|l| &l.arr()[0]));
         // everything that was there is still where it was, byte for byte
         assert!(first.starts_with("{\n  \"general\": {\n    \"enableAutoUpdate\": false\n  },\n  \"mcpServers\": {\n    \"files\": {"), "{first}");
-        assert_eq!(reconcile_file(&f, "/a/marspot-peer"), None);
+        assert_eq!(reconcile_file(&f, &old("/a/marspot-peer")), None);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), first, "byte-identical after the second run");
     }
 
@@ -232,12 +230,12 @@ mod tests {
     fn a_moved_helper_repoints_our_entries_and_keeps_what_the_user_added_to_them() {
         let f = dir().join("settings.json");
         std::fs::write(&f, OTHERS).unwrap();
-        reconcile_file(&f, "/a/marspot-peer");
+        reconcile_file(&f, &old("/a/marspot-peer"));
         // the user trusts the server so its tools run unprompted
         let mut v = read(&f);
         slot(slot(&mut v, "mcpServers", || obj([])), "marspot", || obj([])).set("trust", Value::from(true));
         std::fs::write(&f, pretty(&v)).unwrap();
-        assert!(reconcile_file(&f, "/b/marspot-peer").is_some());
+        assert!(reconcile_file(&f, &old("/b/marspot-peer")).is_some());
         let v = read(&f);
         assert_ours(&v, "/b/marspot-peer");
         assert_eq!(v.at(&["mcpServers", "marspot", "trust"]).and_then(Value::bool), Some(true));
@@ -259,7 +257,7 @@ mod tests {
             "{\"hooks\": {\"AfterTool\": {}}}",
         ] {
             std::fs::write(&f, odd).unwrap();
-            assert!(reconcile_file(&f, "/a/marspot-peer").is_some_and(|note| note.contains("left out")), "{odd}");
+            assert!(reconcile_file(&f, &old("/a/marspot-peer")).is_some_and(|note| note.contains("left out")), "{odd}");
             assert_eq!(std::fs::read_to_string(&f).unwrap(), odd);
         }
     }
@@ -285,7 +283,7 @@ mod tests {
         let files = settings_files(&home);
         assert_eq!(files, vec![home.join(".gemini/settings.json"), shared.clone()]);
         for f in &files {
-            assert!(reconcile_file(f, "/a/marspot-peer").is_some());
+            assert!(reconcile_file(f, &old("/a/marspot-peer")).is_some());
         }
         assert_ours(&read(&shared), "/a/marspot-peer");
         assert_ours(&read(&home.join(".gemini/settings.json")), "/a/marspot-peer");

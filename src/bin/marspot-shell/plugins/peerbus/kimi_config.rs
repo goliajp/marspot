@@ -1,7 +1,8 @@
 //! What a Kimi session needs to be a peer, kept in every Kimi home
 //! the way the other agents' entries are kept in theirs: the MCP
-//! server that gives it the peer tools (`mcpServers.marspot` in
-//! `mcp.json`, running `marspot-peer mcp`) and the hook that hands it
+//! servers of marspot's table in `mcp.json` (`mcpServers.marspot`,
+//! running `marspot-peer mcp`, and `mcpServers.madcawl` while that is
+//! installed) and the hook that hands it
 //! the messages waiting for it (two `[[hooks]]` tables in
 //! `config.toml`, running `marspot-peer kimi-hook`).
 //!
@@ -19,8 +20,9 @@ use marspot_peer::json::{self, Value, obj};
 use marspot_peer::kimi_hook::EVENTS;
 
 use super::claude_hooks::{pretty, slot};
+use super::mcp_servers::{PEER, Servers, and_kept, json_fits, json_kept, json_reconcile, servers};
 
-const SERVER: &str = "marspot";
+const SERVER: &str = PEER;
 /// Seconds Kimi waits for the hook.  It reads a few small files.
 const TIMEOUT: u32 = 10;
 /// Seconds Kimi waits for one call of our tools, at least (its own
@@ -44,9 +46,10 @@ pub(super) fn reconcile() -> Vec<String> {
         return Vec::new();
     }
     let Some(bin) = bin.to_str() else { return Vec::new() };
+    let table = servers(bin);
     let mut notes = Vec::new();
     for dir in homes(&home) {
-        notes.extend(reconcile_mcp(&dir.join("mcp.json"), bin).map(|n| format!("{}: {n}", dir.join("mcp.json").display())));
+        notes.extend(reconcile_mcp(&dir.join("mcp.json"), &table).map(|n| format!("{}: {n}", dir.join("mcp.json").display())));
         notes.extend(reconcile_hooks(&dir.join("config.toml"), bin).map(|n| format!("{}: {n}", dir.join("config.toml").display())));
     }
     notes
@@ -88,7 +91,7 @@ pub(super) fn homes(home: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn reconcile_mcp(path: &Path, bin: &str) -> Option<String> {
+pub(super) fn reconcile_mcp(path: &Path, table: &Servers) -> Option<String> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}\n".to_string(),
@@ -97,47 +100,55 @@ fn reconcile_mcp(path: &Path, bin: &str) -> Option<String> {
     let Ok(mut v) = json::parse(&text) else {
         return Some("not plain JSON; the marspot server is left out".into());
     };
-    let obj_or_absent = |x: Option<&Value>| x.is_none_or(|x| matches!(x, Value::Obj(_)));
-    if !matches!(v, Value::Obj(_)) || !obj_or_absent(v.get("mcpServers")) || !obj_or_absent(v.at(&["mcpServers", SERVER])) {
+    if !matches!(v, Value::Obj(_)) || !json_fits(v.get("mcpServers"), table) {
         return Some("not the shape of Kimi's MCP file; the marspot server is left out".into());
     }
-    if !with_server(&mut v, bin) {
-        return None;
+    let kept = json_kept(v.get("mcpServers"), table);
+    if !with_servers(&mut v, table) {
+        return kept;
     }
     let mut new_text = pretty(&v);
     if text.ends_with('\n') {
         new_text.push('\n');
     }
-    match crate::plugins::claudecode::write_through_symlink(path, &new_text) {
-        Ok(()) => Some("peer tools set".into()),
-        Err(e) => Some(e.to_string()),
-    }
+    let done = match crate::plugins::claudecode::write_through_symlink(path, &new_text) {
+        Ok(()) => "peer tools set".to_string(),
+        Err(e) => e.to_string(),
+    };
+    Some(and_kept(done, kept))
 }
 
-/// Our server in `v`, added or repointed at `bin`.  True when anything
-/// changed.  A key the user added to the entry stays.
-fn with_server(v: &mut Value, bin: &str) -> bool {
-    let server = slot(slot(v, "mcpServers", || obj([])), SERVER, || obj([]));
+/// The table's servers in `v`, added, repointed or taken out; the peer
+/// server is told kimi's tool deadline.  True when anything changed.
+fn with_servers(v: &mut Value, table: &Servers) -> bool {
+    let mut table = table.clone();
     let mut changed = false;
+    if let Some(peer) = table.list.iter_mut().find(|s| s.name == PEER) {
+        let entry = slot(slot(v, "mcpServers", || obj([])), SERVER, || obj([]));
+        let (timeout_s, set) = tool_timeout(entry);
+        changed |= set;
+        peer.args.extend(["--client-timeout-s".to_string(), timeout_s.to_string()]);
+    }
+    changed | json_reconcile(slot(v, "mcpServers", || obj([])), &table)
+}
+
+/// The peer server in `v` alone, as it was written before the table.
+#[cfg(test)]
+fn with_server(v: &mut Value, bin: &str) -> bool {
+    with_servers(v, &super::mcp_servers::of(bin, None))
+}
+
+/// The tool deadline of the peer server `server`, at least
+/// `TOOL_TIMEOUT_S`, and whether it had to be raised.
+fn tool_timeout(server: &mut Value) -> (u32, bool) {
     // a longer deadline the user set stays, and the server is told it
-    let timeout_s = match server.get("toolTimeoutMs").and_then(Value::i64) {
-        Some(ms) if ms >= i64::from(TOOL_TIMEOUT_S) * 1000 => u32::try_from(ms / 1000).unwrap_or(u32::MAX),
+    match server.get("toolTimeoutMs").and_then(Value::i64) {
+        Some(ms) if ms >= i64::from(TOOL_TIMEOUT_S) * 1000 => (u32::try_from(ms / 1000).unwrap_or(u32::MAX), false),
         _ => {
             server.set("toolTimeoutMs", Value::from(i64::from(TOOL_TIMEOUT_S) * 1000));
-            changed = true;
-            TOOL_TIMEOUT_S
+            (TOOL_TIMEOUT_S, true)
         }
-    };
-    let args = Value::Arr(vec![Value::from("mcp"), Value::from("--client-timeout-s"), Value::from(timeout_s.to_string())]);
-    if server.str_at("command") != Some(bin) {
-        server.set("command", Value::from(bin));
-        changed = true;
     }
-    if server.get("args") != Some(&args) {
-        server.set("args", args);
-        changed = true;
-    }
-    changed
 }
 
 fn reconcile_hooks(path: &Path, bin: &str) -> Option<String> {
@@ -323,11 +334,11 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::os::unix::fs::symlink(&home, user.join(".kimi-code-profile-1")).unwrap();
         assert_eq!(homes(&user), vec![home.canonicalize().unwrap()], "a profile that links to the default is one home");
-        assert_eq!(reconcile_mcp(&home.join("mcp.json"), "/b/marspot-peer").as_deref(), Some("peer tools set"));
+        assert_eq!(reconcile_mcp(&home.join("mcp.json"), &super::super::mcp_servers::of("/b/marspot-peer", None)).as_deref(), Some("peer tools set"));
         assert_eq!(reconcile_hooks(&home.join("config.toml"), "/b/marspot-peer").as_deref(), Some("inbox hooks set"));
-        assert_eq!(reconcile_mcp(&home.join("mcp.json"), "/b/marspot-peer"), None);
+        assert_eq!(reconcile_mcp(&home.join("mcp.json"), &super::super::mcp_servers::of("/b/marspot-peer", None)), None);
         assert_eq!(reconcile_hooks(&home.join("config.toml"), "/b/marspot-peer"), None);
         std::fs::write(home.join("mcp.json"), "// comment\n{}").unwrap();
-        assert!(reconcile_mcp(&home.join("mcp.json"), "/b/marspot-peer").unwrap().contains("not plain JSON"));
+        assert!(reconcile_mcp(&home.join("mcp.json"), &super::super::mcp_servers::of("/b/marspot-peer", None)).unwrap().contains("not plain JSON"));
     }
 }

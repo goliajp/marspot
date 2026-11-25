@@ -172,6 +172,11 @@ EOF
 # the package's own bin/ on PATH, not a link to it: Codex finds the
 # rest of its package next to the path it was started from
 export PATH="$(dirname "$(codex_entry)"):$SB/bin:$PATH"
+# a stand-in madcawl-mcp where marspot looks for it: the claude MCP
+# config marspot writes must register it with a socket in the state root
+mkdir -p "$HOME/.local/bin"
+printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/madcawl-mcp"
+chmod +x "$HOME/.local/bin/madcawl-mcp"
 
 echo "==> launching with two panes"
 dev_kill_shell_core
@@ -193,6 +198,19 @@ done
 read -r P1 P2 _ <<<"$SIDS"
 [[ -n "${P2:-}" ]] || fail "two panes never came up (have: $SIDS)"
 echo "==> panes $P1 $P2"
+
+claude_mcp_ok() {
+  python3 - "$MARSPOT_STATE_DIR/claude-mcp.json" "$HOME/.local/bin/madcawl-mcp" "$MARSPOT_STATE_DIR/madcawl.sock" <<'PY' 2>/dev/null
+import json, sys
+s = json.load(open(sys.argv[1]))["mcpServers"]
+assert s["marspot"]["args"] == ["mcp"], s
+m = s["madcawl"]
+assert m["command"] == sys.argv[2] and m["env"]["MADCAWL_SOCKET"] == sys.argv[3], m
+PY
+}
+for (( i = 0; i < 50; i++ )); do claude_mcp_ok && break; sleep 0.2; done
+claude_mcp_ok || fail "claude-mcp.json does not register madcawl-mcp: $(cat "$MARSPOT_STATE_DIR/claude-mcp.json" 2>&1)"
+ok "the claude MCP config registers madcawl-mcp with its socket"
 
 # typed only once each pane's shell is reading; see
 # test-codex-profile-switch.sh for why a retried command is poison
