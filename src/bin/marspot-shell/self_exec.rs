@@ -117,7 +117,10 @@ impl ShellApp {
         use std::os::unix::process::CommandExt;
         let target = match std::env::current_exe() {
             Ok(t) => t,
-            Err(e) => return lx_warn!("shell.ae_check.no_exe", &e.to_string()),
+            Err(e) => {
+                lx_warn!("shell.ae_check.no_exe", &e.to_string());
+                return apple_events::let_present(Some(&self.proxy));
+            }
         };
         lx_event!(
             "SHELL_AE_REPLACE",
@@ -146,6 +149,13 @@ impl ShellApp {
         apple_events::mark_retry(&mut cmd, n);
         let err = exec_prepared(&mut cmd);
         lx_error!("shell.ae_check.exec_failed", &format!("{err}"), target = target.display());
+        // the frames held were of surfaces released above; the next core
+        // brings new ones, and they must not be held for a check that
+        // will not come
+        for w in &mut self.windows {
+            w.held_frame = None;
+        }
+        apple_events::let_present(Some(&self.proxy));
     }
 }
 

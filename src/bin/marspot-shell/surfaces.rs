@@ -123,6 +123,10 @@ impl ShellApp {
 
     /// Surface `id` of window `i`'s live pair is the frame to show.
     fn put_up(&mut self, i: usize, id: u32) {
+        if !self.windows[i].presented && !crate::apple_events::may_present() {
+            self.windows[i].held_frame = Some(id);
+            return;
+        }
         let paced = self.active.as_ref().is_some_and(|c| c.paced);
         let w = &mut self.windows[i];
         let (Some(pair), Some(layers)) = (w.surfaces.as_ref(), w.layers.as_mut()) else {
@@ -160,6 +164,19 @@ impl ShellApp {
         }
         w.first_frame_ready = true;
         w.frame_pending = true;
+    }
+
+    /// Show the first frames held back while the image did not yet
+    /// know it was registered for Apple events.
+    pub(crate) fn show_held_frames(&mut self) {
+        if !crate::apple_events::may_present() {
+            return;
+        }
+        for i in 0..self.windows.len() {
+            if let Some(id) = self.windows[i].held_frame.take() {
+                self.put_up(i, id);
+            }
+        }
     }
 
     /// The core said how its frames are to be shown: show the ones it

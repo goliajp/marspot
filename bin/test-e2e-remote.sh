@@ -73,6 +73,7 @@ DEFAULT_SUITES=(
   test-reseat-bound.sh
   test-reopen-after-quit.sh
   test-quit-after-update.sh
+  test-quit-right-after-update.sh
   test-cc-profile-switch.sh
   test-codex-profile-switch.sh
   test-codex-refresh.sh

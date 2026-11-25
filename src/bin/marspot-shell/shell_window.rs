@@ -69,6 +69,9 @@ pub(super) struct ShellWindow {
     /// Whether this window has been presented once, for the one-line
     /// `WINDOW_FIRST_PRESENT` log.
     pub(super) presented: bool,
+    /// The first frame, held until the image knows it is registered
+    /// for Apple events (`apple_events::may_present`).
+    pub(super) held_frame: Option<u32>,
     /// Dev seam only: this window is to be closed again as soon as it
     /// has painted (`MARSPOT_DEV_CLOSE_EXTRA`).  Latched so the close
     /// runs once.
@@ -150,6 +153,7 @@ impl ShellWindow {
             frame_pending: false,
             dev_close_after_paint: false,
             presented: false,
+            held_frame: None,
             last_saved_window: None,
             last_attached: None,
             skipped_resizes: 0,

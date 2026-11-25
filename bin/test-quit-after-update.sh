@@ -30,6 +30,17 @@
 # could not prompt (read from a `log stream` the run keeps), tccd has no
 # decision on record for the bundle, and the shell kept its coalition.
 #
+# QAU_EARLY=1 asks for each quit the moment the image's first frame is
+# on screen, without waiting for the registration check: a person
+# reaching for the Dock as soon as the window is back.  The check then
+# finishes in the resident, and is waited for before the app is opened
+# again.  QAU_DROP=first|last arms the sandbox seam that makes every
+# image started by an exec lose its registration, before the check's
+# first look or before its last one (by then the quit has usually made
+# the app a resident, which has to replace itself as a resident to be
+# opened again).  At the end, how long after the question each image's
+# first look was answered, next to its first frame.
+#
 # QAU_BUSY=N starts N busy loops for the run (each ends itself after
 # QAU_BUSY_SECS, default 900, and is also stopped by pid at the end):
 # the race is lost far more often on a loaded machine.  Take the host's
@@ -55,6 +66,8 @@ ROUNDS="${QAU_ROUNDS:-30}"
 BUSY="${QAU_BUSY:-0}"
 BUSY_SECS="${QAU_BUSY_SECS:-900}"
 COUNTING="${QAU_COUNT:-0}"
+EARLY="${QAU_EARLY:-0}"
+DROP="${QAU_DROP:-}"
 BUSY_PIDS=()
 TCC_STREAM_PID=""
 
@@ -102,6 +115,7 @@ app_env=(--env "MARSPOT_STATE_DIR=$MARSPOT_STATE_DIR" --env "MARSPOT_SESSION_BIN
 
 dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
+[[ -z $DROP ]] || echo "$DROP" >"$MARSPOT_STATE_DIR/dev-ae-drop"
 open -g "$APP" "${app_env[@]}" || fail "LaunchServices did not open the sandbox bundle"
 for (( i = 0; i < 300; i++ )); do L1="$(dev_shell_pid)"; [[ -n $L1 ]] && "$SHELL_BIN" --panes >/dev/null 2>&1 && break; sleep 0.2; done
 [[ -n ${L1:-} ]] && answers || fail "the app never came up"
@@ -121,7 +135,10 @@ if (( BUSY > 0 )); then
   done
   sleep 3
 fi
-echo "==> app $L1 up; $ROUNDS rounds of update, quit, open, quit; load: $(sysctl -n vm.loadavg)"
+note=""
+(( EARLY )) && note+="; quits at the first frame"
+[[ -n $DROP ]] && note+="; every exec loses its registration before the $DROP look"
+echo "==> app $L1 up; $ROUNDS rounds of update, quit, open, quit; load: $(sysctl -n vm.loadavg)$note"
 
 quits=0 refused=0
 # the coalition LaunchServices lists the shell's record with
@@ -170,6 +187,10 @@ quit() { # label; returns 1 when the quit was refused (counting only)
     return 1
   fi
   wait_more SHELL_QUIT_CLEANUP "$q" 10 || fail "[$1] the app did not act on the quit"
+  # the quit came before the check: it finishes in the resident, which
+  # replaces itself if it was lost, and is not left over for the next image
+  (( EARLY )) && checked "$1, in the resident"
+  return 0
 }
 
 for (( r = 1; r <= ROUNDS; r++ )); do
@@ -182,7 +203,7 @@ for (( r = 1; r <= ROUNDS; r++ )); do
   answers || fail "[round $r] the updated shell does not answer"
   [[ "$(dev_shell_pid)" == "$L1" ]] || fail "[round $r] the update changed the shell's pid"
   wait_more WINDOW_FIRST_PRESENT "$shown" 30 || fail "[round $r] the updated shell showed no window"
-  checked "round $r, after the update"
+  (( EARLY )) || checked "round $r, after the update"
   quit "round $r, after the update" || continue
 
   shown=$(count WINDOW_FIRST_PRESENT)
@@ -191,7 +212,7 @@ for (( r = 1; r <= ROUNDS; r++ )); do
   answers || fail "[round $r] the app did not come back"
   [[ "$(dev_shell_pid)" == "$L1" ]] || fail "[round $r] the app came back as another process"
   wait_more WINDOW_FIRST_PRESENT "$shown" 30 || fail "[round $r] the app came back and showed no window"
-  checked "round $r, after opening again"
+  (( EARLY )) || checked "round $r, after opening again"
   quit "round $r, after opening again" || continue
 
   shown=$(count WINDOW_FIRST_PRESENT)
@@ -216,7 +237,7 @@ fi
 # tccd gets about it is a preflight that may not prompt (appleeventsd
 # looks its permission up, and that is all); and the shell keeps its
 # coalition.
-kids="$(grep -E $'\t(SHELL_AE_CHECKED|shell.ae_check.lost)\t' "$APPLOG" | grep -o 'child=[0-9]*' | cut -d= -f2 | sort -u)"
+kids="$(grep -E $'\tSHELL_AE_LOOKED\t' "$APPLOG" | grep -o 'child=[0-9]*' | cut -d= -f2 | sort -u)"
 nkids=$(grep -c . <<<"$kids")
 since="$(date -r "$RUN_START" '+%Y-%m-%d %H:%M:%S')"
 aed_in="$(/usr/bin/log show --start "$since" --info --debug --style compact \
@@ -250,7 +271,8 @@ done
 (( $(grep -cE "client=${L1S[0]} " <<<"$ls_in") > 0 && $(grep -cE "peer-pid=${L1S[0]} got event" <<<"$aed_in") > 0 )) \
   || fail "the logs do not show the shell's own registrations: the children's cannot be judged from them"
 echo "  registration checks: $(count SHELL_AE_CHECKED) registered, $(count shell.ae_check.lost) found unregistered," \
-  "$(count SHELL_AE_REPLACE) replacements made, $(count shell.ae_check.gave_up) given up; $nkids checking children, $registered of them registered or could have prompted;" \
+  "$(count SHELL_AE_REPLACE) replacements made ($(grep $'\tSHELL_AE_REPLACE\t' "$APPLOG" | grep -c 'resident=true') as a resident)," \
+  "$(count shell.ae_check.gave_up) given up, $(count DEV_AE_DROP) dropped by the seam; $nkids checking children, $registered of them registered or could have prompted;" \
   "$(grep -c "target_token={pid:" <<<"$tcc_in") tccd access requests in all"
 (( nkids > 0 )) || fail "no checking child ran"
 # requests about any checking child: none seen means the stream measured nothing
@@ -280,6 +302,25 @@ fi
 auths="$(grep -E "Handling access request: kTCCServiceAppleEvents:$BID" <<<"$tcc_in" | grep -oE 'authValue: [0-9]+' | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
 echo "  tccd's answers about the bundle's Apple events: ${auths:-none left in the log}"
 ! grep -qE 'authValue: [^1]' <<<"$auths" || fail "tccd has a decision on record for the bundle's Apple events: $auths"
+# each image started by an exec: from the answer to its question to
+# its first look's answer, and to its first frame (residents have none)
+timing="$(awk -F'\t' '
+  $7 == "SHELL_AE_SETTLED" { t0 = $2; look = ""; frame = "" }
+  $7 == "SHELL_AE_LOOKED" && t0 && look == "" && /look=first/ { look = $2 - t0; print "look", look }
+  $7 == "WINDOW_FIRST_PRESENT" && t0 && frame == "" { frame = $2 - t0; print "frame", (look == "" ? "before" : "after") }
+' "$APPLOG")"
+looks="$(awk '$1 == "look" { print $2 }' <<<"$timing" | sort -n)"
+nl=$(grep -c . <<<"$looks")
+echo "  $(count SHELL_AE_SETTLED) images from an exec; $nl first looks answered" \
+  "$(head -1 <<<"$looks")-$(tail -1 <<<"$looks") ms (median $(sed -n "$(( (nl + 1) / 2 ))p" <<<"$looks")) after the question;" \
+  "$(grep -c '^frame' <<<"$timing") first frames, $(grep -c '^frame after' <<<"$timing") of them after the first look"
+# a window shows its first frame only once its image was found registered
+! grep -q '^frame before' <<<"$timing" || fail "a window of an image from an exec showed a frame before its first look"
+if [[ -n $DROP ]]; then
+  (( $(count DEV_AE_DROP) > 0 )) || fail "the seam never dropped a registration"
+  (( $(count shell.ae_check.lost) >= $(count DEV_AE_DROP) )) \
+    || fail "the seam dropped $(count DEV_AE_DROP) registrations and the check found $(count shell.ae_check.lost) lost"
+fi
 echo
 if (( refused > 0 )); then
   echo "FAIL: $refused of $quits quits refused"
