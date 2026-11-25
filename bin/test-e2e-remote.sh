@@ -43,8 +43,9 @@
 #                           there and nothing else on the host
 #   - honest              : exits 1 when any suite failed; 3 when none
 #                           failed but a measuring suite was read next
-#                           to other work, which is neither a pass nor
-#                           a regression: take it again on a quiet host
+#                           to other work or never got the exclusive
+#                           lock, which is neither a pass nor a
+#                           regression: take it again on a quiet host
 set -euo pipefail
 
 DEFAULT_SUITES=(
@@ -195,9 +196,11 @@ trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
-# A measurement builds inside its own exclusive hold (bin/_build_then.sh):
-# built under a shared hold first, it would wait behind every queued
-# measurement and then queue again itself.
+# With E2E_LOCK=bench every suite builds inside its own exclusive hold
+# (bin/_build_then.sh): built under a shared hold first, it would wait
+# behind every queued measurement and then queue again itself.  By
+# default the build is one shared hold here, and a measuring suite then
+# queues once for the exclusive hold it is read under.
 if [[ ${E2E_LOCK:-heavy} != bench ]]; then
   echo "==> building release on $HOST"
   remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
@@ -278,6 +281,14 @@ for suite in "${SUITES[@]}"; do
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
     results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
     echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"
+    unmeasured=1
+  elif (( suite_rc == 75 )) && is_measurement "$suite"; then
+    # the exclusive hold waits for every other heavy job on the host;
+    # not getting it in time says the host was busy, not the suite failed
+    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+    results+=("BUSY  ${secs}s  $suite  (not measured: no exclusive hold of $HOST's lock within ${MAX_WAIT}s)")
+    echo "==> BUSY  ${secs}s  $suite: not measured, the exclusive lock was not free within ${MAX_WAIT}s;" \
+      "neither a pass nor a regression"
     unmeasured=1
   else
     case $suite_rc in
