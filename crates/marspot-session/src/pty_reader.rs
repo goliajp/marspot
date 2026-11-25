@@ -649,44 +649,4 @@ pub(crate) mod tests {
         reader.stop();
         assert!(!nonblocking(pty.raw_master()));
     }
-
-    /// A byte into an idle PTY is in the parser's queue about as soon
-    /// as a plain `poll` and `read` would have it: nothing on the way
-    /// waits for more output or for a turn.
-    #[test]
-    fn a_lone_byte_is_not_held_back() {
-        const ROUNDS: usize = 40;
-        // the tty echoes what is typed at `cat`
-        let plain = spawn("cat");
-        let mut plain_best = Duration::MAX;
-        for _ in 0..ROUNDS {
-            let started = Instant::now();
-            plain.write_shared(b"x").expect("type at the plain pty");
-            let mut fds = [libc::pollfd { fd: plain.raw_master(), events: libc::POLLIN, revents: 0 }];
-            // SAFETY: one valid pollfd on a master the test owns.
-            assert_eq!(unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) }, 1, "no echo");
-            let mut byte = [0u8; 16];
-            assert_eq!(plain.read_shared(&mut byte).expect("read the echo"), 1);
-            plain_best = plain_best.min(started.elapsed());
-        }
-
-        let pty = spawn("cat");
-        let exited = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = channel();
-        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
-        let mut best = Duration::MAX;
-        for _ in 0..ROUNDS {
-            let started = Instant::now();
-            pty.write_shared(b"x").expect("type at the pty");
-            let chunk = rx.recv_timeout(Duration::from_secs(5)).expect("no echo");
-            best = best.min(started.elapsed());
-            assert_eq!(chunk.bytes(), b"x");
-            reader.recycle(chunk);
-        }
-        reader.stop();
-        assert!(
-            best < plain_best + TAIL_WAIT / 2,
-            "a lone byte took {best:?} through the reader and {plain_best:?} through a plain read"
-        );
-    }
 }

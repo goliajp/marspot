@@ -131,76 +131,129 @@ mod tests {
         }
     }
 
-    /// After a flood, the chunks the reader holds give their pages back
-    /// when it goes to sleep, the one the parser still holds when it is
-    /// handed back; keystrokes' echoes after it take nothing back, and
-    /// the next flood takes them back.
-    #[test]
-    fn a_flood_s_chunks_give_their_pages_back_and_the_next_flood_takes_them_back() {
-        const FLOOD: usize = 8_000_000;
-        const NEXT: usize = 1_000_000;
-        let pty = spawn(
-            "head -c 8000000 /dev/zero | tr '\\0' a; sleep 5; for i in 1 2 3; do printf hello; sleep 0.3; done; \
-             sleep 0.5; head -c 1000000 /dev/zero | tr '\\0' b; sleep 30",
-        );
-        let (tx, rx) = channel();
-        let reader = PtyReader::spawn(1, Arc::clone(&pty), Arc::default(), tx, || {});
-        let given = times_given_back();
-        let mut total = 0;
-        // The last chunk the flood filled far stays with this "parser"
-        // until the reader has gone to sleep.  While one is out the
-        // reader never holds all its chunks, so it still owes a rest
-        // when the flood ends, however small the reads after it were.
-        let mut held: Option<Chunk> = None;
-        while total < FLOOD {
+    /// Times pages were given back, once nothing has given any back for
+    /// a moment: a reader that may still be at it is not done.
+    fn settled() -> usize {
+        let mut settled = times_given_back();
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = times_given_back();
+            if now == settled {
+                return settled;
+            }
+            settled = now;
+        }
+    }
+
+    /// Read a flood of `a` to the `Z` that ends it, telling it to end
+    /// through `stop` once 8 MB of it have come and a chunk has been
+    /// filled far.  The last chunk filled far is returned unparsed.
+    ///
+    /// How far the reader fills a chunk is how much the writer wrote
+    /// while it gathered, which is the machine's business: with the
+    /// writer kept off its core a flood of a fixed size filled one chunk
+    /// far, or none.  So the flood lasts until one is.
+    fn first_flood(reader: &PtyReader, rx: &Receiver<Chunk>, stop: &std::path::Path) -> Chunk {
+        let give_up = Instant::now() + Duration::from_secs(120);
+        let (mut total, mut held) = (0, None::<Chunk>);
+        loop {
             let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the flood stopped short");
-            total += chunk.bytes().len();
-            if chunk.bytes().len() >= WORTH_GIVING_BACK {
+            let (len, end) = (chunk.bytes().len(), chunk.bytes().last() == Some(&b'Z'));
+            assert!(chunk.bytes()[..len - usize::from(end)].iter().all(|&b| b == b'a'), "only what was written");
+            total += len;
+            if len >= WORTH_GIVING_BACK {
                 if let Some(earlier) = held.replace(chunk) {
                     reader.recycle(earlier);
                 }
             } else {
                 reader.recycle(chunk);
             }
-        }
-        assert_eq!(total, FLOOD);
-        let held = held.expect("no chunk of the flood was filled far");
-        until("the reader gave back none of the chunks it holds", || times_given_back() >= given + CHUNKS - 1);
-        // a reader that may still be at it is not done
-        let mut settled = times_given_back();
-        loop {
-            std::thread::sleep(Duration::from_millis(200));
-            let now = times_given_back();
-            if now == settled {
-                break;
+            if end {
+                return held.expect("the flood ended before a chunk of it was filled far");
             }
-            settled = now;
+            if total >= 8_000_000 && held.is_some() && !stop.exists() {
+                std::fs::write(stop, b"").expect("the file that ends the flood");
+            }
+            assert!(Instant::now() < give_up, "no chunk of {total} bytes of flood was filled far");
         }
+    }
+
+    /// After a flood, the chunks the reader holds give their pages back
+    /// when it goes to sleep, the one the parser still holds when it is
+    /// handed back; keystrokes' echoes after it take nothing back, and
+    /// the next flood takes them back.
+    #[test]
+    fn a_flood_s_chunks_give_their_pages_back_and_the_next_flood_takes_them_back() {
+        let stop = StopFile(std::env::temp_dir().join(format!("marspot-rest-flood-{}", std::process::id())));
+        let _ = std::fs::remove_file(&stop.0);
+        let pty = spawn(&format!(
+            "until [ -e '{}' ]; do head -c 500000 /dev/zero | tr '\\0' a; done; printf Z; sleep 5; \
+             for i in 1 2 3; do printf hello; sleep 0.3; done; sleep 0.5; tr '\\0' b < /dev/zero",
+            stop.0.display()
+        ));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), Arc::default(), tx, || {});
+        // While a chunk filled far is out the reader never holds all its
+        // chunks, so it still owes a rest when the flood ends, however
+        // small the reads after it were.
+        let held = first_flood(&reader, &rx, &stop.0);
+        until("the reader never went to sleep after the flood", || reader.resting.load(Ordering::SeqCst));
+        let settled = settled();
         reader.recycle(held);
         assert_eq!(times_given_back(), settled + 1, "the chunk handed back after the flood kept its pages");
 
-        // Three reads go round the three chunks, so one of them goes
-        // into the chunk just handed back, whose pages are given back.
+        // A chunk that kept what the flood filled far still says so in
+        // `high` the first time it carries anything after it.  Whether
+        // the reader's own two were filled far is up to the writer; any
+        // that were must have given their pages back.  A chunk first seen
+        // in the next flood may have been read far by it, so only the
+        // echoes check.
+        let mut seen: Vec<*const u8> = Vec::with_capacity(CHUNKS);
+        let mut first_use = |chunk: &Chunk, check: bool| {
+            if !seen.contains(&chunk.buf.as_ptr()) {
+                seen.push(chunk.buf.as_ptr());
+                assert!(!check || chunk.high < WORTH_GIVING_BACK, "a chunk the flood filled {} bytes far kept its pages", chunk.high);
+            }
+            seen.len()
+        };
         let taken = times_taken_back();
         let mut after = Vec::new();
         while after.len() < 15 {
             let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("no output after the flood");
             after.extend_from_slice(chunk.bytes());
+            first_use(&chunk, true);
             reader.recycle(chunk);
         }
         assert_eq!(after, b"hellohellohello");
         assert_eq!(times_taken_back(), taken, "a keystroke's echo took pages back");
 
-        let mut next = 0;
-        while next < NEXT {
+        // A chunk given back is read into as far as it kept, and taken
+        // back once a read fills that: the next flood is read until one
+        // has, and until every chunk has carried some of it.  Each chunk
+        // is kept until the next comes, so the reader gathers for a busy
+        // parser and fills more of a chunk from a slow writer.
+        let give_up = Instant::now() + Duration::from_secs(120);
+        let (mut used, mut parsing) = (0, None);
+        while times_taken_back() == taken || used < CHUNKS {
             let chunk = rx.recv_timeout(Duration::from_secs(30)).expect("the next flood stopped short");
             assert!(chunk.bytes().iter().all(|&b| b == b'b'), "only what was written");
-            next += chunk.bytes().len();
-            reader.recycle(chunk);
+            used = first_use(&chunk, false);
+            if let Some(earlier) = parsing.replace(chunk) {
+                reader.recycle(earlier);
+            }
+            assert!(Instant::now() < give_up, "the next flood was read into what the chunks kept, and no more");
         }
-        assert_eq!(next, NEXT);
-        assert!(times_taken_back() > taken, "the next flood was read into what the chunks kept, and no more");
+        drop(parsing);
         reader.stop();
+    }
+
+    /// The file that ends the first flood, removed however the test ends.
+    struct StopFile(std::path::PathBuf);
+
+    impl Drop for StopFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     /// Output that never fills far into a chunk -- keystrokes' echoes,
