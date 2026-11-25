@@ -59,9 +59,7 @@ impl CoreApp {
                         Some(&(prev, _)) => {
                             let s = marspot::pidtree::proc_stat(node.pid);
                             let dt_ns = panel.last_refresh.elapsed().as_nanos() as u64 + 1;
-                            let cpu = s.map_or(0.0, |cur| {
-                                (cur.total_cpu_ns.saturating_sub(prev) as f64 / dt_ns as f64) as f32 * 100.0
-                            });
+                            let cpu = s.map_or(0.0, |cur| cur.cpu_pct_since(prev, dt_ns));
                             (cpu, s.map_or(0, |s| s.rss_bytes / 1024))
                         }
                         None => (0.0, 0),
@@ -189,11 +187,7 @@ impl CoreApp {
                     let cpu = if let Some(&(prev_cpu, prev_t)) =
                         panel.prev_pid_stats.get(&p)
                     {
-                        let dt_ns = now.duration_since(prev_t).as_nanos() as u64;
-                        if dt_ns > 0 && stat.total_cpu_ns >= prev_cpu {
-                            let dcpu = stat.total_cpu_ns - prev_cpu;
-                            (dcpu as f64 / dt_ns as f64) as f32 * 100.0
-                        } else { 0.0 }
+                        stat.cpu_pct_since(prev_cpu, now.duration_since(prev_t).as_nanos() as u64)
                     } else { 0.0 };
                     sum_cpu_pct += cpu;
                     if cpu > top_busy.0 && !node.comm.starts_with("-zsh") {
