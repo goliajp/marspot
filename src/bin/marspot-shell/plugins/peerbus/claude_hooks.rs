@@ -45,11 +45,12 @@ pub(super) fn config_files() -> Vec<PathBuf> {
         files.extend(super::kimi_config::homes(&home).iter().flat_map(|d| [d.join("mcp.json"), d.join("config.toml")]));
     }
     files.extend(crate::plugins::skills::files());
-    // installing or removing it adds or takes out its entries; the watch
-    // sees that only while ~/.local/bin exists, which it does wherever
-    // install-local put marspot-peer, and otherwise the next minute's
-    // config pass picks it up
-    files.extend(super::mcp_servers::madcawl_path());
+    // installing or removing either madcawl program adds or takes out
+    // its entries and starts or ends its host; the watch sees that only
+    // while ~/.local/bin exists, which it does wherever install-local
+    // put marspot-peer, and otherwise the next minute's config pass
+    // picks it up
+    files.extend(super::mcp_servers::madcawl_paths());
     files
 }
 

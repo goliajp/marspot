@@ -39,6 +39,10 @@ mod kimi_bind;
 mod kimi_config;
 mod leftovers;
 mod lifecycle;
+mod madcawl_host;
+#[cfg(test)]
+mod madcawl_host_tests;
+mod madcawl_host_proc;
 mod mcp_servers;
 pub(crate) mod moving;
 mod moving_checks;

@@ -155,6 +155,18 @@ pub(super) fn envelope(from: &marspot_peer::envelope::Header, answer: &str) -> S
     marspot_peer::envelope::encode_from_plugin(from, Some(RELAY_PLUGIN), &body(answer))
 }
 
+/// Send each asker the answer the turn gave, as this session.
+pub(super) fn relay(b: &super::worker::Binding, sid: u64, owed: Vec<(Asker, String)>) {
+    let from = format!("uds:{}", b.inbox.path.display());
+    let header = marspot_peer::envelope::Header { from: from.clone(), from_name: Some(b.record.name.clone()), from_mode: Some(b.class) };
+    for (asker, answer) in owed {
+        let content = envelope(&header, &answer);
+        let line = marspot_peer::frame::user_line(&content, &from, marspot_peer::frame::Priority::Next, &marspot_peer::rand::uuid_v4());
+        super::deliver::send_line(&b.inbox.relay, &asker.reply_to, &line);
+        marspot_term::lx_info!("peerbus.answer_relayed", "the turn's answer went back to the asker", sid = sid, to = asker.reply_to);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
