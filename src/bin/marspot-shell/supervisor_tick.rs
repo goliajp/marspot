@@ -19,11 +19,10 @@ impl ShellApp {
     pub(super) fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
         // first: a control socket connection is asleep on each of these
         self.drain_pane_control();
-        // Plugin tick — runs at the supervisor cadence (1 s pump plus
-        // knocks, see `user_event`), each plugin further gates by its own
-        // tick_interval_ms.  Cheap when no plugin needs to tick.
-        // last_plugin_tick is reserved for future "supervisor-level
-        // throttle" — MVP doesn't gate here, the registry handles it.
+        inherited::reap_pending();
+        // Plugin tick — at the supervisor cadence (1 s pump plus knocks, see
+        // `user_event`), each plugin further gated by its own tick_interval_ms.
+        // last_plugin_tick is reserved for a supervisor-level throttle; the registry gates.
         // Order matters twice over: drain the plugins' activity
         // reports first so this round's observation is built from
         // them, then step the machines, and only then tick the plugins

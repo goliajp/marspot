@@ -166,6 +166,10 @@ pub(super) fn end_previous(pid_file: &Path) {
     if pid <= 0 {
         return;
     }
+    // an inherited child: from here on this function alone waits for it
+    if crate::inherited::disown(pid) {
+        return lx_info!("madcawl.host.previous_ended", "the previous image's host had exited; reaped with the inherited children", pid = pid);
+    }
     let mut st = 0;
     // SAFETY: a non-blocking look at one pid; ECHILD when it is not ours
     let r = unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) };

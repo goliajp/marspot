@@ -1,20 +1,17 @@
 //! peerbus — Codex sessions as peers of Claude Code sessions.
 //!
-//! Claude Code sessions find each other through a registry of records
-//! and message each other over per-session inbox sockets.  This plugin
-//! gives every Codex pane the same: a record naming it and an inbox
-//! socket in the Claude protocol, with what arrives there delivered
-//! into the Codex thread through the Codex app-server.  Codex sends the
-//! other way with the `marspot-peer` MCP tools.  Every session in a
-//! pane, Claude's included, is named after its pane (`names`).
+//! Claude Code sessions find each other through a registry of records and message
+//! each other over per-session inbox sockets.  This plugin gives every Codex pane the
+//! same: a record naming it and an inbox socket in the Claude protocol, with what
+//! arrives there delivered into the Codex thread through the Codex app-server.  Codex
+//! sends the other way with the `marspot-peer` MCP tools.  Every session in a pane,
+//! Claude's included, is named after its pane (`names`).
 //!
-//! Gemini and Kimi panes get the same record, inbox and MCP tools; what
-//! arrives for one waits in a file until its next turn (`gemini_bind`,
-//! `kimi_bind`).
+//! Gemini and Kimi panes get the same record, inbox and MCP tools; what arrives for
+//! one waits in a file until its next turn (`gemini_bind`, `kimi_bind`).
 //!
-//! The main thread only says which panes run Codex, Gemini or Kimi;
-//! everything that touches a socket, a file or a daemon happens on the
-//! worker thread.
+//! The main thread only says which panes run Codex, Gemini or Kimi; everything that
+//! touches a socket, a file or a daemon happens on the worker thread.
 
 mod bind;
 pub(crate) mod claude_mcp;
@@ -29,6 +26,7 @@ mod codex_toml;
 mod codex_locks;
 mod daemon;
 mod deliver;
+mod exec_prep;
 #[cfg(test)]
 mod fake_daemon;
 mod gemini_bind;
@@ -75,6 +73,7 @@ pub(crate) use refusal::TurnEnds;
 pub(crate) use views::{ThreadView, publish_threads, threads};
 pub(crate) use codex_locks::cli_main as codex_locks_main;
 pub(crate) use kimi_bind::mail_waiting as kimi_mail_waiting;
+pub(crate) use exec_prep::{close_inboxes, exec_failed};
 pub(in crate::plugins) use pair::{Conversation, conversation_of, conversation_of_agent, record_files};
 
 #[derive(Default)]
@@ -88,8 +87,7 @@ pub struct PeerbusPlugin {
     sent_kimi: Option<crate::plugins::kimi::Peers>,
     /// When the worker is next asked for a names pass; at once if None.
     names_at: Option<std::time::Instant>,
-    /// The noted changes (`agents::changes`) the worker has been asked
-    /// to look at the configuration for.
+    /// The noted changes (`agents::changes`) the worker was asked to look at.
     config_seen: u64,
     /// Keeps the CLI installer's thread running; dropped at stop.
     agents: Option<std::sync::mpsc::Sender<()>>,
@@ -101,9 +99,8 @@ impl PeerbusPlugin {
     }
 }
 
-/// Hand the worker an event if it has room.  `Some(false)` when it is
-/// busy with a slow daemon, and the next tick offers again; None when
-/// it is gone.
+/// Hand the worker an event if it has room.  `Some(false)` when it is busy with a
+/// slow daemon, and the next tick offers again; None when it is gone.
 fn offer(tx: &SyncSender<Event>, ev: Event) -> Option<bool> {
     match tx.try_send(ev) {
         Ok(()) => Some(true),
@@ -113,12 +110,11 @@ fn offer(tx: &SyncSender<Event>, ev: Event) -> Option<bool> {
 }
 
 impl PeerbusPlugin {
-    /// What the worker is asked for that no change of the panes asks
-    /// for: a names pass when one is due, and a look at the agents'
-    /// configuration when a change to it has been noted since the last
-    /// one asked for.  A noted change knocks, so this runs for it even
-    /// when the supervisor's clock was at rest.  False when the worker
-    /// is gone.
+    /// What the worker is asked for that no change of the panes asks for: a names
+    /// pass when one is due, and a look at the agents' configuration when a change to
+    /// it has been noted since the last one asked for.  A noted change knocks, so this
+    /// runs for it even when the supervisor's clock was at rest.  False when the
+    /// worker is gone.
     fn ask(&mut self, now: std::time::Instant, changes: u64) -> bool {
         let Some(tx) = &self.tx else { return false };
         if self.names_at.is_none_or(|t| t <= now) {
@@ -162,6 +158,7 @@ impl Plugin for PeerbusPlugin {
             .spawn(move || w.run())
             .map_err(|e| PluginError::Other(format!("peerbus worker: {e}")))?;
         moving::connect(Some(tx.clone()));
+        exec_prep::connect(Some(tx.clone()));
         self.tx = Some(tx);
         self.worker = Some(handle);
         host.log(LogLevel::Info, "start", "worker running");
@@ -192,10 +189,12 @@ impl Plugin for PeerbusPlugin {
 
     fn tick(&mut self, host: &dyn PluginHost) {
         let Some(tx) = &self.tx else { return };
+        if exec_prep::take_reopen() {
+            (self.sent, self.sent_gemini, self.sent_kimi) = (Vec::new(), None, None);
+        }
         let obs = crate::observe::shared().latest();
-        // The title is read here, not on the worker, because a title
-        // that changes has to reach the worker as a changed set.  It is
-        // shared memory: no file system call, nothing that can block.
+        // Read here, not on the worker: a changed title has to reach the worker as a
+        // changed set.  Shared memory: no file system call, nothing that can block.
         let wants: Vec<Want> = obs
             .live()
             .filter_map(|s| {
@@ -249,6 +248,7 @@ impl Plugin for PeerbusPlugin {
     /// session is left listing a peer that cannot answer.
     fn stop(&mut self, _host: &dyn PluginHost) {
         moving::connect(None);
+        exec_prep::connect(None);
         self.agents = None;
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(Event::Stop);

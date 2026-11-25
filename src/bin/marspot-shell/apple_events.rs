@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use marspot::app::EventProxy;
 
 /// Set by an exec that replaces a shell AppKit had registered.
-const REPLACED_ENV: &str = "MARSPOT_IMAGE_REPLACED";
+pub(crate) const REPLACED_ENV: &str = "MARSPOT_IMAGE_REPLACED";
 
 /// How many times in a row the image was replaced because the check
 /// found it unregistered.
