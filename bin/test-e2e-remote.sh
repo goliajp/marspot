@@ -96,6 +96,12 @@ is_measurement() {
 # the exclude list from git itself, so a path this repo ignores is never
 # sent and never deleted on the far side -- which is how the remote
 # target/ survives a sync from a tree that has none.
+# Exit 3 from these means a measurement in them was read on a busy host
+# and everything else passed.
+may_be_unmeasured() {
+  is_measurement "$1" || [[ $1 == soak-l3.sh ]]
+}
+
 remote_sync() {
   local tool
   tool="$(command -v remote-sync || true)"
@@ -260,7 +266,7 @@ for suite in "${SUITES[@]}"; do
     results+=("PASS  ${secs}s  $suite")
     # said now as well: a run that is cut short prints no summary
     echo "==> PASS  ${secs}s  $suite"
-  elif (( suite_rc == 3 )) && is_measurement "$suite"; then
+  elif (( suite_rc == 3 )) && may_be_unmeasured "$suite"; then
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
     results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
     echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"

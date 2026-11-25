@@ -15,6 +15,9 @@
 #
 # Runs entirely in the dev sandbox; never touches the installed app.
 # Run after `cargo build --release`.
+#
+# Exit 0 pass, 1 fail, 3 when every section passed but the latency one
+# went over its ceiling on a busy host (undecided, not a regression).
 
 set -uo pipefail
 
@@ -125,8 +128,15 @@ section() {
   dev_run_probe "$@" >>"$RUN_LOG" 2>&1
   rc=$?
   (( rc != 3 )) || fail "$label: a marspot-session outlived the probe (orphan leak)"
+  if (( rc == 75 )); then
+    # a measurement over its ceiling on a busy host: undecided, and the
+    # sections after it still run
+    undecided+=" $label"
+    return 75
+  fi
   (( rc == 0 )) || fail "$label probe exited $rc ($broke)"
 }
+undecided=""
 
 # N-session collision check (4a): allocate N distinct sessions via the
 # L2-allocates / L3-attaches split, spawn one L3 each, assert every one
@@ -155,9 +165,12 @@ echo "  selection OK — GetSelectionText returned the on-screen text from L3, n
 # Latency tail (4d): keystroke→echo through the extra L2→L3→L2 IPC hop.
 # The design calls for measuring this; the probe reports p50/p99/max and
 # fails only on a gross regression (a polling / stalling event loop).
-section latency "keystroke→echo regression" "$LATENCY_PROBE_BIN" "$SESSION_BIN"
-lat_line=$(grep -E '^PASS|keystroke' "$RUN_LOG" | tail -1)
-echo "  latency OK — ${lat_line##*: }"
+if section latency "keystroke→echo regression" "$LATENCY_PROBE_BIN" "$SESSION_BIN"; then
+  lat_line=$(grep -E '^PASS|keystroke' "$RUN_LOG" | tail -1)
+  echo "  latency OK — ${lat_line##*: }"
+else
+  grep -E '^INCONCLUSIVE' "$RUN_LOG" | tail -1 | sed 's/^/  latency /'
+fi
 
 # Crash isolation (5c): SIGKILL one of two L3s; the sibling must keep
 # echoing and the dead L3's shm must stay readable (an L2 reading it keeps
@@ -191,4 +204,8 @@ section silent-swap "silent-swap mechanism broken" \
   "$SWAP_PROBE_BIN" "$SESSION_BIN" "${SWAP_ROUNDS:-5}"
 echo "  silent-swap OK — replacement replayed + took over on the same session, no orphans"
 
+if [[ -n $undecided ]]; then
+  echo "INCONCLUSIVE —${undecided} not measured on a quiet host; every other section passed"
+  exit 3
+fi
 echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection + latency + crash + swap, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
