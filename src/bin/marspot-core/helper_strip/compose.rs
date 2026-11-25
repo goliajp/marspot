@@ -8,7 +8,7 @@
 //! The name's column is as wide as the widest name, the figures end at
 //! the right edge, and the task has what is left between them.
 
-use super::figures::{compact, cut, elapsed, width, Text};
+use super::figures::{cut, figures, width, Text};
 use super::native_list::Columns;
 use super::strip::{Run, Strip};
 use super::theme::Theme;
@@ -28,6 +28,9 @@ pub(super) const MARGIN: u16 = 2;
 #[derive(Clone, Copy, PartialEq)]
 pub(in super::super) enum State {
     Running,
+    /// Its turn is over and it can be told more.
+    Idle,
+    /// Its process is gone.
     Done,
     Failed,
     Stopped,
@@ -134,14 +137,28 @@ impl List<'_> {
     }
 }
 
-/// Write `list` into `strip`: a blank row and `main` first, unless it
-/// goes on from the agent's own.  The same rows again allocate nothing.
+/// The lines above the rows: a blank one and `main`, unless the rows go
+/// on from the agent's own list.  A strip too short for both and its
+/// rows gives up the blank line first, then `main`.
+fn head(rows: u16, list: &List) -> u16 {
+    if list.native.is_some() {
+        return 0;
+    }
+    let n = list.rows.len();
+    let listed = n.min(WINDOW) as u16 + u16::from(n > WINDOW);
+    rows.saturating_sub(listed).min(2)
+}
+
+/// Write `list` into `strip`, under its head.  The same rows again
+/// allocate nothing.
 pub(in super::super) fn compose(strip: &mut Strip, list: &List) -> Drawn {
-    let line = if list.native.is_none() { 2 } else { 0 };
+    let line = head(strip.rows(), list);
     let (first, fit) = list.window(strip.rows().saturating_sub(line) as usize);
-    if line > 0 {
+    if line == 2 {
         strip.line(0, &[]);
-        main_row(strip, list, first);
+    }
+    if line > 0 {
+        main_row(strip, list, first, line - 1);
     }
     let place = Place::of(strip.cols(), list);
     let mut at = line;
@@ -169,7 +186,7 @@ fn more(arrow: &str, n: usize) -> Text {
     t
 }
 
-fn main_row(strip: &mut Strip, list: &List, above: usize) {
+fn main_row(strip: &mut Strip, list: &List, above: usize, at: u16) {
     let (selected, viewed) = (list.selected == Some(Pick::Main), list.viewed == Pick::Main);
     let attrs = match (selected, viewed) {
         (true, _) => list.theme.selected(viewed),
@@ -180,7 +197,7 @@ fn main_row(strip: &mut Strip, list: &List, above: usize) {
     let up = if above > 0 { more("↑", above) } else { Text::EMPTY };
     let up_col = strip.cols().saturating_sub(MARGIN + width(up.as_str()));
     strip.line(
-        1,
+        at,
         &[
             cursor(list.theme, selected),
             Run { col: 2, text: dot, attrs },
@@ -192,28 +209,6 @@ fn main_row(strip: &mut Strip, list: &List, above: usize) {
 
 fn cursor(theme: &Theme, selected: bool) -> Run<'static> {
     Run { col: 0, text: if selected { CURSOR } else { "" }, attrs: theme.selected(false) }
-}
-
-/// The figures of a row: how it ended, for how long it ran, its tokens.
-/// How it ended takes no part in how wide the figures' column is.
-fn figures(row: &Row, ending: bool) -> Text {
-    let mut t = Text::EMPTY;
-    if row.state == State::Awaiting {
-        t.join("awaiting approval");
-        return t;
-    }
-    match row.state {
-        State::Failed if ending => t.join("failed"),
-        State::Stopped if ending => t.join("stopped"),
-        _ => {}
-    }
-    t.join(elapsed(row.elapsed_ms).as_str());
-    if let Some(n) = row.tokens.filter(|n| *n > 0) {
-        use std::fmt::Write;
-        let arrow = if row.arrow == Arrow::Up { "↑" } else { "↓" };
-        let _ = write!(t, " · {arrow} {} tokens", compact(n).as_str());
-    }
-    t
 }
 
 /// Where the columns of a strip's rows are.
@@ -278,7 +273,7 @@ impl Ink {
         let dot = match row.state {
             State::Done => theme.success(viewed),
             State::Failed | State::Stopped => theme.error(viewed),
-            State::Running | State::Awaiting => task,
+            State::Running | State::Awaiting | State::Idle => task,
         };
         let name = if row.named && !picked { Theme::plain(viewed) } else { task };
         Self { dot, name, task, figures: quiet }

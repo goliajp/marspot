@@ -21,7 +21,6 @@ pub(super) fn row(sid: u64, works: bool) -> StripRow {
         agent: StripAgent::Codex,
         gone: false,
         had_tool: true,
-        named: false,
         started_ms: now,
         worked_ms: 65_000,
         running_since_ms: works.then_some(now),
@@ -62,9 +61,13 @@ impl Session {
     }
 
     pub(super) fn shows(&mut self, cols: u16, rows: u16, bytes: &[u8]) {
+        self.shows_with(cols, rows, bytes, 0);
+    }
+
+    pub(super) fn shows_with(&mut self, cols: u16, rows: u16, bytes: &[u8], flags: u32) {
         let mut t = Terminal::new(cols, rows);
         t.feed(bytes);
-        self.writer.publish(t.grid(), 0, 0);
+        self.writer.publish(t.grid(), 0, flags);
     }
 
     /// The sizes the core asked for since the last look.
@@ -234,7 +237,7 @@ fn a_session_left_short_by_an_earlier_core_is_not_resized() {
     app.strips_tick();
     assert_eq!((given(&app), s.resizes(&app.windows[0].panes[0])), (0, vec![(c.cols, c.rows)]), "it has none");
 
-    for (short, helper, rows) in [(4, false, 0), (2, true, 0), (9, true, 0), (8, false, 8)] {
+    for (short, helper, rows) in [(4, false, 0), (1, true, 1), (2, true, 2), (9, true, 0), (8, false, 8)] {
         assert_eq!(given(&start(short, helper).0), rows, "{short} short, helpers: {helper}");
     }
 }
@@ -289,7 +292,7 @@ fn rows_go_on_from_claudes_own_list() {
     record.parent_agent = StripAgent::Claude;
     app.pane_control.strips.take(record);
     app.strips_tick();
-    assert_eq!(given(&app), MAX_ROWS, "claude on the main screen: all at once");
+    assert_eq!(given(&app), 4, "claude on the main screen: a head, its row and a blank row");
     let c = app.windows[0].layout.cells[0];
     let rule = "─".repeat(c.cols as usize);
     let own = format!("{rule}\r\n❯\r\n{rule}\r\n  foot\r\n\r\n  ⏺ main\r\n  ◯ general-purpose  job{}1s", " ".repeat(c.cols as usize - 28));
@@ -312,7 +315,7 @@ fn a_cleared_row_is_hidden_for_its_batch_only() {
     assert_eq!(h.rows(&one, 0, &mut out), 1);
     assert_eq!(out[0].name, "codex 0002");
     h.hide(2);
-    assert_eq!(h.said(Some(&one), true), height::Said::Cleared);
+    assert_eq!(h.said(Some(&one), true, false), height::Said::Cleared);
     for sid in 10..60 {
         h.hide(sid);
     }

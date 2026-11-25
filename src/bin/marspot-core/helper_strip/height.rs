@@ -1,7 +1,9 @@
 //! How many rows a strip takes, and when that changes.  Each change is
 //! a resize of the program in the pane, so there are few of them: the
-//! height only grows while helpers are at work and goes in one step
-//! once all have ended, and neither happens under the user's hands.
+//! height is that of the rows drawn, goes in one step once all helpers
+//! have ended, and changes neither under the user's hands nor while the
+//! agent's own list comes and goes.  On the main screen, where a resize
+//! leaves rows twice in the history, it only grows.
 
 use super::compose::WINDOW;
 use super::strip::MAX_ROWS;
@@ -14,16 +16,71 @@ const KEEP: Duration = Duration::from_secs(3);
 const QUIET: Duration = Duration::from_secs(1);
 /// And how long that is waited for.
 const PUT_OFF: Duration = Duration::from_secs(30);
-/// The blank row and `main`.
+/// The blank row and `main`, when the strip draws its own.
 const HEAD: u16 = 2;
+/// How long the agent's own list must have been there before the
+/// height follows, and how long gone: its own prompts and menus hide it
+/// for a while, and each change is two resizes.
+const APPEARS: Duration = Duration::from_secs(1);
+const GOES: Duration = Duration::from_secs(3);
 
-/// The rows for `n` helpers: five of them, and one that says how many
-/// more there are.
-pub(super) fn rows_for(n: usize) -> u16 {
-    match n {
-        0 => 0,
-        n if n <= WINDOW => HEAD + n as u16,
-        _ => MAX_ROWS,
+fn steady(on: bool) -> Duration {
+    if on { APPEARS } else { GOES }
+}
+
+/// The rows for `n` helpers: five of them and one that says how many
+/// more there are, after the agent's own list (`merged`) or a head of
+/// their own.  Under them nothing, as under the agent's own list on the
+/// alternate screen; on the main screen (`inline`) one blank row.
+pub(super) fn rows_for(n: usize, merged: bool, inline: bool) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    let head = if merged { 0 } else { HEAD };
+    let listed = n.min(WINDOW) as u16 + u16::from(n > WINDOW);
+    (head + listed + u16::from(inline)).min(MAX_ROWS)
+}
+
+/// Whether the agent draws its own list, as the height takes it: what
+/// the screen showed once it has shown it for [`APPEARS`], or not
+/// shown it for [`GOES`].
+#[derive(Debug, Default)]
+pub(super) struct Merge {
+    merged: bool,
+    /// What the screen shows, and since when; None: never looked at.
+    seen: Option<(bool, Instant)>,
+}
+
+impl Merge {
+    /// The screen shows the agent's list, or not.  The first look is
+    /// taken as it is: nothing was drawn for it yet.
+    pub(super) fn saw(&mut self, on: bool, now: Instant) {
+        match self.seen {
+            None => {
+                self.merged = on;
+                self.seen = Some((on, now));
+            }
+            Some((was, _)) if was != on => self.seen = Some((on, now)),
+            Some(_) => {}
+        }
+    }
+
+    /// Bring `merged` up to `now`.
+    pub(super) fn settle(&mut self, now: Instant) {
+        if let Some((on, since)) = self.seen
+            && now >= since + steady(on)
+        {
+            self.merged = on;
+        }
+    }
+
+    pub(super) fn merged(&self) -> bool {
+        self.merged
+    }
+
+    /// When what is seen is to be taken.
+    pub(super) fn due(&self) -> Option<Instant> {
+        self.seen.filter(|(on, _)| *on != self.merged).map(|(on, since)| since + steady(on))
     }
 }
 
@@ -79,7 +136,7 @@ impl Height {
 
     /// Whether a strip can have left a session this many rows short.
     pub(super) fn could_be(rows: u16) -> bool {
-        (rows_for(1)..=MAX_ROWS).contains(&rows)
+        (rows_for(1, true, false)..=MAX_ROWS).contains(&rows)
     }
 
     pub(super) fn rows(&self) -> u16 {
@@ -116,8 +173,8 @@ impl Height {
         self.spare = false;
         match s.said {
             Said::Unknown | Said::Rows { need: 0, .. } => self.rows,
-            Said::Rows { .. } if s.inline => MAX_ROWS,
-            Said::Rows { need, .. } => self.rows.max(need),
+            Said::Rows { need, .. } if s.inline => self.rows.max(need),
+            Said::Rows { need, .. } => need,
             Said::Nothing | Said::Cleared if self.rows == 0 => 0,
             Said::Nothing | Said::Cleared if self.kept_until(s).is_some_and(|t| s.now < t) => self.rows,
             Said::Nothing | Said::Cleared if self.reserved && s.inline => {

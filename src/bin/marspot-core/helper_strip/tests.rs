@@ -208,7 +208,7 @@ fn the_dev_seam_fills_every_pane() {
     let mut w = win(1, panes);
     w.grid_cols = 2;
     let mut app = app_in(sb.dir(), vec![w]);
-    app.strips = Strips { dev: Some(5), ..Strips::default() };
+    app.strips = Strips { dev: Some(8), ..Strips::default() };
     app.rebuild_layout(0);
     app.place_strips(0);
     for sid in sids {

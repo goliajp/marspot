@@ -86,6 +86,19 @@ fn figures_say_what_is_known() {
     assert_eq!(at(Row { state: State::Failed, ..ROW }), "failed · 3s");
     assert_eq!(at(Row { state: State::Stopped, tokens: Some(9), ..ROW }), "stopped · 3s · ↑ 9 tokens");
     assert_eq!(at(Row { state: State::Awaiting, tokens: Some(9), ..ROW }), "awaiting approval");
+    assert_eq!(at(Row { state: State::Idle, tokens: Some(9), ..ROW }), "idle · 3s · ↑ 9 tokens", "its turn is over, it can go on");
+    assert_eq!(at(Row { state: State::Done, tokens: Some(9), ..ROW }), "3s · ↑ 9 tokens", "only its dot says it has exited");
+}
+
+/// An idle helper's dot is not the one that says it is gone.
+#[test]
+fn an_idle_rows_dot_is_not_an_exited_ones() {
+    let dot = |state: State| {
+        let l = List { rows: &[Row { state, ..ROW }], selected: None, viewed: Pick::Main, theme: &THEMES[0], native: None };
+        strip_of(50, 3, &l).grid().cell(2, 2).attrs
+    };
+    assert_ne!(dot(State::Idle), dot(State::Done));
+    assert_eq!(dot(State::Idle), dot(State::Running));
 }
 
 /// How a row ended takes room from its own task only.
@@ -123,11 +136,17 @@ fn rows_a_strip_has_no_room_for_are_counted() {
     let names: Vec<String> = (0..7).map(|i| format!("n{i}")).collect();
     let rows: Vec<Row> = names.iter().map(|n| Row { name: n, ..ROW }).collect();
     let of = |n: usize, height| lines(&rows[..n], None, Pick::Main, height);
-    assert_eq!(of(2, 3)[2], "  ↓ 2 more");
-    let three = of(3, 4);
-    assert!(three[2].contains("n0"));
-    assert_eq!(three[3], "  ↓ 2 more");
+    let two = of(2, 3);
+    assert!(two[0].ends_with(" main") && two[1].contains("n0") && two[2].contains("n1"), "the blank line goes first: {two:?}");
+    let two = of(2, 2);
+    assert!(two[0].contains("n0") && two[1].contains("n1"), "then main: {two:?}");
     assert!(of(2, 4)[3].contains("n1"));
+    let seven = of(7, 4);
+    assert!(seven[0].contains("n0") && seven[2].contains("n2"), "{seven:?}");
+    assert_eq!(seven[3], "  ↓ 4 more");
+    let seven = of(7, 8);
+    assert!(seven[1].ends_with(" main"), "{seven:?}");
+    assert_eq!(seven[7], "  ↓ 2 more");
     for height in 1..9 {
         lines(&rows, Some(Pick::Row(6)), Pick::Row(5), height);
     }

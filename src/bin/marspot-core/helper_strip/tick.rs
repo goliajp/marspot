@@ -131,10 +131,10 @@ impl CoreApp {
         claude && pane.is_some_and(|p| !p.session().l3_alt_screen_active())
     }
 
-    fn strip_sight(&self, sid: u64, pane: Option<&Pane>, record: Option<&HelperStrip>, said: Said, now: Instant) -> Sight {
+    fn strip_sight(&self, sid: u64, said: Said, inline: bool, now: Instant) -> Sight {
         Sight {
             said,
-            inline: self.strip_inline(sid, pane, record),
+            inline,
             held: self.pane_sessions.contains_key(&sid),
             typed: self.strips.typed.get(&sid).copied(),
             now,
@@ -153,13 +153,19 @@ impl CoreApp {
             let at = self.find_window_pane_by_sid(sid);
             let pane = at.map(|(wi, i)| &self.windows[wi].panes[i]);
             host.see(|helper| self.shadows.iter().any(|p| p.is_l3() && p.shelld_session_id() == Some(helper)));
-            let sight = self.strip_sight(sid, pane, record, host.said(record, told), now);
+            if let Some((p, r)) = pane.filter(|p| p.peek.is_none()).zip(record) {
+                host.glance(r.parent_agent, p.session().grid(), (sid, p.grid_seq()), p.view_offset() != 0, now);
+            }
+            host.merge.settle(now);
+            let inline = self.strip_inline(sid, pane, record);
+            let sight = self.strip_sight(sid, host.said(record, told, inline), inline, now);
             let before = host.height.rows();
             if let Some(rows) = host.height.step(&sight) {
                 lx_event!("HELPER_STRIP_HEIGHT", "a pane's helper strip takes other rows", session = sid, from = before, to = rows);
                 resized.push((sid, rows, at.map(|a| a.0)));
             }
             earlier(&mut due, host.height.due(&sight));
+            earlier(&mut due, host.merge.due());
             let ticks = record.is_some_and(|r| host.ticking(r));
             host.ticks = ticks;
             host.height.rows() > 0 || sight.said != Said::Nothing

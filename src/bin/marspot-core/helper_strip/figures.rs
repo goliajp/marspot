@@ -1,6 +1,7 @@
 //! How a row says how long it has run and what its context holds, in
 //! the words Claude Code uses, and how a text is cut to a width.
 
+use super::compose::{Arrow, Row, State};
 use super::strip::glyphs;
 use std::fmt::Write;
 
@@ -91,4 +92,26 @@ pub(super) fn cut(text: &str, room: u16) -> (&str, &'static str) {
         end = g.as_ptr() as usize - text.as_ptr() as usize + g.len();
     }
     (&text[..end], "…")
+}
+
+/// The figures of a row: how it ended, for how long it ran, its tokens.
+/// How it ended takes no part in how wide the figures' column is.
+pub(super) fn figures(row: &Row, ending: bool) -> Text {
+    let mut t = Text::EMPTY;
+    if row.state == State::Awaiting {
+        t.join("awaiting approval");
+        return t;
+    }
+    match row.state {
+        State::Failed if ending => t.join("failed"),
+        State::Stopped if ending => t.join("stopped"),
+        State::Idle if ending => t.join("idle"),
+        _ => {}
+    }
+    t.join(elapsed(row.elapsed_ms).as_str());
+    if let Some(n) = row.tokens.filter(|n| *n > 0) {
+        let arrow = if row.arrow == Arrow::Up { "↑" } else { "↓" };
+        let _ = write!(t, " · {arrow} {} tokens", compact(n).as_str());
+    }
+    t
 }

@@ -11,7 +11,7 @@ pub(super) fn with_helpers(sb: &Sandbox, n: usize) -> (CoreApp, Session, Vec<Ses
     let (mut app, mut s) = app(sb);
     let c = app.windows[0].layout.cells[0];
     let total = c.rows + c.strip_rows;
-    let rows = super::height::rows_for(n);
+    let rows = super::height::rows_for(n, false, false);
     let mut helpers = Vec::new();
     for _ in 0..n {
         let (pane, h) = Session::of(c.cols, total - rows);
