@@ -79,8 +79,10 @@ fn viewing_under_claudes_list(sb: &Sandbox, n: usize) -> (CoreApp, Session, Vec<
     shown(&mut app, &mut s, true);
     assert!(app.view_helper(s.sid, Some(helpers[0].sid)));
     let c = app.windows[0].layout.cells[0];
-    helpers[0].shows(c.cols, c.rows, b"$ ");
-    app.advance_views(Instant::now());
+    // made at the strip's size, it is shown at once, on the frame it had
+    // then; its next one is read by the loop's pump, as a viewed pane's is
+    helpers[0].shows(c.cols, c.rows, claude_screen(c.cols, "", "").as_bytes());
+    app.pump_all();
     assert_eq!(app.windows[0].panes[0].peeked(), Some(helpers[0].sid));
     app.strips_tick();
     assert_eq!(given(&app), n as u16, "viewing a helper resizes nothing");
@@ -118,11 +120,7 @@ fn helper_strip_a_click_on_the_row_in_view_under_claudes_list_goes_back_to_the_p
 #[test]
 fn helper_strip_up_from_the_first_row_while_viewing_under_claudes_list_selects_main() {
     let sb = Sandbox::new();
-    let (mut app, s, mut helpers) = viewing_under_claudes_list(&sb, 1);
-    // the helper's next frame, at the size it is viewed at: an empty box
-    let c = app.windows[0].layout.cells[0];
-    helpers[0].shows(c.cols, c.rows, claude_screen(c.cols, "", "").as_bytes());
-    app.focused_shown_mut(0).expect("the helper in view").pump();
+    let (mut app, s, _helpers) = viewing_under_claudes_list(&sb, 1);
     press(&mut app, DOWN);
     std::thread::sleep(keys::PROBE + Duration::from_millis(10));
     app.focused_shown_mut(0).expect("the helper in view").pump();
