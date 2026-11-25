@@ -73,6 +73,12 @@ fn sends_a_signal(line: &str) -> bool {
     (line.contains("libc::kill(") || line.contains("pidtree::signal(")) && !line.contains(", 0)")
 }
 
+/// A test module kept in its own file (`tests.rs`, `*_tests.rs`, or under
+/// `tests/`), which only ever builds under `cfg(test)`.
+fn is_test_file(path: &str) -> bool {
+    path.ends_with("/tests.rs") || path.ends_with("_tests.rs") || path.contains("/tests/")
+}
+
 /// The op runner: `pty_op.rs` and the modules under `pty_op/`.
 fn is_op_runner(path: &str) -> bool {
     path.ends_with("pty_op.rs") || path.contains("/pty_op/")
@@ -84,6 +90,13 @@ fn is_op_runner(path: &str) -> bool {
 /// overruns, and the shell ends the madcawl host it started.
 fn kills_its_own_helper(path: &str) -> bool {
     path.ends_with("peerbus/moving_checks.rs") || path.ends_with("peerbus/madcawl_host_proc.rs")
+}
+
+/// proc.stop: a session ends processes of its own pane on its explicit
+/// request, each by pid and start time, and audited; it is a control
+/// operation, not a plugin acting on a pane by itself.
+fn ends_on_a_sessions_request(path: &str) -> bool {
+    path.ends_with("plugins/zombie/stop.rs") || path.ends_with("plugins/zombie/stop/force.rs")
 }
 
 /// A signal is sent in exactly one place, and that place is the op runner.
@@ -98,7 +111,7 @@ fn signalling_happens_only_inside_the_op_runner() {
             if !sends_a_signal(line) {
                 continue;
             }
-            if is_op_runner(&path) || kills_its_own_helper(&path) {
+            if is_op_runner(&path) || kills_its_own_helper(&path) || ends_on_a_sessions_request(&path) || is_test_file(&path) {
                 continue;
             }
             offenders.push(format!("{path}:{n}: {}", line.trim()));
@@ -194,4 +207,45 @@ fn the_forwarder_is_called_from_the_op_runners_interface() {
             lines[i].0
         );
     }
+}
+
+/// The exception above is for the control operation only: the signalling
+/// entry points of proc.stop are called from its op handler and nowhere
+/// else, so no plugin (the zombie watch included, which only tells) can
+/// borrow them.
+#[test]
+fn proc_stop_signals_only_for_its_control_op() {
+    const ENTRIES: [&str; 4] = ["stop::run(", "end_tree(", "stop::one(", "force::after("];
+    const HANDLER: &str = "pane_control/ops_proc.rs";
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        for e in std::fs::read_dir(dir).expect("the shell tree is readable") {
+            let p = e.expect("a readable entry").path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push((p.to_string_lossy().into_owned(), std::fs::read_to_string(&p).expect("readable")));
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    walk(Path::new("src/bin/marspot-shell"), &mut sources);
+    let mut offenders = Vec::new();
+    let mut seen_in_handler = false;
+    for (path, text) in sources.iter().filter(|(p, _)| !is_test_file(p)) {
+        for (n, line) in production_lines(text) {
+            if line.trim_start().starts_with("//") || line.contains("fn ") {
+                continue;
+            }
+            if !ENTRIES.iter().any(|e| line.contains(e)) {
+                continue;
+            }
+            if path.ends_with(HANDLER) {
+                seen_in_handler = true;
+            } else if !ends_on_a_sessions_request(path) {
+                offenders.push(format!("{path}:{n}: {}", line.trim()));
+            }
+        }
+    }
+    assert!(seen_in_handler, "the proc.stop handler no longer calls its entry points: this test looks in the wrong place");
+    assert!(offenders.is_empty(), "proc.stop's signalling is called outside its control op:\n  {}", offenders.join("\n  "));
 }
