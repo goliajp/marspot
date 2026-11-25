@@ -4,6 +4,17 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.17.0
+
+- Claude Code sessions Marspot starts itself (account switches,
+  helpers, handoffs) use Marspot's pane and helper tools without
+  asking for permission each time. Your own Claude Code settings are
+  not changed.
+- With `madcawl-mcp` and `madcawl-shell` installed in `~/.local/bin`,
+  every agent Marspot configures gets the madcawl page tools, and
+  Marspot starts the page host on the first call and lets it go after
+  five idle minutes.
+
 ## 0.16.0
 
 - When the account a Claude Code pane runs on will not last
