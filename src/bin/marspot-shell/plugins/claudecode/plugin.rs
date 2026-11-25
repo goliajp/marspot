@@ -207,6 +207,7 @@ impl Plugin for ClaudecodePlugin {
             self.quiet.scanned(result.sessions_seen.iter().copied());
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;
+            super::sessions_view::publish(&self.last_meta);
             self.last_model = result.new_models;
             self.last_vetoes = result.new_vetoes;
         }

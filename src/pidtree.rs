@@ -1,3 +1,4 @@
+// CARVE-OUT: long only by its inline test module; the code before it stays under 500 lines
 //! macOS process inspection — minimal FFI glue for "list every pid",
 //! "what's this pid's cwd / cmdline / parent".  Used by the
 //! claudecode plugin to walk down from a shelld session's child_pid
@@ -18,11 +19,13 @@ use std::path::PathBuf;
 mod args;
 mod ident;
 mod pane_cwd;
+mod probes;
 mod table;
 
-pub use args::{proc_argv, proc_cmdline, proc_env_value, release_room};
+pub use args::{proc_argv, proc_cmdline, proc_env_value, proc_env_values, release_room};
 pub use ident::{ProcId, SignalError, proc_id, signal};
 pub use pane_cwd::pane_cwd;
+pub use probes::{Zombie, cpu_with_children, fd_path, proc_cpu_time_ns, zombies};
 pub use table::{ProcNode, ProcTable, descendants_of, flatten_pre_order, tree_rooted_at};
 
 /// One process as returned by the sysctl table.  We only keep what
@@ -163,34 +166,6 @@ pub fn proc_row(pid: i32) -> Option<ProcRow> {
         tty_fg_pgid: info.e_tpgid as i32,
         status: info.pbi_status,
     })
-}
-
-/// Total CPU time this process has consumed, in nanoseconds (user +
-/// system), via `proc_pidinfo(PROC_PIDTASKINFO)`.  None when the pid
-/// is gone or the call is refused.
-///
-/// Sampled twice, the difference answers "is anything actually working
-/// in here" — which is a different question from "does this process
-/// have children", and the only one of the two that can be answered
-/// honestly.  Measured on this host: every live claude keeps children
-/// permanently (an MCP server, a language server, `caffeinate`, a
-/// long-lived shell), so a child count says nothing about whether work
-/// is in flight.
-pub fn proc_cpu_time_ns(pid: i32) -> Option<u64> {
-    unsafe {
-        let mut info: libc::proc_taskinfo = std::mem::zeroed();
-        let r = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTASKINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            std::mem::size_of::<libc::proc_taskinfo>() as i32,
-        );
-        if r <= 0 {
-            return None;
-        }
-        Some(info.pti_total_user + info.pti_total_system)
-    }
 }
 
 /// CPU time of `root` plus every descendant, nanoseconds.  Processes
@@ -510,6 +485,14 @@ mod tests {
     fn proc_env_value_returns_none_for_missing_key() {
         let pid = std::process::id() as i32;
         assert!(proc_env_value(pid, "MARSPOT_TEST_NOT_A_REAL_VAR_XYZ").is_none());
+    }
+
+    #[test]
+    fn proc_env_values_reads_several_keys_at_once() {
+        let pid = std::process::id() as i32;
+        let got = proc_env_values(pid, &["PATH", "MARSPOT_TEST_NOT_A_REAL_VAR_XYZ"]).expect("own environment");
+        assert_eq!(got, vec![std::env::var("PATH").ok(), None]);
+        assert!(proc_env_values(-1, &["PATH"]).is_none());
     }
 
     #[test]

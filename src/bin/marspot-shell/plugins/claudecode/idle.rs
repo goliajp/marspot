@@ -144,9 +144,11 @@ pub(super) fn tail_mentions_own_timer(text: &str) -> bool {
 
 /// CPU a claude subtree may burn during the observation window and
 /// still count as idle.  Not zero: an idling MCP server and a language
-/// server both tick over.  50 ms across a window of many seconds is
-/// well under 1 % of a core — an actual tool run is orders above it.
-pub(super) const IDLE_CPU_TOLERANCE_NS: u64 = 50_000_000;
+/// server both tick over.  2 s across the 60 s window is about 3 % of a
+/// core; the CPU reading used to be mach ticks taken as nanoseconds,
+/// which on Apple silicon (41.7 ns a tick) made the old 50 ms about this, and the
+/// reclaim has run at this value since.
+pub(super) const IDLE_CPU_TOLERANCE_NS: u64 = 2_000_000_000;
 
 /// The pane's shell pid, from the registry as last observed.  0 when
 /// the session is gone — the callers treat that as "cannot tell", which

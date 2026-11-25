@@ -25,7 +25,6 @@
 //!
 //! - `mod.rs` (this file) — public trait + types + `PluginRegistry`
 //! - `host.rs` — `PluginHost` impl backed by the shell's state
-//! - `claudecode.rs` — the first plugin, always-on
 //! - `usage/` — collects the account usage feed when nothing else does
 //!
 //! ## API versioning
@@ -61,6 +60,7 @@ pub mod pty_op;
 pub mod pty_command;
 pub mod skills;
 mod ticks;
+pub(crate) mod zombie;
 #[cfg(test)]
 mod agent_front_tests;
 pub use ticks::TickDue;
