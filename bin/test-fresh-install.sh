@@ -136,21 +136,18 @@ ours | awk '{n=split($2,a,"/"); print "  " $1 "  " a[n]}'
 for p in $(pane_shells); do echo "  $p  $(ps -o comm= -p "$p") (pane shell)"; done
 echo "==> what is on screen"
 app_windows | sed 's/^/  /'
-echo "==> system permission prompts since $STARTED"
+echo "==> system permission requests since $STARTED"
 # the log names the app's copy by its real path, /private/tmp/...
-"$TCC_PROMPTS" "$STARTED" com.goliajp.marspot "$(cd "$FRESH" && pwd -P)/" > "$FRESH/prompts" 2>&1
-sed '$d' "$FRESH/prompts" | sed 's/^/  asked: /'
-prompts="$(tail -1 "$FRESH/prompts")"
+"$TCC_PROMPTS" "$STARTED" "$(cd "$FRESH" && pwd -P)/" > "$FRESH/prompts" 2>&1
+tcc_rc=$?
+sed '/^requests=/d' "$FRESH/prompts" | sed 's/^/  /'
+tally="$(grep '^requests=' "$FRESH/prompts" || true)"
+prompts="$(sed -n 's/.*prompts=\([0-9]*\).*/\1/p' <<<"$tally")"
+stored="$(sed -n 's/.*stored=\([0-9]*\).*/\1/p' <<<"$tally")"
 prompt_windows | comm -13 "$FRESH/prompt-windows.before" - > "$FRESH/prompt-windows.new"
-echo "  $prompts asked for the app (unified log, tccd AUTHREQ_PROMPTING);" \
+echo "  ${tally:-no tally} (unified log, tccd AUTHREQ_*; exit $tcc_rc);" \
   "$(grep -c . "$FRESH/prompt-windows.new") new system dialogs on screen"
 sed 's/^/  new dialog: /' "$FRESH/prompt-windows.new"
-# A request the login user's TCC database already answers, allowed or
-# denied, is not asked again.  That database is the user's, not HOME's,
-# so the empty HOME does not make it new.
-echo "  note: what $(id -un) already allowed or denied com.goliajp.marspot here is not asked or counted;" \
-  "a Mac that never ran marspot may be asked more"
-at_most_one_prompt() { [[ $prompts =~ ^[0-9]+$ ]] && (( prompts <= 1 )); }
 echo "==> what it did"
 check "shell is still running" kill -0 $SHELL_PID
 check "one window on screen, the main one" one_main_window
@@ -172,7 +169,23 @@ check "profiles skill in the claude config" test -x "$FRESH/.claude/skills/marsp
 check "codex has the peer server" grep -q 'mcp_servers.marspot' "$FRESH/.codex/config.toml"
 check "no panic" no_panic
 check "no ERROR lines" no_errors
-check "at most one system permission prompt" at_most_one_prompt
+# A request the login user's TCC database already answers, allowed or
+# denied, is not asked again, and that database is the user's, not
+# HOME's: the empty HOME does not make it new.  So the count is a
+# verdict only when tccd saw the app's requests and answered none of
+# them from a stored decision; otherwise it is not measured, which is
+# neither a pass nor a failure.  More than one prompt fails either way.
+if [[ $tcc_rc != 0 || ! $prompts =~ ^[0-9]+$ ]]; then
+  echo "  NOT MEASURED  at most one system permission prompt" \
+    "(the log shows no request of this copy's: the instrument cannot see it)"
+elif (( prompts > 1 )); then
+  echo "  FAIL  at most one system permission prompt ($prompts asked)"; fail=1
+elif (( stored > 0 )); then
+  echo "  NOT MEASURED  at most one system permission prompt ($prompts asked;" \
+    "$stored answered from $(id -un)'s stored decisions, which a Mac that never ran marspot does not have)"
+else
+  echo "  ok    at most one system permission prompt ($prompts asked; tccd evaluated every request afresh)"
+fi
 
 echo "==> warnings in the log"
 awk -F'\t' '$3=="WARN"{print "  " $7 "  " substr($8,1,140)}' "$LOG" | sort | uniq -c | sort -rn | head -20
