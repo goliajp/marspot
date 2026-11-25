@@ -1,11 +1,22 @@
-//! The zombie watch: finds processes an agent left behind that almost
-//! certainly nobody uses any more, and tells the pane they belong to.
+//! The zombie watch: finds processes an agent left behind and subagents
+//! stuck with nothing to wake them, that almost certainly nobody uses
+//! any more, and records what it would tell the pane they belong to.
 //! It never ends them itself.
 //!
-//! So far which pane a process belongs to (`attrib`) and ending one a
-//! session asks to end (`stop`).
+//! The rules and the record reading are `marspot::zombie`; here are the
+//! plugin that runs them on the supervisor's clock (`plugin`) on a
+//! thread of their own (`checker`), the scene a check builds from the
+//! observation (`scene`), which pane a process belongs to (`attrib`),
+//! the dry run's record (`dryrun`), the pacing kept on disk (`store`)
+//! and ending a process a session asks to end (`stop`).  This build
+//! only records: `zombie.notify` is `dryrun` (the default) or `off`.
 
-// nothing calls it until the watch's checks land
-#[allow(dead_code)]
 pub(crate) mod attrib;
+mod checker;
+mod dryrun;
+mod plugin;
+mod scene;
 pub(crate) mod stop;
+mod store;
+
+pub use plugin::ZombiePlugin;

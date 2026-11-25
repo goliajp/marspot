@@ -1,0 +1,222 @@
+//! Cost gates: the time hot or recurring work takes.  Each budget is 3x
+//! the P95 measured on the reference machine (Apple silicon Mac mini,
+//! debug test build) and is widened only after measuring again.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
+
+use marspot::pidtree::{self, ProcId, ProcRow, ProcTable};
+use marspot::zombie::check::{PaneIn, Scene, Watch};
+use marspot::zombie::files::PaneFiles;
+use marspot::zombie::probe::Live;
+
+/// One zombie-watch check over 50 claude panes with 10 tasks each and a
+/// 200 MB transcript each, every task long silent so that every check
+/// samples every task's CPU.  P95 11.5 ms measured 2026-11-26.
+const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_millis(35);
+/// One check of four panes whose transcripts each grew by [`APPENDED`]
+/// since the last check, all of it read and folded.  P95 174 ms measured
+/// 2026-11-26.
+const ZOMBIE_APPENDED_P95_BUDGET: Duration = Duration::from_millis(525);
+const APPENDED_PANES: usize = 4;
+const APPENDED: usize = 6 << 20;
+const APPENDED_CHECKS: u64 = 20;
+
+const PANES: usize = 50;
+const TASKS: usize = 10;
+const TRANSCRIPT: u64 = 200 << 20;
+
+/// The stand-in claudes and every task under them, killed by pid when
+/// the test ends however it ends.
+struct Procs {
+    agents: Vec<Child>,
+    tasks: Vec<ProcId>,
+    dir: PathBuf,
+}
+
+impl Drop for Procs {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            let _ = pidtree::signal(*t, libc::SIGKILL);
+        }
+        for a in &mut self.agents {
+            let _ = a.kill();
+            let _ = a.wait();
+        }
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn transcript(path: &Path, pane: usize) {
+    let f = File::create(path).unwrap();
+    // all but the tail is a hole: the first read only touches the last 64 KiB
+    f.set_len(TRANSCRIPT - 64 * 1024).unwrap();
+    let mut tail = String::from("\n");
+    for i in 0..TASKS {
+        tail.push_str(&format!(
+            r#"{{"type":"assistant","timestamp":"2026-11-25T05:57:06.000Z","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","id":"c{i}","name":"Bash","input":{{"command":"sleep 120 # {pane}","run_in_background":true}}}}]}}}}"#
+        ));
+        tail.push('\n');
+        tail.push_str(&format!(
+            r#"{{"type":"user","timestamp":"2026-11-25T05:57:07.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"c{i}","content":"Command running in background with ID: b{pane:02}{i:02}"}}]}}}}"#
+        ));
+        tail.push('\n');
+    }
+    tail.push_str(r#"{"type":"system","subtype":"turn_duration","timestamp":"2026-11-25T05:58:00.000Z"}"#);
+    tail.push('\n');
+    let mut f = OpenOptions::new().append(true).open(path).unwrap();
+    f.write_all(tail.as_bytes()).unwrap();
+}
+
+fn spawn(dir: &Path, panes: usize) -> Procs {
+    let mut procs = Procs { agents: Vec::new(), tasks: Vec::new(), dir: dir.to_path_buf() };
+    for p in 0..panes {
+        let tasks = dir.join(format!("p{p}")).join("tasks");
+        fs::create_dir_all(&tasks).unwrap();
+        // job control puts each task in its own group, as claude's are
+        let script = format!(
+            "set -m; for i in $(seq -f %02g 0 {}); do sleep 120 > {}/b{p:02}$i.output & done; wait",
+            TASKS - 1,
+            tasks.display()
+        );
+        let child = Command::new("/bin/bash").arg("-c").arg(script).stdin(Stdio::null()).spawn().unwrap();
+        procs.agents.push(child);
+        transcript(&dir.join(format!("u{p}.jsonl")), p);
+    }
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let t = ProcTable::take();
+        let n: usize = procs.agents.iter().map(|a| t.children(a.id() as i32).count()).sum();
+        if n == panes * TASKS {
+            procs.tasks = procs.agents.iter().flat_map(|a| t.children(a.id() as i32).map(ProcRow::id).collect::<Vec<_>>()).collect();
+            break;
+        }
+        assert!(Instant::now() < end, "{n} of {} tasks started", panes * TASKS);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // three hours unwritten: past B1's silence, so every check samples CPU
+    let old = SystemTime::now() - Duration::from_secs(3 * 3600);
+    for e in fs::read_dir(dir).unwrap().flatten().filter(|e| e.path().is_dir()) {
+        for f in fs::read_dir(e.path().join("tasks")).unwrap().flatten() {
+            File::options().write(true).open(f.path()).unwrap().set_modified(old).unwrap();
+        }
+    }
+    procs
+}
+
+fn uuid(p: usize) -> String {
+    format!("u{p}")
+}
+
+#[test]
+fn zombie_check_perf_gate() {
+    let dir = std::env::temp_dir().join(format!("zombie-perf-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let procs = spawn(&dir, PANES);
+    let table = ProcTable::take();
+    let agents: Vec<&ProcRow> = procs.agents.iter().map(|a| table.get(a.id() as i32).unwrap()).collect();
+    let mut files: Vec<PaneFiles> = agents.iter().enumerate().map(|(p, a)| PaneFiles::new(a.id(), &uuid(p), &dir)).collect();
+    let mut watch = Watch::default();
+    let mut probe = Live::default();
+    let helper = |_: &ProcRow, _: bool| false;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+    let mut times = Vec::new();
+    let mut hits = 0;
+    for i in 0..100u64 {
+        let t0 = Instant::now();
+        for (f, a) in files.iter_mut().zip(&agents) {
+            f.refresh(a.start_unix);
+        }
+        let panes = files.iter().zip(&agents).enumerate().map(|(p, (f, a))| PaneIn { sid: p as u64, agent: a, log: &f.log }).collect();
+        let scene = Scene { now: now + i * 300, table: &table, panes, outside: Vec::new(), uid: 501, tmpdir: None, helper: &helper };
+        hits = watch.hits(&scene, &mut probe).len();
+        times.push(t0.elapsed());
+    }
+    let first = times[0];
+    let read: u64 = files.iter().map(PaneFiles::read_bytes).sum();
+    times.sort();
+    let p95 = times[94];
+    println!("zombie check: first {first:?}, p50 {:?}, p95 {p95:?}, max {:?}; {hits} hits; {read} transcript bytes read; {} syscalls", times[49], times[99], probe.calls);
+    assert!(read <= (PANES as u64) * 64 * 1024, "only each transcript's last 64 KiB is ever read: {read}");
+    assert_eq!(hits, PANES * (TASKS - 1), "every older copy of a pane's identical command");
+    assert!(p95 < ZOMBIE_CHECK_P95_BUDGET, "p95 {p95:?} over the budget {ZOMBIE_CHECK_P95_BUDGET:?}");
+    drop(procs);
+}
+
+/// What a busy session adds between two checks: replies, tool calls and
+/// results, the odd background call, a turn's end.  Lines of the sizes
+/// claude writes, about 1.5 KiB each.
+fn growth(bytes: usize) -> String {
+    let filler = "x".repeat(1500);
+    let mut out = String::with_capacity(bytes + 4096);
+    let mut i = 0usize;
+    while out.len() < bytes {
+        let line = match i % 50 {
+            0 => format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-25T06:00:00.000Z","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","id":"g{i}","name":"Bash","input":{{"command":"sleep 1 # {i}","run_in_background":true}}}}]}}}}"#
+            ),
+            1 => format!(
+                r#"{{"type":"user","timestamp":"2026-11-25T06:00:01.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"g{i}","content":"Command running in background with ID: g{i}"}}]}}}}"#
+            ),
+            49 => r#"{"type":"system","subtype":"turn_duration","timestamp":"2026-11-25T06:00:02.000Z"}"#.to_string(),
+            n if n % 2 == 0 => format!(
+                r#"{{"type":"assistant","timestamp":"2026-11-25T06:00:00.000Z","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"{filler}"}}]}}}}"#
+            ),
+            _ => format!(
+                r#"{{"type":"user","timestamp":"2026-11-25T06:00:01.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"t{i}","content":"{filler}"}}]}}}}"#
+            ),
+        };
+        out.push_str(&line);
+        out.push('\n');
+        i += 1;
+    }
+    out
+}
+
+#[test]
+fn zombie_check_perf_gate_with_megabytes_appended_between_checks() {
+    let dir = std::env::temp_dir().join(format!("zombie-perf-grow-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let procs = spawn(&dir, APPENDED_PANES);
+    let table = ProcTable::take();
+    let agents: Vec<&ProcRow> = procs.agents.iter().map(|a| table.get(a.id() as i32).unwrap()).collect();
+    let mut files: Vec<PaneFiles> = agents.iter().enumerate().map(|(p, a)| PaneFiles::new(a.id(), &uuid(p), &dir)).collect();
+    for (f, a) in files.iter_mut().zip(&agents) {
+        f.refresh(a.start_unix);
+    }
+    let chunk = growth(APPENDED);
+    let mut watch = Watch::default();
+    let mut probe = Live::default();
+    let helper = |_: &ProcRow, _: bool| false;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+    let mut times = Vec::new();
+    let before: u64 = files.iter().map(PaneFiles::read_bytes).sum();
+    for i in 0..APPENDED_CHECKS {
+        for p in 0..APPENDED_PANES {
+            OpenOptions::new().append(true).open(dir.join(format!("u{p}.jsonl"))).unwrap().write_all(chunk.as_bytes()).unwrap();
+        }
+        let t0 = Instant::now();
+        for (f, a) in files.iter_mut().zip(&agents) {
+            f.refresh(a.start_unix);
+        }
+        let panes = files.iter().zip(&agents).enumerate().map(|(p, (f, a))| PaneIn { sid: p as u64, agent: a, log: &f.log }).collect();
+        let scene = Scene { now: now + i * 300, table: &table, panes, outside: Vec::new(), uid: 501, tmpdir: None, helper: &helper };
+        watch.hits(&scene, &mut probe);
+        times.push(t0.elapsed());
+    }
+    let read = files.iter().map(PaneFiles::read_bytes).sum::<u64>() - before;
+    times.sort();
+    let p95 = times[(times.len() * 95).div_ceil(100) - 1];
+    println!(
+        "zombie check with {} MiB appended per pane: p50 {:?}, p95 {p95:?}, max {:?}; {read} bytes read",
+        APPENDED >> 20,
+        times[times.len() / 2],
+        times[times.len() - 1]
+    );
+    assert_eq!(read, (chunk.len() * APPENDED_PANES) as u64 * APPENDED_CHECKS, "every appended byte is read once");
+    assert!(p95 < ZOMBIE_APPENDED_P95_BUDGET, "p95 {p95:?} over the budget {ZOMBIE_APPENDED_P95_BUDGET:?}");
+    drop(procs);
+}
