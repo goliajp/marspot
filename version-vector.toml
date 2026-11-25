@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.706"  # codex panes get refused and would_move rows and a heads-up, and nothing is moved
+shell   = "0.7.707"  # helpers choose their account by the allocation's rule for helpers
 core    = "0.12.688"  # the settings panel write-back test is named as a view test, outside the interface text check
 session = "0.11.444"  # the rebalance setting reads dryrun, live or off

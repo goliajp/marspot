@@ -1,11 +1,12 @@
-//! A helper refused by its account moves to the roomiest one, and its
-//! move is reported for the helpers' record.
+//! Helpers refused by their account move by the allocation's rule for
+//! helpers, and each move is reported for the helpers' record.
 
 use super::*;
 use super::super::with_helpers::{drain_account_changes, AccountChanged, HelperRoles};
 
-/// P1 refuses; P2 renews first and is half used, so `best_profile`
-/// sends every pane there; P3 has the most left.
+/// P1 refuses; P2 renews first and is half used, P3 has the most left;
+/// both renew so far ahead that the demand is shared by what is left,
+/// and the ordinary pane, which moves first, takes P2's share.
 fn three_accounts(tag: &str) -> TestHome {
     let home = quota_home(tag);
     fs::create_dir_all(home.join(".claude-profile-3/sessions")).unwrap();
@@ -35,7 +36,7 @@ fn target(host: &FakeHost, i: usize) -> String {
 }
 
 #[test]
-fn helpers_refused_on_their_account_move_to_the_roomiest_one() {
+fn helpers_refused_on_their_account_go_where_the_allocation_has_a_gap() {
     let home = three_accounts("helpers");
     let host = FakeHost::new(home.join("state"));
     let mut plugin = stranded_plugin(pane_on_p1(&home, "u-77"), 77);
@@ -60,16 +61,15 @@ fn helpers_refused_on_their_account_move_to_the_roomiest_one() {
         let i = host.sent.lock().unwrap().iter().position(|(s, _)| *s == sid).unwrap();
         target(&host, i)
     };
-    assert!(to(79).contains(".claude-profile-2"), "an ordinary pane goes where quota lapses first: {}", to(79));
+    assert!(to(79).contains(".claude-profile-2"), "an ordinary pane goes where it renews first: {}", to(79));
     let helpers = [to(77), to(78)];
-    assert!(helpers.iter().any(|t| t.contains(".claude-profile-3")), "{helpers:?}");
-    assert!(helpers.iter().any(|t| t.contains(".claude-profile-2")), "the second helper is spread: {helpers:?}");
+    assert!(helpers.iter().all(|t| t.contains(".claude-profile-3")), "P3 has the gap left: {helpers:?}");
 
     let mut changes = drain_account_changes();
     changes.sort_by_key(|c| c.sid);
     let got: Vec<(u64, &str, u8)> = changes.iter().map(|c: &AccountChanged| (c.sid, c.agent, c.from)).collect();
     assert_eq!(got, [(77, "claude", 1), (78, "claude", 1)], "only the helpers' moves are reported");
-    assert!(changes.iter().all(|c| c.to == 2 || c.to == 3));
+    assert!(changes.iter().all(|c| c.to == 3));
 }
 
 /// The next scan after claude writes that its turn is over says so.

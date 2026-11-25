@@ -14,6 +14,8 @@ use marspot_peer::control::{AgentKind, ErrorCode, Reject};
 use crate::plugins::handoff::launch_line::{self, Launch, Resume};
 use crate::plugins::handoff::{self, Agent};
 use crate::plugins::pty_command::quotable;
+use crate::plugins::claudecode::quota::helper_pick::{self, Pool};
+use crate::plugins::claudecode::rooms::unix_now;
 use crate::plugins::usage::for_helpers::{self, Pick};
 
 pub(super) fn agent_of(k: AgentKind) -> Agent {
@@ -38,8 +40,8 @@ impl Account {
     }
 }
 
-/// The account a helper runs on: `asked` when given, else the one with
-/// the most room for `model`.  Reads profiles and usage feeds from disk:
+/// The account a helper runs on: `asked` when given, else the one the
+/// allocation's rule for helpers picks for `model`.  Reads profiles and usage feeds from disk:
 /// not for the shell's main loop.
 pub(super) fn pick_account(agent: AgentKind, asked: Option<u8>, model: Option<&str>) -> Result<Account, Reject> {
     if let Some(n) = asked {
@@ -56,6 +58,17 @@ pub(super) fn pick_account(agent: AgentKind, asked: Option<u8>, model: Option<&s
             format!("every {} account refuses {}; they take work again: {}", agent.as_str(), model.unwrap_or("the default model"), for_helpers::recoveries_text(&r)),
         )),
     }
+}
+
+/// A Claude helper started on account `n` because the call asked for
+/// it is counted there as a chosen one is: once a view shows its pane,
+/// the pane takes its own entry, not that of a helper the tally chose.
+pub(super) fn note_asked(agent: AgentKind, n: u8, model: Option<&str>) {
+    if !matches!(agent, AgentKind::Claude) {
+        return;
+    }
+    let class = helper_pick::claude_class(for_helpers::feed_model(Agent::Claude, model).as_deref());
+    helper_pick::placed(Pool::Claude, |p| p.note(n, class, unix_now()));
 }
 
 /// The mode in force: the call's, else `helpers.mode` in settings.toml,

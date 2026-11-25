@@ -261,3 +261,16 @@ fn allocation_same_target_after_busy_is_one_would_move() {
     assert_eq!(again.last.get(&3).map(|l| l.rest_moves.len()), Some(1));
     fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn allocation_restart_skips_the_lines_of_new_helpers() {
+    let d = dir("newhelpers");
+    let mut log = EventLog::new(d.clone());
+    let new = |kind: &str| Event { at: NOW - 60, sid: 0, kind: kind.into(), profile: Some(2), class: "plain".into(), detail: String::new() };
+    log.append(&new("placed")).unwrap();
+    log.append(&new("held_back_start")).unwrap();
+    let mut a = Allocation::new(d.clone());
+    a.rebuild(NOW);
+    assert!(a.last.is_empty(), "{:?}", a.last);
+    fs::remove_dir_all(&d).unwrap();
+}

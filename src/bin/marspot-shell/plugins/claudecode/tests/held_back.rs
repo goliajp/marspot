@@ -1,6 +1,6 @@
 //! A refused plain pane held back for the Fable panes: its session is
-//! sent nothing and its badge stays the binding's, and a helper's
-//! choice is not the allocation's.
+//! sent nothing and its badge stays the binding's; a helper is held
+//! back the same, and goes where the allocation's rule for helpers says.
 
 use super::leaving::{rebalance_mode, write_feed};
 use super::*;
@@ -107,10 +107,10 @@ fn quota_a_pane_held_back_for_fable_sends_nothing_and_keeps_its_badge() {
 }
 
 /// The allocation holds a plain pane back here; a helper in the same
-/// place goes where it went before the allocation chose for panes:
-/// `next_move`'s ranking, then the roomiest account.
+/// place is held back too: it does not take what the Fable panes are
+/// short of.
 #[test]
-fn helpers_switch_a_helpers_choice_is_not_the_allocations() {
+fn helpers_switch_a_helper_is_held_back_for_fable_as_a_pane_is() {
     rebalance_mode(marspot::settings::Rebalance::DryRun);
     let (_home, host, mut plugin, mut result) = scene("hbh", 77);
     result.helpers = HelperRoles::of([(50, 0), (77, 50)]);
@@ -118,18 +118,17 @@ fn helpers_switch_a_helpers_choice_is_not_the_allocations() {
     let rooms = rooms::rooms_for(&[1, 2], &marspot::cc_usage::read().unwrap().accounts, |p| Some(format!("hbh{p}@example")), rooms::unix_now());
     assert_eq!(v.must_move(&rooms, 77, 1, crate::plugins::allocation::Class::Plain).0, Move::Hold(HELD_BACK));
     sweep(&mut plugin, &host, &mut result);
-    let sent = host.sent.lock().unwrap().clone();
-    assert_eq!(sent.len(), 1, "{:?}", host.logged.lock().unwrap());
-    assert!(sent[0].1.contains(".claude-profile-2"), "{:?}", sent[0].1);
-    assert_eq!(noted(&host), 0, "a helper is not held back");
+    assert!(host.submitted.lock().unwrap().is_empty(), "held, not moved: {:?}", host.logged.lock().unwrap());
+    assert!(host.sent.lock().unwrap().is_empty());
+    assert_eq!(noted(&host), 1, "the helper is held back");
 }
 
 /// P1 refuses; P2 has the most room left but renews in a week, P3 less
-/// and renews in ten hours.  The roomiest account is P2, the
-/// allocation's rule (a) sends a plain pane to P3, whose room would be
-/// lost at its renewal: a helper keeps going where the roomiest goes.
+/// and renews in ten hours.  The roomiest account was P2; the
+/// allocation sends a plain pane to P3, whose room would be lost at its
+/// renewal, and a helper goes there too.
 #[test]
-fn helpers_switch_a_helper_keeps_roomiests_choice_where_the_allocation_differs() {
+fn helpers_switch_a_helper_goes_where_the_allocation_sends_it() {
     rebalance_mode(marspot::settings::Rebalance::DryRun);
     let tag = "hb3";
     let home = quota_home(tag);
@@ -151,14 +150,11 @@ fn helpers_switch_a_helper_keeps_roomiests_choice_where_the_allocation_differs()
     let v = view(&plugin, &mut result);
     let accounts = marspot::cc_usage::read().unwrap().accounts;
     let rooms = rooms::rooms_for(&[1, 2, 3], &accounts, |p| Some(format!("{tag}{p}@example")), now);
-    let others: Vec<_> = rooms.iter().filter(|(p, _)| *p != 1).cloned().collect();
-    let roomiest = super::super::quota::roomiest::roomiest(&others, &Default::default(), None);
-    assert_eq!(roomiest, Some(2), "the scene: P2 has the most room");
     assert_eq!(v.must_move(&rooms, 78, 1, crate::plugins::allocation::Class::Plain).0, Move::To(3), "the scene: the allocation sends a plain pane to P3");
 
     result.helpers = HelperRoles::of([(50, 0), (78, 50)]);
     sweep(&mut plugin, &host, &mut result);
     let sent = host.sent.lock().unwrap().clone();
     assert_eq!(sent.len(), 1, "{:?}", host.logged.lock().unwrap());
-    assert!(sent[0].1.contains(".claude-profile-2"), "roomiest's choice, not the allocation's: {:?}", sent[0].1);
+    assert!(sent[0].1.contains(".claude-profile-3"), "the allocation's choice: {:?}", sent[0].1);
 }

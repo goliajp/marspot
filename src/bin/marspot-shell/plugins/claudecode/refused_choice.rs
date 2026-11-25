@@ -1,14 +1,14 @@
 //! Where a refused pane goes, or why it stays.
 //!
 //! When it waits, how long and how often it moves are `hold_for`'s.
-//! Where it goes is the allocation core's rule (a) for a pane of its
-//! own; a helper keeps the choice it had before the core chose for
-//! panes: `next_move`'s ranking over the rooms that last it, then the
-//! roomiest account, so helpers refused one after another do not all
-//! land on the account that renews first.
+//! Where it goes is the allocation core's: rule (a) for a pane of its
+//! own, rule (c) for a helper, with the helpers placed since the feed
+//! was written counted where they went, so helpers refused one after
+//! another do not all land on the same account.
 
 use super::super::allocation_view::{HELD_BACK, View};
 use super::super::*;
+use super::super::quota::helper_pick::{Pool, placed};
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::replay::Inputs;
 
@@ -29,8 +29,7 @@ impl ClaudecodePlugin {
     /// chose it.
     pub(super) fn refused_choice(&self, plan: &leave_early::Plan, view: &View, result: &ScanResult, r: &Refused) -> (quota::Move, Option<Inputs>) {
         let (sid, from) = (r.sid, r.meta.profile_num);
-        let all = plan.rooms().to_vec();
-        let rooms = if r.helper { plan.rooms_for_helper(from, r.needs_model, plan.speed_of(sid)) } else { all };
+        let rooms = plan.rooms().to_vec();
         let tally = self.stranded.get(&sid);
         let situation = quota::Situation {
             rooms: &rooms,
@@ -45,15 +44,21 @@ impl ClaudecodePlugin {
             warned: r.warned,
             background_refused: result.agent_refused.get(&sid),
         };
-        if r.helper {
-            let feed_at = result.usage.as_ref().map_or(0, |u| u.generated_at);
-            let decision = quota::next_move(&situation);
-            return (quota::roomiest::helper_move(quota::roomiest::Pool::Claude, feed_at, decision, &rooms, from, r.needs_model), None);
+        if let Some(h) = quota::hold_for(&situation) {
+            return (h, None);
         }
-        match quota::hold_for(&situation) {
-            Some(h) => (h, None),
-            None => view.must_move(&rooms, sid, from, r.class),
+        if !r.helper {
+            return view.must_move(&rooms, sid, from, r.class);
         }
+        placed(Pool::Claude, |p| {
+            let now = crate::plugins::claudecode::rooms::unix_now();
+            p.settle(&view.helpers(), now);
+            let chosen = view.helper_must_move(&rooms, sid, from, r.class, p);
+            if let quota::Move::To(to) = chosen.0 {
+                p.note(to, r.class, now);
+            }
+            chosen
+        })
     }
 
     /// Mark a pane held back for the Fable panes, or no longer held

@@ -15,8 +15,10 @@ use std::collections::HashMap;
 
 use super::allocation_inputs::{AccountIn, Snapshot};
 use super::fable_need::FABLE;
+use super::quota::helper_pick::{Placed, unread_pick};
 use super::quota::{Move, Room};
 use crate::plugins::allocation::choose::{MUST_LAST_H, Mover, Reserve, held_back, loads_of, pick_where};
+use crate::plugins::allocation::helper::{Placement, Scene, place};
 use crate::plugins::allocation::notice::stranded;
 use crate::plugins::allocation::plan::{Plan, plan};
 use crate::plugins::allocation::replay::{Inputs, Kind, Why};
@@ -28,8 +30,12 @@ pub(super) const ALL_OUT: &str = "every account is out";
 pub(super) const NOWHERE: &str = "nowhere else to go";
 pub(super) const HELD_BACK: &str = "it waits rather than take what the Fable panes are short of";
 
-/// One pane in the plan: session, account, class, speed (weeks an hour).
-pub(super) type PaneRow = (u64, u8, Class, f64);
+/// The last sweep's view, for a helper started between sweeps.
+static LAST: std::sync::Mutex<Option<View>> = std::sync::Mutex::new(None);
+
+/// One pane in the plan: session, account, class, speed (weeks an
+/// hour), and whether it is a helper.
+pub(super) type PaneRow = (u64, u8, Class, f64, bool);
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct View {
@@ -47,7 +53,7 @@ impl View {
     /// from `rates`, in `snap.panes`' order, and `slope_f` the
     /// restricted use the accounts' readings show (weeks an hour).
     pub(super) fn from_rates(snap: &Snapshot, rates: &[(f64, f64)], slope_f: f64) -> View {
-        let panes: Vec<PaneRow> = snap.panes.iter().zip(rates).map(|(p, (f, n))| (p.sid, p.profile, p.class, f + n)).collect();
+        let panes: Vec<PaneRow> = snap.panes.iter().zip(rates).map(|(p, (f, n))| (p.sid, p.profile, p.class, f + n, p.helper)).collect();
         let accounts = snap
             .accounts
             .iter()
@@ -79,6 +85,58 @@ impl View {
             v.b_n = last.b_n;
         }
         v
+    }
+
+    /// Keep this view for the helpers started before the next sweep.
+    pub(super) fn publish(&self) {
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.clone());
+    }
+
+    /// What a helper started now reads: the accounts as `accounts` read
+    /// them and `rooms` judge them, the panes and their speeds as the
+    /// last sweep had them.  Before any sweep has published a view no
+    /// helper pane is known either way, so none is said to be shown.
+    pub(super) fn helper_start_scene(now: i64, accounts: Vec<AccountIn>, rooms: &[(u8, Room)]) -> Scene {
+        let last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut scene = View::for_click(now, accounts, last.as_ref()).helper_scene(rooms, None);
+        if last.is_none() {
+            scene.shown = None;
+        }
+        scene
+    }
+
+    /// What a helper's choice reads: the accounts as the main thread
+    /// judges them and the speeds of every pane but `skip`.
+    pub(super) fn helper_scene(&self, rooms: &[(u8, Room)], skip: Option<u64>) -> Scene {
+        let accounts = self.judged(rooms);
+        let table: Vec<(Option<u8>, Class, f64)> = self.panes.iter().filter(|p| Some(p.0) != skip).map(|p| (Some(p.1), p.2, p.3)).collect();
+        let loads = loads_of(&accounts, &table, None);
+        Scene { accounts, loads, b_f: self.b_f, b_n: self.b_n, kappa: Some(KAPPA_FABLE), shown: Some(self.helpers()) }
+    }
+
+    /// The helper panes these loads hold: session, account, class.
+    pub(super) fn helpers(&self) -> Vec<(u64, u8, Class)> {
+        self.panes.iter().filter(|p| p.4).map(|p| (p.0, p.1, p.2)).collect()
+    }
+
+    /// Where a refused helper goes, rule (c), with the helpers `placed`
+    /// whose panes these loads do not hold yet counted on their
+    /// accounts; with the inputs that chose it when the core chose it.  It is held back for the Fable
+    /// panes as any plain pane is.
+    pub(super) fn helper_must_move(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class, placed: &Placed) -> (Move, Option<Inputs>) {
+        let mover = Mover { class, rate: self.rate_of(sid, class) };
+        let scene = self.helper_scene(rooms, Some(sid));
+        match place(&scene, mover, Some(from), &placed.counts()) {
+            Placement::To(to, inputs) => (Move::To(to), Some(inputs)),
+            Placement::HeldBack(..) => (Move::Hold(HELD_BACK), None),
+            Placement::Nowhere => {
+                let model = (class == Class::Restricted).then_some(FABLE);
+                match unread_pick(rooms, Some(from), model, placed) {
+                    Some(to) => (Move::To(to), None),
+                    None => (Move::Hold(ALL_OUT), None),
+                }
+            }
+        }
     }
 
     /// Pane `sid` was sent to `to` this pass: the next choice counts it

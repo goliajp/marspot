@@ -57,6 +57,8 @@ impl Why {
 pub(crate) enum Kind {
     /// Must move; `loads` leave the pane out.
     Out { horizon_h: f64 },
+    /// A new helper, on no account yet: no account is left out.
+    New { horizon_h: f64 },
     /// Resting; `loads` count the pane.
     Rest {
         keeper: bool,
@@ -92,6 +94,7 @@ impl Inputs {
     pub(crate) fn decide(&self, plan: &Plan) -> Option<(u8, Why)> {
         match &self.kind {
             Kind::Out { horizon_h } => pick(&self.accounts, plan, &self.loads, self.mover, Some(self.here), *horizon_h).map(|t| (t, Why::Out)),
+            Kind::New { horizon_h } => pick(&self.accounts, plan, &self.loads, self.mover, None, *horizon_h).map(|t| (t, Why::Out)),
             Kind::Rest { keeper, since_move_h, left, band_last_hour, demand, stale_feed, speed_known, keeps_restricted, moves_week } => {
                 let r = Resting {
                     here: self.here,
@@ -134,6 +137,7 @@ impl Inputs {
         );
         match &self.kind {
             Kind::Out { horizon_h } => s.push_str(&format!(" kind=out horizon={horizon_h}")),
+            Kind::New { horizon_h } => s.push_str(&format!(" kind=new horizon={horizon_h}")),
             Kind::Rest { keeper, since_move_h, left, band_last_hour, demand, stale_feed, speed_known, keeps_restricted, moves_week } => {
                 let since = since_move_h.map_or_else(|| "-".to_string(), |h| h.to_string());
                 let left: Vec<String> = left.iter().map(|(id, h)| format!("{id}:{h}")).collect();
@@ -168,6 +172,7 @@ impl Inputs {
         };
         let kind = match get("kind")? {
             "out" => Kind::Out { horizon_h: num("horizon")? },
+            "new" => Kind::New { horizon_h: num("horizon")? },
             _ => Kind::Rest {
                 keeper: flag("keeper")?,
                 since_move_h: match get("since")? {

@@ -158,17 +158,6 @@ impl Plan<'_> {
         Some((to, self.lasts(to, model, speed)))
     }
 
-    /// The rooms a refused helper chooses among, as for every pane before
-    /// the allocation chose: those lasting `TARGET_H` with it when the
-    /// usual ranking's first among them can take it, else all of them.
-    pub(in crate::plugins) fn rooms_for_helper(&self, current: u8, model: Option<&str>, speed: f64) -> Vec<(u8, quota::Room)> {
-        let lasting = self.lasting(current, model, speed);
-        let fits = quota::best_profile(&lasting, current, model)
-            .and_then(|to| lasting.iter().find(|(p, _)| *p == to))
-            .is_some_and(|(to, r)| *to != current && !r.refused_for(model) && r.known_for(model) && !heads_up::nearly_out(r, model));
-        if fits { lasting } else { self.rooms.clone() }
-    }
-
     /// A pane of `speed` on `model` was sent to `profile` this pass.
     pub(in crate::plugins) fn place(&mut self, profile: u8, model: Option<&str>, speed: f64) {
         let mine = load_of(model, speed);

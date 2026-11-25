@@ -1,8 +1,8 @@
 //! Which account a new helper runs on, for each of the four agents.
 //!
-//! Claude, Kimi and Codex by their usage feeds, with the roomiest rule
-//! (`quota::roomiest`); Gemini writes no usage anywhere, so its homes
-//! take turns.  Every call reads the profiles and feeds from disk, so
+//! Claude, Kimi and Codex by their usage feeds, with the allocation's
+//! rule for helpers (`quota::helper_pick`); Gemini writes no usage
+//! anywhere, so its homes take turns.  Every call reads the profiles and feeds from disk, so
 //! it belongs off the shell's main loop.
 
 use std::path::{Path, PathBuf};
@@ -10,11 +10,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use marspot::cc_usage::CxAccount;
 
-use crate::plugins::claudecode::quota::roomiest::{self, Accounts, Pool};
+use crate::plugins::allocation::choose::Mover;
+use crate::plugins::allocation::helper::{Placement, Scene, place};
+use crate::plugins::allocation::replay::Inputs;
+use crate::plugins::allocation::{Class, RHO0};
+use crate::plugins::claudecode::quota::helper_pick::{self, Accounts, Placed, Pool};
 use crate::plugins::claudecode::quota::Room;
 use crate::plugins::claudecode::rooms::unix_now;
 use crate::plugins::claudecode::seen::Resets;
 use crate::plugins::handoff::{self, Agent};
+
+#[path = "for_helpers_text.rs"]
+mod text;
+pub(in crate::plugins) use text::{earliest_text, recoveries_text};
 
 /// The account a helper is started on.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,29 +72,74 @@ pub(in crate::plugins) fn pick_among(agent: Agent, homes: Vec<(u8, PathBuf)>, mo
         return default_home(agent);
     }
     let numbers: Vec<u8> = homes.iter().map(|(n, _)| *n).collect();
-    let (pool, accounts) = match agent {
-        Agent::Gemini => return take_turns(agent, &homes),
-        Agent::Claude => (Pool::Claude, roomiest::claude_accounts(&numbers, now)),
-        Agent::Kimi => (Pool::Kimi, crate::plugins::kimi::accounts::accounts_now(&numbers, now)),
-        Agent::Codex => (Pool::Codex, codex_accounts(&numbers, marspot::cc_usage::read_codex(), now)),
-    };
     let model = feed_model(agent, model);
-    roomiest::placed(pool, |placed| choose(agent, &homes, &accounts, model.as_deref(), placed, now))
+    let model = model.as_deref();
+    let (pool, accounts, scene) = match agent {
+        Agent::Gemini => return take_turns(agent, &homes),
+        Agent::Claude => {
+            let (a, usage) = helper_pick::claude_accounts(&numbers, now);
+            let scene = helper_pick::claude_scene(&numbers, &a.rooms, usage.as_ref(), now);
+            (Pool::Claude, a, scene)
+        }
+        Agent::Kimi => {
+            let a = crate::plugins::kimi::accounts::accounts_now(&numbers, now);
+            let scene = helper_pick::rooms_scene(&a.rooms, &a.resets, model, now);
+            (Pool::Kimi, a, scene)
+        }
+        Agent::Codex => {
+            let a = codex_accounts(&numbers, marspot::cc_usage::read_codex(), now);
+            let scene = helper_pick::rooms_scene(&a.rooms, &a.resets, model, now);
+            (Pool::Codex, a, scene)
+        }
+    };
+    // only Claude's choices are logged: `alloc_events` is Claude's
+    let events = (agent == Agent::Claude).then(helper_pick::events_dir);
+    helper_pick::placed(pool, |placed| choose(agent, &homes, &accounts, &scene, model, placed, now, events.as_deref()))
 }
 
-/// The pick among `homes` by what `accounts` says, counted in `placed`.
+/// The pick among `homes` by what `accounts` says and what the core
+/// reads of them, `scene`, counted in `placed`; with a line in the
+/// `alloc_events` of `events`, where given, for each choice the core
+/// made.  Where `scene`'s loads come from a view of the panes, the
+/// helpers placed are settled against the helper panes it shows first:
+/// the loads have those.
+///
+/// A plain helper the core would hold back for the Fable panes, were it
+/// a pane that had to move, is started where it would go: a new helper
+/// asked for now is not turned away for a shortfall that may never
+/// come.  Its line, `held_back_start`, keeps what it cost.
+#[allow(clippy::too_many_arguments)] // one choice, each input a separate reading
 pub(in crate::plugins) fn choose(
     agent: Agent,
     homes: &[(u8, PathBuf)],
     accounts: &Accounts,
+    scene: &Scene,
     model: Option<&str>,
-    placed: &mut roomiest::Placed,
+    placed: &mut Placed,
     now: i64,
+    events: Option<&Path>,
 ) -> Pick {
-    placed.feed(accounts.feed_at, now);
-    match roomiest::roomiest(&accounts.rooms, placed, model) {
+    match (&scene.shown, agent) {
+        (Some(shown), _) => placed.settle(shown, now),
+        // no view yet: a later feed does not say which helpers it counts
+        (None, Agent::Claude) => placed.expire(now),
+        (None, _) => placed.feed(accounts.feed_at, now),
+    }
+    let class = class_of(agent, &accounts.rooms, model);
+    let chosen = |kind: &str, n: u8, inputs: &Inputs| {
+        if let Some(dir) = events {
+            helper_pick::record_new(dir, now, kind, n, inputs);
+        }
+        Some(n)
+    };
+    let to = match place(scene, Mover { class, rate: RHO0 }, None, &placed.counts()) {
+        Placement::To(n, inputs) => chosen("placed", n, &inputs),
+        Placement::HeldBack(n, inputs) => chosen("held_back_start", n, &inputs),
+        Placement::Nowhere => helper_pick::unread_pick(&accounts.rooms, None, model, placed),
+    };
+    match to {
         Some(n) => {
-            placed.note(n);
+            placed.note(n, class, now);
             let dir = homes.iter().find(|(h, _)| *h == n).map(|(_, d)| d.clone()).unwrap_or_default();
             Pick::Account(account(agent, n, dir))
         }
@@ -94,10 +147,18 @@ pub(in crate::plugins) fn choose(
             let none = Resets::default();
             let at = |n: u8, room: &Room| {
                 let r = accounts.resets.iter().find(|(h, _)| *h == n).map_or(&none, |(_, r)| r);
-                roomiest::recovers_at(room, r, model, now)
+                helper_pick::recovers_at(room, r, model, now)
             };
             Pick::NoAccount(accounts.rooms.iter().map(|(n, room)| Recovery { number: *n, at: at(*n, room) }).collect())
         }
+    }
+}
+
+/// The class a helper of `agent` on `model` is placed as.
+fn class_of(agent: Agent, rooms: &[(u8, Room)], model: Option<&str>) -> Class {
+    match agent {
+        Agent::Claude => helper_pick::claude_class(model),
+        _ => helper_pick::class_in(rooms, model),
     }
 }
 
@@ -111,26 +172,13 @@ pub(in crate::plugins) fn claude_all_refused(model: Option<&str>) -> Option<Vec<
         return None;
     }
     let now = unix_now();
-    let accounts = roomiest::claude_accounts(&numbers, now);
+    let (accounts, usage) = helper_pick::claude_accounts(&numbers, now);
+    let scene = helper_pick::claude_scene(&numbers, &accounts.rooms, usage.as_ref(), now);
     let model = feed_model(Agent::Claude, model);
-    match choose(Agent::Claude, &homes, &accounts, model.as_deref(), &mut roomiest::Placed::default(), now) {
+    match choose(Agent::Claude, &homes, &accounts, &scene, model.as_deref(), &mut Placed::default(), now, None) {
         Pick::NoAccount(r) => Some(r),
         Pick::Account(_) => None,
     }
-}
-
-/// `P1 at 2026-11-23T14:00:00+00:00, P2 at an unknown time`.
-pub(in crate::plugins) fn recoveries_text(r: &[Recovery]) -> String {
-    let one = |x: &Recovery| {
-        let name = if x.number == 0 { "default".to_string() } else { format!("P{}", x.number) };
-        x.at.map_or_else(|| format!("{name} at an unknown time"), |t| format!("{name} at {}", super::feed::iso_utc(t)))
-    };
-    r.iter().map(one).collect::<Vec<_>>().join(", ")
-}
-
-/// The soonest known recovery among `r`, as text.
-pub(in crate::plugins) fn earliest_text(r: &[Recovery]) -> Option<String> {
-    r.iter().filter_map(|x| x.at).min().map(super::feed::iso_utc)
 }
 
 fn account(agent: Agent, number: u8, dir: PathBuf) -> HelperAccount {
@@ -174,7 +222,7 @@ fn take_turns(agent: Agent, homes: &[(u8, PathBuf)]) -> Pick {
 
 /// The model as the feed labels its cap.  Codex buckets are named by
 /// the model's last word (`gpt-5.3-codex-spark` is `spark`).
-fn feed_model(agent: Agent, model: Option<&str>) -> Option<String> {
+pub(in crate::plugins) fn feed_model(agent: Agent, model: Option<&str>) -> Option<String> {
     let m = model?.to_ascii_lowercase();
     Some(match agent {
         Agent::Codex => m.rsplit('-').next().unwrap_or(&m).to_string(),

@@ -113,6 +113,9 @@ impl HelperService for Service {
             Some(b) => b.account.clone(),
             None => launch::pick_account(a.agent, a.profile, a.model.as_deref())?,
         };
+        if a.profile.is_some() {
+            launch::note_asked(a.agent, account.n, a.model.as_deref());
+        }
         let mut note = None;
         let resume = a.resume_last
             && match launch::has_last(a.agent, &account.home, &cwd) {

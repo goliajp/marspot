@@ -43,6 +43,7 @@ impl ClaudecodePlugin {
                 View::of_defaults(&snapshot(result, &HashMap::new(), &marks, rooms::unix_now()))
             }
         };
+        view.publish();
         self.alloc_view = Some(view.clone());
         view
     }
