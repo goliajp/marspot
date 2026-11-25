@@ -49,6 +49,7 @@ impl Worker {
             c.tx.shutdown();
         }
         self.conns.clear();
+        self.madcawl.stop();
         marspot_peer::panes::remove(&self.owner);
     }
 }

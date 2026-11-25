@@ -174,6 +174,7 @@ pub(crate) struct Worker {
     /// Notes a change to the configuration that nobody here made.
     config_watch: Option<changes::Watch>,
     pub(super) moves: super::moving::Moves,
+    pub(super) madcawl: super::madcawl_host::Host,
 }
 
 impl Worker {
@@ -208,6 +209,7 @@ impl Worker {
             config_watch: None,
             names_passes: 0,
             moves: Default::default(),
+            madcawl: Default::default(),
         }
     }
 
@@ -230,6 +232,7 @@ impl Worker {
     fn reconcile_config(&mut self) {
         self.reconcile_hooks();
         self.reconcile_skills();
+        self.madcawl.reconcile();
         if let Some(w) = &mut self.config_watch {
             w.follow(super::claude_hooks::config_files(), changes::note);
         }
@@ -362,7 +365,7 @@ impl Worker {
                     b.replies.ends.completed(params.and_then(|p| p.get("turn")), crate::plugins::claudecode::rooms::unix_now());
                     if let Some(t) = &turn {
                         let owed = b.replies.completed(t);
-                        self.answer(sid, owed);
+                        super::reply::relay(b, sid, owed);
                     }
                 }
                 let b = self.bindings.get_mut(&sid).expect("found above");
@@ -376,19 +379,6 @@ impl Worker {
                 self.bindings.get_mut(&sid).expect("found above").replies.item(turn, item);
             }
             _ => {}
-        }
-    }
-
-    /// Send each asker the answer the turn gave, as this session.
-    fn answer(&self, sid: u64, owed: Vec<(super::reply::Asker, String)>) {
-        let Some(b) = self.bindings.get(&sid) else { return };
-        let from = format!("uds:{}", b.inbox.path.display());
-        let header = marspot_peer::envelope::Header { from: from.clone(), from_name: Some(b.record.name.clone()), from_mode: Some(b.class) };
-        for (asker, answer) in owed {
-            let content = super::reply::envelope(&header, &answer);
-            let line = marspot_peer::frame::user_line(&content, &from, Priority::Next, &marspot_peer::rand::uuid_v4());
-            deliver::send_line(&b.inbox.relay, &asker.reply_to, &line);
-            lx_info!("peerbus.answer_relayed", "the turn's answer went back to the asker", sid = sid, to = asker.reply_to);
         }
     }
 

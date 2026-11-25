@@ -1,7 +1,8 @@
 //! The MCP servers marspot registers with every agent, as one table
 //! each agent's config writer renders in its own format: the peer
 //! tools (`marspot-peer mcp`) always, and the madcawl browser tools
-//! (`madcawl-mcp`) while that program is installed.
+//! (`madcawl-mcp`) while it and its host, `madcawl-shell`, are both
+//! installed: without a host to reach the server only fails.
 //!
 //! `madcawl-mcp` is looked for at one fixed path, `~/.local/bin`, the
 //! directory marspot already installs `marspot-peer` into: a path that
@@ -13,7 +14,7 @@
 //! fixed path: an entry the user pointed elsewhere is theirs, and it is
 //! not written over while the program is installed either.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use marspot_peer::json::{Value, obj};
 
@@ -22,6 +23,7 @@ use super::claude_hooks::slot;
 pub(super) const PEER: &str = "marspot";
 pub(super) const MADCAWL: &str = "madcawl";
 const MADCAWL_BIN: &str = ".local/bin/madcawl-mcp";
+pub(super) const MADCAWL_SHELL_BIN: &str = ".local/bin/madcawl-shell";
 const MADCAWL_SOCKET: &str = "madcawl.sock";
 /// Why an entry under a server's name was left as the user wrote it.
 pub(super) const NOT_OURS: &str = "an entry pointed at another program; left as it is";
@@ -55,13 +57,24 @@ pub(super) struct Servers {
     pub gone: Vec<(&'static str, String)>,
 }
 
+/// Whether both madcawl programs, the MCP server and its host, are
+/// files at their fixed paths under `home`.
+pub(super) fn madcawl_installed(home: &Path) -> bool {
+    home.join(MADCAWL_BIN).is_file() && home.join(MADCAWL_SHELL_BIN).is_file()
+}
+
+/// The socket the madcawl host listens on, which the shell binds.
+pub(super) fn madcawl_socket() -> PathBuf {
+    marspot_term::paths::state_root().join(MADCAWL_SOCKET)
+}
+
 /// The table with the peer helper at `peer_bin`, `madcawl-mcp` looked
 /// for under `HOME` and given a socket in the state root.
 pub(super) fn servers(peer_bin: &str) -> Servers {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let madcawl = home.map(|h| h.join(MADCAWL_BIN));
-    let madcawl = madcawl.as_deref().and_then(|p| p.to_str().map(|s| (s, p.is_file())));
-    let socket = marspot_term::paths::state_root().join(MADCAWL_SOCKET);
+    let madcawl = home.map(|h| (h.join(MADCAWL_BIN), madcawl_installed(&h)));
+    let madcawl = madcawl.as_ref().and_then(|(p, ok)| p.to_str().map(|s| (s, *ok)));
+    let socket = madcawl_socket();
     match (madcawl, socket.to_str()) {
         (Some((bin, present)), Some(socket)) => of(peer_bin, Some((bin, present, socket))),
         _ => of(peer_bin, None),
@@ -69,7 +82,7 @@ pub(super) fn servers(peer_bin: &str) -> Servers {
 }
 
 /// The table from what was found: `madcawl` is the fixed path, whether
-/// a program is there, and the socket it is told.
+/// both programs are there, and the socket it is told.
 pub(super) fn of(peer_bin: &str, madcawl: Option<(&str, bool, &str)>) -> Servers {
     let peer = Server { name: PEER, command: peer_bin.into(), args: vec!["mcp".into()], env: Vec::new(), fixed: false };
     let mut out = Servers { list: vec![peer], gone: Vec::new() };
@@ -87,10 +100,10 @@ pub(super) fn of(peer_bin: &str, madcawl: Option<(&str, bool, &str)>) -> Servers
     out
 }
 
-/// The path `madcawl-mcp` is looked for at, for the watch that notes
-/// it being installed or removed.
-pub(super) fn madcawl_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(MADCAWL_BIN))
+/// The paths the madcawl programs are looked for at, for the watch
+/// that notes one being installed or removed.
+pub(super) fn madcawl_paths() -> Vec<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).map_or_else(Vec::new, |h| vec![h.join(MADCAWL_BIN), h.join(MADCAWL_SHELL_BIN)])
 }
 
 /// Whether `servers` (an `mcpServers` value) is an object or absent,
@@ -203,7 +216,7 @@ mod tests {
     use marspot_term::test_env::{EnvGuard, TempDir};
 
     #[test]
-    fn mcp_table_has_madcawl_only_while_its_program_is_at_the_fixed_path() {
+    fn mcp_table_has_madcawl_only_while_both_its_programs_are_at_the_fixed_paths() {
         let home = TempDir::new("mcp-table-home");
         let state = TempDir::new("mcp-table-state");
         let mut env = EnvGuard::new();
@@ -215,6 +228,9 @@ mod tests {
 
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        let t = servers("/p/marspot-peer");
+        assert_eq!((t.list.len(), t.gone.len()), (1, 1), "madcawl-mcp without its host is not registered");
+        std::fs::write(home.join(MADCAWL_SHELL_BIN), "#!/bin/sh\n").unwrap();
         let t = servers("/p/marspot-peer");
         assert!(t.gone.is_empty());
         let m = &t.list[1];

@@ -173,10 +173,10 @@ fn mcp_table_claude_file_is_unchanged_without_madcawl_and_carries_it_when_presen
     assert_eq!(v.at(&["mcpServers", MADCAWL, "env", "MADCAWL_SOCKET"]).and_then(Value::str), Some(SOCKET));
 }
 
-/// The registration claude panes get, end to end through the probe: a
-/// program put at `~/.local/bin/madcawl-mcp` is in the file the next
-/// pass writes, with a socket in the state root, and out again once
-/// the program is removed.
+/// The registration claude panes get, end to end through the probe:
+/// `~/.local/bin/madcawl-mcp`, once its host `madcawl-shell` is beside
+/// it, is in the file the next pass writes, with a socket in the state
+/// root, and out again once the program is removed.
 #[test]
 fn mcp_table_claude_registration_follows_the_installed_program() {
     let home = TempDir::new("mcp-table-claude-home");
@@ -191,6 +191,8 @@ fn mcp_table_claude_registration_follows_the_installed_program() {
     let bin = home.join(".local/bin/madcawl-mcp");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+    assert!(claude_mcp::reconcile().is_empty(), "not without its host");
+    std::fs::write(home.join(".local/bin/madcawl-shell"), "#!/bin/sh\n").unwrap();
     assert_eq!(claude_mcp::reconcile().len(), 1, "rewritten for the new server");
     let v = read();
     assert_eq!(v.at(&["mcpServers", MADCAWL, "command"]).and_then(Value::str), bin.to_str());
