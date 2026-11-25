@@ -122,12 +122,16 @@ fi
 # section <label> <what broke> <probe> [args...] — one probe, its exit
 # code, and no session of it left running.
 section() {
-  local label=$1 broke=$2 rc
+  local label=$1 broke=$2 rc before
   shift 2
   echo "--- $label ---" | tee -a "$RUN_LOG"
+  before=$(wc -l <"$RUN_LOG")
   dev_run_probe "$@" >>"$RUN_LOG" 2>&1
   rc=$?
-  (( rc != 3 )) || fail "$label: a marspot-session outlived the probe (orphan leak)"
+  # an orphan keeps a failing probe's own code, so read the probe's lines too
+  if (( rc == 3 )) || tail -n +"$((before + 1))" "$RUN_LOG" | grep -q 'outlived the probe'; then
+    fail "$label: a marspot-session outlived the probe (orphan leak)"
+  fi
   if (( rc == 75 )); then
     # a measurement over its ceiling on a busy host: undecided, and the
     # sections after it still run

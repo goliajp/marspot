@@ -92,16 +92,16 @@ is_measurement() {
     || $1 == measure-active.sh ]]
 }
 
-# One tool does the copying, for every session and every repo: it takes
-# the exclude list from git itself, so a path this repo ignores is never
-# sent and never deleted on the far side -- which is how the remote
-# target/ survives a sync from a tree that has none.
 # Exit 3 from these means a measurement in them was read on a busy host
 # and everything else passed.
 may_be_unmeasured() {
   is_measurement "$1" || [[ $1 == soak-l3.sh ]]
 }
 
+# One tool does the copying, for every session and every repo: it takes
+# the exclude list from git itself, so a path this repo ignores is never
+# sent and never deleted on the far side -- which is how the remote
+# target/ survives a sync from a tree that has none.
 remote_sync() {
   local tool
   tool="$(command -v remote-sync || true)"
