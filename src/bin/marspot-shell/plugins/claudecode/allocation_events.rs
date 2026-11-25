@@ -12,12 +12,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Days of files kept, today included.
-pub(super) const KEEP_DAYS: i64 = 15;
+pub(in crate::plugins) const KEEP_DAYS: i64 = 15;
 
-pub(super) const DAY: i64 = 86_400;
+pub(in crate::plugins) const DAY: i64 = 86_400;
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Event {
+pub(in crate::plugins) struct Event {
     pub at: i64,
     pub sid: u64,
     pub kind: String,
@@ -27,10 +27,10 @@ pub(super) struct Event {
 }
 
 impl Event {
-    fn line(&self) -> String {
+    fn line(&self, agent: &str) -> String {
         let profile = self.profile.map_or_else(|| "-".to_string(), |p| p.to_string());
         let clean = |s: &str| s.replace(['\t', '\n'], " ");
-        format!("{}\tclaude\t{}\t{}\t{}\t{}\t{}\n", self.at, self.sid, self.kind, profile, self.class, clean(&self.detail))
+        format!("{}\t{agent}\t{}\t{}\t{}\t{}\t{}\n", self.at, self.sid, self.kind, profile, self.class, clean(&self.detail))
     }
 
     fn parse(line: &str) -> Option<Event> {
@@ -51,17 +51,23 @@ impl Event {
 
 /// The directory of day files.
 #[derive(Debug)]
-pub(super) struct EventLog {
+pub(in crate::plugins) struct EventLog {
     dir: PathBuf,
     pruned_day: Option<String>,
+    /// The `agent` column of every line this log appends.
+    agent: &'static str,
 }
 
 impl EventLog {
     pub(super) fn new(dir: PathBuf) -> Self {
-        EventLog { dir, pruned_day: None }
+        Self::for_agent(dir, "claude")
     }
 
-    pub(super) fn append(&mut self, ev: &Event) -> std::io::Result<()> {
+    pub(in crate::plugins) fn for_agent(dir: PathBuf, agent: &'static str) -> Self {
+        EventLog { dir, pruned_day: None, agent }
+    }
+
+    pub(in crate::plugins) fn append(&mut self, ev: &Event) -> std::io::Result<()> {
         fs::create_dir_all(&self.dir)?;
         let day = ymd(ev.at);
         if self.pruned_day.as_deref() != Some(day.as_str()) {
@@ -69,7 +75,7 @@ impl EventLog {
             self.pruned_day = Some(day.clone());
         }
         let mut f = fs::OpenOptions::new().create(true).append(true).open(self.dir.join(format!("{day}.tsv")))?;
-        f.write_all(ev.line().as_bytes())
+        f.write_all(ev.line(self.agent).as_bytes())
     }
 
     /// Delete the day files older than `KEEP_DAYS` as of `now`.
@@ -107,7 +113,7 @@ impl EventLog {
     }
 
     /// Every event at or after `from` up to `now`, oldest first.
-    pub(super) fn read_since(&self, from: i64, now: i64) -> Vec<Event> {
+    pub(in crate::plugins) fn read_since(&self, from: i64, now: i64) -> Vec<Event> {
         let mut out = Vec::new();
         let mut day = from - from.rem_euclid(DAY);
         while day <= now {
@@ -182,7 +188,7 @@ fn day_of(path: &Path) -> Option<&str> {
 }
 
 /// `YYYYMMDD` of unix seconds, UTC.
-pub(super) fn ymd(secs: i64) -> String {
+pub(in crate::plugins) fn ymd(secs: i64) -> String {
     let z = secs.div_euclid(DAY) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -209,7 +215,7 @@ mod tests {
         assert_eq!(ymd(1_795_530_644), "20261124");
         assert_eq!(ymd(951_782_400), "20000229");
         let e = ev(5, "bound");
-        let back = Event::parse(e.line().trim_end()).unwrap();
+        let back = Event::parse(e.line("claude").trim_end()).unwrap();
         assert_eq!(back.detail, "a b", "a tab in the detail cannot split the line");
         assert_eq!(Event { detail: "a\tb".into(), ..back }, e);
         assert_eq!(Event::parse("x\tclaude\t1\tbound\t3\tplain\t"), None);

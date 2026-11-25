@@ -62,6 +62,8 @@ struct Turn {
 pub(super) struct Replies {
     waiting: Vec<(String, Asker)>,
     turns: HashMap<String, Turn>,
+    /// How the thread's turns ended, for the thread view.
+    pub(super) ends: super::refusal::TurnEnds,
 }
 
 impl Replies {

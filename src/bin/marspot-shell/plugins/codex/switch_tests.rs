@@ -80,7 +80,7 @@ fn world(argv: &[&str], bound: bool) -> World {
     let mut views = HashMap::new();
     if bound {
         let home1 = home.path().join(".codex-profile-1");
-        views.insert(SID, ThreadView { codex: CODEX, home: home1, thread: THREAD.into(), idle: true });
+        views.insert(SID, ThreadView { codex: CODEX, home: home1, thread: THREAD.into(), idle: true, ends: Default::default() });
     }
     publish_threads(views);
     let asks = Listener::connect();
