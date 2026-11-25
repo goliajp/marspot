@@ -199,3 +199,30 @@ fn peek_an_ended_view_leaves_the_host_alone() {
     app.notify_pane_focus_changes();
     assert_eq!(app.terminal_focus, Some(host));
 }
+
+/// The frame a resized helper is shown with is its screen at the new
+/// size, text and cursor, never a blank one: the view waits for the
+/// session's first frame of that size, and the session reflows before
+/// it publishes.
+#[test]
+fn peek_the_first_frame_after_the_helpers_resize_has_its_screen() {
+    let sb = sandbox();
+    let (mut app, rx, _host, sid) = app_with_helper(&sb);
+    app.inject_input(sid, b"hello");
+    let i = app.shadow_index(sid).unwrap();
+    wait_for("the helper's own frame has the text", || {
+        app.shadows[i].pump();
+        text_of(&app.shadows[i]).contains("hello")
+    });
+    let cell = app.windows[0].layout.cells[0];
+    assert_ne!(size_of(&app.shadows[i]), (cell.cols, cell.rows), "the view has to resize it");
+    app.route_pane_control(place(20, sid, PlaceWhere::Peek));
+    wait_for("the view is shown", || {
+        turn(&mut app, &rx);
+        app.windows[0].panes[0].peeked() == Some(sid)
+    });
+    let shown = app.shown(0, 0);
+    assert_eq!(size_of(shown), (cell.cols, cell.rows), "shown on its frame of the host's size, not on the deadline");
+    assert!(text_of(shown).contains("hello"), "the first frame shown is not blank");
+    assert_eq!(shown.session().grid().cursor(), (5, 0));
+}
