@@ -27,18 +27,54 @@
 //! here, since a half-written frame would desynchronise the protocol
 //! stream permanently.
 
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{IntoRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use marspot_term::frame_writer::FrameWriter;
-use marspot_term::shell_proto::Frame;
+use marspot_term::frame_writer::{BoundedWriter, Queued};
+use marspot_term::shell_proto::{Frame, HEADER_LEN, MsgType};
+
+/// What the writer thread puts on the wire.
+enum Item {
+    Frame(Frame),
+    /// A `GridReady` poke.  The flag is the one `ControlWriter::poke`
+    /// sets; it is cleared just before the poke is written, so a
+    /// publish that finds it set happened before the core was woken and
+    /// is read by the shm read that wake starts.
+    Poke(Arc<AtomicBool>),
+}
+
+impl Queued for Item {
+    fn queued_len(&self) -> usize {
+        match self {
+            Item::Frame(f) => f.wire_len(),
+            Item::Poke(_) => HEADER_LEN,
+        }
+    }
+
+    fn write_all_to(&self, sink: &mut dyn Write) -> io::Result<()> {
+        match self {
+            Item::Frame(f) => f.write_all_to(sink),
+            Item::Poke(queued) => {
+                queued.store(false, Ordering::SeqCst);
+                Frame::new(MsgType::GridReady, Vec::new()).write_all_to(sink)
+            }
+        }
+    }
+}
 
 /// L3's end of the control socket.  The queueing lives in
 /// [`FrameWriter`]; this adds the fd bookkeeping the execv handoff
 /// needs, which is specific to L3's self-update path.
 pub struct ControlWriter {
-    inner: FrameWriter,
+    inner: BoundedWriter<Item>,
+    /// A poke is queued and not yet written.  A core that stops reading
+    /// would otherwise collect one twelve-byte poke per publish until
+    /// the queue's cap, a third of a million of them, and every one but
+    /// the first says nothing the first does not.
+    poke_queued: Arc<AtomicBool>,
     /// The stream's fd, kept so the execv handoff can pass it on.
     fd: RawFd,
     /// Held only so the fd stays open for `fd`'s lifetime; the writer
@@ -60,7 +96,8 @@ impl ControlWriter {
             stream.as_raw_fd()
         };
         Ok(Self {
-            inner: FrameWriter::new("l3-control-writer", thread_half, marspot_term::frame_writer::cap::CONTROL_SOCKET),
+            inner: BoundedWriter::new("l3-control-writer", thread_half, marspot_term::frame_writer::cap::CONTROL_SOCKET),
+            poke_queued: Arc::new(AtomicBool::new(false)),
             fd,
             stream: Some(stream),
         })
@@ -68,7 +105,18 @@ impl ControlWriter {
 
     /// Queue `frame` for L2.  Never blocks.  `false` = dropped.
     pub fn send(&mut self, frame: Frame) -> bool {
-        self.inner.send(frame)
+        self.inner.send(Item::Frame(frame))
+    }
+
+    /// Tell the core the grid changed.  Folded into a poke still
+    /// waiting in the queue, which wakes the core to the same shm.
+    pub fn poke(&mut self) {
+        if self.poke_queued.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if !self.inner.send(Item::Poke(Arc::clone(&self.poke_queued))) {
+            self.poke_queued.store(false, Ordering::SeqCst);
+        }
     }
 
     pub fn backlog(&self) -> usize {
@@ -94,3 +142,7 @@ impl ControlWriter {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "control_writer_tests.rs"]
+mod tests;
