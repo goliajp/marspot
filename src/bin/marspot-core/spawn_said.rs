@@ -2,6 +2,14 @@
 //! frames that type into it and watch it.  The socket's handshake comes
 //! first, and a request sent on the answer got to the core before the
 //! session's word did, to be refused as for an older build.
+//!
+//! The session's word can also come before the pane: the core reads a
+//! new connection from the moment it is made, and the worker that made
+//! it reports the landed spawn (or the restored window) afterwards.
+//! What a session says about itself before its pane is there is kept
+//! and handed to the pane once it is.
+
+use std::collections::VecDeque;
 
 use super::*;
 
@@ -19,6 +27,36 @@ struct Unsaid {
 #[derive(Default)]
 pub(super) struct SpawnsUnsaid(Vec<Unsaid>);
 
+/// Three frames per connection from every session the core may hold
+/// (the process cap is 64), with room to spare; past it the oldest go.
+const EARLY_CAP: usize = 256;
+
+/// What sessions said before their panes landed, oldest first.
+#[derive(Default)]
+pub(super) struct EarlySays(VecDeque<(u64, Frame)>);
+
+impl EarlySays {
+    fn keep(&mut self, sid: u64, frame: Frame) {
+        if self.0.len() >= EARLY_CAP
+            && let Some((gone, f)) = self.0.pop_front()
+        {
+            lx_warn!(
+                "core.early_says.dropped",
+                "a session's word before its pane landed was dropped at the cap",
+                session_id = gone,
+                msg_type = f.msg_type as u32
+            );
+        }
+        self.0.push_back((sid, frame));
+    }
+
+    /// The session's pane will not land (closed, failed, its window
+    /// gone): what it said is dropped with it.
+    pub(super) fn forget(&mut self, sid: u64) {
+        self.0.retain(|(s, _)| *s != sid);
+    }
+}
+
 impl SpawnsUnsaid {
     pub(super) fn wait(&self) -> Option<Duration> {
         let now = Instant::now();
@@ -34,12 +72,29 @@ impl CoreApp {
 
     /// A frame a session sent about itself.
     pub(super) fn session_says(&mut self, sid: u64, frame: &Frame) {
-        if let Some(pane) = self.pane_by_sid_mut(sid) {
-            pane.session_mut().l3_session_says(frame);
+        match self.pane_by_sid_mut(sid) {
+            Some(pane) => pane.session_mut().l3_session_says(frame),
+            None => self.pane_control.shadows.early.keep(sid, frame.clone()),
         }
         if frame.msg_type == MsgType::SessionReadsPaneControl {
             self.answer_unsaid(|u| u.sid == sid);
         }
+    }
+
+    /// Panes landed: each is told what its session said before, in the
+    /// order it was said.  What is for a pane still to come is kept.
+    pub(super) fn replay_early_says(&mut self) {
+        for (sid, frame) in std::mem::take(&mut self.pane_control.shadows.early.0) {
+            self.session_says(sid, &frame);
+        }
+    }
+
+    /// A restored window's panes are in place: they hear what their
+    /// sessions said meanwhile, then any not on the staged build is
+    /// asked to move.  Returns how many were asked.
+    pub(super) fn restored_panes_landed(&mut self, wi: usize) -> usize {
+        self.replay_early_says();
+        marspot::session_signal::ask_all_to_update(win!(self, wi).panes.iter_mut())
     }
 
     pub(super) fn expire_unsaid(&mut self, now: Instant) {

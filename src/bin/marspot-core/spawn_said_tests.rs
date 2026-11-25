@@ -48,3 +48,35 @@ fn shadow_open_of_a_session_that_never_says_it_is_answered_all_the_same() {
     assert_eq!(answered(&app, 8), Some(sid));
     assert_eq!(app.pane_control.shadows.wait(), None);
 }
+
+/// The core reads a new session from its handshake on, and the worker
+/// reports the landed spawn afterwards: the session's word can reach
+/// the loop first.  It still counts once the pane lands.
+#[test]
+fn what_a_session_says_before_its_spawn_lands_still_counts() {
+    let sb = sandbox();
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    assert_eq!(app.dev_open_shadow(9, psid), Route::Forwarded);
+    let mut landed = None;
+    let mut said = None;
+    while landed.is_none() || said.is_none() {
+        match rx.recv_timeout(Duration::from_secs(30)).expect("the spawn lands and its session says it reads pane control") {
+            // held back until the session has spoken
+            CoreEvent::L3SpawnFinished(sid, o) => landed = Some((sid, o)),
+            CoreEvent::L3Says(sid, f) => {
+                if f.msg_type == MsgType::SessionReadsPaneControl && sid != psid {
+                    said = Some(sid);
+                }
+                app.session_says(sid, &f);
+            }
+            _ => {}
+        }
+    }
+    let (sid, outcome) = landed.unwrap();
+    assert_eq!(said, Some(sid));
+    app.adopt_spawn_outcome(sid, outcome);
+    let reach = app.pane_by_sid_mut(sid).unwrap().session().pane_control_reach();
+    assert_eq!(reach, marspot::pane::ControlReach::Reads);
+    assert_eq!(answered(&app, 9), Some(sid), "answered on landing, not after SAY_WITHIN");
+    assert_eq!(app.pane_control.shadows.wait(), None, "nothing is left to wake for");
+}
