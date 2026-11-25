@@ -41,6 +41,17 @@ fn row(usage: Option<&CcUsage>, n: u8) -> Option<&marspot::cc_usage::CcAccount> 
     usage?.accounts.iter().find(|a| a.name == name)
 }
 
+fn resets(usage: Option<&CcUsage>, n: u8) -> Resets {
+    row(usage, n)
+        .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d.unwrap_or(0), models: Vec::new() })
+        .unwrap_or_default()
+}
+
+/// A pane met a refusal on account `n` whose window has not renewed.
+pub(super) fn refused(usage: Option<&CcUsage>, seen: &Seen, n: u8, now: i64) -> bool {
+    seen.shut(n, &resets(usage, n), now)
+}
+
 /// Each of `numbers` as the chooser sees it at `now`.  An account a
 /// pane was refused on is full until the window that refusal was about
 /// renews: at the feed's reset time when it gives one, else after the
@@ -49,12 +60,8 @@ pub(super) fn rooms(numbers: &[u8], usage: Option<&CcUsage>, seen: &Seen, now: i
     numbers
         .iter()
         .map(|&n| {
-            let account = row(usage, n);
-            let mut room = account.map_or_else(|| unmeasured(now), |a| room_of(a, now));
-            let resets = account
-                .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d.unwrap_or(0), models: Vec::new() })
-                .unwrap_or_default();
-            if seen.shut(n, &resets, now)
+            let mut room = row(usage, n).map_or_else(|| unmeasured(now), |a| room_of(a, now));
+            if refused(usage, seen, n, now)
                 && let Room::Known { util_5h, .. } = &mut room
             {
                 *util_5h = Some(1.0);
@@ -65,21 +72,17 @@ pub(super) fn rooms(numbers: &[u8], usage: Option<&CcUsage>, seen: &Seen, now: i
 }
 
 /// The kimi accounts `numbers` as the plugin's own sweep sees them: the
-/// feed, with the refusals its panes have met.  Reads files.
+/// feed, with the refusals its panes have met, and with the month and
+/// paid use while `kimi.allocation` is live.  Reads files.
 pub(in crate::plugins) fn accounts_now(numbers: &[u8], now: i64) -> Accounts {
     let usage = marspot::kimi_usage::read();
     let refused = marspot::paths::state_root().join("plugins/kimi/refused.tsv");
     let seen = std::fs::read_to_string(refused).map(|t| Seen::decode(&t)).unwrap_or_default();
-    let resets = numbers
-        .iter()
-        .map(|&n| {
-            let r = row(usage.as_ref(), n)
-                .map(|a| Resets { five_hour: a.reset_5h.unwrap_or(0), week: a.reset_7d.unwrap_or(0), models: Vec::new() })
-                .unwrap_or_default();
-            (n, r)
-        })
-        .collect();
-    Accounts { rooms: rooms(numbers, usage.as_ref(), &seen, now), resets, feed_at: usage.map_or(0, |u| u.generated_at) }
+    let resets = numbers.iter().map(|&n| (n, resets(usage.as_ref(), n))).collect();
+    let mode = marspot::settings::get().kimi_allocation;
+    let extras = if mode == marspot::settings::AgentAllocation::Live { super::extra::read() } else { Default::default() };
+    let rooms = super::alloc_wire::rooms_for(mode, rooms(numbers, usage.as_ref(), &seen, now), &extras, now);
+    Accounts { rooms, resets, feed_at: usage.map_or(0, |u| u.generated_at) }
 }
 
 /// Which window a refusal on account `n` was about.  kimi's error does

@@ -9,6 +9,8 @@ use std::path::Path;
 
 use marspot_peer::json::{obj, Value};
 
+pub(in crate::plugins) use super::iso_time::iso_utc;
+
 /// A window nobody has read for this long is dropped.
 const KEEP_SECS: i64 = 7 * 86_400;
 /// A window whose reset has passed is dropped once it is this old: the
@@ -35,7 +37,7 @@ impl Window {
         Window { util, reset, severity: None, is_active: None, seen }
     }
 
-    fn expired(&self, now: i64) -> bool {
+    pub(super) fn expired(&self, now: i64) -> bool {
         let age = now - self.seen;
         age > KEEP_SECS || (age > PAST_RESET_KEEP_SECS && self.reset.is_some_and(|r| r <= now))
     }
@@ -64,6 +66,7 @@ pub(super) struct Credits {
 pub(super) struct Reading {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
+    pub month: Option<Window>,
     pub models: Vec<ModelWindow>,
     pub credits: Option<Credits>,
     /// The provider itself says the account is refused, whatever the
@@ -80,6 +83,7 @@ pub(super) struct Account {
     pub limit_reached: bool,
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
+    pub month: Option<Window>,
     pub models: Vec<ModelWindow>,
     pub credits: Option<Credits>,
     /// Unix seconds of the last successful read; 0 for none yet.
@@ -102,6 +106,7 @@ impl Account {
         if r.seven_day.is_some() {
             self.seven_day = r.seven_day;
         }
+        self.absorb_month(r.month);
         for m in r.models {
             match self.models.iter_mut().find(|h| h.label == m.label && h.minutes == m.minutes) {
                 Some(held) => *held = m,
@@ -121,6 +126,7 @@ impl Account {
         if self.seven_day.as_ref().is_some_and(|w| w.expired(now)) {
             self.seven_day = None;
         }
+        self.expire_month(now);
         self.models.retain(|m| !m.window.expired(now));
     }
 
@@ -174,6 +180,7 @@ impl Account {
         if let Some(at) = self.limits_as_of() {
             row.set("limits_as_of", iso_utc(at).into());
         }
+        self.month_into(&mut row);
         row.set("collected_at", iso_utc(self.collected_at()).into());
         row
     }
@@ -255,29 +262,6 @@ pub(super) fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, body)?;
     std::fs::rename(&tmp, path)
-}
-
-/// Unix seconds as `2026-11-10T05:55:14+00:00`, the form the feed's
-/// reader and the devops collector both use.
-pub(in crate::plugins) fn iso_utc(unix: i64) -> String {
-    let days = unix.div_euclid(86_400);
-    let secs = unix.rem_euclid(86_400);
-    // civil-from-days, Howard Hinnant's algorithm
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00",
-        secs / 3_600,
-        secs % 3_600 / 60,
-        secs % 60
-    )
 }
 
 #[cfg(test)]

@@ -11,10 +11,15 @@
 //! with its bare badge and no report.
 
 pub(in crate::plugins) mod accounts;
+mod alloc;
+#[cfg(test)]
+mod alloc_tests;
+mod alloc_wire;
 mod badge;
 mod balance;
 mod config;
 mod context;
+mod extra;
 mod hand_off;
 mod pane;
 mod peer;

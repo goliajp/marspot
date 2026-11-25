@@ -17,7 +17,7 @@ use marspot_peer::json::{self, Value};
 use marspot_term::lx_info;
 
 use super::claude::{outcome_with, Outcome, Waits};
-use super::feed::{Account, Reading, Window};
+use super::feed::{Account, Credits, Reading, Window};
 use super::http;
 use crate::plugins::kimi::{default_home, managed, profile_dirs_in};
 use crate::plugins::plain_file;
@@ -33,6 +33,14 @@ const MAX_LOGIN: u64 = 64 * 1024;
 const SPARE_SECS: i64 = 15;
 /// How often an account's name is asked for again.
 const LABEL_EVERY_SECS: i64 = 86_400;
+/// The monthly allowance's window in `/usages`.  The name is the one a
+/// test body of this module has carried since kimi 2.5.3; no reply from
+/// a real account has been seen to confirm it.
+const MONTH_WINDOW: &str = "limit_month_total";
+/// What the account can still spend once its allowance is used, paid
+/// for: the top-level wallet object of `/usages`.  Read from the same
+/// test body, unconfirmed against a real account.
+const EXTRA_WALLET: &str = "boosterWallet";
 
 #[derive(Debug, PartialEq)]
 pub(super) struct Home {
@@ -143,10 +151,12 @@ fn unix_of(stamp: &str) -> Option<i64> {
     }
 }
 
-/// The two windows in a `/usages` body.  `used_ratio` is a fraction,
-/// written as a number or as a string; `reset_time` is an RFC 3339
-/// time and may be missing.  A body with neither window says nothing:
-/// a row of blanks would read as an account with everything left.
+/// The windows in a `/usages` body: five hours, the week, the month.
+/// `used_ratio` is a fraction, written as a number or as a string;
+/// `reset_time` is an RFC 3339 time and may be missing.  A body with
+/// neither the five hours nor the week says nothing: a row of blanks
+/// would read as an account with everything left.  The paid wallet, when
+/// there is one, is the row's credits: what is left and what it held.
 pub(super) fn parse_usage(body: &str, now: i64) -> Option<Reading> {
     let v = json::parse(body).ok()?;
     let usages = v.get("usages")?;
@@ -163,8 +173,20 @@ pub(super) fn parse_usage(body: &str, now: i64) -> Option<Reading> {
         let reset = entry.str_at("reset_time").and_then(unix_of);
         Some(Window::new(ratio.clamp(0.0, 1.0), reset, now))
     };
-    let r = Reading { five_hour: window("limit_5h"), seven_day: window("limit_7d"), ..Reading::default() };
+    let r = Reading { five_hour: window("limit_5h"), seven_day: window("limit_7d"), month: window(MONTH_WINDOW), credits: wallet(&v), ..Reading::default() };
     (r.five_hour.is_some() || r.seven_day.is_some()).then_some(r)
+}
+
+fn wallet(v: &Value) -> Option<Credits> {
+    let balance = v.get(EXTRA_WALLET)?.get("balance")?;
+    let amount = |key: &str| match balance.get(key)? {
+        Value::Num(n) => Some(*n),
+        Value::Str(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|n| n.is_finite());
+    let left = amount("amountLeft")?;
+    Some(Credits { enabled: Some(true), balance: Some(left), limit: amount("amount"), ..Credits::default() })
 }
 
 /// What a `/me` body calls the account: its address, or else its
@@ -318,7 +340,25 @@ mod tests {
         assert_eq!(r.five_hour, Some(Window::new(0.37, Some(1_794_297_600), NOW)));
         // midnight at +08:00 is 16:00 the day before
         assert_eq!(r.seven_day, Some(Window::new(0.82, Some(1_794_585_600), NOW)));
-        assert!(r.models.is_empty() && r.credits.is_none() && !r.limit_reached);
+        assert!(r.models.is_empty() && !r.limit_reached);
+    }
+
+    #[test]
+    fn a_usage_body_with_a_monthly_window_and_a_wallet_keeps_both() {
+        let body = include_str!("../kimi/fixtures/usages-month-spent.json");
+        let r = parse_usage(body, NOW).unwrap();
+        assert_eq!(r.month, Some(Window::new(1.0, Some(1_796_083_200), NOW)), "the month is spent until 2026-12-01");
+        let c = r.credits.as_ref().expect("the wallet");
+        assert_eq!((c.balance, c.limit), (Some(2_500_000.0), Some(5_000_000.0)));
+        let r = parse_usage(BODY, NOW).unwrap();
+        assert_eq!(r.month, Some(Window::new(0.5, None, NOW)));
+        // through the feed and back, as a restart reads it
+        let mut a = Account { name: "Kimi 2".into(), ..Account::default() };
+        a.absorb(parse_usage(body, NOW).unwrap(), NOW);
+        let text = super::super::feed::render(std::slice::from_ref(&a), NOW);
+        assert_eq!(super::super::feed_load::load(&text), vec![a]);
+        let row = &marspot::cc_usage::parse(&text).unwrap().accounts[0];
+        assert_eq!(row.status, "allowed", "the month does not change what today's choices read");
     }
 
     #[test]

@@ -12,6 +12,12 @@
 //! What panes were refused and what they were told is kept on disk: a
 //! restart of the shell must not send a pane back to an account that
 //! refused one an hour ago.
+//!
+//! `kimi.allocation` adds the shared allocation (`alloc`), the monthly
+//! window and paid use (`extra`).  `off` leaves all of the above as it
+//! is; `dryrun` only writes what the allocation would do; `live` lays
+//! the month and paid use over the accounts, sends a pane that has to
+//! move where the allocation says, and moves resting panes as it plans.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,11 +26,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use marspot::cc_usage::CcUsage;
+use marspot::settings::AgentAllocation;
 use marspot_peer::registry::{Agent, Status};
 
+use super::alloc::{Decision, KimiAlloc};
+use super::alloc_wire::{must_move_to, rooms_for};
+use super::extra::{self, Extras};
 use super::{accounts, quota, KimiPlugin, PaneKimi};
 use crate::plugins::claudecode::heads_up;
-use crate::plugins::claudecode::quota::{helper_pick, next_move, Move, Refusal, Situation};
+use crate::plugins::claudecode::quota::{helper_pick, next_move, Move, Refusal, Room, Situation};
 use crate::plugins::claudecode::with_helpers::{account_changed, AccountChanged, HelperRoles};
 use crate::plugins::claudecode::rooms::unix_now;
 use crate::plugins::claudecode::seen::Seen;
@@ -49,13 +59,19 @@ struct Tally {
 
 #[derive(Default)]
 pub(super) struct Balance {
-    refused: Seen,
+    pub(super) refused: Seen,
     told: heads_up::Ledger,
     tallies: HashMap<u64, Tally>,
-    usage: Option<CcUsage>,
+    pub(super) usage: Option<CcUsage>,
     /// The accounts a pane can be moved to.
     targets: Vec<(u8, PathBuf)>,
     read_at: Option<Instant>,
+    /// Read only while `kimi.allocation` is not `off`.
+    pub(super) extras: Extras,
+    paying: extra::Paying,
+    pub(super) alloc: Option<KimiAlloc>,
+    /// The accounts last logged as shut by the month or paid use.
+    pub(super) shut_said: Vec<(u8, extra::Shut)>,
 }
 
 impl Balance {
@@ -84,13 +100,24 @@ impl Balance {
         }
     }
 
-    fn read(&mut self, now: bool) {
+    fn read(&mut self, now: bool, mode: AgentAllocation, at: i64) {
         if !now && self.read_at.is_some_and(|at| at.elapsed() < READ_EVERY) {
             return;
         }
         self.read_at = Some(Instant::now());
         self.usage = marspot::kimi_usage::read();
         self.targets = handoff::profiles(handoff::Agent::Kimi);
+        self.extras = if mode == AgentAllocation::Off { Extras::new() } else { extra::read() };
+        self.paying.carry(&mut self.extras, at);
+    }
+
+    /// The account numbers a pane on `current` is weighed among.
+    pub(super) fn numbers(&self, current: Option<u8>) -> Vec<u8> {
+        let mut numbers: Vec<u8> = self.targets.iter().map(|(n, _)| *n).collect();
+        if let Some(c) = current.filter(|c| !numbers.contains(c)) {
+            numbers.push(c);
+        }
+        numbers
     }
 }
 
@@ -115,16 +142,22 @@ impl KimiPlugin {
             if self.balance.refused.note(account, &refusal) {
                 host.log(LogLevel::Info, "quota.refused", &format!("sid={sid}: account {account} refused a turn at {}", failure.at));
                 news = true;
+                if let Some(a) = self.balance.alloc.as_mut() {
+                    a.refused(now, *sid, account, failure.at);
+                }
             }
         }
+        let mode = marspot::settings::get().kimi_allocation;
         if !self.panes.is_empty() {
-            self.balance.read(news);
+            self.balance.read(news, mode, now);
         }
         let panes: Vec<(u64, PaneKimi)> = self.panes.iter().map(|(sid, p)| (*sid, p.clone())).collect();
         // an idle plugin does not walk the process table
         let roles = if self.panes.is_empty() { HelperRoles::default() } else { HelperRoles::of_observation(&crate::observe::shared().latest()) };
+        let decisions = self.allocate(host, mode, now, &roles);
         for (sid, pane) in panes {
-            self.judge(host, sid, &pane, now, roles.is_helper(sid));
+            let core = decisions.iter().find(|d| d.sid == sid);
+            self.judge(host, sid, &pane, now, roles.is_helper(sid), (mode, core));
         }
         let b = &mut self.balance;
         b.tallies.retain(|sid, t| self.panes.contains_key(sid) || t.moved.is_some_and(|(at, _)| at.elapsed() < LANDING));
@@ -132,14 +165,11 @@ impl KimiPlugin {
         b.persist(host);
     }
 
-    fn judge(&mut self, host: &dyn PluginHost, sid: u64, pane: &PaneKimi, now: i64, helper: bool) {
+    fn judge(&mut self, host: &dyn PluginHost, sid: u64, pane: &PaneKimi, now: i64, helper: bool, (mode, core): (AgentAllocation, Option<&Decision>)) {
         let b = &mut self.balance;
         let current = pane.profile.unwrap_or(0);
-        let mut numbers: Vec<u8> = b.targets.iter().map(|(n, _)| *n).collect();
-        if !numbers.contains(&current) {
-            numbers.push(current);
-        }
-        let rooms = accounts::rooms(&numbers, b.usage.as_ref(), &b.refused, now);
+        let numbers = b.numbers(Some(current));
+        let rooms = rooms_for(mode, accounts::rooms(&numbers, b.usage.as_ref(), &b.refused, now), &b.extras, now);
         let Some((_, here)) = rooms.iter().find(|(n, _)| *n == current) else { return };
         let status = pane.facts.as_ref().map(|f| f.status);
         let on_its_way = |t: &Tally| t.moved.filter(|(at, to)| *to != current && at.elapsed() < LANDING).map(|(_, to)| to);
@@ -150,17 +180,10 @@ impl KimiPlugin {
             if b.tallies.get(&sid).is_some_and(|t| on_its_way(t).is_none()) {
                 b.tallies.remove(&sid);
             }
-            let working = matches!(status, Some(Status::Busy | Status::Waiting));
-            let elsewhere = rooms.iter().any(|(n, r)| *n != current && !r.refused_for(None));
-            let week = here.reset_7d();
-            if working && elsewhere && heads_up::nearly_out(here, None) && !b.told.get(&sid).is_some_and(|h| h.is_for(current, week)) {
-                host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid}: account {current} is nearly out; telling it"));
-                let delivered = Arc::new(AtomicBool::new(false));
-                let kimi_pid = pane.proc.pid;
-                // the handoff after the move asks a told pane to go on
-                let body = heads_up::body(current, true);
-                heads_up::send_to(sid, current, body, Arc::clone(&delivered), "kimi.quota.heads_up", move || inbox_of(kimi_pid));
-                b.told.insert(sid, heads_up::Sent { profile: current, week, delivered });
+            let resting = core.filter(|d| mode == AgentAllocation::Live && d.why.resting() && status == Some(Status::Idle) && pane.session.is_some());
+            match resting.cloned() {
+                Some(d) => self.move_resting(host, pane, now, current, &d),
+                None => self.heads_up(host, sid, pane, &rooms, current, status),
             }
             return;
         }
@@ -186,7 +209,8 @@ impl KimiPlugin {
         });
         // a helper goes by the rule for helpers, as when it was started
         let feed_at = b.usage.as_ref().map_or(0, |u| u.generated_at);
-        let decision = if helper { helper_pick::helper_move(helper_pick::Pool::Kimi, feed_at, decision, &rooms, current, None) } else { decision };
+        let refusal = failed || accounts::refused(b.usage.as_ref(), &b.refused, current, now);
+        let decision = if helper { helper_pick::helper_move(helper_pick::Pool::Kimi, feed_at, decision, &rooms, current, None) } else { must_move_to(mode, decision, core, current, refusal) };
         match decision {
             Move::Hold(why) => {
                 if tally.hold_said != Some(why) {
@@ -200,11 +224,47 @@ impl KimiPlugin {
                 tally.hold_said = None;
                 let why = if failed { "the account's quota is used up" } else { "the usage feed shows a window spent" };
                 host.log(LogLevel::Info, "quota.move", &format!("sid={sid}: account {current} is out ({why}); moving to profile {n}"));
+                self.note_moved(now, current, core.filter(|d| d.to == n && mode == AgentAllocation::Live));
                 self.hand_off(host, sid, pane, handoff::Agent::Kimi, n);
                 if helper {
                     account_changed(AccountChanged { sid, agent: "kimi", from: current, to: n, at: now });
                 }
             }
+        }
+    }
+}
+
+impl KimiPlugin {
+    /// Tell a working pane once per week that its account is one step
+    /// from out, when another account has room.
+    fn heads_up(&mut self, host: &dyn PluginHost, sid: u64, pane: &PaneKimi, rooms: &[(u8, Room)], current: u8, status: Option<Status>) {
+        let b = &mut self.balance;
+        let Some((_, here)) = rooms.iter().find(|(n, _)| *n == current) else { return };
+        let working = matches!(status, Some(Status::Busy | Status::Waiting));
+        let elsewhere = rooms.iter().any(|(n, r)| *n != current && !r.refused_for(None));
+        let week = here.reset_7d();
+        if working && elsewhere && heads_up::nearly_out(here, None) && !b.told.get(&sid).is_some_and(|h| h.is_for(current, week)) {
+            host.log(LogLevel::Info, "quota.heads_up", &format!("sid={sid}: account {current} is nearly out; telling it"));
+            let delivered = Arc::new(AtomicBool::new(false));
+            let kimi_pid = pane.proc.pid;
+            // the handoff after the move asks a told pane to go on
+            let body = heads_up::body(current, true);
+            heads_up::send_to(sid, current, body, Arc::clone(&delivered), "kimi.quota.heads_up", move || inbox_of(kimi_pid));
+            b.told.insert(sid, heads_up::Sent { profile: current, week, delivered });
+        }
+    }
+
+    /// Live: a resting pane the allocation plans elsewhere is handed to
+    /// a new session there.
+    fn move_resting(&mut self, host: &dyn PluginHost, pane: &PaneKimi, now: i64, current: u8, d: &Decision) {
+        host.log(LogLevel::Info, "kimi.alloc.moving", &format!("sid={}: resting on account {current}; moving to profile {} ({})", d.sid, d.to, d.why.word()));
+        self.note_moved(now, current, Some(d));
+        self.hand_off(host, d.sid, pane, handoff::Agent::Kimi, d.to);
+    }
+
+    fn note_moved(&mut self, now: i64, from: u8, d: Option<&Decision>) {
+        if let (Some(d), Some(a)) = (d, self.balance.alloc.as_mut()) {
+            a.moved(now, from, d);
         }
     }
 }
