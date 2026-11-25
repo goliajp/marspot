@@ -3,6 +3,7 @@
 
 mod chrome_geometry;
 mod display_scale_ratchet;
+mod known_gaps;
 mod osc8_click;
 mod panels_are_trees;
 mod plugin_action_funnel;
