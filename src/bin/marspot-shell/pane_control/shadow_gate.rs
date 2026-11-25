@@ -98,9 +98,12 @@ impl Gate {
 
 impl Held<'_> {
     /// `obs` with every change made after it was taken laid over it.
+    /// A change stamped with the view's own instant is laid over too:
+    /// the clock is coarse enough that the two often read the same
+    /// tick, and the view's registry read may then have missed it.
     pub(super) fn tree(&self, obs: &Observation) -> Tree {
         let mut panes: HashMap<u64, (u64, bool)> = obs.sessions.iter().map(|s| (s.entry.id, (s.entry.shadow_of, s.live))).collect();
-        for c in self.gate.lock().changes.iter().filter(|c| c.at > obs.at) {
+        for c in self.gate.lock().changes.iter().filter(|c| c.at >= obs.at) {
             panes.insert(c.sid, (c.parent, true));
         }
         Tree { panes }
@@ -203,6 +206,15 @@ mod tests {
         assert_eq!(newer.parent_of(2), 0);
         let older = held.tree(&view(before, &[(1, 0), (2, 0)]));
         assert_eq!(older.parent_of(2), 1);
+    }
+
+    #[test]
+    fn shadow_gate_change_on_the_same_tick_as_the_view_counts() {
+        let gate = Gate::default();
+        let held = gate.enter(GATE_WITHIN).unwrap();
+        held.record(2, 1);
+        let at = gate.lock().changes.back().unwrap().at;
+        assert_eq!(held.tree(&view(at, &[(1, 0), (2, 0)])).parent_of(2), 1);
     }
 
     #[test]

@@ -66,9 +66,11 @@ impl Recent {
     }
 
     /// Panes opened after an observation taken at `taken`, and not
-    /// closed since, within the time records are kept.
+    /// closed since, within the time records are kept.  One stamped with
+    /// the observation's own instant counts: the clock is coarse enough
+    /// for both to read the same tick before the registry was read.
     pub(super) fn opened_after(&self, taken: Instant, now: Instant) -> impl Iterator<Item = &Opened> {
-        self.kept(now).filter(move |r| r.at > taken).filter_map(move |r| match &r.change {
+        self.kept(now).filter(move |r| r.at >= taken).filter_map(move |r| match &r.change {
             Change::Opened(o) if !self.closed_lately(o.sid, now) => Some(o),
             _ => None,
         })
@@ -97,6 +99,14 @@ mod tests {
         assert_eq!(sids(t0, t0 + Duration::from_secs(2)), vec![5]);
         assert!(sids(t0 + Duration::from_secs(2), t0 + Duration::from_secs(2)).is_empty(), "the view has it");
         assert!(sids(t0, t0 + KEEP + Duration::from_secs(1)).is_empty(), "kept for a while only");
+    }
+
+    #[test]
+    fn pane_control_recent_open_on_the_same_tick_as_the_view_counts() {
+        let t0 = Instant::now();
+        let mut r = Recent::default();
+        r.opened(opened(5), t0);
+        assert_eq!(r.opened_after(t0, t0).map(|o| o.sid).collect::<Vec<_>>(), vec![5]);
     }
 
     #[test]
