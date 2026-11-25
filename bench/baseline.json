@@ -140,12 +140,12 @@
   },
   "competitors_snapshot": {
     "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).  2026-08-18: ghostty + marspot re-measured under a NEW protocol and are NOT comparable with the 2026-06-07 rows above them.  Two changes: (1) every terminal now pushes LIVE_MIN_BYTES (32 MiB) by cat'ing the scenario file as many times as needed \u2014 a single 8 MiB pass never blocks `cat` long enough to measure a fast terminal, and the old rows mix per-scenario byte counts; (2) each trial ends with a DSR round-trip (`CSI 6 n`), so the number covers work the terminal has CONFIRMED it consumed.  Without (2) a terminal that drops or coalesces under pressure finishes early and wins \u2014 the reason marspot grew DSR support the same day (L2 0.12.138).  iterm/warp/terminal cannot be driven from an ssh session (AppleEvent -1712 under both plain ssh and launchctl asuser for iTerm); they need a console run of bin/measure-other.sh and are stale until then.",
-    "captured_at": "2026-11-22",
+    "captured_at": "2026-11-25",
     "host": {
       "name": "mini",
       "arch": "arm64 (Darwin 27.2.0)",
       "os": "macOS 27.2.1 (build 26B131)",
-      "load1_at_capture": 2.53
+      "load1_at_capture": 1.98
     },
     "iterm2": {
       "version": "3.7.9",
@@ -212,61 +212,61 @@
     "ghostty": {
       "version": "1.4.0 (build 18457)",
       "bundle_id": "com.mitchellh.ghostty",
-      "captured_at": "2026-11-22",
+      "captured_at": "2026-11-25",
       "unit": "MB/s",
       "method": "ssh, run inside the GUI session",
       "grid": "99x35",
-      "cat-ascii_MBps": 282.2,
-      "cat-mixed_MBps": 255.5,
-      "cat-cjk_MBps": 269.1,
-      "cat-emoji_MBps": 279.1,
+      "cat-ascii_MBps": 283.4,
+      "cat-mixed_MBps": 246.2,
+      "cat-cjk_MBps": 262.0,
+      "cat-emoji_MBps": 275.7,
       "rounds": [
         {
           "round": 1,
           "load1": [
-            1.69,
-            1.69
+            1.4,
+            1.61
           ],
-          "overhead_ms": 10.02,
-          "cat-ascii_MBps": 286.6,
-          "cat-mixed_MBps": 255.3,
-          "cat-cjk_MBps": 271.7,
-          "cat-emoji_MBps": 279.7
+          "overhead_ms": 10.32,
+          "cat-ascii_MBps": 282.4,
+          "cat-mixed_MBps": 240.8,
+          "cat-cjk_MBps": 266.6,
+          "cat-emoji_MBps": 280.5
         },
         {
           "round": 2,
           "load1": [
-            1.6,
-            1.63
+            1.74,
+            1.74
           ],
-          "overhead_ms": 10.65,
-          "cat-ascii_MBps": 282.6,
-          "cat-mixed_MBps": 251.4,
-          "cat-cjk_MBps": 269.1,
-          "cat-emoji_MBps": 279.1
+          "overhead_ms": 10.42,
+          "cat-ascii_MBps": 283.4,
+          "cat-mixed_MBps": 245.1,
+          "cat-cjk_MBps": 262.0,
+          "cat-emoji_MBps": 274.2
         },
         {
           "round": 3,
           "load1": [
-            1.78,
-            1.78
+            1.85,
+            1.85
           ],
-          "overhead_ms": 10.4,
-          "cat-ascii_MBps": 282.0,
-          "cat-mixed_MBps": 256.8,
-          "cat-cjk_MBps": 268.4,
-          "cat-emoji_MBps": 280.2
+          "overhead_ms": 10.94,
+          "cat-ascii_MBps": 276.5,
+          "cat-mixed_MBps": 246.2,
+          "cat-cjk_MBps": 258.5,
+          "cat-emoji_MBps": 275.7
         },
         {
           "round": 4,
           "load1": [
-            1.76,
-            1.86
+            1.8,
+            1.97
           ],
-          "overhead_ms": 10.34,
-          "cat-ascii_MBps": 282.2,
-          "cat-mixed_MBps": 255.5,
-          "cat-cjk_MBps": 269.6,
+          "overhead_ms": 10.46,
+          "cat-ascii_MBps": 283.6,
+          "cat-mixed_MBps": 249.8,
+          "cat-cjk_MBps": 270.5,
           "cat-emoji_MBps": 276.6
         }
       ]
@@ -334,70 +334,71 @@
       ]
     },
     "marspot": {
-      "version": "0.6.2 (shell 0.7.498, core 0.12.553, session 0.11.381, git 26d70a8)",
+      "version": "0.17.0 (shell 0.7.713, core 0.12.690, session 0.11.447, git 44265c67)",
       "bundle_id": "com.goliajp.marspot",
-      "captured_at": "2026-11-22",
+      "captured_at": "2026-11-25",
       "unit": "MB/s",
       "method": "ssh, run inside the GUI session",
       "grid": "99x35",
-      "cat-ascii_MBps": 302.7,
-      "cat-mixed_MBps": 268.6,
-      "cat-cjk_MBps": 289.3,
-      "cat-emoji_MBps": 297.2,
+      "cat-ascii_MBps": 302.5,
+      "cat-mixed_MBps": 269.4,
+      "cat-cjk_MBps": 291.1,
+      "cat-emoji_MBps": 297.0,
       "rounds": [
         {
           "round": 1,
           "load1": [
-            1.56,
-            1.56
+            1.72,
+            1.72
           ],
-          "overhead_ms": 10.29,
-          "cat-ascii_MBps": 302.4,
+          "overhead_ms": 9.34,
+          "cat-ascii_MBps": 301.2,
           "cat-mixed_MBps": 269.0,
-          "cat-cjk_MBps": 290.2,
-          "cat-emoji_MBps": 295.3
+          "cat-cjk_MBps": 289.1,
+          "cat-emoji_MBps": 293.1
         },
         {
           "round": 2,
           "load1": [
-            1.77,
-            1.77
+            1.92,
+            1.92
           ],
-          "overhead_ms": 9.22,
-          "cat-ascii_MBps": 304.1,
-          "cat-mixed_MBps": 270.1,
-          "cat-cjk_MBps": 291.4,
-          "cat-emoji_MBps": 297.2
+          "overhead_ms": 10.12,
+          "cat-ascii_MBps": 300.4,
+          "cat-mixed_MBps": 269.9,
+          "cat-cjk_MBps": 292.1,
+          "cat-emoji_MBps": 297.0
         },
         {
           "round": 3,
           "load1": [
-            1.56,
-            1.76
+            1.78,
+            1.78
           ],
-          "overhead_ms": 10.25,
-          "cat-ascii_MBps": 302.7,
-          "cat-mixed_MBps": 264.9,
-          "cat-cjk_MBps": 289.3,
-          "cat-emoji_MBps": 295.6
+          "overhead_ms": 9.4,
+          "cat-ascii_MBps": 302.5,
+          "cat-mixed_MBps": 269.0,
+          "cat-cjk_MBps": 291.1,
+          "cat-emoji_MBps": 297.2
         },
         {
           "round": 4,
           "load1": [
-            1.81,
-            1.81
+            1.97,
+            1.98
           ],
-          "overhead_ms": 9.43,
-          "cat-ascii_MBps": 301.1,
-          "cat-mixed_MBps": 268.6,
-          "cat-cjk_MBps": 288.6,
-          "cat-emoji_MBps": 297.4
+          "overhead_ms": 8.86,
+          "cat-ascii_MBps": 302.6,
+          "cat-mixed_MBps": 269.4,
+          "cat-cjk_MBps": 289.0,
+          "cat-emoji_MBps": 287.3
         }
       ]
     },
     "_captured_at_note": "2026-08-19: ghostty / iterm2 / terminal / marspot were all measured in ONE run, on one host, under the certified protocol (32 MiB per trial, DSR round-trip) - the first time every terminal in this table was compared under identical conditions rather than assembled from separate sessions.  The absolute numbers are lower than an idle host produces (the run happened at load1 ~6), which is fine and is the point: they are all lower together, so the RATIOS hold.  warp is still 2026-06-07: it has no AppleScript dictionary, so driving it needs System Events keystrokes, which TCC does not grant an ssh session - the reachability probe correctly skipped it instead of inventing a number.  Its old figures sit far below ghostty on every corpus, so it does not affect which terminal is 'best other'.  This note describes the 2026-08-19 capture; every row was re-measured on 2026-11-22 (see _note_20261122), the marspot row then from the shipped three-process app.  The gate's 'app MB/s' rows measure the product on each run and divide by the other terminals' rows; it never reads the marspot row.",
     "_unit_note": "A terminal's row says which megabyte its numbers are in: \"unit\": \"MB/s\" is 10^6 bytes per second, and a row without the key was captured before 2026-11-12 in 2^20 bytes per second.  The gate converts the second kind before comparing.",
-    "_note_20261122": "2026-11-22: every row re-measured on mini in the GUI session (sudo launchctl asuser), four rounds each, under one `bench-lock bench` per run: ghostty 1.4.0, terminal 2.15 and the product in run 20261121T204223Z, iterm2 3.7.9 in run 20261121T205051Z with a 900 s marker timeout (at 0.4 MB/s its emoji trials outlast the default 120 s, which is why the first run got one round of it). Ghostty 1.4.0 is the latest release (tag v1.4.0, ghostty-org/ghostty). Grids: the product and Ghostty 99x35 (the product's window is sized to the 99x35 Ghostty always opens at on mini's portrait screen); iTerm2 opened at 120x60 and Terminal at 120x30, not aligned -- neither is the best other terminal, so the vs-best ratio does not depend on them. Warp is no longer in the snapshot: its driver types through System Events keystrokes and its trial marker never appeared within 120 s in run 20261121T204223Z; its last row was from 2026-06-07, too old to divide by, and it was the slowest terminal measured then."
+    "_note_20261122": "2026-11-22: every row re-measured on mini in the GUI session (sudo launchctl asuser), four rounds each, under one `bench-lock bench` per run: ghostty 1.4.0, terminal 2.15 and the product in run 20261121T204223Z, iterm2 3.7.9 in run 20261121T205051Z with a 900 s marker timeout (at 0.4 MB/s its emoji trials outlast the default 120 s, which is why the first run got one round of it). Ghostty 1.4.0 is the latest release (tag v1.4.0, ghostty-org/ghostty). Grids: the product and Ghostty 99x35 (the product's window is sized to the 99x35 Ghostty always opens at on mini's portrait screen); iTerm2 opened at 120x60 and Terminal at 120x30, not aligned -- neither is the best other terminal, so the vs-best ratio does not depend on them. Warp is no longer in the snapshot: its driver types through System Events keystrokes and its trial marker never appeared within 120 s in run 20261121T204223Z; its last row was from 2026-06-07, too old to divide by, and it was the slowest terminal measured then.",
+    "_note_20261125": "2026-11-25: ghostty 1.4.0 (still the latest release, tag v1.4.0) and the product at 44265c67 re-measured on mini in the GUI session, four rounds each under one `bench-lock bench` (run measure-20261125T074207Z, MEASURE_ROUNDS=4, MEASURE_TERMS='ghostty marspot'), grids 99x35 both. iterm2 and terminal keep their 2026-11-22 rows. Every product round is above every ghostty round on all four corpora (min/max MB/s: ascii 300.4/283.6, mixed 269.0/249.8, cjk 289.0/270.5, emoji 287.3/280.5). A three-round run just before it (measure-20261125T073821Z, the first launch of a fresh release build) read the product's first ascii round at 149.2 MB/s, its first two trials 0.22-0.25 s against 0.11-0.12 s after; the other rounds and corpora were normal."
   },
   "multi_session_thresholds": {
     "_comment": [
