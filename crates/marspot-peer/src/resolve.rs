@@ -54,6 +54,10 @@ pub struct Hit {
     pub note: Option<String>,
 }
 
+/// How the text of a miss for a name no pane has begins; a caller that
+/// looks elsewhere then matches on it.
+pub const NO_PANE_NAMED: &str = "no pane is named";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Miss {
     /// For the sender to read.
@@ -125,7 +129,7 @@ pub fn resolve(to: &str, targets: &[Target]) -> Result<Hit, Miss> {
             }
         }
     }
-    let mut text = format!("no pane is named {to:?}");
+    let mut text = format!("{NO_PANE_NAMED} {to:?}");
     if !targets.is_empty() {
         text.push_str(&format!(". The panes are: {}", list(&(0..targets.len()).collect::<Vec<_>>(), targets)));
     }

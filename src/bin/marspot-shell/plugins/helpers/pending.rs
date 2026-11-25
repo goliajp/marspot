@@ -17,6 +17,9 @@
 //! The program in front may stay the same while its inbox comes back,
 //! so a notice that failed for any other reason, or past that wait, is
 //! also tried after each of [`SLOW_MS`], at no cost either.
+//!
+//! Whatever waits, a notice is given up [`GIVE_UP_MS`] after it was
+//! first refused, or at once when its parent pane is gone (`give_up`).
 
 use std::collections::HashMap;
 
@@ -31,6 +34,9 @@ const SETTLE_STEP_MS: u64 = 2_000;
 const SETTLE_FOR_MS: u64 = 30_000;
 /// The waits before the slow retries with one program in front.
 pub(super) const SLOW_MS: [u64; 3] = [60_000, 300_000, 900_000];
+/// How long after its first refusal a notice is tried at all: past the
+/// slow retries, the wait for a new program in front ends here.
+pub(super) const GIVE_UP_MS: u64 = 30 * 60_000;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Notice {
@@ -47,12 +53,14 @@ pub(super) struct Notice {
     pub settle_until: Option<u64>,
     /// Slow retries set with this program in front.
     pub slow: usize,
+    /// When it was first refused (ms after the epoch).
+    pub first_failed_ms: Option<u64>,
 }
 
 /// Whether `err` from a delivery means the pane's agent has no inbox
 /// yet (or is not in the pane table yet), rather than a refusal.
 pub(super) fn not_ready(err: &str) -> bool {
-    err.contains("has no inbox") || err.contains("no pane is named")
+    err.contains("has no inbox") || err.contains(marspot_peer::resolve::NO_PANE_NAMED)
 }
 
 impl Notice {
@@ -62,6 +70,7 @@ impl Notice {
     /// until the wait is over; from then on, and for any other failure,
     /// the slow retries follow, which cost none.
     pub fn failed(&mut self, registering: bool, front: Option<i32>, now_ms: u64) {
+        self.first_failed_ms.get_or_insert(now_ms);
         if front != self.front {
             // another program since, seen by a retry rather than the tick
             self.slow = 0;
@@ -84,6 +93,11 @@ impl Notice {
             self.retry_ms = Some(now_ms + wait);
             self.slow += 1;
         }
+    }
+
+    /// When it is given up; None before it was refused.
+    pub fn give_up_ms(&self) -> Option<u64> {
+        self.first_failed_ms.map(|t| t + GIVE_UP_MS)
     }
 
     /// Whether nothing will try it again with this program in front.
@@ -199,11 +213,17 @@ impl Undelivered {
         self.map.values().filter_map(|n| n.retry_ms).min()
     }
 
-    /// The notices whose retry is due at `now_ms`, each handed out once.
+    /// The soonest time a kept notice is given up.
+    pub fn next_give_up_ms(&self) -> Option<u64> {
+        self.map.values().filter_map(Notice::give_up_ms).min()
+    }
+
+    /// The notices whose retry is due at `now_ms`, each handed out once,
+    /// and those to give up, tried one last time.
     pub fn retries_due(&mut self, now_ms: u64) -> Vec<u64> {
         let mut out = Vec::new();
         for (sid, n) in self.map.iter_mut() {
-            if n.retry_ms.is_some_and(|at| at <= now_ms) {
+            if n.retry_ms.is_some_and(|at| at <= now_ms) || n.give_up_ms().is_some_and(|at| at <= now_ms) {
                 n.retry_ms = None;
                 out.push(*sid);
             }

@@ -16,6 +16,12 @@ fn begun(agent: AgentKind) -> Vec<Event> {
     vec![Event::started(started(10, "shell", agent)), Event::TaskDelivered]
 }
 
+/// The parent pane 10 is there, with no session to take a notice: one
+/// sent from this thread is kept, not given up.
+fn parent_alive() {
+    super::give_up::LOOK.with(|l| *l.borrow_mut() = Some(std::sync::Arc::new(super::tests_review::panes(&[(10, 55)]))));
+}
+
 fn make(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("task.md"), "x").unwrap();
@@ -136,9 +142,10 @@ fn helpers_another_approval_prompt_after_a_start_is_told() {
     assert_eq!((asked(), asked()), (1, 0));
     assert_eq!(in_turn[&1], Turn::BlockedTold);
 
+    parent_alive();
     let told = |sid: u64, screen: Option<&str>| {
         work::still_blocked(&s, sid, screen.map(String::from));
-        // no pane is there to take it: the notice is kept
+        // no session in the pane takes it: the notice is kept
         let h: Helper = s.table().map[&sid].clone();
         s.lock().undelivered.take(sid).is_some() || h.suppressed > 0
     };
@@ -158,6 +165,7 @@ fn helpers_an_approval_prompt_is_the_same_whatever_changes_around_it() {
     };
     let told_of = screen("12s", "clean");
     feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: notify::prompt_sha(&told_of) }]].concat());
+    parent_alive();
     let told = |text: String| {
         work::still_blocked(&s, 1, Some(text));
         let h: Helper = s.table().map[&1].clone();
@@ -177,6 +185,7 @@ fn helpers_a_prompt_written_down_the_way_before_is_not_known() {
     let before = new.split_once(':').map(|(_, sha)| sha.to_string()).unwrap();
     assert!(notify::same_prompt(&new, screen) && !notify::same_prompt(&before, screen) && !notify::same_prompt("", screen));
     feed(&s, 1, [begun(AgentKind::Claude), vec![Event::BlockedNoticed { prompt: before }]].concat());
+    parent_alive();
     work::still_blocked(&s, 1, Some(screen.into()));
     assert!(s.lock().undelivered.take(1).is_some(), "told once more");
     std::fs::remove_dir_all(&dir).unwrap();
