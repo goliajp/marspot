@@ -15,7 +15,7 @@ fn initialize_and_tool_listing() {
     assert_eq!(r.at(&["result", "protocolVersion"]).and_then(Value::str), Some("2025-06-18"));
     assert!(s.handle(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, 0).is_none());
     let r = s.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#, 0).unwrap();
-    assert_eq!(names(&r), ["ListAgents", "SendMessage", "Panes", "PaneOpen", "PaneSend", "PaneRun", "PaneRead", "PaneSet", "HelperStart", "Helpers", "HelperStop"]);
+    assert_eq!(names(&r), ["ListAgents", "SendMessage", "Panes", "PaneOpen", "PaneSend", "PaneRun", "PaneRead", "PaneSet", "HelperStart", "Helpers", "HelperStop", "ProcStop"]);
     for t in &r.at(&["result", "tools"]).unwrap().arr()[..2] {
         assert!(t.str_at("description").unwrap().contains("`name#code`") && t.str_at("description").unwrap().contains("`kind:name`"));
     }
@@ -29,7 +29,7 @@ fn mcp_a_claude_client_gets_only_the_pane_tools() {
     let mut s = server();
     s.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInfo":{"name":"claude-code","version":"2"}}}"#, 0);
     let r = s.handle(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#, 0).unwrap();
-    assert_eq!(names(&r), ["Panes", "PaneOpen", "PaneSend", "PaneRun", "PaneRead", "PaneSet", "HelperStart", "Helpers", "HelperStop"]);
+    assert_eq!(names(&r), ["Panes", "PaneOpen", "PaneSend", "PaneRun", "PaneRead", "PaneSet", "HelperStart", "Helpers", "HelperStop", "ProcStop"]);
     // the read wait's cap is in the schema the client sees
     let read = r.at(&["result", "tools"]).unwrap().arr().iter().find(|t| t.str_at("name") == Some("PaneRead")).unwrap();
     assert_eq!(read.at(&["inputSchema", "properties", "timeout_s", "maximum"]).and_then(Value::i64), Some(1795));

@@ -23,10 +23,13 @@ const QUEUE: usize = 1024;
 enum Event {
     Rec(Rec),
     Refused { caller: String, code: &'static str, op: &'static str, pane: String, at_ms: u64 },
+    /// A line of its own, written as it comes: one per process `proc.stop` signalled.
+    Line(String),
     /// Write out everything held, then answer.
     Flush(SyncSender<()>),
 }
 
+#[derive(Clone)]
 pub(crate) struct Audit {
     tx: SyncSender<Event>,
     dropped: Arc<AtomicU64>,
@@ -70,6 +73,11 @@ impl Audit {
         self.send(Event::Refused { caller, code, op, pane, at_ms: now_ms() });
     }
 
+    /// A finished line, never merged with another.
+    pub fn line(&self, line: String) {
+        self.send(Event::Line(line));
+    }
+
     /// Wait (briefly) until everything sent so far is in the file.
     pub fn flush(&self) {
         let (tx, rx) = sync_channel(1);
@@ -98,6 +106,11 @@ fn run(rx: Receiver<Event>, path: &Path, rotate_at: u64, dropped: &AtomicU64) {
             None => m.flush_due(now_ms(), &utc),
             Some(Event::Rec(r)) => m.add(r, &utc),
             Some(Event::Refused { caller, code, op, pane, at_ms }) => m.refused(&caller, code, op, &pane, at_ms, &utc),
+            Some(Event::Line(l)) => {
+                let mut lines = m.flush_due(now_ms(), &utc);
+                lines.push(l);
+                lines
+            }
             Some(Event::Flush(ack)) => {
                 let lines = m.flush_all(&utc);
                 write_lines(path, rotate_at, &lines, dropped);

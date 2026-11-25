@@ -156,6 +156,8 @@ pub(crate) fn exec_prepared(cmd: &mut std::process::Command) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     // a relay left open ends after the exec as a child nobody waits for
     peerbus::close_inboxes();
+    // a forced kill still waiting would be dropped unrecorded
+    crate::plugins::zombie::stop::force::abandon();
     let err = cmd.exec();
     peerbus::exec_failed();
     err
