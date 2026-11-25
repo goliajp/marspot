@@ -740,11 +740,11 @@ fn main() {
 
     // Input source + L2 wake channel: L2 forwards keystrokes over the
     // control socket; we poke it back with GridReady after each publish.
-    // Resume path: a control stream inherited across execv wins over
-    // anything `setup_control_socket` would resolve from env (it's
-    // already adopted + a reader is running on it).
+    // A resumed image takes only the stream the handoff passed: the env's
+    // fd number names whatever an earlier image left open there.
     let mut poke = match resumed_poke.take() {
         Some(s) => Some(s),
+        None if resumed => None,
         None => setup_control_socket(&mut readers, ev_tx.clone()),
     };
     frames.follow_scroll_from(&session);
