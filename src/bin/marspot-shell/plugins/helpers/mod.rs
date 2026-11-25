@@ -33,6 +33,8 @@ mod container;
 mod dialogs;
 mod dirs;
 mod first_screens;
+mod give_up;
+mod inbox_of;
 mod launch;
 mod names;
 mod notify;
@@ -62,6 +64,8 @@ mod tests;
 mod tests_review;
 #[cfg(test)]
 mod tests_retry;
+#[cfg(test)]
+mod tests_notice;
 #[cfg(test)]
 mod tests_restart;
 #[cfg(test)]

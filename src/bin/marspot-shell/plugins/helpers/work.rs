@@ -11,6 +11,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use super::close::close;
 use super::notify::{self, Stop, Verdict};
 use super::pending::{Notice, front_of};
+use super::give_up::{self, record_stop};
 use super::table::Event;
 use super::{Shared, records};
 use crate::observe::Observation;
@@ -194,10 +195,10 @@ fn handle(s: &Arc<Shared>, job: Job) {
 /// starts) is tried again on the worker's clock (`pending`).
 pub(super) fn send(s: &Shared, sid: u64, mut n: Notice) {
     s.lock().undelivered.superseded(sid);
-    let obs = crate::observe::shared().fresh(crate::observe::INTERVAL);
+    let obs = give_up::look();
     let parent = full_name(n.parent, &obs);
     n.tries += 1;
-    match notify::deliver(&parent, &n.body) {
+    match notify::deliver(n.parent, &parent, &n.body, &obs) {
         Ok(()) => {
             marspot::lx_info!("helpers.notice", &format!("sid={sid}: delivered"));
             if s.table().map.contains_key(&sid) {
@@ -214,6 +215,9 @@ pub(super) fn send(s: &Shared, sid: u64, mut n: Notice) {
 /// it.  What the refusal means and the program a later one is compared
 /// with come from the one look: a program that came since is a change.
 pub(super) fn not_delivered(s: &Shared, sid: u64, mut n: Notice, e: &str, obs: &Observation, now_ms: u64) {
+    if let Some(why) = give_up::reason(&n, obs, now_ms) {
+        return give_up::give_up(s, sid, n, why, e);
+    }
     let front = front_of(obs, n.parent);
     let registering = front.is_some_and(|pgid| pgid != 0) && super::pending::not_ready(e);
     n.failed(registering, front, now_ms);
@@ -247,16 +251,6 @@ pub(super) fn hold(s: &Shared, sid: u64, n: Notice) -> bool {
     // the worker of a later start may be the one to try it
     s.wake();
     kept
-}
-
-/// Write the stop notice `n` of helper `sid` tells of, while it is a
-/// helper; what is left in `n` is its result.
-fn record_stop(s: &Shared, sid: u64, n: &mut Notice) {
-    if s.table().map.contains_key(&sid) {
-        for ev in n.take_stop() {
-            s.record(sid, ev);
-        }
-    }
 }
 
 fn stopped(s: &Arc<Shared>, sid: u64, stop: Stop, by_screen: bool) {

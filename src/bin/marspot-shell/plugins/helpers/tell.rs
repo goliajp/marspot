@@ -62,7 +62,9 @@ pub(super) fn result_untold(h: &Helper) -> bool {
 /// the result of the stop that was written; only the result is written
 /// when it goes.  A parent at its shell prompt cannot take it: it waits
 /// for the next program there, with the slow retries for this shell
-/// spent, so that each restart does not start them over.
+/// spent, so that each restart does not start them over.  Its give-up
+/// clock (`first_failed_ms`) counts from the retell: a refusal before
+/// the restart is not known.
 pub(super) fn retell(s: &Arc<Shared>, sid: u64, obs: &Observation) {
     let Some(h) = s.table().map.get(&sid).cloned().filter(result_untold) else { return };
     if s.lock().undelivered.holds(sid) {
@@ -78,7 +80,7 @@ pub(super) fn retell(s: &Arc<Shared>, sid: u64, obs: &Observation) {
     marspot::lx_info!("helpers.job", &format!("sid={sid} retell"));
     if super::tick::shell_in_front(obs, n.parent) {
         let front = front_of(obs, n.parent);
-        hold(s, sid, Notice { tries: 1, front, slow: SLOW_MS.len(), ..n });
+        hold(s, sid, Notice { tries: 1, front, slow: SLOW_MS.len(), first_failed_ms: Some(super::records::now_ms()), ..n });
     } else {
         send(s, sid, n);
     }

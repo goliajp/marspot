@@ -57,15 +57,18 @@ fn helpers_a_refused_send_sets_the_workers_sleep_by_what_is_in_front() {
     let (s, _rx) = shared_at(&dir);
     feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Codex))]);
     let now = records::now_ms();
-    let (shell, gone, agent) = (panes(&[(10, 0)]), panes(&[]), panes(&[(10, 55)]));
+    let (shell, gone, agent) = (panes(&[(10, 0)]), panes(&[(11, 55)]), panes(&[(10, 55)]));
     assert_eq!(timers::sleep_for(&s), None);
     // an agent in front with no inbox yet is tried on the worker's clock
     work::not_delivered(&s, 1, notice(), NO_INBOX, &agent, now);
     assert!(timers::sleep_for(&s).is_some_and(|d| d <= Duration::from_secs(2)));
     assert!(timers::due_jobs(&s, s.epoch(), now + 1_999, |_| true).is_empty());
     assert!(matches!(timers::due_jobs(&s, s.epoch(), now + 2_000, |_| true).as_slice(), [Job::Redeliver { sid: 1 }]));
-    // its shell in front, its pane gone, or a refusal of another kind waits longer
-    for (obs, err) in [(&shell, NO_INBOX), (&gone, NO_INBOX), (&agent, "connection refused")] {
+    // its pane gone: given up
+    work::not_delivered(&s, 1, notice(), NO_INBOX, &gone, now);
+    assert!(!s.lock().undelivered.holds(1) && timers::sleep_for(&s).is_none());
+    // its shell in front, or a refusal of another kind waits longer
+    for (obs, err) in [(&shell, NO_INBOX), (&agent, "connection refused")] {
         work::not_delivered(&s, 1, notice(), err, obs, now);
         assert!(timers::sleep_for(&s).is_some_and(|d| d > Duration::from_secs(50)), "{err}");
         assert!(timers::due_jobs(&s, s.epoch(), now + 59_999, |_| true).is_empty());

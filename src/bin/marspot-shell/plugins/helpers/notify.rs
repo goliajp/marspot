@@ -11,6 +11,8 @@
 use std::path::Path;
 
 use marspot_peer::control::{AgentKind, screen, sha256};
+use marspot_peer::panes::Pane;
+use marspot_peer::registry::Entry;
 
 use super::table::Helper;
 use crate::plugins::claudecode::with_helpers::NOTICE_HEAD;
@@ -212,13 +214,23 @@ pub(super) fn text(name: &str, h: &Helper, stop: Stop, result_path: &Path, resul
     out
 }
 
-/// Put `body` into the inbox of the pane called `parent` now.
-pub(super) fn deliver(parent: &str, body: &str) -> Result<(), String> {
+/// Put `body` into the inbox of pane `parent`, called `name` now; a
+/// pane the names miss is looked into as `obs` shows it.
+pub(super) fn deliver(parent: u64, name: &str, body: &str, obs: &crate::observe::Observation) -> Result<(), String> {
     let entries = marspot_peer::peers::live_entries();
     let panes = marspot_peer::panes::live(&entries);
-    let r = marspot_peer::peers::resolve(&entries, &panes, parent)?;
-    let line = crate::plugins::claudecode::heads_up::frame_line(&r.socket, body);
-    marspot_peer::inbox::write(&r.socket, &line)
+    deliver_among(&entries, &panes, (parent, name), body, obs)
+}
+
+/// [`deliver`], with the sessions and pane names given.
+pub(super) fn deliver_among(entries: &[Entry], panes: &[Pane], (parent, name): (u64, &str), body: &str, obs: &crate::observe::Observation) -> Result<(), String> {
+    let socket = match marspot_peer::peers::resolve(entries, panes, name) {
+        Ok(r) => r.socket,
+        Err(e) if e.starts_with(marspot_peer::resolve::NO_PANE_NAMED) => super::inbox_of::in_pane(entries, obs, parent).ok_or(e)?,
+        Err(e) => return Err(e),
+    };
+    let line = crate::plugins::claudecode::heads_up::frame_line(&socket, body);
+    marspot_peer::inbox::write(&socket, &line)
 }
 
 #[cfg(test)]
