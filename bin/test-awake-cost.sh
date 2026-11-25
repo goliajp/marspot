@@ -45,7 +45,13 @@ LAYOUTS="${AWAKE_LAYOUTS:-1x1 2x2 4x3}"
 # 38.2, 36.6, 38.0; twelve 106.9, 104.0, 106.9, and 110.0 measured alone.
 # The ceilings are the highest of those and a little of the spread on top.
 BUDGETS="${AWAKE_BUDGETS-1:18,4:41,12:115}"
-CPU_BUDGETS="${AWAKE_CPU_BUDGETS-}"
+# CPU of the app's processes summed, percent of one core.  Measured on
+# mini three times on 3ccfb6e3 (2026-11-25, under the exclusive lock,
+# load1 at most 2.54): one pane 0.682, 0.674, 0.652; four 1.387, 1.399,
+# 1.320; twelve 3.794, 3.906, 3.641.  The three runs differ by up to 7%,
+# and runs of 2026-11-22 read up to 8% above these (four panes 1.51), so
+# each ceiling is the highest reading x 1.15, rounded up to 0.05.
+CPU_BUDGETS="${AWAKE_CPU_BUDGETS-1:0.8,4:1.65,12:4.5}"
 SETTLE="${AWAKE_SETTLE:-15}"
 WINDOW="${AWAKE_WINDOW:-25}"
 work="$(mktemp -d /tmp/marspot-awake.XXXXXX)"
