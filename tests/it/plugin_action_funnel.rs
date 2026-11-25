@@ -78,11 +78,12 @@ fn is_op_runner(path: &str) -> bool {
     path.ends_with("pty_op.rs") || path.contains("/pty_op/")
 }
 
-/// The one other sender: the codex switch's bounded `sqlite3` read kills
-/// that helper, its own unreaped child, when it overruns. It never
-/// reaches a pane's processes, which is what the checkpoint is about.
+/// The other senders, each signalling only its own unreaped child and
+/// never a pane's processes, which is what the checkpoint is about: the
+/// codex switch's bounded `sqlite3` read kills that helper when it
+/// overruns, and the shell ends the madcawl host it started.
 fn kills_its_own_helper(path: &str) -> bool {
-    path.ends_with("peerbus/moving_checks.rs")
+    path.ends_with("peerbus/moving_checks.rs") || path.ends_with("peerbus/madcawl_host_proc.rs")
 }
 
 /// A signal is sent in exactly one place, and that place is the op runner.
