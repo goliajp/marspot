@@ -242,13 +242,12 @@ impl ClaudecodePlugin {
         judged: Judged,
     ) {
         // One question, answered from structure: is a command of the
-        // user's running on this machine right now — then leave the
-        // pane alone until it finishes, because moving kills the
-        // process and takes the command with it.
+        // user's running here now — then leave the pane alone until it
+        // ends, because moving kills the process and the command.
         //
         // There used to be a second question — was this pane working,
-        // so should it be told to carry on.  It is gone, and the
-        // sentence now goes to every pane that is moved.  The reading
+        // so should it be told to carry on.  It is gone: the sentence
+        // goes to every pane that is moved.  The reading
         // was wrong half the time in the direction that costs the
         // most: of six panes moved in silence on 2026-09-30, three had
         // a turn killed mid-flight by the very refusal that triggered
@@ -257,8 +256,7 @@ impl ClaudecodePlugin {
         // is a finished one.  Nothing in the structure separates
         // "finished" from "cut off" after the fact.
         //
-        // Saying it to a pane that really was idle costs one line,
-        // which is what the sentence is worded for — it asks the
+        // To a pane that was idle it costs one line: it asks the
         // session to continue *if* something was interrupted.
         let tool_executing = matches!(result.new_activity.get(&sid), Some(CcActivity::ToolPending { executing: true }));
         let needs_model = judged.room_model(plan.rooms(), meta.profile_num, result.new_models.get(&sid));
@@ -310,8 +308,10 @@ impl ClaudecodePlugin {
                     }
                     self.moved_at.insert(sid, Instant::now());
                     plan.place(target, needs_model.as_deref(), plan.speed_of(sid));
-                    view.placed(sid, target);
-                    // a helper's account is still `roomiest`'s choice, not the core's
+                    // a helper is counted where it went by the helpers' tally
+                    if !helper {
+                        view.placed(sid, target);
+                    }
                     self.record_moved(host, sid, from, target, class, if helper { "helper" } else { "out" }, inputs.as_ref());
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;

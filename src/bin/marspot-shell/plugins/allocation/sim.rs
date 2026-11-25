@@ -73,6 +73,8 @@ pub(super) struct SimPane {
     /// Hours it exists, `[from, until)`: helpers come in batches.
     pub alive: (f64, f64),
     pub rest_moves: u32,
+    /// One of a batch of helpers.
+    pub helper: bool,
 }
 
 impl SimPane {
@@ -144,17 +146,17 @@ fn panes_of(c: &Case, rng: &mut Rng) -> Vec<SimPane> {
     let mut out = Vec::new();
     let f = rates(c.n_f, c.demand * c.fable_share);
     let n = rates(c.n_n, c.demand * (1.0 - c.fable_share));
-    let pane = |class, rho: f64, alive| SimPane { class, rho, est: rho * c.bias, on: None, last: None, left: Vec::new(), alive, rest_moves: 0 };
-    out.extend(f.into_iter().map(|r| pane(Class::Restricted, r, (0.0, f64::INFINITY))));
+    let pane = |class, rho: f64, alive, helper| SimPane { class, rho, est: rho * c.bias, on: None, last: None, left: Vec::new(), alive, rest_moves: 0, helper };
+    out.extend(f.into_iter().map(|r| pane(Class::Restricted, r, (0.0, f64::INFINITY), false)));
     let plain_from = out.len();
-    out.extend(n.into_iter().map(|r| pane(Class::Plain, r, (0.0, f64::INFINITY))));
+    out.extend(n.into_iter().map(|r| pane(Class::Plain, r, (0.0, f64::INFINITY), false)));
     if let Some((k, at)) = c.leave {
         for p in out[plain_from..].iter_mut().rev().take(k) {
             p.alive.1 = at;
         }
     }
     for b in &c.batches {
-        out.extend((0..b.n).map(|_| pane(Class::Plain, b.rate, (b.from, b.until))));
+        out.extend((0..b.n).map(|_| pane(Class::Plain, b.rate, (b.from, b.until), true)));
     }
     out
 }

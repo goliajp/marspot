@@ -8,9 +8,10 @@
 //! nearly out, when that leaves Fable to Fable panes, or when the
 //! other week renews six hours sooner.  `Plan` is this core, through
 //! the same `Inputs::decide` the shell logs its would-moves with: (a)
-//! for every forced move and (b) for resting panes.
+//! for every forced move, (c) for a helper of a batch, and (b) for
+//! resting panes.
 
-use super::choose::{MUST_LAST_H, Mover, loads_of};
+use super::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of};
 use super::plan::{Plan, plan};
 use super::replay::{Inputs, Kind, Why};
 use super::rest::is_keeper;
@@ -72,7 +73,12 @@ pub(super) fn pick(policy: Policy, a: &[Quant], panes: &[SimPane], i: usize, fro
         Policy::Old => old_pick(a, class, from),
         Policy::Plan => {
             let p = targets(policy, a, panes, t, kappa)?;
-            let x = inputs(a, panes, i, t, kappa, true, Kind::Out { horizon_h: MUST_LAST_H });
+            let kind = match (panes[i].helper, from) {
+                (true, None) => Kind::New { horizon_h: HELPER_LAST_H },
+                (true, Some(_)) => Kind::Out { horizon_h: HELPER_LAST_H },
+                (false, _) => Kind::Out { horizon_h: MUST_LAST_H },
+            };
+            let x = inputs(a, panes, i, t, kappa, true, kind);
             x.decide(&p).map(|(to, _)| to)
         }
     }

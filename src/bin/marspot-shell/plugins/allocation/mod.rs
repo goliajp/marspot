@@ -17,6 +17,7 @@
 //! may go there.
 
 pub(crate) mod choose;
+pub(crate) mod helper;
 pub(crate) mod notice;
 pub(crate) mod plan;
 pub(crate) mod replay;

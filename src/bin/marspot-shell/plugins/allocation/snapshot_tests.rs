@@ -8,7 +8,8 @@ use super::plan::{Plan, plan};
 use super::rest::{Resting, RestMove, rest_move};
 use super::sim::world_at;
 use super::sim_policies::{old_helper_pick, old_pick, old_rest};
-use super::{Class, Load, Quant, shortage};
+use super::helper::{self, Placement, Scene};
+use super::{Class, Load, Quant, RHO0, shortage};
 
 const KAPPA_SNAPSHOT: f64 = 0.57;
 
@@ -213,4 +214,36 @@ fn allocation_snapshot_busy_and_low_rows() {
     r.since_move_h = Some(0.1);
     r.band_last_hour = 9;
     assert!(matches!(rest_move(&a, &p, &r), Some(RestMove::LeaveEarly(_))));
+}
+
+/// Rule (c) as the shell places helpers: one after another, each placed
+/// since the reading counted on its account at the default speed.
+fn place_helpers(a: &[Quant], class: Class, n: usize) -> Vec<u8> {
+    let scene = Scene { accounts: a.to_vec(), loads: vec![Load::default(); a.len()], b_f: 0.035, b_n: 0.035, kappa: Some(KAPPA_SNAPSHOT), shown: None };
+    let mut placed: Vec<(u8, Class, u32)> = Vec::new();
+    let mut order = Vec::new();
+    for _ in 0..n {
+        let Placement::To(to, inputs) = helper::place(&scene, Mover { class, rate: RHO0 }, None, &placed) else { panic!("no account for a helper") };
+        assert_eq!(inputs.decide(&inputs.plan()).map(|(t, _)| t), Some(to), "the inputs read back give the same answer");
+        match placed.iter_mut().find(|(id, c, _)| *id == to && *c == class) {
+            Some((_, _, k)) => *k += 1,
+            None => placed.push((to, class, 1)),
+        }
+        order.push(to);
+    }
+    order
+}
+
+#[test]
+fn allocation_snapshot_helper_rows() {
+    for a in [world(), screenshot()] {
+        // (c) new plain helpers: P6, then P4
+        let plain = place_helpers(&a, Class::Plain, 6);
+        assert_eq!(first_seen(&plain)[..2], [6, 4], "{plain:?}");
+        // (c) a new Fable helper: P6
+        assert_eq!(place_helpers(&a, Class::Restricted, 1), [6]);
+        // today's rule sent both to P4, the most left
+        assert_eq!(old_helper_pick(&a, Class::Plain, &[]), Some(4));
+        assert_eq!(old_helper_pick(&a, Class::Restricted, &[]), Some(4));
+    }
 }

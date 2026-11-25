@@ -24,7 +24,7 @@ use marspot_peer::registry::{Agent, Status};
 
 use super::{accounts, quota, KimiPlugin, PaneKimi};
 use crate::plugins::claudecode::heads_up;
-use crate::plugins::claudecode::quota::{next_move, roomiest, Move, Refusal, Situation};
+use crate::plugins::claudecode::quota::{helper_pick, next_move, Move, Refusal, Situation};
 use crate::plugins::claudecode::with_helpers::{account_changed, AccountChanged, HelperRoles};
 use crate::plugins::claudecode::rooms::unix_now;
 use crate::plugins::claudecode::seen::Seen;
@@ -184,9 +184,9 @@ impl KimiPlugin {
             warned: false,
             background_refused: None,
         });
-        // a helper goes where the most is left, as when it was started
+        // a helper goes by the rule for helpers, as when it was started
         let feed_at = b.usage.as_ref().map_or(0, |u| u.generated_at);
-        let decision = if helper { roomiest::helper_move(roomiest::Pool::Kimi, feed_at, decision, &rooms, current, None) } else { decision };
+        let decision = if helper { helper_pick::helper_move(helper_pick::Pool::Kimi, feed_at, decision, &rooms, current, None) } else { decision };
         match decision {
             Move::Hold(why) => {
                 if tally.hold_said != Some(why) {
