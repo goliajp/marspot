@@ -20,6 +20,9 @@
 # minutes.  Everything it starts carries the scratch HOME in its
 # environment, and that is how the cleanup finds it: nothing else on
 # the host is touched.
+#
+# Exit 0 every check passed, 1 one failed, 3 none failed but the prompt
+# count could not be measured on this host.
 set -euo pipefail
 
 DMG="${1:?usage: $0 <Marspot.dmg>}"
@@ -44,6 +47,7 @@ LOG="$FRESH/Library/Logs/Marspot/marspot.log"
 SETTINGS="$FRESH/.claude/settings.json"
 TCC_PROMPTS="/tmp/marspot-$RUN_ID-tcc.sh"
 fail=0
+unmeasured=0
 check() { if "${@:2}"; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=1; fi; }
 ours() { ps -axww -E -o pid=,command= | grep -F "HOME=$FRESH" | grep -v grep; }
 
@@ -172,17 +176,21 @@ check "no ERROR lines" no_errors
 # A request the login user's TCC database already answers, allowed or
 # denied, is not asked again, and that database is the user's, not
 # HOME's: the empty HOME does not make it new.  So the count is a
-# verdict only when tccd saw the app's requests and answered none of
-# them from a stored decision; otherwise it is not measured, which is
-# neither a pass nor a failure.  More than one prompt fails either way.
-if [[ $tcc_rc != 0 || ! $prompts =~ ^[0-9]+$ ]]; then
-  echo "  NOT MEASURED  at most one system permission prompt" \
-    "(the log shows no request of this copy's: the instrument cannot see it)"
-elif (( prompts > 1 )); then
+# verdict only when the log is readable and tccd answered none of the
+# app's requests from a stored decision; otherwise it is not measured
+# (exit 3), which is neither a pass nor a failure.  More than one prompt
+# fails either way.
+# redaction can only hide requests, so a count over one fails even then
+if [[ $prompts =~ ^[0-9]+$ ]] && (( prompts > 1 )); then
   echo "  FAIL  at most one system permission prompt ($prompts asked)"; fail=1
+elif [[ $tcc_rc != 0 || ! $prompts =~ ^[0-9]+$ ]]; then
+  echo "  NOT MEASURED  at most one system permission prompt" \
+    "(the log cannot be read, or tccd logged nothing readable: the instrument cannot see)"
+  unmeasured=1
 elif (( stored > 0 )); then
   echo "  NOT MEASURED  at most one system permission prompt ($prompts asked;" \
     "$stored answered from $(id -un)'s stored decisions, which a Mac that never ran marspot does not have)"
+  unmeasured=1
 else
   echo "  ok    at most one system permission prompt ($prompts asked; tccd evaluated every request afresh)"
 fi
@@ -195,5 +203,5 @@ echo "==> installs"
 awk -F'\t' '$7 ~ /agents\./{print "  " $1 "  " $7 "  " $8 "  " $9 "  " $10}' "$LOG"
 echo "==> stdout/stderr of the app (tail)"
 tail -5 "$FRESH/stdout.log" | sed 's/^/  /'
-exit $fail
+exit $(( fail ? 1 : unmeasured ? 3 : 0 ))
 REMOTE

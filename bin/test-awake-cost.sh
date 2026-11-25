@@ -86,11 +86,15 @@ work, out, commit, host, settle, window, rc, budgets, cpu_budgets = sys.argv[1:1
 settle, window, rc = float(settle), float(window), int(rc)
 def ceilings(text):
     return {int(k): float(v) for k, v in (kv.split(":") for kv in text.split(",") if kv)}
-budgets, cpu_budgets = ceilings(budgets), ceilings(cpu_budgets)
-# the line bin/_idle_wakeups.py draws: load can only make a reading worse,
-# so one within its ceiling stands whatever the load, one over it on a
-# busy host is no verdict
-busy_load = float(os.environ.get("IDLE_BUSY_LOAD") or 5.0)
+try:
+    budgets, cpu_budgets = ceilings(budgets), ceilings(cpu_budgets)
+    # the line bin/_idle_wakeups.py draws: load can only make a reading
+    # worse, so one within its ceiling stands whatever the load, one over
+    # it on a busy host is no verdict
+    busy_load = float(os.environ.get("IDLE_BUSY_LOAD") or 5.0)
+except ValueError as e:
+    print(f"FAIL: unreadable budgets or IDLE_BUSY_LOAD: {e}")
+    sys.exit(2)
 def worse(a, b):
     for c in (1, 2, 3):
         if c in (a, b):

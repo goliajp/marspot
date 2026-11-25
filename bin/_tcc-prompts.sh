@@ -24,10 +24,10 @@
 #
 # Prints one line per request that is not policy ("prompt|stored <time>
 # <service> ...") and last "requests=N prompts=P stored=S".
-# Exit 0 when it read the log and saw at least one of the app's requests;
-# 2 when it cannot see: `log show` failed, or no request of the app's was
-# in the log at all, which on a first launch means the instrument is
-# blind (a redacted attribution, a wrong prefix), not that nothing asked.
+# Exit 0 when it could read the log; 2 when it cannot see: `log show`
+# failed, tccd logged no request from any process in the window (the
+# witness that the log is readable at all), or an attribution was
+# redacted, in which case a request of the app's could hide behind it.
 set -uo pipefail
 start="${1:?usage: $0 START PATH_PREFIX}"
 prefix="${2:?usage: $0 START PATH_PREFIX}"
@@ -38,12 +38,15 @@ import json, re, sys
 prefix = sys.argv[1]
 ours_re = re.compile(r"(?:responsible_path|binary_path)=" + re.escape(prefix))
 reqs = {}
+redacted = False
 for line in sys.stdin:
     try:
         e = json.loads(line)
     except ValueError:
         continue
     msg = e.get("eventMessage", "")
+    if "<private>" in msg:
+        redacted = True
     mid = re.search(r"msgID=([^,]+)", msg)
     if not mid:
         continue
@@ -70,8 +73,8 @@ for r in ours:
         stored += 1
         v, why = r["result"]
         print(f"stored {t}  {svc}  authValue={v} authReason={why}")
-print(f"requests={len(ours)} prompts={prompts} stored={stored}")
-sys.exit(0 if ours else 2)
+print(f"requests={len(ours)} prompts={prompts} stored={stored} witness={len(reqs)}")
+sys.exit(2 if redacted or not reqs else 0)
 ' "$prefix"
 st=("${PIPESTATUS[@]}")
 if [[ ${st[0]} != 0 ]]; then
@@ -79,6 +82,6 @@ if [[ ${st[0]} != 0 ]]; then
   exit 2
 fi
 if [[ ${st[1]} == 2 ]]; then
-  echo "no request of the app's in the log since $start: cannot see" >&2
+  echo "no readable tccd request from any process since $start: cannot see" >&2
 fi
 exit "${st[1]}"
