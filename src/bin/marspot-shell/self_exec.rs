@@ -3,6 +3,7 @@
 
 use marspot::{lx_error, lx_event, lx_warn};
 
+use crate::plugins::peerbus;
 use crate::{apple_events, sup_log, supervisor, ShellApp};
 
 impl ShellApp {
@@ -98,8 +99,7 @@ impl ShellApp {
             .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
             .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
         apple_events::mark(&mut cmd);
-        let err = cmd.exec();
-        // exec only returns on failure.
+        let err = exec_prepared(&mut cmd);
         lx_event!(
             "SHELL_UPDATE_FAIL",
             "exec into current/marspot-shell failed",
@@ -144,7 +144,19 @@ impl ShellApp {
             cmd.env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
         }
         apple_events::mark_retry(&mut cmd, n);
-        let err = cmd.exec();
+        let err = exec_prepared(&mut cmd);
         lx_error!("shell.ae_check.exec_failed", &format!("{err}"), target = target.display());
     }
+}
+
+/// Exec `cmd` as this process's next image, after what has to end
+/// before it; both ways the shell replaces itself go through here.
+/// Returns only when the exec failed.
+pub(crate) fn exec_prepared(cmd: &mut std::process::Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    // a relay left open ends after the exec as a child nobody waits for
+    peerbus::close_inboxes();
+    let err = cmd.exec();
+    peerbus::exec_failed();
+    err
 }

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.713"  # the shell starts the madcawl host on the first connection to its socket
+shell   = "0.7.714"  # the shell closes its inboxes before it execs itself, and every image waits for the children it inherits
 core    = "0.12.690"  # settings learn gemini.allocation beside kimi.allocation
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

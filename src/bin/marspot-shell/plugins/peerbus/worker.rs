@@ -95,6 +95,8 @@ pub(crate) enum Event {
     MoveEnded,
     Rpc { home: PathBuf, msg: Value },
     RpcClosed { home: PathBuf },
+    /// Before the shell replaces its image (`exec_prep`); answered with how many closed.
+    CloseInboxes(SyncSender<usize>),
     Stop,
 }
 
@@ -213,9 +215,8 @@ impl Worker {
         }
     }
 
-    /// The shipped agent skills ride on this thread: it is the one
-    /// that already looks at the agents' directories now and then.
-    /// Logged when the outcome changes, as the hooks are.
+    /// The shipped agent skills ride on this thread, which already looks at the
+    /// agents' directories now and then.  Logged when the outcome changes.
     fn reconcile_skills(&mut self) {
         let notes = crate::plugins::skills::reconcile();
         if notes == self.skill_notes {
@@ -227,8 +228,7 @@ impl Worker {
         self.skill_notes = notes;
     }
 
-    /// Look at everything marspot keeps in the agents' configuration,
-    /// and watch the files it is kept in as they are now.
+    /// Look at what marspot keeps in the agents' configuration, and watch its files.
     fn reconcile_config(&mut self) {
         self.reconcile_hooks();
         self.reconcile_skills();
@@ -273,14 +273,12 @@ impl Worker {
                     }
                 }
                 Event::Names => {
-                    // who runs beside the panes is only known from
-                    // having looked while they were there
+                    // who runs beside the panes is known only from looking while they were there
                     self.look_at_processes(crate::observe::INTERVAL);
                     self.titles_due();
                     self.rename_pass();
                     self.names_passes += 1;
-                    // a file the watch could not follow is still
-                    // looked at now and then
+                    // a file the watch could not follow is still looked at now and then
                     if self.names_passes.is_multiple_of(HOOKS_EVERY_PASSES) {
                         self.reconcile_config();
                     }
@@ -307,6 +305,7 @@ impl Worker {
                         self.schedule_retry();
                     }
                 }
+                Event::CloseInboxes(done) => drop(done.send(self.close_inboxes())),
                 Event::Stop => break,
             }
             self.take_ends();

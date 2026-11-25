@@ -45,6 +45,7 @@ mod control_reader;
 mod dev_window;
 mod frame_layer;
 mod identity;
+mod inherited;
 mod instance;
 mod observe;
 mod orphans;
@@ -130,6 +131,8 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some(apple_events::CHECK_ARG) {
         std::process::exit(apple_events::check_main(std::env::args().nth(2).as_deref()));
     }
+    // before this image starts a child; the per-render subcommands below skip it
+    if inherited::after_exec() { inherited::adopt() }
     // before anything else: AppKit must not register this image first
     apple_events::settle_after_exec();
     // before anything reads or writes the state directory
@@ -152,19 +155,15 @@ fn main() {
         Some("--codex-locks") => std::process::exit(plugins::peerbus::codex_locks_main()),
         _ => {}
     }
-    // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
-    // head`) exit cleanly with the standard EPIPE convention instead
-    // of panicking with a Rust backtrace.  SIG_DFL on macOS for SIGPIPE
-    // terminates the process — that's exactly the Unix contract.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    // `println!` to a closed pipe (`marspot-shell --status | head`) exits by the EPIPE
+    // convention instead of panicking: SIG_DFL for SIGPIPE terminates the process.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
 
-    // Supervisor and shell events go to the shared marspot.log as
-    // component="shell"; idempotent across self-exec restarts.
+    // component="shell" in the shared marspot.log; idempotent across self-exec restarts
     marspot::logx::init("shell");
     marspot_term::signals::log_fatal_senders("L1_SIGNAL");
     apple_events::report();
+    inherited::report();
 
     // Rollback subcommands dispatch BEFORE the redirect: when
     // current/ is broken, exec'ing into it would eat the command.
@@ -174,10 +173,9 @@ fn main() {
         _ => {}
     }
 
-    // One shell per state dir, settled before the redirect into
-    // `binaries/current/`: a launch that loses never execs and never
-    // reaches the launch journal the crash-loop checks count from.
-    // Subcommands talk to the running shell and take no lock.
+    // One shell per state dir, settled before the redirect into `binaries/current/`: a
+    // launch that loses never execs and never reaches the launch journal the crash-loop
+    // checks count from.  Subcommands talk to the running shell and take no lock.
     if !std::env::args().nth(1).is_some_and(|a| a.starts_with('-')) {
         identity::settle();
         instance::hold_or_exit();
@@ -208,9 +206,8 @@ fn main() {
         SIGUSR1_FLAG.store(true, Ordering::Release);
     }
 
-    // Dispatch CLI subcommands before we touch AppKit / start a
-    // window.  --status / --trigger run against an already-running
-    // shell, so they must not themselves take over the run loop.
+    // CLI subcommands before AppKit or a window: --status / --trigger talk to a
+    // running shell and must not take over the run loop themselves.
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--version") => {

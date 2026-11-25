@@ -234,6 +234,30 @@ fn madcawl_host_ends_the_host_a_previous_image_left() {
     assert!(!cfg.pid_file.exists() && !gone(parent));
 }
 
+/// The previous image's host had exited and the new image's start
+/// waited for it with the other inherited children: its pid may name
+/// another process by now, so the host's start takes it from there and
+/// neither waits for nor signals it.
+#[test]
+fn madcawl_host_leaves_a_previous_host_the_inherited_children_took() {
+    let rig = Rig::new();
+    let cfg = rig.cfg();
+    let child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let pid = child.id() as i32;
+    drop(child);
+    until("the child has exited", 5, || {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: a look at one child of ours that leaves it unwaited
+        let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+        r == 0 && info.si_pid == pid
+    });
+    crate::inherited::adopt();
+    std::fs::write(&cfg.pid_file, format!("{pid} 0\n")).unwrap();
+    proc::end_previous(&cfg.pid_file);
+    assert!(!cfg.pid_file.exists());
+    assert!(!crate::inherited::disown(pid), "the host's start took it out of the inherited ones");
+}
+
 #[test]
 fn madcawl_host_binds_only_with_both_programs_installed() {
     let home = TempDir::new("madcawl-installed");
