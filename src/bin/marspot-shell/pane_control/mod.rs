@@ -37,6 +37,7 @@ mod mainloop;
 pub(crate) mod names;
 mod ops_input;
 mod ops_pane;
+mod ops_proc;
 mod ops_read;
 mod panel_act;
 mod panes;

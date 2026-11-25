@@ -15,6 +15,7 @@ fn n(v: &Value, k: &str) -> String {
 pub fn exit_code(op: &Op, resp: &Response) -> u8 {
     match (op, resp) {
         (_, Response::Err(_)) => 1,
+        (Op::ProcStop(_), r) => super::cli_proc::exit_code(r),
         (Op::Run(_), Response::Ok(v)) => match v.get("exit_status").and_then(Value::i64) {
             Some(code) => code.clamp(0, 255) as u8,
             None => 1,
@@ -48,6 +49,7 @@ pub fn print(op: &Op, v: &Value) {
         }
         Op::Resize { .. } | Op::Place { .. } | Op::Close { .. } => println!("ok"),
         Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::cli_helper::print(op, v),
+        Op::ProcStop(_) => super::cli_proc::print(v),
     }
 }
 

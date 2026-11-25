@@ -14,6 +14,7 @@
 pub mod b64;
 pub mod cli;
 pub mod cli_helper;
+pub mod cli_proc;
 mod cli_out;
 pub mod client;
 pub mod keys;
@@ -23,7 +24,8 @@ pub mod screen;
 pub mod sha256;
 
 pub use request::{
-    AgentKind, HelperStartArgs, HelperStop, Input, Isolation, Op, OpenArgs, ReadArgs, Request, RunArgs, SendArgs, Wait, Where,
+    AgentKind, HelperStartArgs, HelperStop, Input, Isolation, Op, OpenArgs, ProcStopArgs, ReadArgs, Request, RunArgs, SendArgs, Wait,
+    Where,
 };
 pub use response::{Reject, Response};
 

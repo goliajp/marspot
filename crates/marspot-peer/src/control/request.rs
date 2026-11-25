@@ -34,6 +34,7 @@ pub enum Op {
     /// `all`: every helper, not only the caller's.
     HelperList { all: bool },
     HelperStop(HelperStop),
+    ProcStop(ProcStopArgs),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +137,7 @@ impl Op {
             Op::HelperStart(_) => "helper.start",
             Op::HelperList { .. } => "helper.list",
             Op::HelperStop(_) => "helper.stop",
+            Op::ProcStop(_) => "proc.stop",
         }
     }
 
@@ -247,6 +249,7 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
         "helper.start" => Op::HelperStart(helper::start(&a)?),
         "helper.list" => Op::HelperList { all: a.bool("all", false)? },
         "helper.stop" => Op::HelperStop(helper::stop(&a)?),
+        "proc.stop" => Op::ProcStop(proc::stop(&a)?),
         other => return Err(bad(format!("unknown op `{other}`"))),
     };
     if let Op::Resize { cols, rows, .. } = &op
@@ -264,6 +267,10 @@ use args::{input, run_command, wait};
 #[path = "request_helper.rs"]
 pub mod helper;
 pub use helper::{AgentKind, HelperStartArgs, HelperStop, Isolation};
+
+#[path = "request_proc.rs"]
+pub mod proc;
+pub use proc::ProcStopArgs;
 
 #[path = "request_json.rs"]
 mod encode;

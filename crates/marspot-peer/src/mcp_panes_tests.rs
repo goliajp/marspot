@@ -4,21 +4,26 @@ use crate::json;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 
-/// What the nine tools may spend of every session's context.
-const BUDGET: usize = 2048;
+/// What the ten tools may spend of every session's context.
+const BUDGET: usize = 2304;
 /// The helper tools' part: HelperStart also says when a helper beats a
 /// one-shot exec, for a session that never loads the helpers skill.
 const HELPER_SHARE: usize = 704;
+/// ProcStop's part.
+const PROC_SHARE: usize = 256;
 
 #[test]
 fn mcp_pane_tool_descriptions_fit_the_budget() {
     let helper = |t: &Value| t.str_at("name").is_some_and(|n| n.starts_with("Helper"));
     let len = |t: &Value| t.str_at("description").unwrap().len();
     let all = tools(1795);
-    let panes: usize = all.iter().filter(|t| !helper(t)).map(len).sum();
+    let proc = |t: &Value| t.str_at("name") == Some("ProcStop");
+    let panes: usize = all.iter().filter(|t| !helper(t) && !proc(t)).map(len).sum();
     let helpers: usize = all.iter().filter(|t| helper(t)).map(len).sum();
+    let procs: usize = all.iter().filter(|t| proc(t)).map(len).sum();
     assert_eq!(all.iter().filter(|t| helper(t)).count(), 3);
-    assert!(panes <= BUDGET - HELPER_SHARE, "{panes} bytes of pane tool descriptions");
+    assert!(panes <= BUDGET - HELPER_SHARE - PROC_SHARE, "{panes} bytes of pane tool descriptions");
+    assert!(procs <= PROC_SHARE, "{procs} bytes of the ProcStop description");
     assert!(helpers <= HELPER_SHARE, "{helpers} bytes of helper tool descriptions");
     for t in tools(55) {
         let d = t.str_at("description").unwrap();
@@ -69,6 +74,7 @@ fn mcp_pane_args_pass_through_unchanged() {
         ("HelperStart", "helper.start", r#"{"agent":"codex","task":"review","cwd":"/w","resume":"last","budget_minutes":10}"#),
         ("Helpers", "helper.list", r#"{"all":true}"#),
         ("HelperStop", "helper.stop", r#"{"name":"spg#5521"}"#),
+        ("ProcStop", "proc.stop", r#"{"ids":["36160@1795584627123456"],"tree":true,"force":false}"#),
     ] {
         assert_eq!(request_for(tool, &args(a), Some("th-1"), 55).unwrap(), direct(op, Some("th-1"), a), "{tool} {a}");
     }

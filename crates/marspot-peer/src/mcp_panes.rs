@@ -29,6 +29,7 @@ pub const TOOLS: &[(&str, &str)] = &[
     ("HelperStart", "Start an agent (claude, codex, gemini, kimi) on a task in a shadow pane under yours; its result reaches your inbox when it stops. Use it, not codex exec / claude -p in your shell, for work of over a minute or two, in parallel, with follow-ups or for the user to watch: it does not block you, gets its own account, shows under your pane. A one-shot exec suits a few-second answer. Optional: cwd, model, profile, mode (auto/ask), resume:\"last\", budget_minutes (30). If others_in_cwd names a session there, SendMessage it first."),
     ("Helpers", "List your helpers (all:true: every one): name, agent, account, state, time left, result_path."),
     ("HelperStop", "Stop a helper by name, or all:true for all of yours."),
+    ("ProcStop", "End processes of your pane by pid@start_us, as a marspot reminder lists them: SIGTERM to each and what runs under it (tree:false: only it); force:true adds SIGKILL 5 s later. Never your agent, shell or marspot."),
 ];
 
 /// The `instructions` of the `initialize` answer.  Clients that put
@@ -102,10 +103,12 @@ fn schema(tool: &str, cap_s: u32) -> Value {
         ],
         "Helpers" => vec![("all", prop("boolean"))],
         "HelperStop" => vec![("name", prop("string")), ("all", prop("boolean"))],
+        "ProcStop" => vec![("ids", obj([("type", Value::from("array")), ("items", prop("string"))])), ("tree", prop("boolean")), ("force", prop("boolean"))],
         _ => Vec::new(),
     };
     let required = match tool {
         "HelperStart" => vec![Value::from("agent"), Value::from("task")],
+        "ProcStop" => vec![Value::from("ids")],
         _ if props.iter().any(|(k, _)| *k == "target") => vec![Value::from("target")],
         _ => Vec::new(),
     };
@@ -165,6 +168,7 @@ pub fn request_for(tool: &str, args: &Value, thread: Option<&str>, cap_s: u32) -
         "HelperStart" => "helper.start",
         "Helpers" => "helper.list",
         "HelperStop" => "helper.stop",
+        "ProcStop" => "proc.stop",
         other => return Err(bad(&format!("unknown tool {other:?}"))),
     };
     if matches!(op, "pane.run" | "pane.read") {

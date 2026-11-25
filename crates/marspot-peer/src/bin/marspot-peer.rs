@@ -11,6 +11,8 @@
 //! marspot-peer gemini-hook
 //! marspot-peer kimi-hook
 //! marspot-peer pane …
+//! marspot-peer helper …
+//! marspot-peer procs …
 //! ```
 //!
 //! On the command line the sender is the Codex session this runs
@@ -42,13 +44,15 @@ const USAGE: &str = "usage:
   marspot-peer gemini-hook
   marspot-peer kimi-hook
   marspot-peer pane ...    (see `marspot-peer pane` for its own usage)
-  marspot-peer helper ...  (see `marspot-peer helper` for its own usage)";
+  marspot-peer helper ...  (see `marspot-peer helper` for its own usage)
+  marspot-peer procs ...   (see `marspot-peer procs` for its own usage)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("pane") => return ExitCode::from(marspot_peer::control::cli::main(&args[1..])),
         Some("helper") => return ExitCode::from(marspot_peer::control::cli_helper::main(&args[1..])),
+        Some("procs") => return ExitCode::from(marspot_peer::control::cli_proc::main(&args[1..])),
         Some("list") => list(),
         Some("whoami") => whoami(),
         Some("send") => send(&args[1..]),

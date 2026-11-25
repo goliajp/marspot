@@ -1,6 +1,8 @@
 //! Who is asking.  The answer sets limits, the parent of a new pane and
-//! the audit line; it never decides what may be done, so it has to be
-//! close, not unforgeable.
+//! the audit line, and `proc.stop` scopes a request to the answer's
+//! pane.  It guards against mistakes, not against a caller that lies:
+//! it has to be close, not unforgeable, and a forged Codex thread id
+//! borrows another pane.
 //!
 //! In order: a Codex thread the peer bus knows the pane of; else the
 //! connecting process (`LOCAL_PEERPID`) and its ancestors, the first of

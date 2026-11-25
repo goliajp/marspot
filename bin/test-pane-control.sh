@@ -296,6 +296,57 @@ else
   check "the placed pane closes as a window pane" pc close "$S2"
 fi
 
+echo "════ 8. procs stop ════"
+# pid@start_us, the start time as the kernel keeps it (proc_bsdinfo)
+proc_ident() { # pid
+  python3 - "$1" <<'PY'
+import ctypes, struct, sys
+pid = int(sys.argv[1])
+buf = ctypes.create_string_buffer(136)
+n = ctypes.CDLL("/usr/lib/libSystem.B.dylib").proc_pidinfo(pid, 3, ctypes.c_uint64(0), buf, 136)
+if n != 136:
+    sys.exit(1)
+sec, usec = struct.unpack_from("<QQ", buf.raw, 120)
+print(f"{pid}@{sec * 1000000 + usec}")
+PY
+}
+bg_pid() { # pane, command printing BG=<pid>
+  pc run "$1" --timeout 20 "$2" 2>/dev/null | grep -o 'BG=[0-9]*' | tail -1 | cut -d= -f2
+}
+# both sleeps are disowned: ended below whichever checks fail, each
+# only while its pid is still the process read at the start
+end_sleep() { # pid, pid@start_us
+  [[ -n $1 && -n $2 && $(proc_ident "$1" 2>/dev/null) == "$2" ]] && kill "$1" 2>/dev/null
+  return 0
+}
+MINE=$(bg_pid "$P1" 'sleep 300 &!; echo BG=$!')
+MINE_ID=$([[ -n $MINE ]] && proc_ident "$MINE")
+THEIRS=$(bg_pid "$P2" 'sleep 301 & disown; echo BG=$!')
+THEIRS_ID=$([[ -n $THEIRS ]] && proc_ident "$THEIRS")
+if [[ -n $MINE_ID && -n $THEIRS_ID ]]; then
+  STOP="env MARSPOT_STATE_DIR=$SD $(printf '%q' "$PEER") procs stop"
+  check "procs stop ends a process of the caller's own pane" runs "$P1" 0 "$STOP $MINE_ID"
+  check "and it has ended" bash -c "for i in \$(seq 50); do kill -0 $MINE 2>/dev/null || exit 0; sleep 0.1; done; exit 1"
+  check "another pane's process is not_yours" runs "$P1" 1 "$STOP $THEIRS_ID"
+  check "and it still runs" kill -0 "$THEIRS"
+  check "a start time that does not match is gone, nothing sent" runs "$P2" 0 "$STOP ${THEIRS}@1"
+  check "and it still runs after that" kill -0 "$THEIRS"
+  audited() { # id, result
+    local i
+    for (( i = 0; i < 30; i++ )); do
+      grep -a '"op":"proc.stop"' "$SD/control-audit.log" 2>/dev/null | grep -F "\"id\":\"$1\"" | grep -qF "\"result\":\"$2\"" && return 0
+      sleep 0.2
+    done
+    return 1
+  }
+  check "control-audit.log has the stop" audited "$MINE_ID" stopped
+  check "control-audit.log has the refusal" audited "$THEIRS_ID" not_yours
+else
+  check "two background sleeps to stop were started and read ($MINE, $THEIRS)" false
+fi
+end_sleep "$MINE" "$MINE_ID"
+end_sleep "$THEIRS" "$THEIRS_ID"
+
 check "the app is still up" alive "$(dev_shell_pid)"
 check "no panic in the log" bash -c "! grep -qa $'\tPANIC' $(printf '%q' "$LOG")"
 
