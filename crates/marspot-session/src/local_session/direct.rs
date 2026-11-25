@@ -130,7 +130,7 @@ mod tests {
     use super::*;
     use std::os::fd::RawFd;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::thread;
 
     use marspot_term::pty::Pty;
@@ -146,10 +146,15 @@ mod tests {
     const LONG: Duration = Duration::from_secs(45);
     const PAD: &str = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
-    /// `LINES` numbered lines of 108 characters, thirteen megabytes in
-    /// all.
-    fn flooded() -> Vec<u8> {
-        (0..LINES).flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect()
+    /// Lines a `Feed::Lines` writes at a time.
+    const BATCH: usize = 1000;
+    /// A `Feed::Lines` stops here, lent or not: about 109 megabytes.
+    const MOST_LINES: usize = 1_000_000;
+
+    /// The numbered lines `lines`, 109 bytes each; `LINES` of them are
+    /// thirteen megabytes.
+    fn numbered(lines: std::ops::Range<usize>) -> Vec<u8> {
+        lines.flat_map(|i| format!("{i:07} {PAD}\n").into_bytes()).collect()
     }
 
     fn taken() -> Vec<u8> {
@@ -158,10 +163,11 @@ mod tests {
 
     const ENDLESS: &[u8] = b"0123456789012345678901234567890123456789\n";
 
-    /// What the pane is fed: bytes once, then the end of the pty or a
-    /// pty left open; or a line again and again.
+    /// What the pane is fed: numbered lines until the test says stop,
+    /// then the end of the pty or a pty left open; or a line again and
+    /// again.
     enum Feed {
-        Once { bytes: Vec<u8>, then_open: bool },
+        Lines { then_open: bool },
         Endless(&'static [u8]),
     }
 
@@ -180,10 +186,35 @@ mod tests {
     /// is as steady as the tests need it to be on any machine.  The
     /// pty's own output processing is off: the bytes come out as they
     /// were written.
+    ///
+    /// No QoS keeps a thread on its core inside a virtual machine: the
+    /// hypervisor can take the vCPU away mid-flood, and the reader rightly
+    /// takes such a pause for the end of a flood.  So the flood tests feed
+    /// lines until the loop has read some itself.
     struct Feeder {
         slave: Option<std::os::fd::OwnedFd>,
         stop: Arc<AtomicBool>,
+        /// Lines a `Feed::Lines` has written, a batch at a time.
+        lines: Arc<AtomicUsize>,
+        /// A `Feed::Lines` has written its last batch.
+        done: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl Feeder {
+        /// Stops a `Feed::Lines` once the loop has read some of it
+        /// itself since `before` and at least `LINES` lines have gone
+        /// out.
+        fn stop_once_lent(&self, before: usize) {
+            if READ_HERE.get() > before && self.lines.load(Ordering::SeqCst) >= LINES {
+                self.stop.store(true, Ordering::SeqCst);
+            }
+        }
+
+        /// The lines written in all, once the last batch is out.
+        fn written(&self) -> Option<usize> {
+            self.done.load(Ordering::SeqCst).then(|| self.lines.load(Ordering::SeqCst))
+        }
     }
 
     impl Drop for Feeder {
@@ -226,16 +257,26 @@ mod tests {
         // end of the pty unless the feeder keeps the other one open
         // SAFETY: dup of a descriptor this function owns.
         let mut out = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(libc::dup(slave.as_raw_fd())) });
-        let keep = matches!(feed, Feed::Once { then_open: true, .. }) || matches!(feed, Feed::Endless(_));
+        let keep = matches!(feed, Feed::Lines { then_open: true } | Feed::Endless(_));
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
+        let (lines, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let (written, finished) = (Arc::clone(&lines), Arc::clone(&done));
         let thread = thread::spawn(move || {
             // SAFETY: sets this thread's own QoS.
             assert_eq!(unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) }, 0);
             match feed {
                 // an error is the session gone: nobody reads any more
-                Feed::Once { bytes, .. } => {
-                    let _ = out.write_all(&bytes);
+                Feed::Lines { .. } => {
+                    let mut next = 0;
+                    while !stopping.load(Ordering::SeqCst)
+                        && next < MOST_LINES
+                        && out.write_all(&numbered(next..next + BATCH)).is_ok()
+                    {
+                        next += BATCH;
+                        written.store(next, Ordering::SeqCst);
+                    }
+                    finished.store(true, Ordering::SeqCst);
                 }
                 Feed::Endless(line) => {
                     while !stopping.load(Ordering::SeqCst) && out.write_all(line).is_ok() {}
@@ -269,7 +310,7 @@ mod tests {
             cols: COLS,
             rows: 24,
         };
-        (Feeder { slave: keep.then_some(slave), stop, thread: Some(thread) }, session)
+        (Feeder { slave: keep.then_some(slave), stop, lines, done, thread: Some(thread) }, session)
     }
 
     fn pace(follow: Option<Follow>, key_waiting: &AtomicBool) -> Pace<'_> {
@@ -314,49 +355,54 @@ mod tests {
     /// thread read it.
     #[test]
     fn a_flood_read_by_two_threads_in_turn_is_parsed_whole_and_in_order() {
-        lent_on_the_way(|| {
-            let (_feeder, mut s) = fed(Feed::Once { bytes: flooded(), then_open: false });
-            taken();
-            let read_here = turn_until(&mut s, None, |s, _| s.exited.load(Ordering::SeqCst) && !lent(s));
-            s.pump();
-            let (got, want) = (taken(), flooded());
-            let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
-            let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
-            assert!(
-                got == want,
-                "{} bytes parsed of {}, the same up to byte {same}\n got: {:?}\nwant: {:?}",
-                got.len(),
-                want.len(),
-                near(&got),
-                near(&want)
-            );
-            read_here
+        let (feeder, mut s) = fed(Feed::Lines { then_open: false });
+        taken();
+        let before = READ_HERE.get();
+        turn_until(&mut s, None, |s, _| {
+            feeder.stop_once_lent(before);
+            s.exited.load(Ordering::SeqCst) && !lent(s)
         });
+        lent_since(before);
+        s.pump();
+        let got = taken();
+        let want = numbered(0..feeder.written().expect("the feed ended with the pty"));
+        let same = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
+        let near = |v: &[u8]| String::from_utf8_lossy(&v[same.saturating_sub(120)..(same + 240).min(v.len())]).into_owned();
+        assert!(
+            got == want,
+            "{} bytes parsed of {}, the same up to byte {same}\n got: {:?}\nwant: {:?}",
+            got.len(),
+            want.len(),
+            near(&got),
+            near(&want)
+        );
     }
 
     /// When the flood pauses the pty goes back to the reader, which
     /// brings what comes next.
     #[test]
     fn a_pause_gives_the_pty_back_to_the_reader() {
-        lent_on_the_way(|| {
-            let (_feeder, mut s) = fed(Feed::Once { bytes: flooded(), then_open: true });
-            taken();
-            let all = flooded().len();
-            let read_here = turn_until(&mut s, None, |s, total| total == all && !lent(s));
-            // the tty echoes what is typed
-            s.pty.write_shared(b"after\n").expect("type at the pty");
-            turn_until(&mut s, None, |_, total| total >= b"after\n".len());
-            assert!(taken().ends_with(b"after\n"));
-            assert!(!lent(&s), "a line of echo is not a flood");
-            read_here
+        let (feeder, mut s) = fed(Feed::Lines { then_open: true });
+        taken();
+        let before = READ_HERE.get();
+        let mut all = None;
+        turn_until(&mut s, None, |s, total| {
+            feeder.stop_once_lent(before);
+            if all.is_none() {
+                all = feeder.written().map(|n| numbered(0..n).len());
+            }
+            all == Some(total) && !lent(s)
         });
+        lent_since(before);
+        // the tty echoes what is typed
+        s.pty.write_shared(b"after\n").expect("type at the pty");
+        turn_until(&mut s, None, |_, total| total >= b"after\n".len());
+        assert!(taken().ends_with(b"after\n"));
+        assert!(!lent(&s), "a line of echo is not a flood");
     }
 
-    /// Run `flood`, which returns the bytes the loop read itself: what it
-    /// checks holds whoever read the bytes, and the loop must have read
-    /// some of them for it to say anything about the loop.
-    fn lent_on_the_way(flood: impl FnOnce() -> usize) {
-        assert!(flood() > 0, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
+    fn lent_since(before: usize) {
+        assert!(READ_HERE.get() > before, "the loop was never lent the pty: {}", crate::pty_reader::tests::rated());
     }
 
     /// A key ends the turn before another byte is read; the pty stays
