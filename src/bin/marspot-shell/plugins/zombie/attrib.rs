@@ -145,8 +145,19 @@ impl Attributor {
         o
     }
 
+    /// The claude session an outside process inherited, from what
+    /// placing it read; None before it was placed or when it has none.
+    pub fn session(&mut self, obs: &Observation, row: &ProcRow) -> Option<String> {
+        let (root, _) = self.outside_root(obs, row)?;
+        if !self.env.has_all(&root, &KEYS) {
+            return None;
+        }
+        self.env.value(&root, KEYS[1])
+    }
+
     /// Outside processes placed in this check rather than remembered
     /// from an earlier one.
+    #[cfg(test)]
     pub fn placed(&self) -> usize {
         self.placed
     }

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.718"  # an image started by an exec shows no frame until it is found registered for Apple events, within a bounded wait
-core    = "0.12.692"  # the process panel shows real CPU% on Apple silicon: pidtree converts mach ticks to nanoseconds
+shell   = "0.7.719"  # the zombie watch checks claude panes every five minutes on its own thread and records suspects and the messages it would send
+core    = "0.12.693"  # pidtree reads an executable path; the zombie rules, pacing and transcript reader live in the lib
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

@@ -25,7 +25,7 @@ mod table;
 pub use args::{proc_argv, proc_cmdline, proc_env_value, proc_env_values, release_room};
 pub use ident::{ProcId, SignalError, proc_id, signal};
 pub use pane_cwd::pane_cwd;
-pub use probes::{Zombie, cpu_with_children, fd_path, proc_cpu_time_ns, zombies};
+pub use probes::{Zombie, cpu_with_children, exe_path, fd_path, proc_cpu_time_ns, zombies};
 pub use table::{ProcNode, ProcTable, descendants_of, flatten_pre_order, tree_rooted_at};
 
 /// One process as returned by the sysctl table.  We only keep what

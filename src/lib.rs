@@ -144,6 +144,8 @@ pub use marspot_term::settings;
 pub mod state;
 pub mod tools;
 pub mod ui;
+/// The zombie watch's rules; the shell runs them.
+pub mod zombie;
 
 /// Window-chrome height in **logical points** — ONE band above the
 /// grid carrying three groups on a single row: the AppKit-drawn

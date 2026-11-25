@@ -1,0 +1,194 @@
+# the processes of the 2026-11-25 23:34 JST scene that the rules look at
+# now	1795617273
+# pid	ppid	pgid	start	comm	cwd	exe	stdout	session	token	thread	argv
+1	0	1	1794900232	launchd	-	-	-	-	-	-	launchd
+862	1	851	1795357257	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd1
+1741	1733	1741	1794900372	-zsh	-	-	-	-	-	-	-zsh
+1769	1768	1769	1794900372	-zsh	-	-	-	-	-	-	-zsh
+1788	1786	1788	1794900372	-zsh	-	-	-	-	-	-	-zsh
+1829	1827	1829	1794900372	-zsh	-	-	-	-	-	-	-zsh
+1861	1853	1861	1794900372	-zsh	-	-	-	-	-	-	-zsh
+1894	1886	1894	1794900372	-zsh	-	-	-	-	-	-	-zsh
+1988	1985	1988	1794900372	-zsh	-	-	-	-	-	-	-zsh
+2000	1991	2000	1794900372	-zsh	-	-	-	-	-	-	-zsh
+2042	2035	2042	1794900372	-zsh	-	-	-	-	-	-	-zsh
+2068	2065	2068	1794900373	-zsh	-	-	-	-	-	-	-zsh
+2092	2088	2092	1794900373	-zsh	-	-	-	-	-	-	-zsh
+3362	30708	30708	1795558589	rust-analyzer	-	-	-	-	-	-	rust-analyzer
+3419	3362	30708	1795558589	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+3420	3362	30708	1795558589	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+6256	64590	64590	1795599603	rust-analyzer	-	-	-	-	-	-	rust-analyzer
+6311	6256	64590	1795599603	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+6312	6256	64590	1795599603	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+12538	1	12538	1795611817	java	/Users/user/.gradle/daemon/9.7.1	/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home/bin/java	-	0a76d287-c435-4cc2-b9e7-a68ffca225db	1e2-0000000000000000	-	java cmd2
+20660	1	20660	1794903494	adb	/Users/user/work/proj-g	-	-	8faf5423-2fa7-46c7-8902-7fe6b50d3bd3	1e1-0000000000000000	-	adb cmd3
+21339	64590	21339	1795606723	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-j/663e10a4-97e5-4f0a-94c2-73f9ca86dc41/tasks/bduab43ns.output	-	-	-	zsh cmd4 bench-lock
+22220	64663	64663	1795580176	rust-analyzer	-	-	-	-	-	-	rust-analyzer
+22238	22220	64663	1795580176	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+22240	22220	64663	1795580176	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+22371	1	20528	1795393357	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd5
+30708	2092	30708	1795553745	claude	-	-	-	-	-	-	claude cmd6
+30709	1769	30709	1795553745	claude	-	-	-	-	-	-	claude cmd7
+30710	1788	30710	1795553745	claude	-	-	-	-	-	-	claude cmd8
+31546	30710	30710	1795553747	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+31547	30710	30710	1795553747	smix-mcp	-	-	-	-	-	-	smix-mcp
+31596	30709	30709	1795553747	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+31600	30709	30709	1795553747	smix-mcp	-	-	-	-	-	-	smix-mcp
+31679	30708	30708	1795553748	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+31680	30708	30708	1795553748	smix-mcp	-	-	-	-	-	-	smix-mcp
+35278	1	35277	1795297715	tail	/Users/user/work/proj-a/d2/worktrees/d3	-	-	-	-	-	tail -n +1 -f /private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/scratchpad/f4.log
+35280	1	35277	1795297715	ugrep	/Users/user/work/proj-a/d2/worktrees/d3	-	-	153c990a-bc0f-49d0-9303-1bf639e4128e	1e8-0000000000000000	-	ugrep cmd10
+36160	64587	36160	1795586227	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/b6lpc8u81.output	-	-	-	zsh cmd11
+36161	36160	36160	1795586227	bash	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/b6lpc8u81.output	-	-	-	bash cmd12
+37219	1	37219	1795008772	codex	/Users/user/work/proj-i	/Users/user/.local/bin/codex	-	-	1e5-0000000000000000	-	codex app-server
+39438	1741	39438	1795497649	claude	-	-	-	-	-	-	claude cmd13
+39706	39438	39438	1795497651	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+39712	39438	39438	1795497651	smix-mcp	-	-	-	-	-	-	smix-mcp
+40365	1	39677	1795387485	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd1
+40512	1	40323	1795405306	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd1
+40934	30710	40934	1795613222	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-d/a749de4e-af11-4a40-bf1e-784156f50219/tasks/bsp2f0lja.output	-	-	-	zsh cmd14
+40935	40934	40934	1795613222	bash	-	-	/private/tmp/claude-501/-Users-user-work-proj-d/a749de4e-af11-4a40-bf1e-784156f50219/tasks/bsp2f0lja.output	-	-	-	bash cmd15
+41418	76888	76887	1795616725	sleep	-	-	-	-	-	-	sleep cmd16
+43455	64590	43455	1795616772	zsh	-	-	-	-	-	-	zsh cmd17 bench-lock
+43457	43455	43455	1795616773	ssh	-	-	-	-	-	-	ssh cmd18 bench-lock
+44244	64587	44244	1795591850	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/b702piafb.output	-	-	-	zsh cmd19
+44245	44244	44244	1795591850	bash	/Users/user/work/proj-a	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/b702piafb.output	-	-	-	bash cmd12
+45485	30708	45485	1795616836	zsh	-	-	-	-	-	-	zsh cmd20
+47295	1	47294	1795347891	tail	/Users/user/work/proj-c/d5/d6/d7	-	-	-	-	-	tail -n0 -F f8.log f9.log
+47297	1	47294	1795347891	ugrep	/Users/user/work/proj-c/d5/d6/d7	-	-	3e2dcbc0-7f85-456f-83a7-c3205c4734a9	1b0-0000000000000000	-	ugrep cmd21
+47436	1	47435	1795355502	tail	/Users/user/work/proj-c/d5/d6/d7	-	-	-	-	-	tail -n0 -F f10.log f11.log
+47439	1	47435	1795355502	ugrep	/Users/user/work/proj-c/d5/d6/d7	-	-	3e2dcbc0-7f85-456f-83a7-c3205c4734a9	1b0-0000000000000000	-	ugrep cmd22
+48704	90014	48704	1795506706	marspot-peer	/Users/user/work/proj-h	-	-	-	-	-	marspot-peer cmd9
+48705	90014	48705	1795506706	marspot-peer	/Users/user/work/proj-i	-	-	-	-	-	marspot-peer cmd9
+49506	85112	85098	1795615256	bash	-	-	-	-	-	-	bash cmd23
+49531	96425	96424	1795616925	sleep	-	-	-	-	-	-	sleep cmd16
+49686	49506	85098	1795615256	bash	-	-	-	-	-	-	bash cmd23
+49687	49686	85098	1795615256	bun	-	-	-	-	-	-	bun cmd24
+49795	30710	49795	1795613283	bash	/Users/user/work/proj-d	-	/private/tmp/claude-501/-Users-user-work-proj-d/a749de4e-af11-4a40-bf1e-784156f50219/tasks/b8vhpcgud.output	-	-	-	bash cmd25
+50311	1	48973	1795269208	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd1
+51242	96385	51242	1795479613	codex	/Users/user/work/proj-a	-	-	-	1ed-0000000000000000	-	codex app-server
+60291	30708	30708	1795617043	caffeinate	-	-	-	-	-	-	caffeinate -i -t 300
+60896	64590	60896	1795617050	zsh	-	-	-	-	-	-	zsh cmd26
+60913	64528	60913	1795615357	zsh	-	-	-	-	-	-	zsh cmd27
+60916	60913	60913	1795615357	smix	-	-	-	-	-	-	smix cmd28
+61133	64587	64587	1795575964	rust-analyzer	-	-	-	-	-	-	rust-analyzer
+61161	61133	64587	1795575965	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+61162	61133	64587	1795575965	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+61439	64663	64663	1795617055	caffeinate	-	-	-	-	-	-	caffeinate -i -t 300
+62643	64590	62643	1795617063	zsh	-	-	-	-	-	-	zsh cmd29
+62645	62643	62643	1795617063	sleep	-	-	-	-	-	-	sleep cmd16
+63210	64590	63210	1795617067	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-j/663e10a4-97e5-4f0a-94c2-73f9ca86dc41/tasks/bg01y4wqw.output	-	-	-	zsh cmd30
+63255	64663	63255	1795617067	zsh	-	-	-	-	-	-	zsh cmd31
+63256	63255	63255	1795617067	bash	-	-	-	-	-	-	bash cmd32
+63260	63256	63255	1795617067	bash	-	-	-	-	-	-	bash cmd33
+63261	63260	63255	1795617067	bash	-	-	-	-	-	-	bash cmd34
+63264	63261	63255	1795617067	bash	-	-	-	-	-	-	bash cmd35
+63265	63261	63255	1795617067	grep	-	-	-	-	-	-	grep cmd36
+63822	64528	63822	1795617070	zsh	-	-	-	-	-	-	zsh cmd37
+63823	63822	63822	1795617070	Python	-	-	-	-	-	-	Python cmd38
+64093	63264	63255	1795617073	ssh	-	-	-	-	-	-	ssh cmd39
+64527	1829	64527	1795572649	claude	-	-	-	-	-	-	claude cmd40
+64528	2068	64528	1795572649	claude	-	-	-	-	-	-	claude cmd41
+64583	30708	64583	1795617080	zsh	-	-	-	-	-	-	zsh cmd42
+64587	1988	64587	1795572650	claude	-	-	-	-	-	-	claude cmd43
+64588	2000	64588	1795572650	claude	-	-	-	-	-	-	claude cmd44
+64589	2042	64589	1795572650	claude	-	-	-	-	-	-	claude cmd45
+64590	1861	64590	1795572650	claude	-	-	-	-	-	-	claude cmd46
+64663	1894	64663	1795572653	claude	-	-	-	-	-	-	claude cmd47
+64910	64588	64588	1795572654	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+64916	64587	64587	1795617085	caffeinate	-	-	-	-	-	-	caffeinate -i -t 300
+64926	64588	64588	1795572654	smix-mcp	-	-	-	-	-	-	smix-mcp
+65236	64528	64528	1795572654	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+65240	64528	64528	1795572654	smix-mcp	-	-	-	-	-	-	smix-mcp
+65242	64590	64590	1795572654	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+65249	64590	64590	1795572654	smix-mcp	-	-	-	-	-	-	smix-mcp
+65312	64663	64663	1795572654	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+65316	64663	64663	1795572654	smix-mcp	-	-	-	-	-	-	smix-mcp
+65353	64587	64587	1795572654	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+65357	64587	64587	1795572654	smix-mcp	-	-	-	-	-	-	smix-mcp
+65525	64528	64528	1795617093	caffeinate	-	-	-	-	-	-	caffeinate -i -t 300
+65653	64527	64527	1795572655	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+65654	64527	64527	1795572655	smix-mcp	-	-	-	-	-	-	smix-mcp
+65672	64589	64589	1795572655	marspot-peer	-	-	-	-	-	-	marspot-peer cmd9
+65673	64589	64589	1795572655	smix-mcp	-	-	-	-	-	-	smix-mcp
+66605	64527	66605	1795617110	zsh	-	-	-	-	-	-	zsh cmd48
+66760	64587	66760	1795572662	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/bwsg7d7u5.output	-	-	-	zsh cmd49
+66937	66760	66760	1795572663	bash	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/bwsg7d7u5.output	-	-	-	bash cmd12
+67442	64527	64527	1795580564	rust-analyzer	-	-	-	-	-	-	rust-analyzer
+67464	67442	64527	1795580564	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+67465	67442	64527	1795580564	rust-analyzer-pr	-	-	-	-	-	-	rust-analyzer-proc-macro-srv
+69823	64587	69823	1795580611	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/b6ptg4btk.output	-	-	-	zsh cmd50
+70052	69823	69823	1795580612	bash	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/b6ptg4btk.output	-	-	-	bash cmd12
+70270	1	56389	1795591980	java	/Users/user/Library/Application	/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home/bin/java	-	0a76d287-c435-4cc2-b9e7-a68ffca225db	1e2-0000000000000000	-	java cmd51
+70791	64663	70791	1795615442	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-c/3e2dcbc0-7f85-456f-83a7-c3205c4734a9/tasks/bbv5wd6qe.output	-	-	-	zsh cmd52
+70792	70791	70791	1795615442	ssh	-	-	-	-	-	-	ssh cmd53
+71697	30708	71697	1795617171	zsh	-	-	-	-	-	-	zsh cmd54
+71749	30710	71749	1795576071	bash	/Users/user/work/proj-d	-	/private/tmp/claude-501/-Users-user-work-proj-d/a749de4e-af11-4a40-bf1e-784156f50219/tasks/bl03261ac.output	-	-	-	bash cmd55
+71944	64588	71944	1795615449	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-f/66bd77cc-bdb4-4059-9c74-20dc25499351/tasks/bkjp4tc9o.output	-	-	-	zsh cmd56
+71950	71944	71944	1795615449	bash	-	-	-	-	-	-	bash cmd57
+72327	64587	72327	1795617179	zsh	-	-	-	-	-	-	zsh cmd58
+72328	72327	72328	1795617179	timeout	-	-	-	-	-	-	timeout cmd59
+72329	72328	72328	1795617179	bash	-	-	-	-	-	-	bash cmd60
+72652	71950	71944	1795615459	ssh	-	-	-	-	-	-	ssh cmd61 bench-lock
+72739	1	72730	1795399865	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd1
+72854	63210	63210	1795617187	sleep	-	-	-	-	-	-	sleep cmd62
+73950	64528	64528	1795572844	sourcekit-lsp	-	-	-	-	-	-	sourcekit-lsp
+74085	1	73566	1795617202	daemon-a	-	/Users/user/.cargo/bin/daemon-a	-	-	-	-	daemon-a cmd63
+74161	84118	83862	1795617202	ssh	-	-	-	-	-	-	ssh cmd64 bench-lock
+74325	1	74325	1795009415	Electron	/	/Applications/app-a.app/Contents/MacOS/Electron	-	-	1e5-0000000000000000	01a0bca3-87a2-7aa2-8d42-d84a71b8539a	Electron cmd65
+74327	74325	74325	1795009415	Electron	-	-	-	-	-	-	Electron cmd66
+74328	74325	74325	1795009415	Electron	-	-	-	-	-	-	Electron cmd67
+74336	1	74335	1795009416	chrome_crashpad_	-	/Applications/app-a.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler	-	-	-	-	Electron cmd68
+76586	64663	76586	1795617214	zsh	-	-	-	-	-	-	zsh cmd69
+76588	76586	76586	1795617214	bash	-	-	-	-	-	-	bash cmd70
+76589	76588	76586	1795617214	bash	-	-	-	-	-	-	bash cmd71
+76642	74325	74325	1795009462	Electron	-	-	-	-	-	-	Electron cmd72
+76643	74325	74325	1795009462	Electron	-	-	-	-	-	-	Electron cmd73
+76725	45485	45485	1795617214	sleep	-	-	-	-	-	-	sleep cmd74
+76887	30709	76887	1795615519	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-e/7837abe1-44f1-4202-8688-077238891ae2/tasks/btgsj98w8.output	-	-	-	zsh cmd75
+76888	76887	76887	1795615519	sh	-	-	/private/tmp/claude-501/-Users-user-work-proj-e/7837abe1-44f1-4202-8688-077238891ae2/tasks/btgsj98w8.output	-	-	-	sh cmd76
+76989	64590	64590	1795617216	caffeinate	-	-	-	-	-	-	caffeinate -i -t 300
+77237	64663	77237	1795617216	zsh	-	-	-	-	-	-	zsh cmd77
+77282	76589	76586	1795617217	ssh	-	-	-	-	-	-	ssh cmd78
+78172	66605	66605	1795617230	sleep	-	-	-	-	-	-	sleep cmd74
+78323	60896	60896	1795617231	sleep	-	-	-	-	-	-	sleep cmd74
+78418	63823	63822	1795617232	java	-	-	-	-	-	-	java cmd79
+79362	64528	79362	1795617236	zsh	-	-	-	-	-	-	zsh cmd80
+79364	79362	79362	1795617236	Python	-	-	-	-	-	-	Python cmd81
+79776	49795	49795	1795617239	sleep	-	-	-	-	-	-	sleep cmd74
+80554	71749	71749	1795617242	sleep	-	-	-	-	-	-	sleep cmd74
+80803	30710	30710	1795617244	caffeinate	-	-	-	-	-	-	caffeinate -i -t 300
+81343	1	80767	1795332197	server	/Users/user/work/proj-b	/Users/user/work/proj-b/target/debug/server	-	3d6cd4cf-8135-4a90-865c-f077148c4222	1ae-0000000000000000	-	server cmd1
+82134	21339	21339	1795617249	sleep	-	-	-	-	-	-	sleep cmd82
+82307	74325	74325	1795036944	Electron	-	-	-	-	-	-	Electron cmd83
+82377	74325	74325	1795036953	Electron	-	-	-	-	-	-	Electron cmd84
+82382	74325	74325	1795036954	Electron	-	-	-	-	-	-	Electron cmd85
+83663	51242	83663	1795523634	codex-code-mode-	/Users/user/work/proj-a	-	-	-	1ed-0000000000000000	-	codex-code-mode-host cmd86
+83740	66937	66760	1795617257	sleep	-	-	-	-	-	-	sleep cmd74
+83793	64528	83793	1795617257	zsh	-	-	-	-	-	-	zsh cmd87
+83813	40935	40934	1795617257	ssh	-	-	-	-	-	-	ssh cmd88
+83862	64587	83862	1795614513	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/bukvanzjg.output	-	-	-	zsh cmd89
+83865	83862	83862	1795614513	bash	-	-	/private/tmp/claude-501/-Users-user-work-proj-a/153c990a-bc0f-49d0-9303-1bf639e4128e/tasks/bukvanzjg.output	-	-	-	bash cmd90
+83929	70052	69823	1795617259	sleep	-	-	-	-	-	-	sleep cmd74
+83989	36161	36160	1795617259	sleep	-	-	-	-	-	-	sleep cmd74
+83997	64583	64583	1795617260	sleep	-	-	-	-	-	-	sleep cmd91
+84118	83865	83862	1795614513	bash	-	-	-	-	-	-	bash cmd92
+84240	77237	77237	1795617261	sleep	-	-	-	-	-	-	sleep cmd93
+84983	49687	85098	1795617267	smix	-	-	-	-	-	-	smix cmd94
+85004	83793	83793	1795617267	sleep	-	-	-	-	-	-	sleep cmd95
+85098	64528	85098	1795613492	zsh	-	-	-	-	-	-	zsh cmd96
+85112	85098	85098	1795613492	bash	-	-	-	-	-	-	bash cmd97
+85358	84983	85098	1795617268	simctl	-	-	-	-	-	-	simctl cmd98
+85420	44245	44244	1795617269	sleep	-	-	-	-	-	-	sleep cmd74
+85489	72329	72328	1795617270	sleep	-	-	-	-	-	-	sleep cmd99
+85576	71697	71697	1795617271	sleep	-	-	-	-	-	-	sleep cmd91
+85625	30710	85625	1795617272	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-d/a749de4e-af11-4a40-bf1e-784156f50219/tasks/bjx2309vf.output	-	-	-	zsh cmd100
+85627	85625	85625	1795617272	sleep	-	-	-	-	-	-	sleep cmd74
+85746	64587	85746	1795617273	zsh	-	-	-	-	-	-	zsh cmd101
+85748	85746	85746	1795617273	ps	-	-	-	-	-	-	-
+90014	37219	90014	1795481436	codex	/Users/user/work/proj-i	-	-	-	1e5-0000000000000000	-	codex app-server
+93798	90014	93798	1795523138	codex-code-mode-	/Users/user/work/proj-i	-	-	-	1e5-0000000000000000	-	codex-code-mode-host cmd86
+95176	1	95173	1795514713	node	/Users/user/work/proj-g	-	-	8faf5423-2fa7-46c7-8902-7fe6b50d3bd3	1e1-0000000000000000	-	node cmd102
+96385	1	96385	1795446895	codex	/Users/user/work/proj-a	/Users/user/.local/bin/codex	-	-	1ed-0000000000000000	-	codex app-server
+96424	30709	96424	1795615719	zsh	-	-	/private/tmp/claude-501/-Users-user-work-proj-e/7837abe1-44f1-4202-8688-077238891ae2/tasks/bgbynzaex.output	-	-	-	zsh cmd103
+96425	96424	96424	1795615719	sh	-	-	/private/tmp/claude-501/-Users-user-work-proj-e/7837abe1-44f1-4202-8688-077238891ae2/tasks/bgbynzaex.output	-	-	-	sh cmd104

@@ -102,6 +102,7 @@ use bind_meta::*;
 pub(crate) use cycle_op::badge_menu_for;
 pub(crate) use api_error::retryable_error_kind;
 pub(crate) use sessions_view::{ClaudePane, pane_of_session, sessions};
+pub(crate) use idle::is_resting_helper;
 #[cfg(test)]
 use api_error::strip_ansi;
 

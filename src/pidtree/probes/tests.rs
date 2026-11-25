@@ -118,6 +118,15 @@ fn cpu_with_children_grows_for_a_script_that_starts_a_child_every_second() {
 }
 
 #[test]
+fn exe_path_names_the_program_a_process_runs() {
+    let child = Reaped(Command::new("/bin/sleep").arg("5").spawn().unwrap());
+    let pid = child.0.id() as i32;
+    assert_eq!(exe_path(pid).as_deref(), Some(std::path::Path::new("/bin/sleep")));
+    drop(child);
+    assert_eq!(exe_path(pid), None, "a reaped process has no executable");
+}
+
+#[test]
 fn cpu_with_children_of_no_process_is_none() {
     let mut child = Command::new("/usr/bin/true").spawn().unwrap();
     let pid = child.id() as i32;

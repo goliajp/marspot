@@ -114,6 +114,16 @@ pub fn fd_path(pid: i32, fd: i32) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
 }
 
+/// The path of the executable `pid` runs, via `proc_pidpath`.  None
+/// when the process is gone or the call is refused.
+pub fn exe_path(pid: i32) -> Option<PathBuf> {
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` holds PROC_PIDPATHINFO_MAXSIZE writable bytes
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let n = usize::try_from(n).ok().filter(|n| *n > 0)?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..n])))
+}
+
 /// A process that has exited and is waiting for its parent to reap it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Zombie {

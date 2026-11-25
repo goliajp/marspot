@@ -81,7 +81,7 @@ pub(super) const KILL_GRACE: Duration = Duration::from_secs(15);
 /// an unrecognised helper (a new MCP server, another language server)
 /// reads as work and the session simply is not reclaimed.  The
 /// opposite default would silently kill somebody's build.
-pub(super) fn is_resting_helper(row: &pidtree::ProcRow, has_children: bool) -> bool {
+pub(crate) fn is_resting_helper(row: &pidtree::ProcRow, has_children: bool) -> bool {
     let name = row.comm.as_str();
     if name.contains("-mcp") || name.starts_with("mcp-") {
         return true;
