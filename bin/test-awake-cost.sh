@@ -10,8 +10,9 @@
 # restored), and reads each process's timer wake-ups per second and CPU
 # with bin/_idle_wakeups.py, for N = 1, 4 and 12.
 #
-# Each layout is held to a ceiling of timer wake-ups per second, all the
-# app's processes summed (AWAKE_BUDGETS).  Prints one table and writes
+# Each layout is held to a ceiling of timer wake-ups per second and one
+# of CPU, all the app's processes summed (AWAKE_BUDGETS,
+# AWAKE_CPU_BUDGETS).  Prints one table and writes
 # it, with date, commit, host and load, to
 # bench/results/awake-cost-<stamp>.json.
 #
@@ -24,6 +25,8 @@
 #   AWAKE_WINDOW    measured window in seconds (25)
 #   AWAKE_BUDGETS   ceilings by pane count, "panes:wake-ups/s,..."; see
 #                   below for where the defaults come from
+#   AWAKE_CPU_BUDGETS  ceilings by pane count on the CPU of all the app's
+#                   processes summed, "panes:percent-of-one-core,..."
 #
 # Exit codes, those of bin/measure-idle-marspot.sh: 0 measured and
 # within the ceilings; 1 a layout measured on a quiet host was over its
@@ -42,6 +45,7 @@ LAYOUTS="${AWAKE_LAYOUTS:-1x1 2x2 4x3}"
 # 38.2, 36.6, 38.0; twelve 106.9, 104.0, 106.9, and 110.0 measured alone.
 # The ceilings are the highest of those and a little of the spread on top.
 BUDGETS="${AWAKE_BUDGETS-1:18,4:41,12:115}"
+CPU_BUDGETS="${AWAKE_CPU_BUDGETS-}"
 SETTLE="${AWAKE_SETTLE:-15}"
 WINDOW="${AWAKE_WINDOW:-25}"
 work="$(mktemp -d /tmp/marspot-awake.XXXXXX)"
@@ -67,13 +71,25 @@ commit="${E2E_COMMIT:-}"
 [[ -z $commit && -d $ROOT/.git ]] && commit="$(git -C "$ROOT" rev-parse --short=8 HEAD)"
 mkdir -p "$ROOT/bench/results"
 out="$ROOT/bench/results/awake-cost-$(date +%Y%m%d-%H%M%S).json"
-python3 - "$work" "$out" "$commit" "$(hostname -s)" "$SETTLE" "$WINDOW" "$rc" "$BUDGETS" $LAYOUTS <<'PY'
+python3 - "$work" "$out" "$commit" "$(hostname -s)" "$SETTLE" "$WINDOW" "$rc" "$BUDGETS" "$CPU_BUDGETS" $LAYOUTS <<'PY'
 import datetime, json, os, sys
-work, out, commit, host, settle, window, rc, budgets = sys.argv[1:9]
+work, out, commit, host, settle, window, rc, budgets, cpu_budgets = sys.argv[1:10]
 settle, window, rc = float(settle), float(window), int(rc)
-budgets = {int(k): float(v) for k, v in (kv.split(":") for kv in budgets.split(",") if kv)}
+def ceilings(text):
+    return {int(k): float(v) for k, v in (kv.split(":") for kv in text.split(",") if kv)}
+budgets, cpu_budgets = ceilings(budgets), ceilings(cpu_budgets)
+# the line bin/_idle_wakeups.py draws: load can only make a reading worse,
+# so one within its ceiling stands whatever the load, one over it on a
+# busy host is no verdict
+busy_load = float(os.environ.get("IDLE_BUSY_LOAD") or 5.0)
+def worse(a, b):
+    for c in (1, 2, 3):
+        if c in (a, b):
+            return c
+    return 0
+verdicts = []
 runs, broken = [], []
-for layout in sys.argv[9:]:
+for layout in sys.argv[10:]:
     c, r = layout.split("x")
     n = int(c) * int(r)
     path = os.path.join(work, f"{n}.json")
@@ -100,8 +116,20 @@ for layout in sys.argv[9:]:
         for f in ("wakeups_per_sec", "idle_wakeups_per_sec"):
             k[f] = round(k[f], 2)
         k["cpu_pct"] = round(k["cpu_pct"], 4)
+    cpu, cpu_budget = reading["cpu_pct"], cpu_budgets.get(n)
+    if cpu_budget is not None:
+        if cpu <= cpu_budget:
+            verdicts.append(f"PASS: {n} panes, CPU {cpu:.3f}% of one core, ceiling {cpu_budget}")
+        elif reading["load1_max"] > busy_load:
+            rc = worse(rc, 3)
+            verdicts.append(f"NOT MEASURED: {n} panes, CPU {cpu:.3f}%, ceiling {cpu_budget}, "
+                            f"load1 reached {reading['load1_max']} (busy over {busy_load})")
+        else:
+            rc = worse(rc, 1)
+            verdicts.append(f"FAIL: {n} panes, CPU {cpu:.3f}% of one core, ceiling {cpu_budget}")
     runs.append({
         "panes": n, "window_secs": reading["window_secs"], "budget_wakeups_per_sec": budgets.get(n),
+        "budget_cpu_pct": cpu_budget,
         "load1_first": reading["load1_first"], "load1_max": reading["load1_max"],
         "agent_frames_min": ticks[0] if ticks else None,
         "total": {"wakeups_per_sec": reading["intr_wakeups_per_sec"],
@@ -121,7 +149,7 @@ for r in runs:
         print(f"{r['panes']:>5}  {name:<16} {k['n']:>3}  {k['wakeups_per_sec']:>9.2f} {k['wakeups_per_sec_each']:>9.2f}"
               f"  {k['cpu_pct']:>9.3f} {k['cpu_pct_each']:>9.3f}  {r['load1_first']}..{r['load1_max']}")
     t = r["total"]
-    ceiling = f"  ceiling {r['budget_wakeups_per_sec']}" if r["budget_wakeups_per_sec"] is not None else ""
+    ceiling = f"  ceilings {r['budget_wakeups_per_sec']} wk/s, {r['budget_cpu_pct']} CPU%"
     print(f"{r['panes']:>5}  {'all':<16} {len(r['processes']):>3}  {t['wakeups_per_sec']:>9.2f} {'':>9}  {t['cpu_pct']:>9.3f}{ceiling}")
 doc = {
     "suite": "awake-cost",
@@ -135,6 +163,8 @@ with open(out, "w") as f:
     json.dump(doc, f, indent=1)
     f.write("\n")
 print(f"written: {out}")
+for v in verdicts:
+    print(v)
 for b in broken:
     print(f"FAIL: {b}")
 sys.exit(2 if broken else rc)

@@ -28,8 +28,10 @@
 # Contract:
 #   - shares the host     : every suite holds the host's bench lock,
 #                           shared (`heavy`), so a measurement waits for
-#                           it; `E2E_LOCK=bench` takes it exclusively
-#                           for a suite that is itself a measurement
+#                           it; a measuring suite (is_measurement) takes
+#                           it exclusively, and `E2E_LOCK=bench` takes it
+#                           exclusively for every suite and builds inside
+#                           that hold
 #   - bounded             : each suite is stopped after E2E_SUITE_TIMEOUT
 #                           seconds (default 900); the build after
 #                           E2E_BUILD_TIMEOUT (default 1800)
@@ -82,6 +84,7 @@ DEFAULT_SUITES=(
   test-adversarial-update.sh
   test-idle-wakeups.sh
   test-idle-exit-codes.sh
+  test-awake-cost.sh
 )
 
 # The suites that are measurements.  Their exit codes are the four of
@@ -230,6 +233,11 @@ for suite in "${SUITES[@]}"; do
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
     lock="bench --max-wait $MAX_WAIT $UNTIL"
     run="bin/_build_then.sh $BUILD_TIMEOUT $SUITE_TIMEOUT ${E2E_FEATURES:--} $suite"
+  elif is_measurement "$suite"; then
+    # built above already; a reading taken next to other heavy work
+    # would only ever come back busy
+    lock="bench --max-wait $MAX_WAIT $UNTIL"
+    run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   else
     lock="heavy --max-wait $MAX_WAIT $UNTIL"
     run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
