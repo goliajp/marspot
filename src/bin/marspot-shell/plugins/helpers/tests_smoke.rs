@@ -26,7 +26,7 @@ fn idle_stops(rx: &std::sync::mpsc::Receiver<Job>) -> usize {
 fn helpers_a_recorded_turn_end_is_told_while_the_screen_still_draws() {
     let dir = temp("recorded");
     let (s, rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
     let (mut in_turn, mut parked) = (HashMap::new(), tick::Parked::default());
     let mut ticks = |status: PaneStatus, n: usize| {
         for _ in 0..n {
@@ -62,7 +62,7 @@ fn helpers_a_recorded_turn_end_is_told_while_the_screen_still_draws() {
 fn helpers_a_recorded_turn_end_is_told_once_over_a_restart() {
     let dir = temp("recorded-restart");
     let (s, rx) = shared_at(&dir);
-    let begun = vec![Event::Started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered];
+    let begun = vec![Event::started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered];
     feed(&s, 1, [begun, vec![Event::IdleNoticed, Event::ResultChanged]].concat());
     let told = s.table().map[&1].notices[0];
     for (end, stops) in [(told, 0), (told + 1, 1)] {
@@ -91,9 +91,9 @@ impl Ticked {
     fn new(tag: &str, child: bool) -> Self {
         let dir = temp(tag);
         let (s, rx) = shared_at(&dir);
-        feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
+        feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
         if child {
-            feed(&s, 2, vec![Event::Started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+            feed(&s, 2, vec![Event::started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
         }
         Ticked { s, rx, in_turn: HashMap::new(), dir }
     }

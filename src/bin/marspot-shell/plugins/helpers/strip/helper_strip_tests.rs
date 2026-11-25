@@ -29,7 +29,7 @@ pub(super) fn number(sid: u64) -> Option<u16> {
 }
 
 pub(super) fn begin(s: &Shared, sid: u64, parent: u64, agent: AgentKind) {
-    feed(s, sid, vec![Event::Started(started(parent, "claude", agent)), Event::TaskDelivered]);
+    feed(s, sid, vec![Event::started(started(parent, "claude", agent)), Event::TaskDelivered]);
 }
 
 /// The records as of `now_ms`, seen with `obs`; the facts found are
@@ -43,7 +43,7 @@ pub(super) fn strips_at(s: &Shared, m: &mut Memory, obs: &Observation, now_ms: u
     strips
 }
 
-fn strips(s: &Shared, m: &mut Memory, obs: &Observation) -> Vec<HelperStrip> {
+pub(super) fn strips(s: &Shared, m: &mut Memory, obs: &Observation) -> Vec<HelperStrip> {
     strips_at(s, m, obs, records::now_ms())
 }
 
@@ -54,7 +54,7 @@ pub(super) fn at(s: &Shared, sid: u64, at_ms: u64, evs: Vec<Event>) {
 }
 
 pub(super) fn begin_at(s: &Shared, sid: u64, parent: u64, at_ms: u64) {
-    at(s, sid, at_ms, vec![Event::Started(started(parent, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    at(s, sid, at_ms, vec![Event::started(started(parent, "claude", AgentKind::Codex)), Event::TaskDelivered]);
 }
 
 fn states(x: &HelperStrip) -> Vec<(u64, StripState, bool)> {
@@ -75,35 +75,11 @@ fn lists_helpers_by_their_top_pane_in_start_order() {
     begin(&s, 1, 3, AgentKind::Gemini);
     begin(&s, 2, 30, AgentKind::Kimi);
     // its pane is open, its task has not gone in
-    feed(&s, 4, vec![Event::Started(started(10, "claude", AgentKind::Claude))]);
+    feed(&s, 4, vec![Event::started(started(10, "claude", AgentKind::Claude))]);
     let got = strips(&s, &mut Memory::default(), &obs);
     let lists: Vec<(u64, Vec<u64>)> = got.iter().map(|x| (x.root_sid, x.rows.iter().map(|r| r.sid).collect())).collect();
     assert_eq!(lists, [(10, vec![3, 1]), (20, vec![2])]);
     assert_eq!(got[0].rows[0].number, Some(1003));
-    dir_gone(&d);
-}
-
-#[test]
-fn a_row_names_agent_and_model_and_has_a_plain_task() {
-    let d = temp("strip-row");
-    let (s, _rx) = shared_at(&d);
-    let mut st = started(10, "claude", AgentKind::Claude);
-    (st.model, st.task_line) = ("opus".into(), "看\tthe \x1b[31mparser".into());
-    feed(&s, 1, vec![Event::Started(st), Event::TaskDelivered]);
-    let got = strips(&s, &mut Memory::default(), &panes(&[(10, 0), (1, 10)]));
-    let r = &got[0].rows[0];
-    assert_eq!((r.name.as_str(), r.model.as_str(), r.task.as_str()), ("claude opus", "opus", "看the [31mparser"));
-    assert_eq!((r.agent, r.ended_ms, r.tokens), (StripAgent::Claude, None, None));
-    begin(&s, 2, 10, AgentKind::Codex);
-    let got = strips(&s, &mut Memory::default(), &panes(&[(10, 0), (1, 10), (2, 10)]));
-    assert_eq!((got[0].rows[1].name.as_str(), got[0].rows[1].model.as_str()), ("codex", ""));
-    // given a name, it goes by that
-    let mut st = started(10, "claude", AgentKind::Claude);
-    (st.model, st.label) = ("opus".into(), "par\u{7}ser".into());
-    feed(&s, 3, vec![Event::Started(st), Event::TaskDelivered]);
-    let got = strips(&s, &mut Memory::default(), &panes(&[(10, 0), (1, 10), (2, 10), (3, 10)]));
-    let names: Vec<(&str, bool)> = got[0].rows.iter().map(|r| (r.name.as_str(), r.named)).collect();
-    assert_eq!(names, [("claude opus", false), ("codex", false), ("parser", true)]);
     dir_gone(&d);
 }
 
@@ -114,8 +90,8 @@ fn a_start_that_fails_yields_no_row_and_preparing_does() {
     let obs = panes(&[(10, 0), (1, 10), (2, 10), (3, 10)]);
     let mut m = Memory::default();
     begin(&s, 1, 10, AgentKind::Codex);
-    feed(&s, 2, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::Stopped { exited: false }]);
-    feed(&s, 3, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::Preparing]);
+    feed(&s, 2, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::Stopped { exited: false }]);
+    feed(&s, 3, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::Preparing]);
     assert_eq!(states(&strips(&s, &mut m, &obs)[0]), [(1, StripState::Working, false), (3, StripState::Preparing, false)]);
     // it was listed: that it failed is, too
     feed(&s, 3, vec![Event::Stopped { exited: false }]);
@@ -214,7 +190,7 @@ fn a_batch_is_over_three_seconds_after_its_last_end() {
     for sid in 1..=3 {
         begin_at(&s, sid, 10, T + sid);
     }
-    s.used(1, "c", used::Used { tokens: Some(100), had_tool: Some(false) });
+    s.used(1, "c", used::Used { tokens: Some(100), had_tool: Some(false), model: None });
     let a = strips_at(&s, &mut m, &obs, T + 10);
     assert_eq!(a[0].batch, T + 1);
     at(&s, 1, T + 100, vec![Event::IdleNoticed]);
@@ -302,8 +278,8 @@ fn the_top_pane_is_the_one_at_the_start_until_a_place_changes_it() {
     let (s, _rx) = shared_at(&d);
     let mut m = Memory::default();
     let with_root = |parent, root| Started { root: Some(root), ..started(parent, "claude", AgentKind::Codex) };
-    feed(&s, 3, vec![Event::Started(with_root(10, 10)), Event::TaskDelivered]);
-    feed(&s, 4, vec![Event::Started(with_root(3, 10)), Event::TaskDelivered]);
+    feed(&s, 3, vec![Event::started(with_root(10, 10)), Event::TaskDelivered]);
+    feed(&s, 4, vec![Event::started(with_root(3, 10)), Event::TaskDelivered]);
     // the pane between is gone, its row too
     feed(&s, 3, vec![Event::IdleNoticed]);
     s.lock().table.map.remove(&3);
@@ -446,10 +422,10 @@ fn says_which_agent_is_in_front_of_the_parent() {
 fn context_read_is_kept_for_helpers_outside_containers() {
     let d = temp("strip-used");
     let (s, _rx) = shared_at(&d);
-    let read = |tokens, had_tool| used::Used { tokens, had_tool };
+    let read = |tokens, had_tool| used::Used { tokens, had_tool, model: None };
     begin(&s, 1, 10, AgentKind::Claude);
     let boxed = Started { isolation: marspot_peer::control::Isolation::Container, ..started(10, "claude", AgentKind::Claude) };
-    feed(&s, 2, vec![Event::Started(boxed), Event::TaskDelivered]);
+    feed(&s, 2, vec![Event::started(boxed), Event::TaskDelivered]);
     for sid in [1, 2, 3] {
         s.used(sid, "c", read(Some(12_010), Some(false)));
     }

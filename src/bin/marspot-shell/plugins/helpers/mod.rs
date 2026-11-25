@@ -46,6 +46,7 @@ mod results;
 mod screen;
 mod service;
 mod settle;
+mod started;
 mod stop_all;
 pub(crate) mod strip;
 mod table;

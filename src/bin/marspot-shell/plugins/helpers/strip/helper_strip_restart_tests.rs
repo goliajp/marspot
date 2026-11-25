@@ -33,7 +33,7 @@ fn a_later_turn_goes_on_over_a_start_of_the_shell() {
     let now = records::now_ms();
     let t = now - 600_000;
     for (sid, agent) in [(1, AgentKind::Claude), (2, AgentKind::Kimi)] {
-        at(&s, sid, t, vec![Event::Started(started(10, "claude", agent)), Event::TaskDelivered]);
+        at(&s, sid, t, vec![Event::started(started(10, "claude", agent)), Event::TaskDelivered]);
         s.at_work(sid, true);
     }
     s.publish_turns(&HashMap::from([(1, Turn::Working), (2, Turn::Working)]));
@@ -68,7 +68,7 @@ fn a_turn_that_ended_while_no_shell_ran_ends_at_its_record() {
     let now = records::now_ms();
     let t = now - 600_000;
     begin_at(&s, 2, 10, t);
-    at(&s, 1, t, vec![Event::Started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered, Event::IdleNoticed, Event::TurnEnded]);
+    at(&s, 1, t, vec![Event::started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered, Event::IdleNoticed, Event::TurnEnded]);
     at(&s, 1, t + 1_000, vec![Event::TurnBegan]);
     let (s, _rx) = again(&d, &[1, 2]);
     assert_eq!(strips_at(&s, &mut m, &obs, now)[0].rows[0].state, StripState::Working);
@@ -122,7 +122,7 @@ fn a_start_waits_for_a_walk_only_for_a_helper_whose_top_is_not_said() {
     };
     assert!(rebuild::reload(&s, &look));
     let with_root = Started { root: Some(10), ..started(10, "claude", AgentKind::Codex) };
-    at(&s, 1, records::now_ms(), vec![Event::Started(with_root), Event::TaskDelivered]);
+    at(&s, 1, records::now_ms(), vec![Event::started(with_root), Event::TaskDelivered]);
     assert!(rebuild::reload(&s, &look));
     assert_eq!(looks.get(), 0);
     begin(&s, 2, 10, AgentKind::Codex);
@@ -186,7 +186,7 @@ fn one_placed_elsewhere_replays_in_one_batch() {
     let mut m = Memory::default();
     let root = |root| Started { root: Some(root), ..started(10, "claude", AgentKind::Codex) };
     for sid in [1, 2] {
-        at(&s, sid, T + sid, vec![Event::Started(root(10)), Event::TaskDelivered]);
+        at(&s, sid, T + sid, vec![Event::started(root(10)), Event::TaskDelivered]);
     }
     strips_at(&s, &mut m, &panes(&[(10, 0), (20, 0), (1, 10), (2, 10)]), T + 10);
     strips_at(&s, &mut m, &panes(&[(10, 0), (20, 0), (1, 10), (2, 20)]), T + 20);

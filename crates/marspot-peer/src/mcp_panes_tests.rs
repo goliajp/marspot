@@ -36,7 +36,7 @@ fn mcp_pane_tool_descriptions_fit_the_budget() {
 fn mcp_helper_start_says_when_to_use_a_helper_over_exec() {
     let all = tools(1795);
     let d = all.iter().find(|t| t.str_at("name") == Some("HelperStart")).unwrap().str_at("description").unwrap();
-    for phrase in ["not codex exec / claude -p", "over a minute or two", "in parallel", "follow-ups", "does not block you", "few-second answer"] {
+    for phrase in ["not codex exec / claude -p", "over a minute or two", "in parallel", "follow-ups", "does not block you", "few-second answer", "title: a few words shown on its row under your pane"] {
         assert!(d.contains(phrase), "{phrase}: {d}");
     }
 }

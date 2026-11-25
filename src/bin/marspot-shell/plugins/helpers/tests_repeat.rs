@@ -52,7 +52,7 @@ impl Told {
         let record = format!(r#"{{"pid":{me},"sessionId":"s","name":"10","procStart":"{start}","messagingSocketPath":"{}"}}"#, socket.display());
         std::fs::write(sessions.join(format!("{me}.json")), record).unwrap();
         let (s, _rx) = shared_at(&dir.join("helpers"));
-        feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
+        feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Claude)), Event::TaskDelivered]);
         std::fs::create_dir_all(s.dir_of(1)).unwrap();
         work::start(std::sync::Arc::clone(&s)).unwrap();
         Told { _sandbox: sandbox, s, inbox, in_turn: HashMap::new(), transcript: Vec::new(), ended: 0, notices: 0 }
@@ -100,7 +100,7 @@ fn helpers_a_result_is_not_told_again_for_a_notice_about_another_helper() {
 
     // another helper under it, which it did not start, stops; a second
     // one still runs
-    let child = || vec![Event::Started(started(1, "shell", AgentKind::Codex)), Event::TaskDelivered];
+    let child = || vec![Event::started(started(1, "shell", AgentKind::Codex)), Event::TaskDelivered];
     feed(&h.s, 2, [child(), vec![Event::IdleNoticed]].concat());
     feed(&h.s, 3, child());
     h.takes(Turn::by_marspot(NOTICE).says("Not a helper of mine; nothing to do."));
@@ -144,7 +144,7 @@ fn helpers_the_turn_after_a_held_end_is_told_whatever_it_did() {
     h.takes(Turn::by_text("the task").says("done"));
     h.told();
     // told; then it hands more work on, and its end waits for that
-    feed(&h.s, 2, vec![Event::Started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&h.s, 2, vec![Event::started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
     h.takes(Turn::by_text("and this").with(TOOL).with(TOOL_RESULT).says("Started one."));
     assert_eq!(h.in_turn[&1], turn::Turn::Held);
     feed(&h.s, 2, vec![Event::Stopped { exited: false }]);

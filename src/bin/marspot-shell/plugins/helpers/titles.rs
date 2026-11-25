@@ -140,6 +140,7 @@ mod tests {
                 task_line: "review the parser".into(),
                 task_sha: String::new(),
                 label: String::new(),
+                title: String::new(),
                 conv: None,
                 root: None,
             },

@@ -116,7 +116,7 @@ fn container_codex_refused_login_is_judged_like_claudes() {
 
     let dir = temp("container-codex-expired");
     let (s, _rx) = shared_at(&dir);
-    s.record(41, Event::Started(boxed(AgentKind::Codex)));
+    s.record(41, Event::started(boxed(AgentKind::Codex)));
     let h = s.table().map[&41].clone();
     std::fs::create_dir_all(s.dir_of(41)).unwrap();
     std::fs::write(s.dir_of(41).join("expires"), "5").unwrap();
@@ -166,7 +166,7 @@ fn container_codex_helper_stopped_while_its_token_is_written_loses_it() {
     let mut env = marspot_term::test_env::EnvGuard::new();
     env.set("HOME", dir.display().to_string());
     let (s, _rx) = shared_at(&dir.join("helpers"));
-    s.record(41, Event::Started(super::super::tests::started(1, "claude", AgentKind::Codex)));
+    s.record(41, Event::started(super::super::tests::started(1, "claude", AgentKind::Codex)));
     std::fs::create_dir_all(s.dir_of(41).join("home")).unwrap();
     let me = std::sync::Arc::clone(&s);
     let run = std::thread::spawn(move || expired::again(&me, 41, AgentKind::Codex, "codex", Some(d)));
@@ -198,7 +198,7 @@ fn container_codex_helper_stopped_while_its_token_failed_to_be_written_loses_it(
     let mut env = marspot_term::test_env::EnvGuard::new();
     env.set("HOME", dir.display().to_string());
     let (s, _rx) = shared_at(&dir.join("helpers"));
-    s.record(41, Event::Started(super::super::tests::started(1, "claude", AgentKind::Codex)));
+    s.record(41, Event::started(super::super::tests::started(1, "claude", AgentKind::Codex)));
     std::fs::create_dir_all(s.dir_of(41).join("home")).unwrap();
     // the token's end cannot be written: a directory is in its place
     std::fs::create_dir_all(s.dir_of(41).join("expires")).unwrap();

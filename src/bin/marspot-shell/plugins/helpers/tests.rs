@@ -31,6 +31,7 @@ pub(super) fn started(parent: u64, caller: &str, agent: AgentKind) -> Started {
         task_line: "review\tthe \\ parser".into(),
         task_sha: "ab".repeat(32),
         label: String::new(),
+        title: String::new(),
         conv: None,
         root: None,
     }
@@ -56,8 +57,9 @@ fn helpers_every_event_reads_back_from_its_line() {
     h.clock.end(1500);
     h.result_sha = "ef".repeat(32);
     for ev in [
-        Event::Started(started(3, "shell", AgentKind::Kimi)),
-        Event::Started(Started { root: Some(2), ..started(3, "shell", AgentKind::Kimi) }),
+        Event::started(started(3, "shell", AgentKind::Kimi)),
+        Event::started(Started { root: Some(2), ..started(3, "shell", AgentKind::Kimi) }),
+        Event::started(Started { title: "fix the\tlexer".into(), ..started(3, "claude", AgentKind::Claude) }),
         Event::Preparing,
         Event::TaskDelivered,
         Event::ResultChanged,
@@ -100,9 +102,9 @@ pub(super) fn feed(s: &Shared, sid: u64, evs: Vec<Event>) {
 fn helpers_replay_gives_the_table_and_survives_rotation() {
     let dir = temp("replay");
     let (s, _rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered, Event::ResultChanged, Event::IdleNoticed]);
-    feed(&s, 2, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered, Event::AccountChanged("P4".into())]);
-    feed(&s, 3, vec![Event::Started(started(11, "codex", AgentKind::Gemini)), Event::TaskDelivered, Event::Stopped { exited: false }]);
+    feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered, Event::ResultChanged, Event::IdleNoticed]);
+    feed(&s, 2, vec![Event::started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered, Event::AccountChanged("P4".into())]);
+    feed(&s, 3, vec![Event::started(started(11, "codex", AgentKind::Gemini)), Event::TaskDelivered, Event::Stopped { exited: false }]);
     let before = s.table();
     assert_eq!(records::replay(&s.log, &|_| None).unwrap().table, *before);
     assert_eq!(before.map.len(), 2);
@@ -129,10 +131,10 @@ fn helpers_replay_gives_the_table_and_survives_rotation() {
 #[test]
 fn helpers_started_without_task_delivered_is_what_a_restart_closes() {
     let mut t = Table::default();
-    t.apply(5, 1, &Event::Started(started(1, "claude", AgentKind::Codex)));
-    t.apply(6, 1, &Event::Started(started(1, "claude", AgentKind::Codex)));
+    t.apply(5, 1, &Event::started(started(1, "claude", AgentKind::Codex)));
+    t.apply(6, 1, &Event::started(started(1, "claude", AgentKind::Codex)));
     t.apply(6, 2, &Event::TaskDelivered);
-    t.apply(7, 1, &Event::Started(started(1, "claude", AgentKind::Codex)));
+    t.apply(7, 1, &Event::started(started(1, "claude", AgentKind::Codex)));
     t.apply(7, 2, &Event::Preparing);
     let closed: Vec<u64> = t.map.values().filter(|h| h.delivered_ms.is_none() && !h.preparing).map(|h| h.sid).collect();
     assert_eq!(closed, vec![5]);
@@ -140,7 +142,7 @@ fn helpers_started_without_task_delivered_is_what_a_restart_closes() {
 
 fn delivered(agent: AgentKind) -> Helper {
     let mut t = Table::default();
-    t.apply(1, 0, &Event::Started(started(9, "claude", agent)));
+    t.apply(1, 0, &Event::started(started(9, "claude", agent)));
     t.apply(1, 0, &Event::TaskDelivered);
     t.map.remove(&1).unwrap()
 }
@@ -252,8 +254,8 @@ pub(super) fn host_with(status: &[(u64, PaneStatus)]) -> ShellPluginHost {
 fn helpers_reclaim_only_what_an_agent_started_once_its_parent_has_none() {
     let dir = temp("reclaim");
     let (s, rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
-    feed(&s, 2, vec![Event::Started(started(10, "shell", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    feed(&s, 2, vec![Event::started(started(10, "shell", AgentKind::Codex)), Event::TaskDelivered]);
     let now = records::now_ms();
     let wait = super::NO_AGENT_FOR.as_millis() as u64;
     tick::reclaim(&s, &host_with(&[(10, PaneStatus::Empty)]), &s.table(), now, &no_panes(), &mut tick::Parked::default());
@@ -298,7 +300,7 @@ fn helpers_expired_budget_goes_at_the_first_tick() {
 fn helpers_turn_end_of_a_claude_helper_is_one_stop() {
     let dir = temp("turn");
     let (s, rx) = shared_at(&dir);
-    feed(&s, 1, vec![Event::Started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
+    feed(&s, 1, vec![Event::started(started(10, "shell", AgentKind::Claude)), Event::TaskDelivered]);
     let mut in_turn = HashMap::new();
     tick::tick(&s, &host_with(&[(1, PaneStatus::AwaitingUser)]), &mut in_turn, &mut tick::Parked::default());
     assert!(rx.try_iter().all(|j| !matches!(j, Job::Stopped { .. })), "no turn seen yet");

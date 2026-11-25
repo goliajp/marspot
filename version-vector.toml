@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.720"  # a strip row on the wire no longer says whether its name was given
+shell   = "0.7.721"  # helpers take a title for their strip row, which names agent and the model its records say answered
 core    = "0.12.695"  # a helper strip is as high as the rows it draws, says idle for a finished turn, and the row in view goes back to the pane
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

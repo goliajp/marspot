@@ -13,7 +13,7 @@ use super::work::{self, Job};
 use super::{notify, rebuild, records, tick};
 
 fn begun(agent: AgentKind) -> Vec<Event> {
-    vec![Event::Started(started(10, "shell", agent)), Event::TaskDelivered]
+    vec![Event::started(started(10, "shell", agent)), Event::TaskDelivered]
 }
 
 fn make(dir: &Path) {

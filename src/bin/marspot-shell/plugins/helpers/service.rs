@@ -61,7 +61,7 @@ pub(super) fn state_of(h: &Helper) -> &'static str {
     }
 }
 
-fn first_line(task: &str) -> String {
+pub(super) fn first_line(task: &str) -> String {
     task.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(120).collect()
 }
 
@@ -140,12 +140,13 @@ impl HelperService for Service {
             task_line: first_line(&a.task),
             task_sha: sha256::digest(a.task.as_bytes()).iter().map(|b| format!("{b:02x}")).collect(),
             label: a.name.clone().unwrap_or_default(),
+            title: a.title.as_deref().map(first_line).unwrap_or_default(),
             conv: crate::plugins::peerbus::conversation_of(parent).map(|c| c.id),
             root: Some(self.0.root_over(parent)),
         };
         // written before anything runs in the pane: a shell started over
         // between the two would otherwise find an agent nobody accounts for
-        self.0.record(sid, Event::Started(started));
+        self.0.record(sid, Event::started(started));
         let written = match &boxed {
             Some(b) => container::begin(&self.0, sid, a, &parent_name, &mode, b),
             None => self.write_files(sid, a, (&parent_name, caller), &cwd, &account, &mode, resume),
@@ -269,7 +270,7 @@ mod tests {
         let _sandbox = marspot_term::test_env::sandbox_state_dir();
         let dir = temp("panel-stop");
         let (s, _rx) = shared_at(&dir);
-        feed(&s, 2, vec![Event::Started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+        feed(&s, 2, vec![Event::started(started(1, "claude", AgentKind::Codex)), Event::TaskDelivered]);
         std::fs::create_dir_all(s.dir_of(2)).unwrap();
         helpers_port::register(Box::new(Service(Arc::clone(&s))));
         let (closed, counts) = close_two();

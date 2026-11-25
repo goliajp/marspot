@@ -37,7 +37,7 @@ fn look(s: &Shared, now: Option<(ProcId, &str)>) {
 }
 
 fn by(conv: &str) -> Event {
-    Event::Started(Started { conv: Some(conv.into()), ..started(1, "claude", AgentKind::Codex) })
+    Event::started(Started { conv: Some(conv.into()), ..started(1, "claude", AgentKind::Codex) })
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn helpers_only_a_helper_and_its_parent_are_a_pair() {
     let dir = temp("pair");
     let (s, _rx) = shared_at(&dir);
     for (sid, parent) in [(10, 1), (11, 1), (20, 10), (30, 2)] {
-        feed(&s, sid, vec![Event::Started(started(parent, "claude", AgentKind::Codex))]);
+        feed(&s, sid, vec![Event::started(started(parent, "claude", AgentKind::Codex))]);
     }
     let pair = |a, b| pair_in(&s, a, b, |_| Some(in_conversation(OLD, "any")));
     for (a, b) in [(10, 1), (11, 1), (20, 10), (30, 2)] {

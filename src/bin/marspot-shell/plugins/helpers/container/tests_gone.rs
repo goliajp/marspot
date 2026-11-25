@@ -81,7 +81,7 @@ fn container_directory_goes_after_the_container() {
     let root = dir.join("helpers");
     std::fs::create_dir_all(&root).unwrap();
     let (s, _rx) = shared_at(&root);
-    s.record(41, Event::Started(boxed(AgentKind::Claude)));
+    s.record(41, Event::started(boxed(AgentKind::Claude)));
     pending::add(&s.root(), 41, &[]).unwrap();
     std::fs::create_dir_all(s.dir_of(41)).unwrap();
     std::fs::write(s.dir_of(41).join("env"), "x").unwrap();
