@@ -174,3 +174,64 @@ fn ask_again(pty: &Pty, buf: &mut [u8]) -> Asked {
     }
     Asked::Dry
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use super::super::tests::spawn;
+    use super::super::{PtyReader, channel};
+    use super::*;
+
+    /// A byte into an idle PTY is in the parser's queue about as soon
+    /// as a plain `poll` and `read` would have it: nothing on the way
+    /// waits for more output or for a turn.
+    #[test]
+    fn a_lone_byte_is_not_held_back() {
+        const ROUNDS: usize = 40;
+        // The tty echoes what is typed, and the program takes each byte
+        // as it comes: a line with no end holds only MAX_CANON bytes,
+        // and past that the tty answers with a bell.
+        const TYPED_AT: &str = "stty -icanon; cat >/dev/null";
+        let plain = spawn(TYPED_AT);
+        let mut plain_best = Duration::MAX;
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            plain.write_shared(b"x").expect("type at the plain pty");
+            let mut fds = [libc::pollfd { fd: plain.raw_master(), events: libc::POLLIN, revents: 0 }];
+            // SAFETY: one valid pollfd on a master the test owns.
+            assert_eq!(unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) }, 1, "no echo");
+            let mut byte = [0u8; 16];
+            assert_eq!(plain.read_shared(&mut byte).expect("read the echo"), 1);
+            plain_best = plain_best.min(started.elapsed());
+        }
+
+        let pty = spawn(TYPED_AT);
+        let exited = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let reader = PtyReader::spawn(1, Arc::clone(&pty), exited, tx, || {});
+        // A byte held back waits at least `TAIL_WAIT` every time, while
+        // the two threads it crosses may each wait for a core on a busy
+        // machine: this tries until one round is quick, and the time
+        // limit only tells never from not yet.  However slow the plain
+        // read was, a quick round stays under what holding back costs.
+        let quick = (plain_best + TAIL_WAIT / 2).min(TAIL_WAIT * 3 / 4);
+        let give_up = Instant::now() + Duration::from_secs(30);
+        let (mut best, mut rounds) = (Duration::MAX, 0);
+        while best >= quick {
+            assert!(
+                rounds < ROUNDS || Instant::now() < give_up,
+                "in {rounds} rounds a lone byte took {best:?} at best through the reader and {plain_best:?} through a plain read"
+            );
+            let started = Instant::now();
+            pty.write_shared(b"x").expect("type at the pty");
+            let chunk = rx.recv_timeout(Duration::from_secs(5)).expect("no echo");
+            best = best.min(started.elapsed());
+            rounds += 1;
+            assert_eq!(chunk.bytes(), b"x");
+            reader.recycle(chunk);
+        }
+        reader.stop();
+    }
+}
