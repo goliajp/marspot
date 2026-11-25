@@ -11,9 +11,8 @@ use super::CcActivity;
 use super::context::used_of_tail;
 use crate::plugins::helpers::used::Used;
 
-/// How much of a transcript's end the cheap checks read.  A single
-/// record longer than this (a huge tool result) reads as `Unknown`,
-/// which the callers already treat as "in flight".
+/// How much of a transcript's end the cheap checks read first; more
+/// when that holds no whole conversation record (`tail_reach`).
 const TAIL: u64 = 32 * 1024;
 
 /// Value of a **top-level** string field of one jsonl record.
@@ -159,26 +158,21 @@ pub(super) fn parse_session_id(path: &PathBuf) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Cheap "what's the type of the last record" check.  Reads at most
-/// the last 32 KiB of the file and looks at the last `\n`-separated
-/// record's `"type":"…"` field.  Returns None if the file is malformed
-/// or has no recognisable type.
-/// The last [`TAIL`] bytes of a transcript as text.  None when it
-/// cannot be read.
-fn read_tail(path: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = fs::File::open(path).ok()?;
-    let start = f.metadata().ok()?.len().saturating_sub(TAIL);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::with_capacity(TAIL as usize);
-    f.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+#[path = "tail_reach.rs"]
+pub(super) mod tail_reach;
+
+/// The end of a transcript as text, and how many bytes back it starts.
+#[cfg(test)]
+fn read_tail(path: &Path) -> Option<(String, u64)> {
+    let r = tail_reach::read(path, fs::metadata(path).ok()?.len(), TAIL)?;
+    Some((r.text, r.window))
 }
 
 struct Tail {
     len: u64,
     mtime: SystemTime,
     text: Arc<str>,
+    reach: tail_reach::Reach,
     used: Option<Used>,
 }
 
@@ -194,27 +188,30 @@ struct Tail {
 pub(super) struct TailCache {
     map: HashMap<PathBuf, Tail>,
     pub(super) reads: u64,
+    /// Bytes taken from transcripts.
+    pub(super) bytes: u64,
 }
 
 impl TailCache {
     pub(super) fn tail(&mut self, path: &Path) -> Option<Arc<str>> {
         let md = fs::metadata(path).ok()?;
         let key = (md.len(), md.modified().ok()?);
-        if let Some(t) = self.map.get(path)
-            && (t.len, t.mtime) == key
-        {
-            return Some(t.text.clone());
-        }
+        let mut reach = match self.map.get(path) {
+            Some(t) if (t.len, t.mtime) == key => return Some(t.text.clone()),
+            Some(t) if t.reach.bare.is_some() => tail_reach::grown(path, key.0, TAIL, &t.reach, t.len),
+            _ => tail_reach::read(path, key.0, TAIL),
+        }?;
         self.reads += 1;
-        let text: Arc<str> = read_tail(path)?.into();
-        self.map.insert(path.to_path_buf(), Tail { len: key.0, mtime: key.1, text: text.clone(), used: None });
+        self.bytes += reach.read;
+        let text: Arc<str> = std::mem::take(&mut reach.text).into();
+        self.map.insert(path.to_path_buf(), Tail { len: key.0, mtime: key.1, text: text.clone(), reach, used: None });
         Some(text)
     }
 
     /// What the window last read says of the context; None when none was.
     pub(super) fn used(&mut self, path: &Path) -> Option<Used> {
         let t = self.map.get_mut(path)?;
-        Some(*t.used.get_or_insert_with(|| used_of_tail(path, &t.text, t.len, TAIL)))
+        Some(*t.used.get_or_insert_with(|| used_of_tail(path, &t.text, t.len, t.reach.window)))
     }
 
     pub(super) fn retain(&mut self, keep: impl Fn(&PathBuf) -> bool) {
@@ -228,13 +225,13 @@ impl TailCache {
 /// caller's no-evidence answer is the conservative one.
 #[cfg(test)]
 pub(super) fn tail_window(path: &Path) -> String {
-    read_tail(path).unwrap_or_default()
+    read_tail(path).map(|t| t.0).unwrap_or_default()
 }
 
 /// Read a session's last record and classify it.
 #[cfg(test)]
 pub(super) fn tail_activity(path: &Path, has_young_child: bool) -> CcActivity {
-    activity_of(read_tail(path).as_deref(), has_young_child)
+    activity_of(read_tail(path).map(|t| t.0).as_deref(), has_young_child)
 }
 
 /// Classify a session by the last conversation record in its tail

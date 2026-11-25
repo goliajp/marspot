@@ -6,6 +6,7 @@ use marspot_peer::json::{self, Value};
 
 use super::model::short_model;
 use super::transcript::record_type;
+use super::transcript::tail_reach::{MOST, read_back};
 use super::with_helpers::turns;
 use super::worker::WorkerCtx;
 use crate::plugins::helpers::used::{self, Model, Used};
@@ -74,33 +75,23 @@ pub(super) fn used_of_tail(path: &Path, tail: &str, len: u64, window: u64) -> Us
     }
 }
 
-/// How far back from its end a transcript is read for its last
-/// response, when that is not in the tail.
-const FAR: u64 = 2 * 1024 * 1024;
-
 /// The context of the last response in the transcript at `path`, `len`
 /// bytes long, and its model, read in windows twice as long each time
-/// from `near` up to [`FAR`]: a record longer than the tail cuts it in
-/// two.
+/// from twice `near` up to [`MOST`]: a record longer than the tail cuts
+/// it in two.  Nothing when the tail already reached that far.
 fn response_before(path: &Path, len: u64, near: u64) -> Used {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else { return Used::default() };
-    let mut window = near.saturating_mul(2);
-    loop {
-        let start = len.saturating_sub(window);
-        let mut buf = Vec::new();
-        if f.seek(SeekFrom::Start(start)).is_err() || f.by_ref().take(len - start).read_to_end(&mut buf).is_err() {
-            return Used::default();
-        }
-        let text = String::from_utf8_lossy(&buf);
+    if near >= MOST {
+        return Used::default();
+    }
+    let mut used = Used::default();
+    let read = read_back(path, len, near.saturating_mul(2).min(MOST), 2, |buf, start| {
+        let text = String::from_utf8_lossy(buf);
         // a window that starts inside a record leaves that record out
         let whole = if start == 0 { &text[..] } else { text.split_once('\n').map_or("", |(_, rest)| rest) };
-        let used = used_in(whole, start == 0);
-        if used.tokens.is_some() || start == 0 || window >= FAR {
-            return used;
-        }
-        window = window.saturating_mul(2).min(FAR);
-    }
+        used = used_in(whole, start == 0);
+        used.tokens.is_some()
+    });
+    read.map_or_else(Used::default, |_| used)
 }
 
 impl WorkerCtx {
@@ -203,7 +194,7 @@ mod tests {
         std::fs::write(&p, format!("{SAID}\n{}\n", user_of(200 * 1024))).unwrap();
         let len = std::fs::metadata(&p).unwrap().len();
         assert_eq!(response_before(&p, len, 1024).tokens, Some(12_208), "past a long record of another kind");
-        std::fs::write(&p, format!("{SAID}\n{}\n", user_of(FAR))).unwrap();
+        std::fs::write(&p, format!("{SAID}\n{}\n", user_of(MOST))).unwrap();
         let len = std::fs::metadata(&p).unwrap().len();
         assert_eq!(response_before(&p, len, 1024).tokens, None, "no further back than the bound");
         std::fs::remove_file(&p).unwrap();
