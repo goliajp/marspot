@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.719"  # the zombie watch checks claude panes every five minutes on its own thread and records suspects and the messages it would send
-core    = "0.12.693"  # pidtree reads an executable path; the zombie rules, pacing and transcript reader live in the lib
+core    = "0.12.694"  # the core keeps what a session says before its pane lands and drops it with a pane that never does
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

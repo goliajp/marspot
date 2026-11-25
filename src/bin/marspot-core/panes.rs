@@ -90,6 +90,7 @@ impl CoreApp {
                 Ok(_) => self.retire_pane_session(sid, true),
                 Err(_) => marspot::session_close::close_dead_session(sid),
             }
+            self.pane_control.shadows.early.forget(sid);
             self.spawn_landed(sid, Err("the pane went away while it started".into()));
             return;
         };
@@ -116,10 +117,12 @@ impl CoreApp {
                     marspot::pane::VacantPane::new(sid, c, r),
                 ));
                 lx_error!("core.spawn.failed", &e.to_string(), session_id = sid);
+                self.pane_control.shadows.early.forget(sid);
             }
         }
         self.mark_sid_window_dirty(sid);
         self.spawn_landed(sid, landed);
+        self.replay_early_says();
     }
 }
 

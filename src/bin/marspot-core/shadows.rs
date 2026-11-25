@@ -33,6 +33,7 @@ pub(super) struct Shadows {
     /// L1 rate-limits; each leaves when its spawn reports back.
     spawning: HashMap<u64, (u32, bool)>,
     pub(super) unsaid: super::spawn_said::SpawnsUnsaid,
+    pub(super) early: super::spawn_said::EarlySays,
     pub(super) closed: ClosedSlots,
     pub(super) places: super::shadow_place::Places,
     pub(super) peeks: super::peek::Peeks,

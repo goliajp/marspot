@@ -208,9 +208,9 @@ impl CoreApp {
             lx_warn!(
                 "core.window.restore_window_gone",
                 "window closed while its panes were assembling; dropping them",
-                window_id = window_id,
-                panes = panes.len()
+                window_id = window_id, panes = panes.len()
             );
+            panes.iter().filter_map(Pane::shelld_session_id).for_each(|s| self.pane_control.shadows.early.forget(s));
             return;
         };
         if panes.is_empty() {
@@ -227,7 +227,7 @@ impl CoreApp {
             self.pane_control.shadows.closed.take(sid);
         }
         win!(self, wi).panes = panes;
-        let asked = marspot::session_signal::ask_all_to_update(win!(self, wi).panes.iter_mut());
+        let asked = self.restored_panes_landed(wi);
         win!(self, wi).focused_idx = win!(self, wi).focused_idx.min(n - 1);
         // Placeholder-era selection referred to panes that no longer
         // exist.
