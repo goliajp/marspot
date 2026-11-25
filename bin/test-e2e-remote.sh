@@ -88,7 +88,8 @@ DEFAULT_SUITES=(
 # bin/measure-idle-marspot.sh: 1 is over budget, 2 the instrument
 # failing, 3 a host too busy to read.
 is_measurement() {
-  [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh || $1 == test-awake-cost.sh ]]
+  [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh || $1 == test-awake-cost.sh \
+    || $1 == measure-active.sh ]]
 }
 
 # One tool does the copying, for every session and every repo: it takes
@@ -238,12 +239,21 @@ for suite in "${SUITES[@]}"; do
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))
+  # a measure-active run that timed out can leave iTerm2 up: quit it and
+  # SIGTERM the pids the run wrote down (a no-op when it cleaned up)
+  if [[ $suite == measure-active.sh ]]; then
+    remote_gui "cd ~/$REMOTE_DIR && bin/_active_iterm.sh close $current_sd/iterm.pids" || true
+  fi
   reap_sandbox "$current_sd"
   # a suite that records readings leaves them in the remote tree, which
   # nothing else copies back
   if [[ $suite == test-awake-cost.sh ]]; then
     mkdir -p "$ROOT/bench/results"
     scp -q "${HOST}:${REMOTE_DIR}/bench/results/awake-cost-*.json" "$ROOT/bench/results/" </dev/null || true
+  fi
+  if [[ $suite == measure-active.sh ]]; then
+    mkdir -p "$ROOT/bench/results"
+    scp -q "${HOST}:${REMOTE_DIR}/bench/results/active-*.json" "$ROOT/bench/results/" </dev/null || true
   fi
   if (( suite_rc == 0 )); then
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
