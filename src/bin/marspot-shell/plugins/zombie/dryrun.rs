@@ -4,6 +4,14 @@
 //! so it carries a one-line pointer to each entry and this file the text
 //! a person judges the rules by.  0600; past 1 MiB the file moves to
 //! `dryrun.log.1`, replacing the one before.
+//!
+//! Each entry starts `== <kind> <unix> sid=<sid> …`: `suspect`,
+//! `would_tell` (the dry run's message), `told` (a message sent live)
+//! and `held` (a due message the pacing held back, `why=` naming the
+//! limit: `pane_gap`, `pane_day`, `host_hour`, `host_day`).  Messages
+//! per day are the `would_tell` (or `told`) headers counted by the date
+//! of their unix time; a day over the daily cap of the whole machine is
+//! a day with a `held … why=host_day` entry.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;

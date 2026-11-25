@@ -75,6 +75,14 @@ pub struct TaskRec {
     pub command: Option<String>,
 }
 
+impl TaskRec {
+    /// The call that started it is on record and asked to run in the
+    /// background; a result whose call was not read only says a task.
+    pub fn said_background(&self) -> bool {
+        self.background && !self.tool.is_empty()
+    }
+}
+
 /// What every transcript of a session shares: the tool calls whose
 /// results name a task, and the notifications of the tasks' ends.
 #[derive(Clone, Debug)]

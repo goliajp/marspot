@@ -214,7 +214,7 @@ pub(in crate::plugins) fn frame_line(inbox: &str, body: &str) -> String {
 }
 
 /// The inbox of the claude with this pid, from the sessions registry.
-fn inbox_of(claude_pid: i32) -> Option<String> {
+pub(in crate::plugins) fn inbox_of(claude_pid: i32) -> Option<String> {
     marspot_peer::peers::live_entries().into_iter().find(|e| e.pid == claude_pid && !e.ours)?.socket
 }
 

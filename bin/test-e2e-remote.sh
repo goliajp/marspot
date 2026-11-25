@@ -81,6 +81,7 @@ DEFAULT_SUITES=(
   test-codex-follow.sh
   test-agent-handoff.sh
   test-peerbus.sh
+  test-zombie-watch.sh
   test-real-update.sh
   test-negative-update.sh
   test-adversarial-update.sh

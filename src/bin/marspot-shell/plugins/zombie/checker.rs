@@ -7,14 +7,15 @@ use std::path::PathBuf;
 
 use marspot::lx_info;
 use marspot::pidtree::ProcTable;
-use marspot::zombie::check::{Key, Scene, Suspect, Watch};
+use marspot::zombie::check::{Key, Scene, Watch};
 use marspot::zombie::files::PaneFiles;
 use marspot::zombie::limits::{self, Notify};
 use marspot::zombie::probe::Live;
-use marspot::zombie::{rules, tell};
+use marspot::zombie::rules;
 
 use super::attrib::{Attributor, Known};
-use super::{dryrun, scene, store};
+use super::teller::{Cx, Teller};
+use super::{deliver, dryrun, plugin, scene, store};
 
 pub(super) struct Checker {
     /// `<state>/zombie`.
@@ -23,11 +24,12 @@ pub(super) struct Checker {
     probe: Live,
     watch: Watch,
     files: HashMap<u64, PaneFiles>,
-    pacer: tell::Pacer,
+    pacers: store::Pacers,
     /// Suspects already logged, while what they name lives.
     logged: HashSet<Key>,
-    /// Panes whose due message the pacing held back, as last logged.
-    held: HashSet<u64>,
+    teller: Teller,
+    /// The mode and scale last logged.
+    mode: Option<(Notify, u64)>,
     unreaped: Vec<(i32, usize)>,
 }
 
@@ -35,16 +37,17 @@ impl Checker {
     /// A checker keeping its state in `dir`, going on from the pacing
     /// saved there.
     pub fn new(dir: PathBuf, now: u64) -> Checker {
-        let pacer = store::load(&dir, now);
+        let pacers = store::load(&dir, now);
         Checker {
             dir,
             attrib: Attributor::default(),
             probe: Live::default(),
             watch: Watch::default(),
             files: HashMap::new(),
-            pacer,
+            pacers,
             logged: HashSet::new(),
-            held: HashSet::new(),
+            teller: Teller::default(),
+            mode: None,
             unreaped: Vec::new(),
         }
     }
@@ -55,7 +58,17 @@ impl Checker {
         if notify == Notify::Off {
             return;
         }
+        let scale = if plugin::sandboxed() { limits::scale(&body) } else { 1 };
+        plugin::set_scale(scale);
+        if self.mode.replace((notify, scale)) != Some((notify, scale)) {
+            lx_info!("zombie.mode", "the watch checks claude panes", notify = format!("{notify:?}"), scale = scale);
+        }
+        let l = l.scaled(scale);
         self.watch.limits = l.clone();
+        self.watch.scale = scale;
+        for p in self.pacers.both() {
+            p.scale = scale;
+        }
         let obs = crate::observe::shared().latest();
         let known = Known::current();
         self.attrib.begin(&obs, &known);
@@ -85,47 +98,23 @@ impl Checker {
                 dryrun::append(&log, "suspect", now, &head, &x.hit.evidence);
             }
         }
-        let told = self.would_tell(&suspects, now);
+        let reach = crate::plugins::claudecode::reach().into_iter().map(|p| (p.sid, p)).collect();
+        let files = &self.files;
+        let turn_ended = |sid: u64| files.get(&sid).is_some_and(|f| f.log.main.turn_ended.is_some());
+        let cx = Cx { notify, now, scale, dir: &self.dir, reach: &reach, turn_ended: &turn_ended };
+        let told = self.teller.tell(&cx, &suspects, self.pacers.of(notify), &mut deliver::deliver);
         let open: HashSet<u64> = known.claude.iter().map(|c| c.sid).collect();
-        let before = (self.pacer.told_tsv(), self.pacer.clock_tsv());
+        let before = self.pacers.tsv();
         let alive = |id: &str| alive(id, &obs.table, &self.files);
         self.logged.retain(|k| alive(&k.id));
-        self.pacer.keep_alive(alive);
-        self.pacer.keep_panes(|sid| open.contains(&sid));
-        self.held.retain(|sid| open.contains(sid));
-        if told || before != (self.pacer.told_tsv(), self.pacer.clock_tsv()) {
-            store::save(&self.dir, &self.pacer);
+        for p in self.pacers.both() {
+            p.keep_alive(alive);
+            p.keep_panes(|sid| open.contains(&sid));
         }
-    }
-
-    /// What would be sent, and when the pacing would hold it back.
-    /// Whether anything would have gone out.
-    fn would_tell(&mut self, suspects: &[Suspect], now: u64) -> bool {
-        let mut by_pane: HashMap<u64, Vec<&Suspect>> = HashMap::new();
-        for s in suspects.iter().filter(|s| !self.pacer.told(&s.hit.key.id)) {
-            by_pane.entry(s.hit.key.sid).or_default().push(s);
+        self.teller.keep_panes(|sid| open.contains(&sid));
+        if told || before != self.pacers.tsv() {
+            store::save(&self.dir, &self.pacers);
         }
-        let mut any = false;
-        for (sid, items) in by_pane {
-            let ended = self.files.get(&sid).and_then(|f| f.log.main.turn_ended);
-            if !tell::due(&items, &self.pacer, ended, now) {
-                continue;
-            }
-            if !self.pacer.allows(sid, now) {
-                if self.held.insert(sid) {
-                    lx_info!("zombie.would_tell.held", "the pacing holds this pane's message back", sid = sid, items = items.len());
-                }
-                continue;
-            }
-            self.held.remove(&sid);
-            let ids: Vec<&str> = items.iter().map(|s| s.hit.key.id.as_str()).collect();
-            lx_info!("zombie.would_tell", "a message this dry run did not send; text in zombie/dryrun.log", sid = sid, items = ids.join(","));
-            let head = format!("sid={sid} items={}", ids.join(","));
-            dryrun::append(&self.dir.join("dryrun.log"), "would_tell", now, &head, &tell::body(&items));
-            self.pacer.record(sid, now, items.iter().map(|s| s.hit.key.id.clone()));
-            any = true;
-        }
-        any
     }
 
     /// Z0: unreaped children of the shell and of the panes' processes,
