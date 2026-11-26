@@ -1,16 +1,18 @@
 //! What the Claude CLI shows around `/limit-reset`, read as text: the
-//! account's cached feature flags that switch the command on and give
-//! its lines, the row of a listed grant that matches the confirmed one,
-//! and the line that says how the claim went.
+//! account's cached feature flags that switch the weekly session reset
+//! on and give its lines, the line printed after the command that says
+//! how the claim went, and the date that line names.
 
 use marspot_peer::json::{self, Value};
 
-use super::{Grant, Res};
-use crate::plugins::claudecode::limit_reset_screen;
+use super::Res;
 
 /// What the CLI printed on an account not at its five-hour limit
 /// (Claude Code 2.1.332, 2026-11-26).
 pub(super) const NOT_AVAILABLE: &str = "A 5-hour limit reset isn't available right now.";
+
+/// The command as typed, and as the CLI echoes it above its output.
+const COMMAND: &str = "/limit-reset";
 
 /// The weekly session reset as the account's cached flags describe it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -40,30 +42,42 @@ pub(super) fn session_reset(body: &str) -> SessionReset {
     }
 }
 
-/// Whether the CLI lists stored resets on that account at all.
-pub(super) fn lists_grants(body: &str) -> bool {
-    let Ok(v) = json::parse(body) else { return false };
-    match flag(&v, "tengu_cedar_ember") {
-        Some(Value::Bool(b)) => *b,
-        Some(f) => f.get("enabled").and_then(Value::bool) == Some(true),
-        None => false,
-    }
-}
-
-/// Whether `line` is `template` with something in place of `{date}`.
-fn fits(line: &str, template: &str) -> bool {
+/// What `line` has in place of `{date}` in `template`, `None` when the
+/// line is not that template; `Some("")` for a template with no date.
+fn fill<'a>(line: &'a str, template: &str) -> Option<&'a str> {
     match template.split_once("{date}") {
-        Some((head, tail)) => line.contains(head.trim()) && line.contains(tail.trim()),
-        None => line.contains(template.trim()),
+        Some((head, tail)) => {
+            let (head, tail) = (head.trim(), tail.trim());
+            let start = line.find(head)? + head.len();
+            let rest = &line[start..];
+            let end = if tail.is_empty() { rest.len() } else { rest.find(tail)? };
+            Some(rest[..end].trim())
+        }
+        None => line.contains(template.trim()).then_some(""),
     }
 }
 
-/// How the claim went, from the screen after it, and the line that says
-/// so; `None` while no line says.
+/// The screen after the last echo of the command, or nothing when the
+/// screen shows no echo: words above it are not the command's answer.
+fn after_command(screen: &str) -> &str {
+    let mut from = None;
+    let mut pos = 0;
+    for line in screen.split_inclusive('\n') {
+        pos += line.len();
+        let bare = line.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '-'));
+        if bare == COMMAND {
+            from = Some(pos);
+        }
+    }
+    from.map_or("", |i| &screen[i..])
+}
+
+/// How the claim went, from the lines the CLI printed after the echo of
+/// the command, and the line that says so; `None` while no line says.
 pub(super) fn result_of(screen: &str, s: &SessionReset) -> Option<(Res, String)> {
-    for line in screen.lines().rev().map(str::trim).filter(|l| !l.is_empty()) {
+    for line in after_command(screen).lines().map(str::trim).filter(|l| !l.is_empty()) {
         let lower = line.to_ascii_lowercase();
-        let by = |t: &Option<String>| t.as_deref().is_some_and(|t| fits(line, t));
+        let by = |t: &Option<String>| t.as_deref().is_some_and(|t| fill(line, t).is_some());
         let result = if by(&s.success) || lower.contains("limits reset") || (lower.contains("reset used ·") && lower.contains("back in your weekly")) {
             Res::Reset
         } else if by(&s.spent) || lower.contains("already used") {
@@ -84,37 +98,30 @@ pub(super) fn result_of(screen: &str, s: &SessionReset) -> Option<(Res, String)>
     None
 }
 
-/// Two times this close are the same: the screen shows minutes.
-const SAME_TIME_S: i64 = 120;
+const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
-/// The row of the screen's grant list that is the confirmed grant: same
-/// kind, same count left and the same end where both say.  `None` when
-/// the screen lists no such row, or more than one.
-pub(super) fn row_for(screen: &str, g: &Grant, now: i64) -> Option<usize> {
-    let listed = limit_reset_screen::read(screen, now).grants;
-    let same = |x: &marspot::agent_resets::Grant| {
-        let ends = match (x.ends_at, g.ends_at) {
-            (Some(a), Some(b)) => (a - b).abs() <= SAME_TIME_S,
-            _ => true,
-        };
-        x.kind == g.kind && (g.left.is_none() || x.left == g.left) && ends
-    };
-    let mut rows = listed.iter().enumerate().filter(|(_, x)| same(x)).map(|(i, _)| i);
-    let row = rows.next()?;
-    rows.next().is_none().then_some(row)
+/// The day `text` names, as 00:00 UTC of it: `2026-12-04`, or `Dec 4`
+/// (`December 4`, `Dec 4, 2026`) taken as the first such day from a day
+/// before `at` on.  The CLI prints a day and no time.
+fn day_in(text: &str, at: i64) -> Option<i64> {
+    let iso = |y: i64, m: usize, d: u32| marspot::cc_usage::parse_iso_utc(format!("{y:04}-{m:02}-{d:02}T00:00:00Z"));
+    if let Some(t) = text.get(..10).and_then(|d| marspot::cc_usage::parse_iso_utc(format!("{d}T00:00:00Z"))) {
+        return Some(t);
+    }
+    let mut words = text.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty());
+    let month = words.next()?.to_ascii_lowercase();
+    let m = MONTHS.iter().position(|n| month.starts_with(n))? + 1;
+    let d: u32 = words.next()?.parse().ok()?;
+    if let Some(y) = words.next().and_then(|w| w.parse::<i64>().ok()) {
+        return iso(y, m, d);
+    }
+    let year = 1970 + at / 31_556_952;
+    (year - 1..=year + 1).filter_map(|y| iso(y, m, d)).find(|t| *t >= at - 86_400)
 }
 
-/// Whether the screen lists grants to choose from: rows of grants, and
-/// none of the session reset's own lines, which name a kind too.
-pub(super) fn lists(screen: &str, s: &SessionReset, now: i64) -> bool {
-    let session_line = |l: &str| {
-        l.contains(NOT_AVAILABLE) || [&s.success, &s.spent, &s.unavailable].iter().any(|t| t.as_deref().is_some_and(|t| fits(l, t)))
-    };
-    !screen.lines().any(session_line) && !limit_reset_screen::read(screen, now).grants.is_empty()
-}
-
-/// Whether the screen asks to confirm what was chosen.
-pub(super) fn asks_to_confirm(screen: &str) -> bool {
-    let lower = screen.to_ascii_lowercase();
-    ["confirm", "are you sure", "yes, use"].iter().any(|w| lower.contains(w))
+/// When the session reset is offered again, from the line a claim
+/// printed at `at`: the date in the success or spent line, `None` when
+/// the line names none this build can read.
+pub(super) fn next_offered(line: &str, s: &SessionReset, at: i64) -> Option<i64> {
+    [&s.success, &s.spent].into_iter().flatten().filter_map(|t| fill(line, t)).filter(|d| !d.is_empty()).find_map(|d| day_in(d, at))
 }

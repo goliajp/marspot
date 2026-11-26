@@ -68,7 +68,6 @@ mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;
 mod alloc_moves;
-pub(crate) mod limit_reset_screen;
 mod worker_loop;
 pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;

@@ -1,14 +1,15 @@
 //! A Claude claim through the official CLI: a window marspot opens for
 //! it, a background pane under that window running `claude` on the
-//! account with an explicit model, `/limit-reset`, the confirmed grant
-//! chosen where the CLI lists grants, the result line read, Esc, and
-//! both panes closed.  No pane of the user's is touched.
+//! account with an explicit model, `/limit-reset`, the result line read,
+//! Esc, and both panes closed.  No pane of the user's is touched.
 //!
-//! The weekly session reset has no dialog: on an account at its
-//! five-hour limit the command uses it at once.  So the command is typed
-//! only for kind `session`, or for a stored grant where the account's
-//! cached flags say the CLI lists them; a listed grant is chosen only
-//! when exactly one row matches the confirmed kind, count and end.
+//! Only the weekly session reset is claimed this way.  It has no
+//! dialog: on an account at its five-hour limit the command uses it at
+//! once, so typing the command is the claim.  Stored grants of any
+//! other kind would be chosen from a list the CLI shows behind
+//! `tengu_cedar_ember`, which no account has had and no screen of
+//! which has been captured; until one is, a claim of any other kind is
+//! `unavailable` and nothing is typed, whatever the account's flags say.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -85,15 +86,13 @@ fn open(new_window: bool, parent: Option<String>, command: Option<String>) -> Re
 }
 
 pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
+    if grant.kind != "session" {
+        return Outcome::of(Res::Unavailable, "marspot claims no stored Claude reset but the weekly session reset yet");
+    }
     let dir = config_dir(profile);
-    let flags = flags_of(&dir);
-    let session = claude_screen::session_reset(&flags);
-    let typed_ok = match grant.kind.as_str() {
-        "session" => session.enabled,
-        _ => claude_screen::lists_grants(&flags),
-    };
-    if !typed_ok {
-        return Outcome::of(Res::Unavailable, "the CLI offers no reset of this kind on this account (its cached flags say so)");
+    let session = claude_screen::session_reset(&flags_of(&dir));
+    if !session.enabled {
+        return Outcome::of(Res::Unavailable, "the CLI offers no session reset on this account (its cached flags say so)");
     }
     let Some(line) = PtyCommand::new("claude").env("CLAUDE_CONFIG_DIR", dir.to_string_lossy()).arg("--model").arg(MODEL).to_bytes() else {
         return Outcome::of(Res::Error, "the account's directory cannot be put on a command line");
@@ -108,44 +107,24 @@ pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
         Err(e) => return Outcome::of(Res::Error, &format!("no pane for the CLI: {e}")),
     }
     let cli = panes.cli.clone().unwrap_or_default();
-    drive(&cli, grant, &session, deadline)
+    drive(&cli, &session, deadline)
 }
 
-fn drive(cli: &str, grant: &Grant, session: &SessionReset, deadline: Instant) -> Outcome {
+fn drive(cli: &str, session: &SessionReset, deadline: Instant) -> Outcome {
     let ready = read(cli, Wait::Text(READY.into()), deadline);
     if !ready.contains(READY) {
         let last = ready.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
         return Outcome::of(Res::Error, &format!("the CLI did not become ready: {last}"));
     }
+    if Instant::now() >= deadline {
+        return Outcome::of(Res::Error, "the claim's time ran out before the command was typed");
+    }
     if let Err(e) = send(cli, Input::Text { text: "/limit-reset".into(), enter: true }) {
         return Outcome::of(Res::Error, &format!("could not type the command: {e}"));
     }
     let screen = read(cli, Wait::Quiet(1500), deadline);
-    // a list's rows carry words a result line has too: a list is read as a list
-    if grant.kind != "session" && claude_screen::lists(&screen, session, super::unix_now()) {
-        return choose(cli, grant, session, &screen, deadline);
-    }
     match claude_screen::result_of(&screen, session) {
         Some((result, line)) => Outcome::of(result, &line),
         None => Outcome::of(Res::Error, "the CLI printed no line this build knows after /limit-reset"),
-    }
-}
-
-/// Choose the confirmed grant on the CLI's list and confirm it.
-fn choose(cli: &str, grant: &Grant, session: &SessionReset, screen: &str, deadline: Instant) -> Outcome {
-    let Some(row) = claude_screen::row_for(screen, grant, super::unix_now()) else {
-        return Outcome::of(Res::Unavailable, "the CLI does not list exactly one grant like the confirmed one; nothing was chosen");
-    };
-    let mut down = vec!["down"; row];
-    down.push("enter");
-    keys(cli, &down);
-    let mut screen = read(cli, Wait::Quiet(1000), deadline);
-    if claude_screen::asks_to_confirm(&screen) {
-        keys(cli, &["enter"]);
-        screen = read(cli, Wait::Quiet(1500), deadline);
-    }
-    match claude_screen::result_of(&screen, session) {
-        Some((result, line)) => Outcome::of(result, &line),
-        None => Outcome::of(Res::Error, "the CLI printed no result line this build knows after the choice"),
     }
 }

@@ -6,37 +6,44 @@
 use marspot::agent_resets::{AccountResets, Resets};
 use marspot_peer::json::{Value, obj};
 
-use super::claude_screen;
+use super::claude_screen::{self, SessionReset};
 use super::ledger::Row;
 
 /// A five-hour reading older than this does not say the account is at
 /// its limit now.
 const FRESH_S: i64 = 10 * 60;
+/// A use of the session reset older than this is not this week's.
 const WEEK_S: i64 = 7 * 86_400;
 
 /// What is known of one Claude account's weekly session reset.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Session {
     pub profile: u8,
-    /// The CLI offers it on this account (its cached flags).
-    pub enabled: bool,
+    /// Whether the CLI offers it on this account and the lines it
+    /// prints, from its cached flags.
+    pub flags: SessionReset,
     /// The five-hour window is spent, from a fresh reading; `None` when
     /// none is fresh.
     pub at_limit: Option<bool>,
 }
 
+/// The block of one account.  A use this week with no date the CLI
+/// named leaves both the next date and whether it is offered unknown.
 fn session_block(s: &Session, rows: &[&Row], now: i64) -> Value {
     let used = rows.iter().rev().find(|r| r.kind == "session" && matches!(r.outcome.result.as_str(), "reset" | "already_used"));
-    let next = used.map(|r| r.at + WEEK_S).filter(|t| *t > now);
-    let available = match (s.enabled, next, s.at_limit) {
-        (false, _, _) | (_, Some(_), _) => Some(false),
-        (true, None, at) => at,
+    let named = used.and_then(|r| claude_screen::next_offered(&r.outcome.detail, &s.flags, r.at));
+    let next = named.filter(|t| *t > now);
+    let this_week = used.is_some_and(|r| now - r.at < WEEK_S);
+    let available = match (s.flags.enabled, next, named, this_week) {
+        (false, ..) | (_, Some(_), _, _) => Some(false),
+        (true, None, None, true) => None,
+        (true, None, _, _) => s.at_limit,
     };
     obj([
         ("available", available.map_or(Value::Null, Value::from)),
         ("next_available_at", next.map_or(Value::Null, Value::from)),
         ("uses_weekly", true.into()),
-        ("enabled", s.enabled.into()),
+        ("enabled", s.flags.enabled.into()),
     ])
 }
 
@@ -93,7 +100,7 @@ fn sessions(now: i64) -> Vec<Session> {
             let name = format!("Claude {profile}");
             let row = usage.as_ref().and_then(|u| u.accounts.iter().find(|a| a.name == name));
             let at_limit = row.filter(|a| now - a.collected_at <= FRESH_S).and_then(|a| a.util_5h).map(|u| u >= 1.0);
-            Session { profile, enabled: claude_screen::session_reset(&flags).enabled, at_limit }
+            Session { profile, flags: claude_screen::session_reset(&flags), at_limit }
         })
         .collect()
 }
