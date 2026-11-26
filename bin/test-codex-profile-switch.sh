@@ -13,6 +13,9 @@
 # the terminal to go by.  It holds a pick while the terminal is still
 # drawing, and once the pane has been quiet it hands the conversation
 # off to a codex started under the other profile's `CODEX_HOME`.  The
+# stand-in writes a rollout in the shape codex does, so the handoff has
+# a conversation to carry, and the test reads back what the new codex
+# was typed and the document it names.  The
 # resume-by-id path needs the daemon and is pinned by unit tests
 # against a stand-in daemon; driving the real CLI would sign into the
 # user's accounts and end their sessions.
@@ -60,14 +63,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wait_for() { # regex, seconds
-  local re="$1" secs="$2" i
+# Lines the app log holds now.  Every wait takes one of these first and
+# only accepts lines written after it: a match anywhere in the log let
+# an earlier pass of the same event satisfy a later wait.
+mark() { if [[ -f "$APPLOG" ]]; then wc -l < "$APPLOG" | tr -d ' '; else echo 0; fi; }
+after() { tail -n "+$(( $1 + 1 ))" "$APPLOG" 2>/dev/null; }
+
+wait_for() { # regex, seconds, baseline from `mark`
+  local re="$1" secs="$2" base="$3" i
   for (( i = 0; i < secs * 5; i++ )); do
-    grep -qE "$re" "$APPLOG" 2>/dev/null && return 0
+    after "$base" | grep -qE "$re" && return 0
     sleep 0.2
   done
   return 1
 }
+# a log field `sid=N`, and not the start of `sid=N3`
+sid_is() { printf 'sid=%s([[:space:]]|$)' "$1"; }
 
 if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" || ! -x "$SESSION_BIN" ]]; then
   echo "==> building release binaries"
@@ -80,7 +91,10 @@ fi
 # Compiled, not a script: the plugin identifies the agent by argv[0]'s
 # basename, and a `#!` script is exec'd as `/bin/sh <path>` — argv[0]
 # would be `sh` and nothing would ever be recognised.  It records how
-# it was called and then waits, like the real one waiting for input.
+# it was called, writes a rollout of one finished turn the way codex
+# does, draws codex's input box and then logs every line typed at it.
+# The turn's text carries the stand-in's pid, so the handoff document
+# can only hold it if it was read from this run's rollout.
 echo "==> building the codex stand-in"
 rm -rf "$SB"; mkdir -p "$SB/bin"
 # The log path is compiled in, not read from the environment: a pane
@@ -88,11 +102,27 @@ rm -rf "$SB"; mkdir -p "$SB/bin"
 # (deliberately — a pane gets the user's environment, never the
 # launcher's session), and the first version of this test lost its log
 # to a variable under some other name that still never arrived.  A
-# literal cannot go missing.
+# literal cannot go missing.  The default home is compiled in for the
+# same reason: with no `CODEX_HOME` the plugin looks under the shell's
+# own `$HOME/.codex`, which is this test's, whatever the pane inherits.
 cat > "$SB/codex-stub.c" <<STUB
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+static void mkdirs(char *p) {
+    for (char *s = p + 1; *s; s++)
+        if (*s == '/') { *s = 0; mkdir(p, 0755); *s = '/'; }
+    mkdir(p, 0755);
+}
+// one item_completed event, the record the handoff reads a turn from
+static void item(FILE *r, const char *type, const char *text, const char *phase) {
+    fprintf(r, "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":"
+               "{\"type\":\"%s\",\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]%s%s%s}}}\\n",
+            type, text, phase ? ",\"phase\":\"" : "", phase ? phase : "", phase ? "\"" : "");
+}
 int main(int argc, char **argv) {
     FILE *f = fopen("$CODEX_LOG", "a");
     // Nothing to record means this test can observe nothing, and a
@@ -104,6 +134,45 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) fprintf(f, "%s%s", i > 1 ? " " : "", argv[i]);
     fprintf(f, "\\n");
     fclose(f);
+
+    // a CODEX_HOME inherited from outside the sandbox could be a real
+    // codex home: never write a rollout there
+    if (home && strncmp(home, "$SB/", strlen("$SB/")) != 0) return 10;
+
+    // sessions/YYYY/MM/DD/rollout-<time>-<uuid>.jsonl, opened by a
+    // session_meta naming the directory it runs in
+    char cwd[1024], dir[1400], path[1600], day[16], stamp[32], id[40], text[64];
+    if (!getcwd(cwd, sizeof cwd)) return 8;
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    strftime(day, sizeof day, "%Y/%m/%d", &tm);
+    strftime(stamp, sizeof stamp, "%Y-%m-%dT%H-%M-%S", &tm);
+    snprintf(id, sizeof id, "00000000-0000-4000-8000-%012d", getpid());
+    snprintf(dir, sizeof dir, "%s/sessions/%s", home ? home : "$SB/home/.codex", day);
+    mkdirs(dir);
+    snprintf(path, sizeof path, "%s/rollout-%s-%s.jsonl", dir, stamp, id);
+    FILE *r = fopen(path, "w");
+    if (!r) return 7;
+    fprintf(r, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"%s\",\"cwd\":\"%s\"}}\\n", id, cwd);
+    snprintf(text, sizeof text, "carry-me-%d", getpid());
+    item(r, "UserMessage", text, NULL);
+    snprintf(text, sizeof text, "carried-reply-%d", getpid());
+    item(r, "AgentMessage", text, "final_answer");
+    fclose(r);
+
+    // the input box: a rule over the prompt line, which is what the
+    // switch waits to see before it types at the new codex
+    printf("\\n──────────\\n› ");
+    fflush(stdout);
+    char line[4096];
+    while (fgets(line, sizeof line, stdin)) {
+        FILE *g = fopen("$CODEX_LOG", "a");
+        if (!g) return 9;
+        line[strcspn(line, "\\r\\n")] = 0;
+        fprintf(g, "input pid=%d: %s\\n", getpid(), line);
+        fclose(g);
+    }
     for (;;) pause();
 }
 STUB
@@ -137,7 +206,7 @@ disown
 # Gatekeeper daemon is busy, and the supervisor gives a core that
 # misses its HelloAck a second try — so this waits for a pane to
 # actually be addressable rather than for a fixed time after boot.
-wait_for 'L3_SPAWNED' 90 || fail "no pane session was ever spawned"
+wait_for 'L3_SPAWNED' 90 0 || fail "no pane session was ever spawned"
 SID=""
 for (( i = 0; i < 150; i++ )); do
   SID="$("$SHELL_BIN" --panes 2>/dev/null | awk 'NR>1 {print $1; exit}')"
@@ -169,6 +238,7 @@ done
 [[ -f "$READY" ]] || fail "the pane's shell never ran anything typed into it"
 
 echo "==> starting the stand-in in the pane"
+BOUND_BASE="$(mark)"
 # Retried only while it is REFUSED — a refusal queues nothing, so this
 # cannot leave a second `codex` waiting in the pty the way retrying a
 # successful send did.  The refusal to expect is "pane is busy": the
@@ -204,31 +274,31 @@ ok "the stand-in is running as pane $SID's agent (pid $LIVE_PID)"
 # The plugin has to SEE it before a menu pick can mean anything: the
 # badge is published off its own scan, and a pick on a pane it has not
 # bound is dropped.
-wait_for "codex.*sid=$SID" 30 \
+wait_for "codex.*$(sid_is "$SID")" 30 "$BOUND_BASE" \
   || fail "the plugin never recognised the pane's agent"
 ok "the plugin bound the pane to it"
 
 # the tag `handoff::profile_tag` gives codex's P2 row:
 # 0x4F48_0000 | owner << 12 | profile, codex = 2
 PICK="$SID $(( 0x4F480000 | 2 << 12 | 2 ))"
-picks() { grep -c 'DEV_BADGE_MENU' "$APPLOG" 2>/dev/null; }
 # Renamed into place, so the tick that reads it cannot catch it
 # half-written — a plain `>` redirect once lost the pick that way.
 pick() {
-  local n i; n="$(picks)"
+  local base; base="$(mark)"
   echo "$PICK" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
-  for (( i = 0; i < 100; i++ )); do
-    (( $(picks) > n )) && return 0
-    sleep 0.2
-  done
-  fail "the seam never fired"
+  wait_for 'DEV_BADGE_MENU' 20 "$base" || fail "the seam never fired"
 }
+HELD="switch\.held.*pane $SID: BadgeCodexTerminalBusy"
+HANDED="switch\.no_thread.*pane $SID: thread not known, handing off to P2"
 
 echo "==> picking profile 2 while the terminal has just drawn"
-# The pane drew the echoed command line moments ago, and no daemon
-# says whether a turn is running: the pick is held, not acted on.
+# The pane drew the echoed command line and the stand-in's input box
+# moments ago, and no daemon says whether a turn is running: the pick
+# is held, not acted on.
+QUIET_BASE="$(mark)"
+base="$(mark)"
 pick
-wait_for "switch\.held.*pane $SID: BadgeCodexTerminalBusy" 10 \
+wait_for "$HELD" 10 "$base" \
   || fail "a pick on a terminal that just drew was not held as busy"
 sleep 1
 (( $(starts) == BEFORE )) || fail "a held pick still started a codex"
@@ -237,15 +307,31 @@ ok "the pick was held: the terminal had just drawn"
 
 echo "==> waiting for the pane to read quiet"
 # The pane state machine calls a silent foreground job quiet after
-# 30 s without output, and the switch wants it quiet 3 s more.
-wait_for "pane_state\.changed.*sid=$SID.*to=busy:fg_job" 45 \
+# 30 s without output, and the switch wants it quiet 3 s more.  Nothing
+# logs the second part, so the switch itself is asked: a pick that is
+# still held is picked again, and the first one handed off ends the
+# wait.  Bounded well past the 3 s, so a threshold that grew would fail.
+wait_for "pane_state\.changed.*$(sid_is "$SID").*to=busy:fg_job" 45 "$QUIET_BASE" \
   || fail "the pane never settled into a quiet foreground job"
-sleep 4
+SETTLED_AT=$SECONDS
 
 echo "==> picking profile 2 from the badge menu"
-pick
-wait_for "switch\.no_thread.*pane $SID: thread not known, handing off to P2" 10 \
-  || fail "the pick on a quiet pane was not handed off"
+HANDOFF_BASE=""
+held=0
+while (( SECONDS - SETTLED_AT < 15 )); do
+  base="$(mark)"
+  pick
+  for (( i = 0; i < 25; i++ )); do
+    if after "$base" | grep -qE "$HANDED"; then HANDOFF_BASE=$base; break 2; fi
+    if after "$base" | grep -qE "$HELD"; then held=$(( held + 1 )); break; fi
+    sleep 0.2
+  done
+  (( i < 25 )) || fail "a pick on a quiet pane was neither held nor handed off"
+  sleep 0.5
+done
+[[ -n "$HANDOFF_BASE" ]] \
+  || fail "the pick on a quiet pane was not handed off within 15 s ($held picks held)"
+ok "the pick on a quiet pane was handed off ($held picks held while the 3 s ran)"
 
 # What the switch must do: end the running one, and start codex under
 # the other profile's CODEX_HOME.
@@ -258,13 +344,41 @@ kill -0 "$LIVE_PID" 2>/dev/null && fail "the codex that was running is still run
 ok "the codex that was running was ended"
 
 SECOND="$(grep '^start ' "$CODEX_LOG" | tail -1)"
+NEW_PID="$(sed -n 's/.*pid=\([0-9]*\).*/\1/p' <<<"$SECOND")"
 grep -q "CODEX_HOME=$HOME/.codex-profile-2" <<<"$SECOND" \
   || fail "the new codex did not get profile 2's home: $SECOND"
 ok "it came back under profile 2's CODEX_HOME"
-# the stand-in wrote no rollout, so there is no session to carry and
-# none to resume
+# profile 2 has never held this pane's conversation, so there is
+# nothing there to resume: the conversation travels as a handoff
 grep -q 'argv=$' <<<"$SECOND" \
-  || fail "with no session written, the new codex should start fresh: $SECOND"
-ok "with no session written, it started fresh"
+  || fail "with no session on profile 2, the new codex should start fresh: $SECOND"
+ok "with no session on profile 2, it started fresh"
 
-echo "PASS — a badge-menu pick moves a live codex pane to another profile"
+echo "==> waiting for the handoff to be typed at the new codex"
+wait_for "handoff\.switch\.paste.*$(sid_is "$SID")" 60 "$HANDOFF_BASE" \
+  || fail "the handoff never pasted anything into pane $SID"
+for (( i = 0; i < 50; i++ )); do
+  grep -q "^input pid=$NEW_PID: " "$CODEX_LOG" && break
+  sleep 0.2
+done
+# a second paste or a stray newline would land after the first line:
+# give it a moment before counting
+sleep 1
+TYPED="$(grep "^input pid=$NEW_PID: " "$CODEX_LOG")"
+[[ -n "$TYPED" ]] || fail "the new codex (pid $NEW_PID) was typed nothing"
+[[ "$(wc -l <<<"$TYPED" | tr -d ' ')" == 1 ]] || fail "the new codex was typed more than one line: $TYPED"
+grep -qF '[marspot handoff] I just switched this pane from codex to you' <<<"$TYPED" \
+  || fail "what the new codex was typed is not the handoff message: $TYPED"
+ok "the new codex was typed the handoff message"
+grep -q "^input pid=$LIVE_PID: " "$CODEX_LOG" \
+  && fail "the codex that was leaving was typed at: $(grep "^input pid=$LIVE_PID: " "$CODEX_LOG")"
+
+DOC="$MARSPOT_STATE_DIR/handoff/$SID.md"
+grep -qF " is in $DOC. Read it" <<<"$TYPED" \
+  || fail "the message does not name pane $SID's handoff document $DOC: $TYPED"
+[[ -f "$DOC" ]] || fail "the document the message names does not exist: $DOC"
+grep -qF "carry-me-$LIVE_PID" "$DOC" && grep -qF "carried-reply-$LIVE_PID" "$DOC" \
+  || fail "the document does not carry the leaving codex's turn: $(head -c 600 "$DOC")"
+ok "the document it names carries the turn from the leaving codex's rollout"
+
+echo "PASS — a badge-menu pick moves a live codex pane to another profile, conversation and all"
