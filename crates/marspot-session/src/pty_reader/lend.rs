@@ -29,6 +29,19 @@
 //! megabyte, half the floods of slow-parsing text stayed with the loop
 //! for good and went 10 % slower.
 //!
+//! A pty the loop found dry is not the end of a flood.  With the pane's
+//! process on efficiency cores the writer is scheduled out for longer
+//! than the loop waits for more, every few megabytes, and a reader that
+//! took two rates afresh after each carried a third to nine tenths of a
+//! 64 MiB flood itself, at 13-54 % more CPU than a loop carrying nearly
+//! all of it.  So a pty given back dry is offered again on the reader's
+//! next full chunk, on the rate taken before, and what the loop carries
+//! in those loans adds up to its verdicts: the same floods went with
+//! 5-25 % less CPU, as fast to within 5 % either way.  A pause the
+//! reader sees itself still ends the flood.  With two busy programs
+//! beside it on the same cores floods end every few megabytes, and lent
+//! through those pauses too, text that parses slowly went 9-12 % slower.
+//!
 //! Order.  The reader lends only after it has queued everything it
 //! read, and reads nothing until the pty is given back; the loop reads
 //! only once that queue is empty, and has parsed all it read before it
@@ -38,7 +51,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::turn::Turn;
 
@@ -46,16 +59,12 @@ use super::turn::Turn;
 const LOOK_MS: libc::c_int = 2;
 
 /// What a rate is taken over: two megabytes, some seven milliseconds.
-const RATED_BYTES: u64 = 2 << 20;
-
-/// Rates the reader takes before it offers the pty: the first is of a
-/// flood getting under way.
-const RATES_BEFORE_AN_OFFER: u32 = 2;
+pub(super) const RATED_BYTES: u64 = 2 << 20;
 
 /// Verdicts in the loop's favour after which the pty goes back for the
 /// reader's rate to be taken again, the first time in a flood; twice
 /// as many each time after.
-const KEPT_FOR: u64 = 16;
+pub(super) const KEPT_FOR: u64 = 16;
 
 /// The loop keeps a flood it carries no more than this many percent
 /// slower than the reader did: two rates of the same flood taken
@@ -70,89 +79,9 @@ const SLOWER_PERCENT: u64 = 3;
 /// and pays one window more.
 const SLOWER_IN_A_ROW: u64 = 2;
 
-/// Rates the reader takes of a flood the loop carried slower before it
-/// offers it again: what the flood is made of may have changed.  Twice
-/// as many after each time the loop was slower again.  Asking has a
-/// price, two megabytes carried the slower way and the pty changing
-/// hands twice: a flood of slow-parsing text asked about every 32 MiB
-/// went 2 % slower than one never lent (306 MB/s against 312), asked
-/// once in 128 MiB it went as fast (310).
-const DECLINED_FOR: u32 = 32;
-
 /// Bytes a second, from bytes carried and how long it took.
-fn rate(bytes: u64, took: Duration) -> u64 {
+pub(super) fn rate(bytes: u64, took: Duration) -> u64 {
     (bytes as u128 * 1_000_000_000 / took.as_nanos().max(1)) as u64
-}
-
-/// The reader's own carrying of a flood, a megabyte at a time.
-pub(super) struct Carried {
-    since: Option<Instant>,
-    bytes: u64,
-    /// Rates taken since the flood began or the pty came back.
-    rates: u32,
-    /// Rates taken since the loop gave the flood back as slower.
-    declined_for: u32,
-    /// Rates to take before a flood given back as slower is offered
-    /// again.
-    wait: u32,
-}
-
-impl Carried {
-    pub(super) fn new() -> Self {
-        Self { since: None, bytes: 0, rates: 0, declined_for: 0, wait: DECLINED_FOR }
-    }
-
-    /// The flood is over, or the pty was away: what was counted is not
-    /// a megabyte of this reader's own any more.
-    pub(super) fn restart(&mut self) {
-        self.since = None;
-        self.bytes = 0;
-        self.rates = 0;
-    }
-
-    /// The flood has ended: the next one is offered afresh.
-    pub(super) fn flood_over(&mut self, lend: &Lend) {
-        #[cfg(test)]
-        super::tests::note_flood_over();
-        self.restart();
-        self.declined_for = 0;
-        self.wait = DECLINED_FOR;
-        lend.declined.store(false, Ordering::SeqCst);
-        lend.keep_for.store(KEPT_FOR, Ordering::Relaxed);
-    }
-
-    /// A chunk of `len` bytes of a flood that goes on has been queued.
-    /// `true` when that completes a rate the pty may be offered on.
-    pub(super) fn chunk(&mut self, len: usize, lend: &Lend) -> bool {
-        let now = Instant::now();
-        let Some(since) = self.since else {
-            // from the end of the flood's first chunk: its beginning is
-            // the program starting up
-            self.since = Some(now);
-            return false;
-        };
-        self.bytes += len as u64;
-        if self.bytes < RATED_BYTES {
-            return false;
-        }
-        lend.two_rate.store(rate(self.bytes, now.duration_since(since)), Ordering::SeqCst);
-        self.since = Some(now);
-        self.bytes = 0;
-        self.rates += 1;
-        if self.rates < RATES_BEFORE_AN_OFFER {
-            return false;
-        }
-        if lend.declined.load(Ordering::SeqCst) {
-            self.declined_for += 1;
-            if self.declined_for < self.wait {
-                return false;
-            }
-            self.wait = self.wait.saturating_mul(2);
-            lend.declined.store(false, Ordering::SeqCst);
-        }
-        self.declined_for = 0;
-        true
-    }
 }
 
 pub(crate) struct Lend {
@@ -164,15 +93,24 @@ pub(crate) struct Lend {
     welcome: AtomicBool,
     /// The loop gave the pty back because the reader carried this flood
     /// faster.
-    declined: AtomicBool,
+    pub(super) declined: AtomicBool,
+    /// The loop gave the pty back because the output paused.
+    paused: AtomicBool,
+    /// The next offer goes on with a flood the loop gave back dry: what
+    /// it carried in the loans before still counts towards its next
+    /// verdict.  Those loans end at every dry pty, and counted from none
+    /// at each, a flood cut into loans shorter than a rate could never
+    /// come to one.
+    pub(super) resumed: AtomicBool,
     /// Bytes a second the reader last carried this flood at by itself.
-    two_rate: AtomicU64,
+    pub(super) two_rate: AtomicU64,
     /// What the loop has carried since its last verdict: bytes, and
-    /// nanoseconds; the verdicts in its favour since the offer; and the
-    /// rates in a row it carried slower.
+    /// nanoseconds; the verdicts in its favour since the offer, or since
+    /// the first of the loans a dry pty cut a flood into; and the rates
+    /// in a row it carried slower.
     here: [AtomicU64; 4],
     /// Verdicts in the loop's favour it may keep the pty for.
-    keep_for: AtomicU64,
+    pub(super) keep_for: AtomicU64,
     /// Written by the loop when it gives the pty back.
     back: UnixStream,
     back_rx: UnixStream,
@@ -187,6 +125,8 @@ impl Lend {
             wanted: AtomicBool::new(false),
             welcome: AtomicBool::new(false),
             declined: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            resumed: AtomicBool::new(false),
             two_rate: AtomicU64::new(0),
             here: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
             keep_for: AtomicU64::new(KEPT_FOR),
@@ -256,12 +196,37 @@ impl Lend {
         }
     }
 
+    /// The pty ran dry after the loop read `bytes` more in `took` since
+    /// it last counted: those count too, or loans always shorter than
+    /// the loop's look at the clock would never come to a verdict, and
+    /// the pty would be lent again and again on an ever older rate.
+    /// The reader goes on with the flood, unless they made a verdict
+    /// that gave the pty back already.
+    pub(crate) fn ran_dry(&self, bytes: usize, took: Duration) {
+        if bytes == 0 || self.carried_here(bytes, took) {
+            self.give_back_paused();
+        }
+    }
+
+    fn give_back_paused(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        self.give_back();
+    }
+
+    /// Whether the pty came back from its last loan because it ran dry.
+    pub(super) fn came_back_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
     /// Lend the pty.  Called by the reader with nothing in hand and
     /// everything it read queued.
     pub(super) fn offer(&self) {
-        for count in &self.here {
-            count.store(0, Ordering::Relaxed);
+        if !self.resumed.swap(false, Ordering::SeqCst) {
+            for count in &self.here {
+                count.store(0, Ordering::Relaxed);
+            }
         }
+        self.paused.store(false, Ordering::SeqCst);
         self.wanted.store(false, Ordering::SeqCst);
         self.lent.store(true, Ordering::SeqCst);
     }
@@ -297,6 +262,7 @@ impl Lend {
 
 #[cfg(test)]
 mod tests {
+    use super::super::carried::{Carried, DECLINED_FOR};
     use super::super::lease::Leases;
     use super::*;
     use std::sync::Arc;
@@ -436,6 +402,158 @@ mod tests {
             assert!(!window(&mut carried, &lend), "the next flood offered again after {rates} rates");
         }
         assert!(window(&mut carried, &lend), "the next flood waits as long as the first did");
+    }
+
+    /// A pty back from a loop that found it dry is offered on the
+    /// reader's next full chunk, on the rate taken before the loan; not
+    /// before the flood has its rates, not after it ended or the pty came
+    /// back for another reason, and not while the loop is declined.
+    #[test]
+    fn a_pty_back_dry_is_offered_on_the_next_chunk() {
+        const WINDOW: usize = RATED_BYTES as usize;
+        let ms = Duration::from_millis;
+        let lend = Lend::new();
+        lend.welcome(true);
+        let mut carried = Carried::new();
+        let mut now = Instant::now();
+        let mut window = |carried: &mut Carried, lend: &Lend, after: Duration| {
+            now += after;
+            carried.chunk_at(WINDOW, lend, now)
+        };
+        assert!(!window(&mut carried, &lend, ms(2)));
+        assert!(!window(&mut carried, &lend, ms(2)));
+        // back before the flood had its rates: they are still to take
+        carried.resume();
+        assert!(!window(&mut carried, &lend, ms(2)), "offered on the first rate");
+        assert!(window(&mut carried, &lend, ms(2)), "the rate before the loan was not counted");
+        let two = lend.two_rate.load(Ordering::SeqCst);
+        carried.resume();
+        assert!(window(&mut carried, &lend, ms(1)), "not offered on the next chunk");
+        assert_eq!(lend.two_rate.load(Ordering::SeqCst), two, "a rate was taken across the loan");
+
+        for (ended, how) in [(true, "the flood ended"), (false, "the pty came back for another reason")] {
+            carried.resume();
+            if ended {
+                carried.flood_over(&lend);
+            } else {
+                carried.restart();
+            }
+            assert!(!window(&mut carried, &lend, ms(2)), "offered on the next chunk after {how}");
+            assert!(!window(&mut carried, &lend, ms(2)), "offered on one rate after {how}");
+            assert!(window(&mut carried, &lend, ms(2)));
+        }
+
+        // given back as slower, it stays the reader's
+        lend.offer();
+        let slow = Duration::from_nanos(WINDOW as u64 * 1_000_000_000 / (lend.two_rate.load(Ordering::SeqCst) * 90 / 100));
+        assert!(lend.carried_here(WINDOW, slow));
+        assert!(!lend.carried_here(WINDOW, slow));
+        assert!(!lend.came_back_paused());
+        carried.resume();
+        assert!(!window(&mut carried, &lend, ms(1)), "a declined flood offered again");
+        assert!(!window(&mut carried, &lend, ms(2)), "a declined flood offered on a rate");
+    }
+
+    /// Loans that a dry pty cuts a flood into add up to the loop's verdicts:
+    /// slower over two windows spread across four loans, the flood goes
+    /// back to the reader.  A loan on a fresh rate counts from none.
+    #[test]
+    fn loans_a_pause_cuts_add_up_to_a_verdict() {
+        const WINDOW: usize = RATED_BYTES as usize;
+        let ms = Duration::from_millis;
+        let lend = Lend::new();
+        lend.welcome(true);
+        let mut carried = Carried::new();
+        let mut now = Instant::now();
+        let mut chunk = |carried: &mut Carried, lend: &Lend, after: Duration| {
+            now += after;
+            carried.chunk_at(WINDOW, lend, now)
+        };
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(chunk(&mut carried, &lend, ms(2)));
+        let slow = Duration::from_nanos(WINDOW as u64 * 1_000_000_000 / (lend.two_rate.load(Ordering::SeqCst) * 90 / 100));
+
+        lend.offer();
+        for loan in 1..4 {
+            assert!(lend.carried_here(WINDOW / 2, slow / 2), "given back after loan {loan}");
+            lend.give_back_paused();
+            carried.resume();
+            assert!(chunk(&mut carried, &lend, ms(1)), "not offered again after loan {loan}");
+            lend.offer();
+        }
+        assert!(!lend.carried_here(WINDOW / 2, slow / 2), "two slower windows across four loans came to no verdict");
+        assert!(!lend.is_welcome());
+
+        // a loan on a fresh rate forgets what the loans before it carried
+        carried.flood_over(&lend);
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(chunk(&mut carried, &lend, ms(2)));
+        lend.offer();
+        assert!(lend.carried_here(WINDOW / 2, slow / 2));
+        lend.give_back_paused();
+        carried.resume();
+        assert!(chunk(&mut carried, &lend, ms(1)));
+        carried.restart();
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(chunk(&mut carried, &lend, ms(2)));
+        lend.offer();
+        assert_eq!(lend.here[0].load(Ordering::Relaxed), 0, "the half window of an earlier loan was counted");
+    }
+
+    /// Loans of seven 4 KiB reads each, every one ending at a dry pty
+    /// before the loop looks at the clock, still come to the verdict
+    /// that the loop is slower, two windows in.
+    #[test]
+    fn loans_shorter_than_a_look_add_up_to_a_verdict() {
+        const WINDOW: usize = RATED_BYTES as usize;
+        const LOAN: usize = 7 * 4096;
+        let ms = Duration::from_millis;
+        let lend = Lend::new();
+        lend.welcome(true);
+        let mut carried = Carried::new();
+        let mut now = Instant::now();
+        let mut chunk = |carried: &mut Carried, lend: &Lend, after: Duration| {
+            now += after;
+            carried.chunk_at(WINDOW, lend, now)
+        };
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(!chunk(&mut carried, &lend, ms(2)));
+        assert!(chunk(&mut carried, &lend, ms(2)));
+        let slow = Duration::from_nanos(LOAN as u64 * 1_000_000_000 / (lend.two_rate.load(Ordering::SeqCst) * 90 / 100));
+        let to_verdict = 2 * WINDOW.div_ceil(LOAN);
+
+        lend.offer();
+        for loan in 1..=to_verdict {
+            lend.ran_dry(LOAN, slow);
+            if loan < to_verdict {
+                assert!(lend.came_back_paused(), "given back as slower after loan {loan} of {to_verdict}");
+                carried.resume();
+                assert!(chunk(&mut carried, &lend, ms(1)), "not offered again after loan {loan}");
+                lend.offer();
+            }
+        }
+        assert!(!lend.lent());
+        assert!(!lend.came_back_paused(), "{to_verdict} loans, two windows slower, came to no verdict");
+        assert!(!lend.is_welcome());
+    }
+
+    /// Only a pty the loop found dry comes back paused, and the next
+    /// loan starts without it.
+    #[test]
+    fn the_pty_comes_back_paused_only_when_the_output_paused() {
+        let lend = Lend::new();
+        lend.offer();
+        lend.give_back();
+        assert!(!lend.came_back_paused());
+        lend.offer();
+        lend.give_back_paused();
+        assert!(lend.came_back_paused());
+        assert!(!lend.lent());
+        lend.offer();
+        assert!(!lend.came_back_paused(), "an old pause outlived the next loan");
     }
 
     /// A slower rate between two that are not is the noise between two

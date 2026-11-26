@@ -37,6 +37,7 @@ use std::time::Duration;
 use marspot_term::idle_pages::Given;
 use marspot_term::pty::Pty;
 
+mod carried;
 mod echo;
 mod gather;
 mod lease;
@@ -44,10 +45,10 @@ mod lend;
 mod rest;
 mod turn;
 mod wakes;
+use carried::Carried;
 use echo::Echo;
 use gather::{Gathered, gather};
 use lease::Leases;
-use lend::Carried;
 pub(crate) use lend::Lend;
 use rest::Rest;
 use turn::Turn;
@@ -274,7 +275,11 @@ impl PtyReader {
                                 if !lending.wait_back(stop_rx.as_raw_fd(), &mut turn) {
                                     break;
                                 }
-                                carried.restart();
+                                if lending.came_back_paused() {
+                                    carried.resume();
+                                } else {
+                                    carried.restart();
+                                }
                             }
                         }
                         Gathered::Ended => {
