@@ -54,7 +54,7 @@ fn allocation_line_names_every_open_account_and_lists_the_others_out_with_their_
 
 #[test]
 fn allocation_line_for_16_open_accounts_fits_under_the_loggers_cap() {
-    assert!(PREFIX_MAX + PLAN_MAX <= LOGX_MAX_LINE);
+    const { assert!(PREFIX_MAX + PLAN_MAX <= LOGX_MAX_LINE) };
     let acc: Vec<Quant> = (1..=16).map(|i| q(i, 0.5 + f64::from(i) / 100.0, 0.4, 100.0 + f64::from(i), true)).collect();
     let table: Vec<(Option<u8>, Class, f64)> = (1..=16).flat_map(|i| [(Some(i), Class::Restricted, 0.01), (Some(i), Class::Plain, 0.02)]).collect();
     let moves: Vec<Option<String>> = (0..12).map(|i| Some(format!("{}→P{}(waste)", 400 + i, i % 16 + 1))).collect();
