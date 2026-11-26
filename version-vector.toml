@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.727"  # a claude helper at a prompt reads awaiting approval within seconds and is told once per prompt
+shell   = "0.7.728"  # marspot-peer answers --help with its usage, refuses unknown options before it connects, and takes text after its first word as written
 core    = "0.12.698"  # a helper strip row can say awaiting answer, and its dev dump keeps the gap between columns
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it
