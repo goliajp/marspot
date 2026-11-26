@@ -9,6 +9,9 @@
 #
 #   1. a model key written into the file is logged, told over the pane
 #      and put back within a second; another key is told and kept;
+#  1b. a writer that truncates the file and then writes it never leaves
+#      it empty or short of a key, and a model it brings is put back with
+#      the other keys it wrote kept;
 #   2. Enter on /model in the box is held and a notice shown; y sends it,
 #      and the model it writes is kept;
 #   3. Esc drops the held Enter and the box keeps /model;
@@ -66,6 +69,24 @@ setting() { printf 'claude.model = %s\nreclaim.enabled = false\n' "$1" > "$SD/se
 write_shared() { # json text
   printf '%s\n' "$1" > "$SHARED.new" && mv "$SHARED.new" "$SHARED"
 }
+# A writer that truncates the file in place and writes it a moment later,
+# as editors and some JSON writers do: the watch sees it empty in between.
+truncating_writes() { # count, printf format with one %d for the index
+  python3 - "$SHARED" "$1" "$2" <<'PY'
+import sys, time
+path, n, fmt = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+for i in range(n):
+    with open(path, "r+") as f:
+        f.truncate(0)
+        f.flush()
+        time.sleep(0.01)
+        f.write((fmt % i if "%d" in fmt else fmt) + "\n")
+    time.sleep(0.03)
+PY
+}
+key_is() { # key, value: the shared file is whole JSON and holds it
+  python3 -c 'import json,sys; sys.exit(0 if str(json.load(open(sys.argv[1])).get(sys.argv[2])) == sys.argv[3] else 1)' "$SHARED" "$1" "$2"
+}
 within() { # seconds, command…: true once the command is, polling every 0.1 s
   local n=$(( $1 * 10 )) i
   shift
@@ -119,6 +140,19 @@ check "another key is told" within 1 more_than NOTICE_SHOWN "$shown"
 sleep 1
 check "and kept" grep -q light "$SHARED"
 check "and not put back" test "$(count "$SD" svc.cc_model.put_back)" = "$put"
+
+echo "════ 1b. a writer that truncates the file and then writes it ════"
+truncating_writes 40 '{"theme": "light", "n": %d}'
+sleep 1
+check "the file is never left empty" test -s "$SHARED"
+check "it ends with the last write, every key there" key_is n 39
+check "and no model came in" model_is ""
+put=$(count "$SD" svc.cc_model.put_back)
+truncating_writes 1 '{"theme": "light", "n": 99, "model": "fable"}'
+check "a model it brings is put back within a second" within 1 model_is ""
+check "logged as put back" within 1 more_than svc.cc_model.put_back "$put"
+check "and the keys written with it stay" key_is n 99
+check "theme too" grep -q light "$SHARED"
 
 echo "════ 2. /model typed in the box ════"
 pc send --force "$P1" "python3 $ROOT/bin/_fake_claude_box.py $SHARED $SUBMITS $KEYS" >/dev/null || die "could not start the stand-in"
