@@ -129,15 +129,32 @@ changed() {
 }
 
 # peer_decision NEW INSTALLED: marspot-peer is not part of the swap; it
-# is replaced on PATH whenever it was built.  Call before installing it.
+# is replaced on PATH when it is from another commit or its bytes
+# differ.  Call before installing it; install only on bytes-differ or
+# not-installed.
+#
+# The same-commit step comes first because the bytes of two installs
+# of one build never match: install-local signs the binary every time,
+# and a Developer ID signature carries its signing time.
 peer_decision() {
-  local new="$1" old="$2"
+  local new="$1" old="$2" new_sha
   if [[ ! -x "$new" ]]; then _why peer not-built
   elif [[ ! -f "$old" ]]; then _why peer not-installed
   else
     _from peer "$old"
-    if cmp -s "$new" "$old"; then _why peer bytes-same; else _why peer bytes-differ; fi
+    new_sha="$(binary_git_sha "$new")"
+    if [[ -n "$new_sha" && "$new_sha" == "${FROM_peer:-}" && "$new_sha" != *-dirty ]]; then
+      _why peer same-commit
+    elif cmp -s "$new" "$old"; then _why peer bytes-same
+    else _why peer bytes-differ
+    fi
   fi
+}
+
+# peer_needs_install: after peer_decision, whether the binary on PATH
+# is to be replaced.
+peer_needs_install() {
+  case "${WHY_peer:-}" in bytes-differ|not-installed) return 0 ;; *) return 1 ;; esac
 }
 
 # Which binaries a repository path is built into, in LP.  `other` = none
@@ -239,7 +256,7 @@ swap_list() {
   (( $1 )) && s="shell"
   (( $2 )) && s="$s${s:+,}core"
   (( $3 )) && s="$s${s:+,}session"
-  case "${WHY_peer:-}" in bytes-differ|not-installed) s="$s${s:+,}peer" ;; esac
+  ! peer_needs_install || s="$s${s:+,}peer"
   echo "${s:-none}"
 }
 

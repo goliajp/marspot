@@ -3,6 +3,7 @@
 
 mod chrome_geometry;
 mod display_scale_ratchet;
+mod install_layers;
 mod known_gaps;
 mod layering;
 mod osc8_click;
