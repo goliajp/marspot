@@ -96,12 +96,12 @@ fn pane_control_shadow_concurrent_opens_hold_the_count_limit() {
         let Some(Ok(m)) = (msg == MsgType::PaneSpawn).then(|| decode_pane_spawn(p)) else { return };
         spawned.fetch_add(1, Ordering::AcqRel);
         let sid = next.fetch_add(1, Ordering::AcqRel);
-        let s = PaneSpawned { req_id: m.req_id, ok: true, sid, err: String::new() };
+        let s = PaneSpawned { req_id: m.req_id, ok: true, sid, err: String::new(), window_id: 0 };
         hub.links.route(MsgType::PaneSpawned, &encode_pane_spawned(&s).unwrap());
     };
     let n = 5;
     let ctxs: Vec<_> = (0..n).map(|_| ctx(CallerKey::Pane(10), vec![entry(10, "/w")], cfg.clone())).collect();
-    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
+    let open = OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 120, rows: 40, command: None };
     let start = Barrier::new(n);
     let outs: Vec<Result<(), Reject>> = with_slow_core(&hub, rx, answer, || {
         std::thread::scope(|s| {
@@ -130,7 +130,7 @@ fn pane_control_shadow_open_with_no_answer_still_counts() {
     hub.caps.store(CAP_SHADOWS, Ordering::Release);
     let cfg = Config { shadows_per_parent: 1, ..Config::default() };
     let c = ctx(CallerKey::Pane(10), vec![entry(10, "/w")], cfg);
-    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
+    let open = OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 120, rows: 40, command: None };
     let mut conn = Conn::new(&hub, Peer::default(), None);
     // the core is sent the spawn but never answers
     let first = ops_pane::open_within(&mut conn, &c, &open, Duration::from_millis(200)).unwrap_err();

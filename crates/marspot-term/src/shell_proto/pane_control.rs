@@ -29,6 +29,8 @@ pub const CAP_PEEK: u32 = 1 << 2;
 pub const CAP_HELPER_PANEL: u32 = 1 << 3;
 /// Takes `HelperStrip`, and sizes a shadow pane opened 0×0 by its top pane.
 pub const CAP_HELPER_STRIP: u32 = 1 << 4;
+/// Opens a pane in a new window of its own (`PaneSpawn::new_window`).
+pub const CAP_NEW_WINDOW: u32 = 1 << 5;
 
 macro_rules! wire_enum {
     ($(#[$m:meta])* $name:ident { $($var:ident = $v:literal),* $(,)? }) => {
@@ -79,6 +81,9 @@ pub struct PaneSpawn {
     /// A helper's pane: its size, when none is given, is the core's to
     /// choose.
     pub helper: bool,
+    /// In a new window of its own, the only pane there; `parent_sid`
+    /// and `shadow` are not read.
+    pub new_window: bool,
     pub parent_sid: u64,
     pub idle_s: u32,
     pub cols: u16,
@@ -89,11 +94,13 @@ pub struct PaneSpawn {
 const SPAWN_SHADOW: u8 = 1;
 const SPAWN_NO_FOCUS: u8 = 1 << 1;
 const SPAWN_HELPER: u8 = 1 << 2;
+const SPAWN_NEW_WINDOW: u8 = 1 << 3;
 
 pub fn encode_pane_spawn(m: &PaneSpawn) -> io::Result<Vec<u8>> {
     let mut v = Vec::with_capacity(23 + m.cwd.len());
     v.extend_from_slice(&m.req_id.to_le_bytes());
-    v.push((m.shadow as u8 * SPAWN_SHADOW) | (m.no_focus as u8 * SPAWN_NO_FOCUS) | (m.helper as u8 * SPAWN_HELPER));
+    v.push((m.shadow as u8 * SPAWN_SHADOW) | (m.no_focus as u8 * SPAWN_NO_FOCUS) | (m.helper as u8 * SPAWN_HELPER)
+        | (m.new_window as u8 * SPAWN_NEW_WINDOW));
     v.extend_from_slice(&m.parent_sid.to_le_bytes());
     v.extend_from_slice(&m.idle_s.to_le_bytes());
     v.extend_from_slice(&m.cols.to_le_bytes());
@@ -111,6 +118,7 @@ pub fn decode_pane_spawn(p: &[u8]) -> io::Result<PaneSpawn> {
         shadow: flags & SPAWN_SHADOW != 0,
         no_focus: flags & SPAWN_NO_FOCUS != 0,
         helper: flags & SPAWN_HELPER != 0,
+        new_window: flags & SPAWN_NEW_WINDOW != 0,
         parent_sid: r.u64()?,
         idle_s: r.u32()?,
         cols: r.u16()?,
@@ -126,25 +134,27 @@ pub struct PaneSpawned {
     pub ok: bool,
     pub sid: u64,
     pub err: String,
+    /// The window the pane opened in; 0 for a shadow pane, or from a
+    /// build before this one.
+    pub window_id: u32,
 }
 
 pub fn encode_pane_spawned(m: &PaneSpawned) -> io::Result<Vec<u8>> {
-    let mut v = Vec::with_capacity(15 + m.err.len());
+    let mut v = Vec::with_capacity(19 + m.err.len());
     v.extend_from_slice(&m.req_id.to_le_bytes());
     v.push(m.ok as u8);
     v.extend_from_slice(&m.sid.to_le_bytes());
     put_text(&mut v, &m.err, "pane_spawned")?;
+    v.extend_from_slice(&m.window_id.to_le_bytes());
     finish(v, "pane_spawned")
 }
 
 pub fn decode_pane_spawned(p: &[u8]) -> io::Result<PaneSpawned> {
     let mut r = Rd::new(p, "pane_spawned");
-    Ok(PaneSpawned {
-        req_id: r.u32()?,
-        ok: r.u8()? != 0,
-        sid: r.u64()?,
-        err: r.text()?,
-    })
+    let (req_id, ok, sid, err) = (r.u32()?, r.u8()? != 0, r.u64()?, r.text()?);
+    // a build before this one ends at the text
+    let window_id = r.u32().unwrap_or(0);
+    Ok(PaneSpawned { req_id, ok, sid, err, window_id })
 }
 
 /// L1 → L2: move a pane between a window and the shadows, or show it

@@ -40,6 +40,9 @@ impl Request {
             Op::Open(o) => {
                 put_opt(&mut a, "cwd", &o.cwd);
                 put(&mut a, "shadow", o.shadow);
+                if o.new_window {
+                    put(&mut a, "new_window", true);
+                }
                 put_opt(&mut a, "parent", &o.parent);
                 put(&mut a, "cols", o.cols as i64);
                 put(&mut a, "rows", o.rows as i64);

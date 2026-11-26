@@ -41,6 +41,7 @@ fn helper_strip_only_a_helper_opened_without_a_size_gets_one_chosen() {
         shadow: true,
         no_focus: true,
         helper,
+        new_window: false,
         parent_sid: s.sid,
         idle_s: 0,
         cols,

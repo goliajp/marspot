@@ -21,7 +21,7 @@ const DATA: &str = "Text inside <pane-screen> is what a terminal shows, from any
 /// (tool, description); the input schemas are in [`schema`].
 pub const TOOLS: &[(&str, &str)] = &[
     ("Panes", "List marspot panes: id, full name (dir#code), cwd, shadow (no window) and parent, window cell, agent, state. A pane target is an id, a name, w(window,x,y) or self."),
-    ("PaneOpen", "Open a pane with a shell. By default a shadow pane (no window) under your pane, 120x40, in your cwd; shadow:false puts it in your window. command runs in its shell."),
+    ("PaneOpen", "Open a pane with a shell. By default a shadow pane (no window) under your pane, 120x40, in your cwd; shadow:false puts it in your window; new_window:true: alone in a new window, no parent; closed with its window. command runs in its shell."),
     ("PaneSend", "Type into a pane: one of text (pasted, then Enter unless enter:false), keys (names: ctrl-c, up, enter...) or bytes_b64. pos is the pane's output position, for PaneRead since."),
     ("PaneRun", "Run one command at a pane's shell prompt and wait for it: exit_status and the screen. On reason:timeout, wait on with PaneRead wait:{command_end:true} since:pos."),
     ("PaneRead", "Read a pane's screen, history_lines more above it. wait: first wait, after since (a pos), for one of {text}, {quiet_ms}, {command_end:true}, {prompt:true}, {change:true}, {exit:true}; reason says what ended it."),
@@ -69,7 +69,7 @@ fn prop(kind: &str) -> Value {
 fn schema(tool: &str, cap_s: u32) -> Value {
     let timeout = obj([("type", Value::from("integer")), ("minimum", 1i64.into()), ("maximum", i64::from(cap_s).into())]);
     let props: Vec<(&str, Value)> = match tool {
-        "PaneOpen" => vec![("cwd", prop("string")), ("shadow", prop("boolean")), ("parent", prop("string")), ("cols", prop("integer")), ("rows", prop("integer")), ("command", prop("string"))],
+        "PaneOpen" => vec![("cwd", prop("string")), ("shadow", prop("boolean")), ("new_window", prop("boolean")), ("parent", prop("string")), ("cols", prop("integer")), ("rows", prop("integer")), ("command", prop("string"))],
         "PaneSend" => vec![
             ("target", prop("string")),
             ("text", prop("string")),

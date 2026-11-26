@@ -16,6 +16,7 @@ use super::*;
 mod audit_tests;
 mod conn_tests;
 mod list_tests;
+mod new_window_tests;
 pub(crate) mod panel_act_tests;
 mod proc_stop_tests;
 mod server_tests;
@@ -197,7 +198,7 @@ fn an_external_shadow_pane_needs_a_parent() {
     let (hub, _rx) = hub_at(&dir);
     let mut conn = Conn::new(&hub, Peer::default(), None);
     let c = ctx(CallerKey::External, Vec::new(), Config::default());
-    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
+    let open = OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 120, rows: 40, command: None };
     assert_eq!(ops_pane::open(&mut conn, &c, &open).unwrap_err().code, ErrorCode::BadRequest);
     let visible = OpenArgs { shadow: false, ..open };
     // past the parent check, the core without bit 1 is not asked

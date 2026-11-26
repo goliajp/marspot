@@ -61,6 +61,7 @@ DEFAULT_SUITES=(
   test-all-shells-exit.sh
   test-multi-window.sh
   test-panel-behaviour.sh
+  test-pane-new-window.sh
   test-commands.sh
   test-theme-switch.sh
   test-language-switch.sh

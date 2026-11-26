@@ -41,7 +41,7 @@ fn with_core<R>(hub: &Hub, rx: Receiver<MainCmd>, answer: impl Fn(&Hub, MsgType,
 fn spawn_as(sid: u64) -> impl Fn(&Hub, MsgType, &[u8]) + Send + Sync {
     move |hub, msg, p| {
         let Some(Ok(m)) = (msg == MsgType::PaneSpawn).then(|| decode_pane_spawn(p)) else { return };
-        let s = PaneSpawned { req_id: m.req_id, ok: true, sid, err: String::new() };
+        let s = PaneSpawned { req_id: m.req_id, ok: true, sid, err: String::new(), window_id: 0 };
         hub.links.route(MsgType::PaneSpawned, &encode_pane_spawned(&s).unwrap());
     }
 }
@@ -55,7 +55,7 @@ fn pane_control_open_answers_the_name_the_next_list_shows() {
     let (hub, rx) = hub_at(&temp("openname"));
     // the view is from before the open, as the observer's can be
     let c = ctx(CallerKey::Pane(10), vec![entry(10, "/w/spg")], Config::default());
-    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
+    let open = OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 120, rows: 40, command: None };
     let (opened, list) = with_core(&hub, rx, spawn_as(4242), || {
         let mut conn = Conn::new(&hub, Peer::default(), None);
         let opened = ops_pane::open(&mut conn, &c, &open).unwrap();
@@ -110,7 +110,7 @@ fn pane_control_resize_right_after_an_open_reaches_the_core() {
     registered(10, 0);
     registered(4244, 10);
     let c = ctx(CallerKey::Pane(10), vec![entry(10, "/w/spg")], Config::default());
-    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: None };
+    let open = OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 120, rows: 40, command: None };
     let answer = |hub: &Hub, msg: MsgType, p: &[u8]| {
         spawn_as(4244)(hub, msg, p);
         let Some(Ok(m)) = (msg == MsgType::PaneSize).then(|| decode_pane_size(p)) else { return };
@@ -130,7 +130,7 @@ fn pane_control_resize_right_after_an_open_reaches_the_core() {
 fn pane_control_only_a_helpers_pane_is_said_to_be_one() {
     let (hub, rx) = hub_at(&temp("openhelper"));
     let c = ctx(CallerKey::Pane(10), vec![entry(10, "/w/spg")], Config::default());
-    let open = OpenArgs { cwd: None, shadow: true, parent: None, cols: 0, rows: 0, command: None };
+    let open = OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 0, rows: 0, command: None };
     let said = std::sync::Mutex::new(Vec::new());
     let answer = |hub: &Hub, msg: MsgType, p: &[u8]| {
         if let Some(Ok(m)) = (msg == MsgType::PaneSpawn).then(|| decode_pane_spawn(p)) {

@@ -41,6 +41,8 @@ pub enum Op {
 pub struct OpenArgs {
     pub cwd: Option<String>,
     pub shadow: bool,
+    /// In a new window of its own, with no parent.
+    pub new_window: bool,
     pub parent: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -206,14 +208,7 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
     let a = Args(v.get("args").filter(|a| matches!(a, Value::Obj(_))).unwrap_or(&empty));
     let op = match op {
         "pane.list" => Op::List,
-        "pane.open" => Op::Open(OpenArgs {
-            cwd: a.str("cwd")?,
-            shadow: a.bool("shadow", true)?,
-            parent: a.str("parent")?,
-            cols: a.size("cols", 120)?,
-            rows: a.size("rows", 40)?,
-            command: a.str("command")?,
-        }),
+        "pane.open" => open(&a)?,
         "pane.send" => Op::Send(SendArgs { target: a.target()?, input: input(&a)?, force: a.bool("force", false)? }),
         "pane.run" => Op::Run(RunArgs {
             target: a.target()?,
@@ -258,6 +253,23 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
         return Err(bad("`cols` and `rows` must be at least 2"));
     }
     Ok(Request { op, caller_thread })
+}
+
+fn open(a: &Args) -> Result<Op, Reject> {
+    let new_window = a.bool("new_window", false)?;
+    let o = OpenArgs {
+        cwd: a.str("cwd")?,
+        shadow: a.bool("shadow", !new_window)?,
+        new_window,
+        parent: a.str("parent")?,
+        cols: a.size("cols", 120)?,
+        rows: a.size("rows", 40)?,
+        command: a.str("command")?,
+    };
+    if new_window && (o.shadow || o.parent.is_some()) {
+        return Err(bad("a pane in a new window is not a shadow and has no `parent`"));
+    }
+    Ok(Op::Open(o))
 }
 
 #[path = "request_args.rs"]
