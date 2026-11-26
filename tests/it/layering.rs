@@ -3,6 +3,9 @@
 //! Only rules the tree already keeps are here; each one fails on the
 //! first file or manifest that breaks it.
 
+mod manifest_deps;
+
+use manifest_deps::{linked_section, manifest_deps, resolve, workspace_section};
 use std::path::{Path, PathBuf};
 
 fn root() -> &'static Path {
@@ -54,29 +57,16 @@ fn the_scheduler_names_no_agent() {
     assert!(found.is_empty(), "the scheduler names an agent:\n{}", found.join("\n"));
 }
 
-/// The crates a manifest pulls in by path, for building (dev
-/// dependencies are not linked into the binaries).
+fn read_manifest(dir: &Path) -> String {
+    let manifest = dir.join("Cargo.toml");
+    std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display()))
+}
+
+/// The crates a manifest pulls in by path for building, `.workspace =
+/// true` entries resolved through the root manifest.
 fn path_deps(crate_dir: &Path) -> Vec<(String, PathBuf)> {
-    let manifest = crate_dir.join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
-    let mut linked = false;
-    let mut out = Vec::new();
-    for line in text.lines().map(str::trim) {
-        if let Some(section) = line.strip_prefix('[') {
-            let section = section.trim_end_matches(']');
-            linked = section == "dependencies"
-                || section == "build-dependencies"
-                || (section.starts_with("target.") && section.ends_with(".dependencies"));
-            continue;
-        }
-        if !linked || line.starts_with('#') {
-            continue;
-        }
-        let (Some((name, spec)), true) = (line.split_once('='), line.contains("path")) else { continue };
-        let Some(path) = spec.split("path").nth(1).and_then(|s| s.split('"').nth(1)) else { continue };
-        out.push((name.trim().to_string(), crate_dir.join(path)));
-    }
-    out
+    let ws = manifest_deps(&read_manifest(root()), workspace_section);
+    resolve(manifest_deps(&read_manifest(crate_dir), linked_section), crate_dir, &ws, root())
 }
 
 /// Every crate `start` links by path, itself excluded.
