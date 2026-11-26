@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 use marspot_peer::json::{self, Value, obj};
 
+mod lines;
+pub use lines::{MAX_LINES, line_count, lines};
+
 /// How a reading of an account's resets ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {

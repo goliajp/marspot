@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// State behind the toolbar's accounts (usage) panel.
+pub(super) struct CcUsageModalState {
+    /// Parsed feed; `None` = file missing/unreadable (modal shows a
+    /// placeholder instead of closing).
+    pub(super) data: Option<marspot::cc_usage::CcUsage>,
+    pub(super) codex: Option<marspot::cc_usage::CodexUsage>,
+    pub(super) resets: Vec<marspot::agent_resets::AccountResets>,
+    pub(super) loaded_at: Instant,
+    pub(super) surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::cc_usage_view::CcUsageSurface>>,
+}
+
 impl CoreApp {
     /// A panel's toolbar button or shortcut.
     pub(super) fn toggle_panel(&mut self, wi: usize, kind: SurfaceKind) {
@@ -54,6 +65,7 @@ impl CoreApp {
                 w.cc_usage_modal = Some(CcUsageModalState {
                     data: marspot::cc_usage::read(),
                     codex: marspot::kimi_usage::read_codex_and_kimi(),
+                    resets: marspot::agent_resets::read(unix_now()),
                     loaded_at: Instant::now(),
                     surface: Default::default(),
                 });
@@ -123,10 +135,11 @@ impl CoreApp {
             modal.and_then(|m| m.data.as_ref()),
             modal.and_then(|m| m.codex.as_ref()),
         );
+        let reset_rows = modal.map_or(0, reset_rows);
         let (cell_w, cell_h) = self.renderer.cell_dims();
         let w = &win!(self, wi);
-        let home = marspot::ui::components::cc_usage_modal::panel_rect(
-            n, window_rows, w.w_phys, w.h_phys, cell_w, cell_h, w.layout.top_inset,
+        let home = marspot::ui::components::cc_usage_modal::panel_rect_with(
+            (n, window_rows, reset_rows), w.w_phys, w.h_phys, cell_w, cell_h, w.layout.top_inset,
         );
         surface_stack::place(home, w.panels.offset(), w.w_phys, w.h_phys, w.layout.top_inset)
     }
@@ -139,6 +152,7 @@ impl CoreApp {
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
             modal.codex = marspot::kimi_usage::read_codex_and_kimi();
+            modal.resets = marspot::agent_resets::read(unix_now());
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }
@@ -192,6 +206,7 @@ impl CoreApp {
                     status_severity: severity(&a.status),
                     reset_label: soonest_reset(&ws),
                     windows: ws.iter().map(window).collect(),
+                    resets: reset_lines(&modal.resets, &["claude"], &a.name),
                 }
             }));
         }
@@ -203,6 +218,7 @@ impl CoreApp {
                 status_severity: severity(&a.status),
                 reset_label: soonest_reset(&a.windows),
                 windows: a.windows.iter().map(window).collect(),
+                resets: reset_lines(&modal.resets, &["codex", "kimi"], &a.name),
             }));
         }
         if accounts.is_empty() {
@@ -235,4 +251,30 @@ impl CoreApp {
             accounts,
         })
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The resets of the account named `name` of one of `agents`.
+fn resets_of<'a>(all: &'a [marspot::agent_resets::AccountResets], agents: &[&str], name: &str) -> Option<&'a marspot::agent_resets::Resets> {
+    all.iter().find(|a| a.name == name && agents.contains(&a.agent.as_str())).map(|a| &a.resets)
+}
+
+/// The reset lines of the account named `name` of one of `agents`.
+fn reset_lines(all: &[marspot::agent_resets::AccountResets], agents: &[&str], name: &str) -> Vec<String> {
+    let Some(r) = resets_of(all, agents, name) else { return Vec::new() };
+    marspot::agent_resets::lines(r, unix_now(), |t| {
+        let (month, day, hour, minute) = marspot::cc_usage::local_mdhm(t);
+        format!("{month}/{day} {hour:02}:{minute:02}")
+    })
+}
+
+/// The most reset lines any account of the open panel lists.
+fn reset_rows(modal: &CcUsageModalState) -> usize {
+    let count = |agents: &[&str], name: &str| resets_of(&modal.resets, agents, name).map_or(0, marspot::agent_resets::line_count);
+    let claude = modal.data.iter().flat_map(|d| d.accounts.iter()).map(|a| count(&["claude"], &a.name));
+    let rest = modal.codex.iter().flat_map(|d| d.accounts.iter()).map(|a| count(&["codex", "kimi"], &a.name));
+    claude.chain(rest).max().unwrap_or(0)
 }

@@ -218,6 +218,9 @@ pub struct CcUsageAccountRender {
     /// and the timeline draw the same rows, and a provider that meters
     /// something new needs no new field.
     pub windows: Vec<CcUsageWindowRender>,
+    /// One line per kind of stored reset: kind, how many are left and
+    /// when they can be used.  Empty for an account with none.
+    pub resets: Vec<String>,
 }
 
 /// One metered window of an account.
@@ -250,6 +253,7 @@ impl Clone for CcUsageAccountRender {
             status_severity: self.status_severity,
             reset_label: self.reset_label.clone(),
             windows: self.windows.clone(),
+            resets: self.resets.clone(),
         }
     }
 
@@ -260,6 +264,7 @@ impl Clone for CcUsageAccountRender {
         self.status_severity = from.status_severity;
         self.reset_label.clone_from(&from.reset_label);
         self.windows.clone_from(&from.windows);
+        self.resets.clone_from(&from.resets);
     }
 }
 
@@ -375,6 +380,19 @@ pub fn panel_rect(
     window_rows: usize,
     w_phys: f64,
     h_phys: f64,
+    cell_w: f64,
+    cell_h: f64,
+    top_inset: f64,
+) -> Rect {
+    panel_rect_with((n_accounts, window_rows, 0), w_phys, h_phys, cell_w, cell_h, top_inset)
+}
+
+/// [`panel_rect`] for cards that also list up to `reset_rows` lines of
+/// stored resets.
+pub fn panel_rect_with(
+    (n_accounts, window_rows, reset_rows): (usize, usize, usize),
+    w_phys: f64,
+    h_phys: f64,
     _cell_w: f64,
     cell_h: f64,
     top_inset: f64,
@@ -383,7 +401,7 @@ pub fn panel_rect(
     // Only the width matters to the probe: the content's height is a
     // function of how wide it is.
     let content_w = PanelChrome::new(Rect { x: 0.0, y_top: 0.0, w, h: 0.0 }, 0.0).content.w;
-    let content_h = usage_layout::content_height(content_w, cell_h, n_accounts, window_rows);
+    let content_h = usage_layout::content_height(content_w, cell_h, n_accounts, (window_rows, reset_rows));
     panel_chrome::frame_rect(w_phys, h_phys, w, panel_chrome::frame_height(content_h), top_inset)
 }
 

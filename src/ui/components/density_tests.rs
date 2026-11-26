@@ -15,6 +15,7 @@
 use super::chrome_snapshot_tests as chrome;
 use super::density_kit::{capture, compare, Capture};
 use super::panel_snapshot_tests as panel;
+use super::reset_snapshot_tests as resets;
 use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::snapshot_kit::{in_language, in_theme};
 use crate::ui::components::chrome_target::ChromeTarget;
@@ -80,6 +81,7 @@ scenes_hold_at_both_scales! {
     density_accounts = panel::panel_snapshot_accounts, 927;
     density_accounts_narrow = panel::panel_snapshot_accounts_narrow, 927;
     density_accounts_empty = panel::panel_snapshot_accounts_empty, 1;
+    density_accounts_resets = resets::panel_snapshot_accounts_resets, 927;
     density_controls = panel::panel_snapshot_controls, 5;
     density_controls_zh = controls_zh, 5;
     density_chrome_window = chrome::chrome_snapshot_window, 0;
@@ -304,5 +306,6 @@ pictures_at_scale_2! {
     panel_snapshot_layout_2x = panel::panel_snapshot_layout;
     panel_snapshot_process_2x = panel::panel_snapshot_process;
     panel_snapshot_accounts_2x = panel::panel_snapshot_accounts;
+    panel_snapshot_accounts_resets_2x = resets::panel_snapshot_accounts_resets;
     panel_snapshot_controls_2x = panel::panel_snapshot_controls;
 }

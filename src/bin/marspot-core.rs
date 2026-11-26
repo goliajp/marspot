@@ -1596,16 +1596,6 @@ mod real_pty_tests;
 #[path = "marspot-core/shell_end_tests.rs"]
 mod shell_end_tests;
 
-/// cc — state behind the toolbar `Cc` (Claude usage) modal.
-struct CcUsageModalState {
-    /// Parsed feed; `None` = file missing/unreadable (modal shows a
-    /// placeholder instead of closing).
-    data: Option<marspot::cc_usage::CcUsage>,
-    codex: Option<marspot::cc_usage::CodexUsage>,
-    loaded_at: Instant,
-    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::cc_usage_view::CcUsageSurface>>,
-}
-
 struct ContextMenuState {
     items: std::rc::Rc<[marspot::ui::components::MenuItem]>,
     anchor_x: marspot::ui::Units,
@@ -2431,6 +2421,7 @@ mod layout_state;
 mod pane_forward;
 #[path = "marspot-core/panels.rs"]
 mod panels;
+use panels::CcUsageModalState;
 #[path = "marspot-core/helper_strip/mod.rs"]
 mod helper_strip;
 #[path = "marspot-core/helper_panel.rs"]

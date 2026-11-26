@@ -103,3 +103,24 @@ fn a_devops_block_with_iso_times_and_unknown_fields_reads() {
     assert!(Resets::from_value(&json::parse(r#"{"observed_at":1}"#).unwrap()).is_none(), "no grants list, no block");
     assert!(parse("not json").is_empty());
 }
+
+#[test]
+fn a_card_shows_one_line_per_kind_with_counts_and_window() {
+    let when = |t: i64| format!("t{}", t - NOW);
+    let mut r = codex(NOW).resets;
+    assert_eq!(lines(&r, NOW, when), ["full 2/2 to t3600"], "a start already behind is not shown");
+    r.grants[0].left = Some(0);
+    r.grants[1].usable_now = Some(false);
+    assert_eq!(lines(&r, NOW, when), ["full 1/2 to t7200 not now"], "the used one says nothing of the window");
+    r.grants.push(Grant { kind: "fable".into(), left: Some(1), ends_at: Some(NOW + 60), ..Grant::default() });
+    r.grants.push(Grant { kind: "full".into(), left: Some(2), starts_at: Some(NOW + 5), ..Grant::default() });
+    r.grants.push(Grant { kind: "weekly".into(), left: Some(1), ..Grant::default() });
+    assert_eq!(lines(&r, NOW, when), ["full 1/2 to t7200 not now", "fable 1 to t60", "full 2 from t5"], "three kinds at most");
+    r.grants[3].ends_at = Some(NOW + 50);
+    assert_eq!(lines(&r, NOW, when)[2], "full 2 to t50 from t5", "the end first, so a narrow card cuts the start");
+    assert_eq!(line_count(&r), 3);
+    assert!(lines(&Resets::none(NOW, "none"), NOW, when).is_empty(), "Kimi and Gemini: nothing");
+    let no = Resets { outcome: Outcome::Ineligible, ineligible_reason: Some("surface".into()), ..Resets::none(NOW, "limit_reset_screen") };
+    assert_eq!(lines(&no, NOW, when), ["resets: ineligible (surface)"]);
+    assert_eq!((line_count(&no), line_count(&Resets::none(NOW, "none"))), (1, 0));
+}
