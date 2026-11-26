@@ -9,7 +9,10 @@ use marspot_term::exec_contract::{Arrival, ExecKind};
 
 use crate::handoff::L3Handoff;
 
-/// A cold start's check, once logging is up.
+/// A cold start's check, once logging is up.  Never on a resume: an
+/// older image that a core started and that did not know the mark
+/// keeps the core's `session-spawn` mark through its own update, and
+/// the image it execs would take that mark for its own.
 pub(crate) fn check_spawn(arrival: Option<&Arrival>) {
     if let Some(a) = arrival.filter(|a| a.kind() == ExecKind::SessionSpawn) {
         a.verify(&[]);
@@ -52,7 +55,8 @@ pub(crate) fn inherited_dir_lock(id: u64) -> Option<File> {
 /// and after it.  `fd`, `var`: a descriptor without close-on-exec, an
 /// unlisted variable, after the sweep, which the new image catches;
 /// `fd-before`, `var-before`: the same before it, which the sweep
-/// removes.
+/// removes; `old-mark`: the mark an image that does not know the
+/// contract leaves when a core started it.
 #[cfg(debug_assertions)]
 pub(crate) fn leak_for_test(swept: bool) {
     use std::os::fd::IntoRawFd;
@@ -64,8 +68,13 @@ pub(crate) fn leak_for_test(swept: bool) {
             // SAFETY: fcntl on the descriptor just opened
             unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
         }
-        // SAFETY: the loop has ended; the threads left do not read the environment
+        // SAFETY (all three): the loop has ended; the threads left do not read the environment
         ("var", true) | ("var-before", false) => unsafe { std::env::set_var("MARSPOT_LEAKED_BY_TEST", "1") },
+        ("old-mark", true) => {
+            // SAFETY: getppid cannot fail
+            let core = unsafe { libc::getppid() };
+            unsafe { std::env::set_var(marspot_term::exec_contract::KIND_ENV, format!("session-spawn:{core}")) }
+        }
         _ => {}
     }
 }

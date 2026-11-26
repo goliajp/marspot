@@ -72,8 +72,9 @@ fn exec_contract_an_extra_variable_stops_the_new_image() {
     leaked("var");
 }
 
-/// The update had something extra on hand before its sweep: the new
-/// image resumes and logs no mismatch.
+/// The update had something extra on hand before its sweep, or (an
+/// older image's) a core's spawn mark left over: the new image resumes
+/// and logs no mismatch.
 fn resumes_cleanly(what: &str) {
     let mut sandbox = Sandbox::new();
     sandbox.env.set("MARSPOT_TEST_EXEC_LEAK", what);
@@ -94,4 +95,9 @@ fn exec_contract_the_sweep_takes_a_descriptor_out_of_the_way() {
 #[test]
 fn exec_contract_the_sweep_takes_a_variable_out_of_the_way() {
     resumes_cleanly("var-before");
+}
+
+#[test]
+fn exec_contract_a_resume_ignores_a_spawn_mark_an_older_image_left() {
+    resumes_cleanly("old-mark");
 }

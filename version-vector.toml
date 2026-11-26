@@ -30,4 +30,4 @@
 
 shell   = "0.7.755"  # its self-execs and the core it starts carry only what their exec lists
 core    = "0.12.712"  # the sessions it starts carry only what their exec lists; it checks what it was handed
-session = "0.11.463"  # a debug-only seam hands the update something extra before its sweep, for the tests that the sweep removes it
+session = "0.11.464"  # it checks a core's spawn list only when it starts cold, not on a resume

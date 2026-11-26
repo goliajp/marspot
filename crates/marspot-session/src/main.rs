@@ -422,7 +422,6 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
-    exec_arrival::check_spawn(arrival.as_ref());
     signal_events::leave_the_spawner_group();
     // before the first byte is parsed: a colour query has to be
     // answered from the theme the settings name
@@ -598,6 +597,7 @@ fn main() {
             local
         } else {
             // Cold start: forkpty + shell + bind UDS.
+            exec_arrival::check_spawn(arrival.as_ref());
             lx_event!(
                 "L3_OWNS_PTY",
                 "spawning local PTY (no shelld)",

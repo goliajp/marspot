@@ -31,6 +31,13 @@ pub unsafe fn arrive() -> Option<Arrival> {
     let kind = ExecKind::parse(name)?;
     // SAFETY: neither call can fail
     let maker = if kind.replaces_itself() { unsafe { libc::getpid() } } else { unsafe { libc::getppid() } };
+    // the pid tells this process's own marks from older ones, not this
+    // image's: after a rollback in the same pid (new, then an older build
+    // that neither reads nor clears the mark, then new again) the new
+    // image takes the mark the first new image set, and checks against
+    // that kind and may report what the older build handed over; nothing
+    // in the environment can tell, since the older build passes it on as
+    // it found it
     if pid.parse::<libc::pid_t>().ok()? != maker {
         return None;
     }
