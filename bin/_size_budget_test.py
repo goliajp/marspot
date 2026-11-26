@@ -4,13 +4,16 @@
 Builds a throwaway root (Cargo.toml, bench/size-budget.json, the size
 tables) from a fabricated link map, then checks the map summary, the
 matching rule, and the bench gate itself on fabricated size readings:
-under budget passes and leaves the budget files alone, over budget
-fails, and a budget raised without its table is refused.
+under budget passes and leaves the budget files alone, one binary
+over budget fails, a missing reading has no verdict, and a budget
+raised without its table, by editing the table header, or without the
+build needing it is refused.
 """
 import hashlib
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -48,6 +51,16 @@ MAP = """# Path: /x/marspot-shell
 """
 
 
+LINKEDIT = 0x1800
+
+
+def _fake_macho(path, size):
+    """A file of `size` bytes whose only load command is a __LINKEDIT of LINKEDIT bytes."""
+    seg = struct.pack("<2I16s4Q4I", 0x19, 72, b"__LINKEDIT", 0, 0, size - LINKEDIT, LINKEDIT, 1, 1, 0, 0)
+    head = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, len(seg), 0, 0)
+    open(path, "wb").write((head + seg).ljust(size, b"\0"))
+
+
 def _expect(cond, what, failures):
     if not cond:
         failures.append(what)
@@ -56,8 +69,12 @@ def _expect(cond, what, failures):
 def _map_checks(work, failures):
     path = os.path.join(work, "x.map")
     open(path, "w").write(MAP)
-    rows = _size_map.summarize(path, 0x20000)
+    binf = os.path.join(work, "bin")
+    _fake_macho(binf, 0x20000)
+    rows = _size_map.summarize(path, 0x20000, _size_map.linkedit_bytes(binf))
     _expect(sum(rows.values()) == 0x20000, f"map rows add up to {sum(rows.values())}", failures)
+    _expect(rows.get(_size_map.LINKEDIT) == LINKEDIT, f"linkedit row {rows}", failures)
+    _expect(rows.get(_size_map.UNMAPPED) == 0x20000 - 0x9300 - LINKEDIT, f"unmapped row {rows}", failures)
     _expect(rows.get("marspot_term::parser") == 0x3000, f"parser row {rows}", failures)
     _expect(rows.get("marspot_term::grid") == 0x1000, f"impl row {rows}", failures)
     _expect(rows.get("core") == 0x2000, f"core row {rows}", failures)
@@ -77,7 +94,6 @@ def _make_root(work, map_path):
     open(os.path.join(root, "Cargo.toml"), "w").write('[package]\nname = "marspot"\nversion = "0.18.3"\n')
     json.dump({}, open(os.path.join(root, sb.BUDGET_FILE), "w"))
     binf = os.path.join(work, "bin")
-    open(binf, "wb").write(b"\0" * 0x20000)
     for name in sb.BINARIES:
         raw = os.path.join(work, f"{name}.raw.tsv")
         sb.raw(map_path, binf, name, raw, root)
@@ -95,12 +111,13 @@ def _digest(root):
     return h.hexdigest()
 
 
-def _gate(root, work, size, update="0"):
+def _gate(root, work, sizes, update="0"):
+    """Run the gate on size readings {binary: bytes}; a binary left out has no reading."""
     cur = os.path.join(work, "cur")
     shutil.rmtree(cur, ignore_errors=True)
     os.makedirs(cur)
-    for name in sb.BINARIES:
-        open(os.path.join(cur, f"size-{name}.txt"), "w").write(f"{size}\n")
+    for name, n in sizes.items():
+        open(os.path.join(cur, f"size-{name}.txt"), "w").write(f"{n}\n")
     env = dict(os.environ, MARSPOT_BENCH_HISTORY_DIR=os.path.join(work, "history"))
     baseline = os.path.join(work, "baseline.json")
     if not os.path.exists(baseline):
@@ -111,32 +128,103 @@ def _gate(root, work, size, update="0"):
     return p.returncode, p.stdout + p.stderr
 
 
-def _rule_checks(root, failures):
-    _expect(sb.check(root) == [], f"fresh budgets refused: {sb.check(root)}", failures)
+def _all(n):
+    return {name: n for name in sb.BINARIES}
+
+
+class _Undo:
+    """Puts the budget file, the tables and Cargo.toml back after a case edits them."""
+
+    def __init__(self, root):
+        self.root, self.saved = root, os.path.join(root, "..", "saved")
+
+    def __enter__(self):
+        shutil.rmtree(self.saved, ignore_errors=True)
+        shutil.copytree(os.path.join(self.root, "bench"), self.saved)
+        self.cargo = open(os.path.join(self.root, "Cargo.toml")).read()
+        return self
+
+    def __exit__(self, *_):
+        shutil.rmtree(os.path.join(self.root, "bench"))
+        shutil.copytree(self.saved, os.path.join(self.root, "bench"))
+        open(os.path.join(self.root, "Cargo.toml"), "w").write(self.cargo)
+
+
+def _edit_budget(root, name, budget, minor="0.18"):
     path = os.path.join(root, sb.BUDGET_FILE)
-    good = open(path).read()
-    b = json.loads(good)
-    b["0.18"]["marspot-shell"]["budget"] += 16384
+    b = json.load(open(path))
+    b.setdefault(minor, {})[name] = dict(b["0.18"][name], budget=budget)
     json.dump(b, open(path, "w"))
+
+
+def _edit_table(root, name, fn):
+    table = sb.table_path(root, "0.18", name)
+    lines = open(table).readlines()
+    open(table, "w").write("".join(fn(line) for line in lines))
+
+
+def _refused(root, needle, what, failures):
     p = sb.check(root)
-    _expect(any("table was written for" in x for x in p), f"raise without table accepted: {p}", failures)
-    open(path, "w").write(good)
-    table = sb.table_path(root, "0.18", "marspot-core")
-    saved = open(table).read()
-    os.remove(table)
-    p = sb.check(root)
-    _expect(any("has no size table" in x for x in p), f"missing table accepted: {p}", failures)
-    open(table, "w").write(saved + "extra\t5\t0\t+5\n")
-    p = sb.check(root)
-    _expect(any("add up to" in x for x in p), f"table with wrong sum accepted: {p}", failures)
-    open(table, "w").write(saved)
-    _expect(sb.minor_in_force(json.loads(good), "0.19") == "0.18", "0.19 does not inherit 0.18", failures)
-    _expect(sb.minor_in_force(json.loads(good), "0.17") is None, "0.17 picked up 0.18", failures)
+    _expect(any(needle in x for x in p), f"{what} accepted: {p}", failures)
+
+
+def _table_checks(root, failures):
+    with _Undo(root):
+        _edit_budget(root, "marspot-shell", 0x30000 + 16384)
+        _refused(root, "table was written for", "raise without table", failures)
+    with _Undo(root):
+        _edit_budget(root, "marspot-shell", 0x40000)
+        _edit_table(root, "marspot-shell", lambda l: "# budget\t262144\n" if l.startswith("# budget\t") else l)
+        _refused(root, "checksum does not hold", "raise by editing the table header", failures)
+    with _Undo(root):
+        os.remove(sb.table_path(root, "0.18", "marspot-core"))
+        _refused(root, "has no size table", "missing table", failures)
+    with _Undo(root):
+        open(sb.table_path(root, "0.18", "marspot-core"), "a").write("extra\t5\t0\t+5\n")
+        _refused(root, "add up to", "table with wrong sum", failures)
+    with _Undo(root):
+        head, rows = sb.read_table(sb.table_path(root, "0.18", "marspot-core"))
+        over = rows[_size_map.UNMAPPED] + 7
+        rows["core"] += over
+        rows[_size_map.UNMAPPED] -= over
+        head["checksum"] = sb.checksum(head, rows)
+        sb.write_table(sb.table_path(root, "0.18", "marspot-core"), head, rows, {})
+        _refused(root, "more than the file", "negative unmapped row", failures)
+    with _Undo(root):
+        open(os.path.join(root, "Cargo.toml"), "w").write('[package]\nname = "marspot"\nversion = "0.17.9"\n')
+        _refused(root, "no budget for product version 0.17", "version below every key", failures)
+
+
+def _raise_checks(root, work, failures):
+    with _Undo(root):
+        p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "marspot-peer.raw.tsv"), root)
+        _expect(any("must be needed by the build" in x for x in p), f"unneeded raise accepted: {p}", failures)
+    with _Undo(root):
+        big = os.path.join(work, "big")
+        _fake_macho(big, 0x38000)
+        sb.raw(os.path.join(work, "x.map"), big, "marspot-peer", os.path.join(work, "big.tsv"), root)
+        p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "big.tsv"), root)
+        _expect(p == [], f"needed raise refused: {p}", failures)
+    with _Undo(root):
+        os.makedirs(os.path.join(root, sb.TABLE_DIR, "0.19"))
+        shutil.copy(sb.table_path(root, "0.18", "marspot-peer"), sb.table_path(root, "0.19", "marspot-peer"))
+        _edit_budget(root, "marspot-peer", 0x30000, minor="0.19")
+        _refused(root, "previous_budget none, but 0.18", "a second first budget", failures)
+
+
+def _rule_checks(root, work, failures):
+    _expect(sb.check(root) == [], f"fresh budgets refused: {sb.check(root)}", failures)
+    _table_checks(root, failures)
+    _raise_checks(root, work, failures)
+    _expect(sb.check(root) == [], f"a case did not put the budgets back: {sb.check(root)}", failures)
+    b = sb.load(root)
+    _expect(sb.minor_in_force(b, "0.19") == "0.18", "0.19 does not inherit 0.18", failures)
+    _expect(sb.minor_in_force(b, "0.17") is None, "0.17 picked up 0.18", failures)
 
 
 def _gate_checks(root, work, failures):
     before = _digest(root)
-    rc, out = _gate(root, work, 0x20000)
+    rc, out = _gate(root, work, _all(0x20000))
     _expect(rc == 0 and "size marspot-shell" in out and "FAIL" not in out,
             f"under budget: rc {rc}\n{out[-1500:]}", failures)
     _expect(_digest(root) == before, "an under-budget run changed a budget file", failures)
@@ -145,21 +233,23 @@ def _gate_checks(root, work, failures):
     _expect(len(lines) == 2 and lines[0].split("\t") == list(sb.HISTORY_COLUMNS)
             and lines[1].split("\t")[2:6] == [str(0x20000)] * 4,
             f"size history: {lines}", failures)
-    rc, out = _gate(root, work, 0x20000, update="1")
+    rc, out = _gate(root, work, _all(0x20000), update="1")
     _expect(rc == 0 and "wrote" in out and _digest(root) == before,
             f"--update-baseline touched a budget: rc {rc}\n{out[-800:]}", failures)
     _expect("binary_size_bytes_max" not in json.load(open(os.path.join(work, "baseline.json"))),
             "--update-baseline wrote a size ceiling", failures)
-    rc, out = _gate(root, work, 0x30001)
-    _expect(rc == 1 and "GATE FAILED" in out, f"over budget: rc {rc}\n{out[-1500:]}", failures)
-    path = os.path.join(root, sb.BUDGET_FILE)
-    good = open(path).read()
-    b = json.loads(good)
-    b["0.18"]["marspot-peer"]["budget"] = 0x40000
-    json.dump(b, open(path, "w"))
-    rc, out = _gate(root, work, 0x20000)
-    _expect(rc == 1 and "budget refused" in out, f"refused budget: rc {rc}\n{out[-1500:]}", failures)
-    open(path, "w").write(good)
+    rc, out = _gate(root, work, dict(_all(0x20000), **{"marspot-peer": 0x30001}))
+    peer = [l for l in out.splitlines() if l.startswith("size marspot-peer")]
+    _expect(rc == 1 and "GATE FAILED (1 regression" in out and peer and "FAIL" in peer[0],
+            f"marspot-peer alone over budget: rc {rc}\n{out[-1500:]}", failures)
+    missing = _all(0x20000)
+    del missing["marspot-core"]
+    rc, out = _gate(root, work, missing)
+    _expect(rc == 3, f"no reading for marspot-core: rc {rc}\n{out[-1500:]}", failures)
+    with _Undo(root):
+        _edit_budget(root, "marspot-peer", 0x40000)
+        rc, out = _gate(root, work, _all(0x20000))
+        _expect(rc == 1 and "budget refused" in out, f"refused budget: rc {rc}\n{out[-1500:]}", failures)
 
 
 def run():
@@ -167,7 +257,7 @@ def run():
     work = tempfile.mkdtemp(prefix="marspot-size-selftest-")
     try:
         root = _make_root(work, _map_checks(work, failures))
-        _rule_checks(root, failures)
+        _rule_checks(root, work, failures)
         _gate_checks(root, work, failures)
     finally:
         shutil.rmtree(work, ignore_errors=True)

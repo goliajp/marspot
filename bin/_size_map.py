@@ -10,13 +10,16 @@ split one level further (`marspot_term::parser`); every other crate is
 one row.  A symbol that is not Rust (C, Objective-C stubs, anonymous
 constants, literal strings) is counted under the section it lives in.
 
-The rows always add up to the binary's file size: what no symbol
-covers (Mach-O headers, `__LINKEDIT`, the code signature, page
-padding) is one row of its own, so a size table cannot silently leave
-part of the binary out.
+The rows always add up to the binary's file size.  The map lists no
+`__LINKEDIT` (symbol table, string table, code signature), so its
+file size is read from the binary's own segment commands and is one
+row; what is left (Mach-O headers, page padding) is another, so a
+size table cannot silently leave part of the binary out.  A negative
+leftover means the rows count something twice.
 """
 import os
 import re
+import struct
 import sys
 
 WORKSPACE = {
@@ -26,7 +29,10 @@ WORKSPACE = {
 # zerofill sections take address space, not file bytes
 ZEROFILL = {"__bss", "__common", "__thread_bss"}
 SMALL = 2048
-UNMAPPED = "(unmapped: headers, linkedit, signature, padding)"
+UNMAPPED = "(unmapped: headers, padding)"
+LINKEDIT = "(__LINKEDIT: symbols, strings, signature)"
+_MH_MAGIC_64 = 0xFEEDFACF
+_LC_SEGMENT_64 = 0x19
 
 _LEGACY_IDENT = re.compile(r"(\d+)")
 _SYMBOL = re.compile(r"^0x([0-9A-Fa-f]+)\s+0x([0-9A-Fa-f]+)\s+\[\s*\d+\]\s(.*)$")
@@ -109,8 +115,23 @@ def module_of(symbol):
     return "::".join(parts[:depth])
 
 
-def summarize(map_path, file_bytes):
-    """{row: bytes}, adding up to `file_bytes`."""
+def linkedit_bytes(bin_path):
+    """File size of the `__LINKEDIT` segment of a thin 64-bit Mach-O."""
+    data = open(bin_path, "rb").read()
+    magic, _, _, _, ncmds, _, _, _ = struct.unpack_from("<8I", data, 0)
+    if magic != _MH_MAGIC_64:
+        raise SystemExit(f"{bin_path}: not a thin 64-bit Mach-O")
+    off = 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<2I", data, off)
+        if cmd == _LC_SEGMENT_64 and data[off + 8:off + 24].rstrip(b"\0") == b"__LINKEDIT":
+            return struct.unpack_from("<Q", data, off + 48)[0]
+        off += size
+    raise SystemExit(f"{bin_path}: no __LINKEDIT segment")
+
+
+def summarize(map_path, file_bytes, linkedit=0):
+    """{row: bytes}, adding up to `file_bytes`; `linkedit` is the __LINKEDIT file size."""
     sections, totals, mode = [], {}, None
     for line in open(map_path, errors="replace"):
         line = line.rstrip("\n")
@@ -137,16 +158,18 @@ def summarize(map_path, file_bytes):
                 continue
             key = module_of(name) or (f"({sec[2]},{sec[3]})" if sec else "(no section)")
             totals[key] = totals.get(key, 0) + size
-    return _fold_small(totals, file_bytes)
+    return _fold_small(totals, file_bytes, linkedit)
 
 
-def _fold_small(totals, file_bytes):
+def _fold_small(totals, file_bytes, linkedit):
     rows = {}
     for key, n in totals.items():
         if n < SMALL:
             crate = key.split("::")[0]
             key = f"{crate}::(small)" if crate in WORKSPACE else "(other small)"
         rows[key] = rows.get(key, 0) + n
+    if linkedit:
+        rows[LINKEDIT] = linkedit
     rows[UNMAPPED] = file_bytes - sum(rows.values())
     return rows
 
@@ -155,7 +178,7 @@ def main(argv):
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
-    rows = summarize(argv[1], os.path.getsize(argv[2]))
+    rows = summarize(argv[1], os.path.getsize(argv[2]), linkedit_bytes(argv[2]))
     for key, n in sorted(rows.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"{key}\t{n}")
     return 0

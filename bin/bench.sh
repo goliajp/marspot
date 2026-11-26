@@ -88,7 +88,6 @@ if (( SIZE_TABLES )); then
   exit 0
 fi
 
-
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).
 #
 # Every scenario, not two of them.  The list used to name cat-ascii and
@@ -335,8 +334,9 @@ run_block scroll measure_scroll
 
 # ---- binary size: sub-second, so part of the fast gate --------------
 # judged against bench/size-budget.json, see bin/_size_budget.py
-python3 "$ROOT/bin/_size_budget.py" --self-test | tail -1
-[[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "bin/_size_budget.py --self-test failed" >&2; exit 1; }
+python3 "$ROOT/bin/_size_budget.py" --self-test > "$CUR_DIR/size-selftest.txt" \
+  || { cat "$CUR_DIR/size-selftest.txt"; echo "bin/_size_budget.py --self-test failed" >&2; exit 1; }
+tail -1 "$CUR_DIR/size-selftest.txt"
 echo "==> binary sizes"
 for bin in $(python3 "$ROOT/bin/_size_budget.py" binaries); do
   if [[ -x "$(marspot_bin "$bin")" ]]; then

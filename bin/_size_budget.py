@@ -24,9 +24,15 @@ whole set when one does not match.  The table for minor M and binary
 B is bench/size-tables/M/B.tsv, and it matches when its header names
 B and a version of minor M, its `budget` equals the budget, its
 `file_bytes` equals the entry's `measured`, its module rows add up to
-`file_bytes`, and `measured` is not over `budget`.  So raising a
-budget is one commit with the new number and the table of the build
-that needed it: `bin/bench-remote.sh --size-tables` links the four
+`file_bytes` with no negative leftover, `measured` is not over
+`budget`, and its `checksum` (written by `set`, over the rows, the
+budget, the file size and the previous budget) still holds, so an
+edit of the header alone fails.  `previous_budget` is the budget the
+entry replaced: a budget above it is accepted only when `measured`
+is above it too (a raise must be needed by the build), and `none`
+only when no lower minor has a budget for B.  So raising a budget is
+one commit with the new number and the table of the build that
+needed it: `bin/bench-remote.sh --size-tables` links the four
 binaries with a map on the bench host and brings back raw tables in
 bench/remote-runs/<ts>/size-tables/; `set` turns one into the
 committed table, with the change per module against the table it
@@ -35,6 +41,7 @@ replaces.
 Every run's sizes also go to <history-dir>/size-history.tsv (see
 append_history), which is not tracked.
 """
+import hashlib
 import json
 import os
 import re
@@ -76,6 +83,13 @@ def minor_in_force(budgets, minor):
     keys = [k for k in budgets if re.fullmatch(r"\d+\.\d+", k)]
     lower = [k for k in keys if _minor_key(k) <= _minor_key(minor)]
     return max(lower, key=_minor_key) if lower else None
+
+
+def _entry_in_force(budgets, minor, name):
+    """The newest key at or below `minor` with a budget for `name`."""
+    keys = [k for k, v in budgets.items() if re.fullmatch(r"\d+\.\d+", k)
+            and _minor_key(k) <= _minor_key(minor) and name in v]
+    return max(keys, key=_minor_key) if keys else None
 
 
 def table_path(root, minor, name):
@@ -135,16 +149,45 @@ def _check_entry(root, minor, name, e):
         out.append(f"{where}: measured {e['measured']} but its table read {head.get('file_bytes')!r}")
     elif sum(rows.values()) != e["measured"]:
         out.append(f"{where}: table rows add up to {sum(rows.values())}, not {e['measured']}")
+    if rows.get(_size_map.UNMAPPED, 0) < 0:
+        out.append(f"{where}: table rows count {-rows[_size_map.UNMAPPED]} bytes more than the file")
     if e["measured"] > e["budget"]:
         out.append(f"{where}: measured {e['measured']} is over its own budget {e['budget']}")
-    return out
+    if head.get("checksum") != checksum(head, rows):
+        out.append(f"{where}: table checksum does not hold: not written by `set`, or edited since")
+    return out + _check_raise(root, minor, name, e, head.get("previous_budget"))
+
+
+def _check_raise(root, minor, name, e, prev):
+    where = f"{name} {minor}"
+    if prev == "none":
+        lower = [k for k, v in load(root).items() if re.fullmatch(r"\d+\.\d+", k)
+                 and _minor_key(k) < _minor_key(minor) and name in v]
+        return [f"{where}: previous_budget none, but {lower[0]} has a budget"] if lower else []
+    if not (prev or "").isdigit():
+        return [f"{where}: table records no previous_budget"]
+    if e["budget"] > int(prev) and e["measured"] <= int(prev):
+        return [f"{where}: budget raised from {prev} to {e['budget']}, but measured "
+                f"{e['measured']} fits {prev}: a raise must be needed by the build"]
+    return []
+
+
+def checksum(head, rows):
+    """sha256 over what a budget rests on: the rows, the budget, the file size, the previous budget."""
+    h = hashlib.sha256()
+    for k in ("binary", "version", "file_bytes", "budget", "previous_budget"):
+        h.update(f"{k}\t{head.get(k)}\n".encode())
+    for k in sorted(rows):
+        h.update(f"{k}\t{rows[k]}\n".encode())
+    return "sha256:" + h.hexdigest()
 
 
 def write_table(path, head, rows, previous):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     keys = sorted(set(rows) | set(previous), key=lambda k: (-rows.get(k, 0), k))
     with open(path, "w") as f:
-        for k in ("binary", "version", "commit", "file_bytes", "budget", "previous"):
+        for k in ("binary", "version", "commit", "file_bytes", "budget", "previous_budget",
+                  "previous", "checksum"):
             f.write(f"# {k}\t{head.get(k, '-')}\n")
         f.write("module\tbytes\tprevious\tdelta\n")
         for k in keys:
@@ -154,7 +197,7 @@ def write_table(path, head, rows, previous):
 
 def raw(map_path, bin_path, name, out, root):
     file_bytes = os.path.getsize(bin_path)
-    rows = _size_map.summarize(map_path, file_bytes)
+    rows = _size_map.summarize(map_path, file_bytes, _size_map.linkedit_bytes(bin_path))
     commit = os.environ.get("MARSPOT_BENCH_COMMIT") or "-"
     head = {"binary": name, "version": product_version(root), "commit": commit,
             "file_bytes": file_bytes}
@@ -167,13 +210,14 @@ def set_budget(name, budget, raw_path, root):
         raise SystemExit(f"{raw_path} is a table for {head.get('binary')!r}, not {name}")
     minor = minor_of(head["version"])
     budgets = load(root)
-    prev_minor = minor_in_force(budgets, minor)
-    prev_path = table_path(root, prev_minor, name) if prev_minor else None
+    prev_minor = _entry_in_force(budgets, minor, name)
     previous = {}
-    if prev_path and os.path.exists(prev_path):
-        prev_head, previous = read_table(prev_path)
+    head["previous_budget"] = budgets[prev_minor][name]["budget"] if prev_minor else "none"
+    if prev_minor:
+        prev_head, previous = read_table(table_path(root, prev_minor, name))
         head["previous"] = f"{prev_minor} {prev_head.get('file_bytes')}"
     head["budget"] = budget
+    head["checksum"] = checksum({k: str(v) for k, v in head.items()}, rows)
     write_table(table_path(root, minor, name), head, rows, previous)
     budgets.setdefault(minor, {})[name] = {"budget": budget, "measured": int(head["file_bytes"])}
     with open(os.path.join(root, BUDGET_FILE), "w") as f:
