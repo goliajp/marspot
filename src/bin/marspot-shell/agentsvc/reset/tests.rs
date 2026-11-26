@@ -147,10 +147,10 @@ fn reset_the_devops_files_give_the_address_and_the_key_goes_only_in_the_header()
     std::fs::create_dir_all(home.join(".config/devops")).unwrap();
     std::fs::write(home.join(".config/devops/api-url"), format!("{base}/\n")).unwrap();
     std::fs::write(home.join(".config/devops/api-key"), "dk_secret_9\n").unwrap();
-    let access = verify::access_in(home.path()).ok().expect("both files");
+    let access = verify::access_in(home.path()).expect("both files");
     let c = claim(Provider::Codex, 2, "cc-1");
-    verify::verify(&access, &c, "tok-9").ok().expect("confirmed");
-    let refused = verify::verify(&access, &c, "tok-9").err().expect("403");
+    verify::verify(&access, &c, "tok-9").expect("confirmed");
+    let refused = verify::verify(&access, &c, "tok-9").expect_err("403");
     assert!(!refused.detail.contains("dk_secret_9") && !refused.reply("cc-1").to_json().contains("dk_secret_9"));
     let heads = server.join().unwrap();
     for head in &heads {
