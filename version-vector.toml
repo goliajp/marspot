@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.805"  # a claude claim types only for the session reset, reads only after the echo; next date from its line
+shell   = "0.7.806"  # the panes of a reset claim are left out of switching, rebalance, leave-early and reclaim
 core    = "0.12.730"  # each claimable reset line on the accounts panel is a button: a press arms it, a second confirms
 session = "0.11.471"  # marspot-term gains the ResetPanelAct frame (not used by session)

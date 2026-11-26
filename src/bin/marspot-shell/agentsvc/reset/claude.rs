@@ -76,6 +76,9 @@ impl Drop for Panes {
             let _ = ask(Op::Close { target: cli });
         }
         let _ = ask(Op::Close { target: self.window.clone() });
+        if let Ok(sid) = self.window.parse() {
+            super::panes::unmark(sid);
+        }
     }
 }
 
@@ -102,6 +105,10 @@ pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
         Ok(window) => Panes { window, cli: None },
         Err(e) => return Outcome::of(Res::Error, &format!("no window for the CLI: {e}")),
     };
+    // marked before the CLI pane exists, so no scan sees it unmarked
+    if !panes.window.parse().is_ok_and(super::panes::mark) {
+        return Outcome::of(Res::Error, "the claim's window could not be kept out of account switching");
+    }
     match open(false, Some(panes.window.clone()), Some(command)) {
         Ok(cli) => panes.cli = Some(cli),
         Err(e) => return Outcome::of(Res::Error, &format!("no pane for the CLI: {e}")),

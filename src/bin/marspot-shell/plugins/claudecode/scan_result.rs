@@ -85,6 +85,21 @@ pub(super) struct ScanResult {
     pub(super) alloc: Option<super::allocation_view::View>,
 }
 
+impl ScanResult {
+    /// The panes the account rules may touch: all but a reset claim's,
+    /// which the claim is typing into.
+    pub(super) fn ordinary(&self) -> impl Iterator<Item = (&u64, &BindMeta)> {
+        self.new_meta.iter().filter(|(sid, _)| !self.helpers.is_reset_claim(**sid))
+    }
+
+    /// Each pane's account and whether it rests, for a reset claim that
+    /// waits until every pane on its account does.
+    pub(super) fn publish_resting(&self) {
+        let resting = |sid: &u64| matches!(self.new_activity.get(sid), Some(CcActivity::AwaitingUser));
+        crate::agentsvc::reset::idle::publish("claude", self.ordinary().map(|(sid, m)| (m.profile_num, resting(sid))));
+    }
+}
+
 /// The files the quota sweep judges by besides the bindings: the usage
 /// feed and each bound pane's pushed choice.  Read on the scan thread,
 /// so the tick that acts on them waits on no disk (2026-11-10: the

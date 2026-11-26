@@ -21,6 +21,7 @@ mod codex;
 pub(crate) mod idle;
 mod ledger;
 mod outcome;
+pub(crate) mod panes;
 mod status;
 mod verify;
 
