@@ -56,14 +56,36 @@ fn a_process_that_execs_without_closing_loses_no_count() {
     for i in 0..3 {
         assert!(!log.append(D0 + i, "k", &[]).unwrap());
     }
-    // exec runs no destructors
+    // exec runs no destructors; it closes the close-on-exec descriptor,
+    // and with it the lock
+    let fd = log.day.as_ref().unwrap().file.as_raw_fd();
+    // SAFETY: fcntl and close on a descriptor the forgotten log owned
+    assert_ne!(unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0, "the day goes away at exec");
     std::mem::forget(log);
+    assert_eq!(unsafe { libc::close(fd) }, 0);
     let mut next = FactLog::at(tmp.path().to_path_buf(), 1, 15).unwrap();
     assert!(!next.append(D0 + 9, "k", &[]).unwrap());
     assert_eq!(next.dropped(), 4);
     drop(next);
     assert_eq!(read_day(&tmp.join("20251126.tsv")), (vec![], 4));
     assert_eq!(lines(&tmp.join("20251126.tsv")).len(), 1, "one dropped line, raised in place");
+}
+
+#[test]
+fn a_second_writer_on_the_same_day_takes_no_lock_and_writes_nothing() {
+    let tmp = TempDir::new("fact-log-two-writers");
+    let mut first = FactLog::at(tmp.path().to_path_buf(), 1 << 20, 15).unwrap();
+    assert!(first.append(D0, "k", &[("v", "1")]).unwrap());
+    // a torn tail the second writer must not cut while the first holds the day
+    first.day.as_ref().unwrap().file.write_all_at(b"1764115201\tk\tv=", first.day.as_ref().unwrap().len).unwrap();
+    let before = std::fs::read(tmp.join("20251126.tsv")).unwrap();
+    let mut second = FactLog::at(tmp.path().to_path_buf(), 1 << 20, 15).unwrap();
+    let err = second.append(D0 + 1, "k", &[("v", "2")]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+    assert_eq!(std::fs::read(tmp.join("20251126.tsv")).unwrap(), before, "the refused writer touched nothing");
+    drop(first);
+    assert!(second.append(D0 + 2, "k", &[("v", "3")]).unwrap(), "the lock is tried again at the next append");
+    assert_eq!(lines(&tmp.join("20251126.tsv")), ["1764115200\tk\tv=1", "1764115202\tk\tv=3"]);
 }
 
 #[test]

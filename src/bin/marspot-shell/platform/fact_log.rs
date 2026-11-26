@@ -8,12 +8,25 @@
 //! it, and the next process to open the day goes on raising the same
 //! line.  A reader can tell a quiet day from a full one.
 //!
-//! One process writes a directory at a time.  A last line an earlier
-//! process left cut short is cut off on open: it was never a whole fact.
-//! Days older than `keep_days` are deleted when a new day starts.
+//! One writer per day file: a log takes an exclusive `flock` on the day
+//! before it reads or changes it, and holds it while the day is open.
+//! Lines go at the offset this writer knows, so a second writer would
+//! overwrite the first's lines and could point the dropped count into
+//! them.  A second writer (another log on the same directory in this
+//! process, or another marspot-shell process such as a command-line
+//! mode) does not wait: its append fails with `WouldBlock`, writes
+//! nothing, and the caller decides what the fact is worth; its next
+//! append tries the lock again.  The descriptor is close-on-exec, so an
+//! exec releases the lock and the new image takes it at its first
+//! append.
+//!
+//! A last line an earlier process left cut short is cut off on open: it
+//! was never a whole fact.  Days older than `keep_days` are deleted when
+//! a new day starts.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
@@ -49,7 +62,9 @@ impl FactLog {
         Ok(FactLog { dir, cap, keep_days, day: None, line: String::new() })
     }
 
-    /// Append one fact; false when the day's cap dropped it.
+    /// Append one fact; false when the day's cap dropped it.  An error
+    /// of kind `WouldBlock` when another writer holds the day: nothing
+    /// was written.
     pub(crate) fn append(&mut self, unix: u64, kind: &str, fields: &[(&str, &str)]) -> io::Result<bool> {
         super::assert_off_main("a fact appended");
         let name = fact_line::day_file(unix);
@@ -90,7 +105,16 @@ impl FactLog {
 /// there, cutting off a last line it left unfinished, and pick up the
 /// count of a dropped line that ends the file.
 fn open_day(dir: &Path, name: String) -> io::Result<Day> {
-    let mut file = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(dir.join(&name))?;
+    let path = dir.join(&name);
+    let mut file = OpenOptions::new().create(true).read(true).write(true).truncate(false).open(&path)?;
+    // SAFETY: flock only takes a lock on a descriptor this function owns
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::WouldBlock {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, format!("another writer holds {}", path.display())));
+        }
+        return Err(e);
+    }
     let size = file.metadata()?.len();
     let (whole, last) = last_line(&mut file, size)?;
     if whole < size {
