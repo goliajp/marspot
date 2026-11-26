@@ -37,7 +37,7 @@ use std::time::SystemTime;
 
 use crate::language::LangId;
 use crate::palette::ThemeId;
-use values::{fmt_f32, parse_bool, parse_f32};
+use values::{fmt_f32, parse_bool, parse_f32, split_kv};
 
 mod agent_allocation;
 mod cc_model;
@@ -360,17 +360,6 @@ fn value_of(s: &Settings, key: &str) -> String {
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         _ => agent_allocation::value_of(s, key).unwrap_or_default(),
     }
-}
-
-/// Split one line into `(key, value)`, or `None` for a comment, a
-/// blank, or anything that is not an assignment.
-fn split_kv(line: &str) -> Option<(&str, &str)> {
-    let t = line.trim();
-    if t.is_empty() || t.starts_with('#') {
-        return None;
-    }
-    let (k, v) = t.split_once('=')?;
-    Some((k.trim(), v.trim().trim_matches('"')))
 }
 
 pub fn parse(body: &str) -> Settings {

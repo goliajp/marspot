@@ -1,5 +1,16 @@
 //! How a settings value is read from the file and written back.
 
+/// Split one line into `(key, value)`, or `None` for a comment, a
+/// blank, or anything that is not an assignment.
+pub(super) fn split_kv(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') {
+        return None;
+    }
+    let (k, v) = t.split_once('=')?;
+    Some((k.trim(), v.trim().trim_matches('"')))
+}
+
 /// A float, clamped to a range the rest of the program can survive.
 ///
 /// Out of range is treated as a typo and ignored rather than clamped:
