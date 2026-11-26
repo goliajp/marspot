@@ -8,12 +8,14 @@
 # Usage:
 #   bin/bench-remote.sh                # fast tier (default host=mini)
 #   bin/bench-remote.sh --full         # full tier
+#   bin/bench-remote.sh --size-tables  # module tables for a size budget
 #   HOST=other-mini bin/bench-remote.sh --full
 #
 # Contract:
 #   - exclusive : a local mkdir lock against another bench-remote from
 #                 this machine, and the host's bench lock, taken as
 #                 `bench`, against everything else using the machine
+#                 (`heavy` for --size-tables, which times nothing)
 #   - clean     : dedicated CARGO_TARGET_DIR, caffeinate -dims
 #   - bounded   : the build + measurement is stopped after
 #                 MARSPOT_BENCH_TIMEOUT seconds (default 5400); cargo
@@ -181,12 +183,16 @@ MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
 # A round says when it expects to be done, for whoever queues behind
 # it.  The full tier has held the lock 8 to 15 minutes once it has it,
 # the fast one a few; MARSPOT_BENCH_UNTIL="+90m what" overrides.
+# Size tables time nothing: a cold fat-LTO build is heavy work, run
+# alongside other heavy work rather than holding everyone out.
+LOCK_MODE=bench
 case " $* " in
+  *" --size-tables "*) BENCH_UNTIL_DEFAULT="+40m marspot size tables"; LOCK_MODE=heavy ;;
   *" --full "*) BENCH_UNTIL_DEFAULT="+20m marspot full bench" ;;
   *) BENCH_UNTIL_DEFAULT="+10m marspot bench" ;;
 esac
 UNTIL=" --until $(printf '%q' "${MARSPOT_BENCH_UNTIL:-$BENCH_UNTIL_DEFAULT}")"
-LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT$UNTIL"
+LOCK_CMD="/usr/local/bin/bench-lock $LOCK_MODE --max-wait $MAX_WAIT$UNTIL"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""

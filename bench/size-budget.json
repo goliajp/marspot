@@ -1,0 +1,21 @@
+{
+  "_comment": "One absolute size budget per shipped binary per product minor version (Cargo.toml [package] version without the patch); a minor with no key runs under the newest lower one.  Under its budget a bench run changes no tracked file, over it the size row fails.  `measured` is the release size (mini, lto=fat) of the build whose module table is bench/size-tables/<minor>/<binary>.tsv; the bench refuses a budget whose table does not match.  Raising one: `bin/bench-remote.sh --size-tables`, then `python3 bin/_size_budget.py set <binary> <budget> bench/remote-runs/<ts>/size-tables/<binary>.tsv`, and commit the two files; a raise is accepted only when the measured size is over the budget it replaces.  0.18 budgets: 7 MiB, 2.75 MiB, 1.75 MiB and 1 MiB, from the ceilings of 2026-11-26 and their growth since 2026-11-22.",
+  "0.18": {
+    "marspot-shell": {
+      "budget": 7340032,
+      "measured": 6346592
+    },
+    "marspot-core": {
+      "budget": 2883584,
+      "measured": 2678288
+    },
+    "marspot-session": {
+      "budget": 1835008,
+      "measured": 1636528
+    },
+    "marspot-peer": {
+      "budget": 1048576,
+      "measured": 857200
+    }
+  }
+}
