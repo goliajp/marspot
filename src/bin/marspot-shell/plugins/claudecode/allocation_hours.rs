@@ -100,15 +100,21 @@ impl Hours {
 /// begin early enough to know who was busy at `from`); the shell has
 /// been up since `up_since`.
 pub(super) fn sum(facts: &[Event], from: i64, to: i64, up_since: i64) -> Vec<Hour> {
-    let mut rows: Vec<Hour> = (0..=(to - from) / HOUR).map(|k| from + k * HOUR).map(|at| Hour { at, known: at >= up_since, ..Hour::default() }).collect();
+    let mut rows: Vec<Hour> = (0..=(to - from) / HOUR).map(|k| from + k * HOUR).map(|at| Hour { at, known: at + HOUR > up_since, ..Hour::default() }).collect();
     let mut seen: Vec<HashSet<u64>> = vec![HashSet::new(); rows.len()];
     let slot = |at: i64| (at >= from && at < to + HOUR).then(|| ((at - from) / HOUR) as usize);
-    let mut last_before: HashMap<u64, i64> = HashMap::new();
-    for e in facts.iter().filter(|e| e.at < up_since) {
-        last_before.entry(e.sid).and_modify(|a| *a = (*a).max(e.at)).or_insert(e.at);
-    }
-    // busy from before the start: no further than the pane's last fact before it
-    let end_of = |sid: u64, s: i64, e: i64| if s < up_since { last_before.get(&sid).copied().unwrap_or(s).clamp(s, e) } else { e };
+    // the old shell's last sign of life: a span busy from before the start
+    // counts to there, and again from the start on (the new shell restores
+    // the pane's state without writing a fact for it)
+    let old_last = facts.iter().filter(|e| e.at < up_since).map(|e| e.at).max();
+    let span = |rows: &mut [Hour], s: i64, e: i64| {
+        if s < up_since {
+            add_busy(rows, s, old_last.unwrap_or(s).clamp(s, e));
+            add_busy(rows, up_since, e);
+        } else {
+            add_busy(rows, s, e);
+        }
+    };
     let mut busy_since: HashMap<u64, i64> = HashMap::new();
     for e in facts {
         if let Some(k) = slot(e.at) {
@@ -125,28 +131,20 @@ pub(super) fn sum(facts: &[Event], from: i64, to: i64, up_since: i64) -> Vec<Hou
                     if e.class == "fable" { rows[k].fable += pts } else { rows[k].other += pts }
                 }
             }
-            "busy" => match busy_since.get(&e.sid).copied() {
-                // seen busy again by this shell: what came before it is closed
-                Some(s) if s < up_since && e.at >= up_since => {
-                    add_busy(&mut rows, s, end_of(e.sid, s, e.at));
-                    busy_since.insert(e.sid, e.at);
-                }
-                Some(_) => {}
-                None => {
-                    busy_since.insert(e.sid, e.at);
-                }
-            },
+            "busy" => {
+                busy_since.entry(e.sid).or_insert(e.at);
+            }
             // a pane moved to another account goes on being busy
             "rest" | "bound" if e.kind == "rest" || e.profile.is_none() => {
                 if let Some(s) = busy_since.remove(&e.sid) {
-                    add_busy(&mut rows, s, end_of(e.sid, s, e.at));
+                    span(&mut rows, s, e.at);
                 }
             }
             _ => {}
         }
     }
-    for (sid, s) in busy_since {
-        add_busy(&mut rows, s, end_of(sid, s, to + HOUR));
+    for s in busy_since.into_values() {
+        span(&mut rows, s, to + HOUR);
     }
     for (r, s) in rows.iter_mut().zip(seen) {
         r.panes = s.len();

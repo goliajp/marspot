@@ -43,9 +43,10 @@ fn allocation_hours_sum_both_speeds_and_the_busy_pane_hours_of_each_hour() {
 
 /// The shell went down at about 18:20 and came back at 21:30: 19:00 and
 /// 20:00 have no fact and are unknown, not idle; 481, busy when it went
-/// down, counts busy only to its last fact; 21:00 has a fact and is known.
+/// down, counts busy to the old shell's last fact and again from 21:30,
+/// with no new busy fact (the new shell restores its state silently).
 #[test]
-fn allocation_hours_an_hour_the_shell_missed_is_unknown_and_a_busy_pane_stops_at_its_last_fact() {
+fn allocation_hours_an_hour_the_shell_missed_is_unknown_and_a_busy_pane_counts_on_both_sides_of_it() {
     let opus = "model=claude-opus-5-5 in=0 cc5m=0 cc1h=0 cr=0 out=152500";
     let facts = [
         ev(H18 + 60, 481, "busy", "plain", ""),
@@ -58,8 +59,11 @@ fn allocation_hours_an_hour_the_shell_missed_is_unknown_and_a_busy_pane_stops_at
     assert_eq!(rows.iter().map(|r| r.known).collect::<Vec<_>>(), [true, false, false, true], "{rows:?}");
     assert!(near(rows[0].busy_h, 1140.0 / 3600.0), "481 to 18:20, not through the gap: {rows:?}");
     assert!(near(rows[1].busy_h, 0.0) && near(rows[2].busy_h, 0.0), "{rows:?}");
-    assert!(near(rows[3].busy_h, 1600.0 / 3600.0), "430 busy since the shell is up, to the hour's end: {rows:?}");
+    assert!(near(rows[3].busy_h, (100.0 + 1600.0) / 3600.0), "481 from the start to its rest, 430 to the hour's end: {rows:?}");
     assert_eq!(rows[1].line(), format!("{}\thour\tfable=- other=- busy_h=- panes=-\n", H18 + HOUR));
+    // an idle hour the shell started in is known
+    let rows = sum(&facts[..3], H18, H18 + 3 * HOUR, H18 + 2 * HOUR + 600);
+    assert!(rows[2].known && !rows[1].known, "{rows:?}");
     // the same facts with the shell up all along: 481 busy through the gap
     let rows = sum(&facts, H18, H18 + 3 * HOUR, H18);
     assert!(rows.iter().all(|r| r.known) && near(rows[1].busy_h, 1.0), "{rows:?}");
