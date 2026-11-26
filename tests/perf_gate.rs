@@ -3,7 +3,7 @@
 //! debug test build) and is widened only after measuring again.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -18,9 +18,14 @@ use marspot::zombie::probe::Live;
 /// samples every task's CPU.  P95 11.5 ms measured 2026-11-26.
 const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_millis(35);
 /// One check of four panes whose transcripts each grew by [`APPENDED`]
-/// since the last check, all of it read and folded.  P95 174 ms measured
-/// 2026-11-26.
-const ZOMBIE_APPENDED_P95_BUDGET: Duration = Duration::from_millis(525);
+/// since the last check, all of it read and folded, as a multiple of the
+/// floor: reading the same appended bytes once and counting their lines,
+/// timed in the same run.  A fixed time failed on a hosted runner about
+/// 3x slower than mini; the ratio holds across machines and still blows
+/// when a check re-reads whole transcripts or folds them quadratically.
+/// P95/floor 1.52 to 1.85 over six runs (P95 176 to 263 ms, floor p50
+/// 116 to 144 ms) measured 2026-11-26.
+const ZOMBIE_APPENDED_P95_FLOOR_MULTIPLE: f64 = 5.5;
 const APPENDED_PANES: usize = 4;
 const APPENDED: usize = 6 << 20;
 const APPENDED_CHECKS: u64 = 20;
@@ -193,6 +198,8 @@ fn zombie_check_perf_gate_with_megabytes_appended_between_checks() {
     let helper = |_: &ProcRow, _: bool| false;
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
     let mut times = Vec::new();
+    let mut floors = Vec::new();
+    let mut marks: Vec<u64> = (0..APPENDED_PANES).map(|p| fs::metadata(dir.join(format!("u{p}.jsonl"))).unwrap().len()).collect();
     let before: u64 = files.iter().map(PaneFiles::read_bytes).sum();
     for i in 0..APPENDED_CHECKS {
         for p in 0..APPENDED_PANES {
@@ -206,17 +213,42 @@ fn zombie_check_perf_gate_with_megabytes_appended_between_checks() {
         let scene = Scene { now: now + i * 300, table: &table, panes, outside: Vec::new(), uid: 501, tmpdir: None, helper: &helper };
         watch.hits(&scene, &mut probe);
         times.push(t0.elapsed());
+        let t1 = Instant::now();
+        std::hint::black_box(floor_read(&dir, &mut marks));
+        floors.push(t1.elapsed());
     }
     let read = files.iter().map(PaneFiles::read_bytes).sum::<u64>() - before;
     times.sort();
+    floors.sort();
     let p95 = times[(times.len() * 95).div_ceil(100) - 1];
+    let floor = floors[floors.len() / 2];
+    let ratio = p95.as_secs_f64() / floor.as_secs_f64();
     println!(
-        "zombie check with {} MiB appended per pane: p50 {:?}, p95 {p95:?}, max {:?}; {read} bytes read",
+        "zombie check with {} MiB appended per pane: p50 {:?}, p95 {p95:?}, max {:?}; floor p50 {floor:?}, max {:?}; p95/floor {ratio:.2}; {read} bytes read",
         APPENDED >> 20,
         times[times.len() / 2],
-        times[times.len() - 1]
+        times[times.len() - 1],
+        floors[floors.len() - 1]
     );
     assert_eq!(read, (chunk.len() * APPENDED_PANES) as u64 * APPENDED_CHECKS, "every appended byte is read once");
-    assert!(p95 < ZOMBIE_APPENDED_P95_BUDGET, "p95 {p95:?} over the budget {ZOMBIE_APPENDED_P95_BUDGET:?}");
+    assert!(
+        ratio < ZOMBIE_APPENDED_P95_FLOOR_MULTIPLE,
+        "p95 {p95:?} is {ratio:.2}x the floor {floor:?}, over the budget {ZOMBIE_APPENDED_P95_FLOOR_MULTIPLE}x"
+    );
     drop(procs);
+}
+
+/// The least any check must do with what was appended: read each pane's
+/// new bytes once and find the line ends.  Returns the line count.
+fn floor_read(dir: &Path, marks: &mut [u64]) -> usize {
+    let mut lines = 0;
+    for (p, mark) in marks.iter_mut().enumerate() {
+        let mut f = File::open(dir.join(format!("u{p}.jsonl"))).unwrap();
+        f.seek(SeekFrom::Start(*mark)).unwrap();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).unwrap();
+        *mark += buf.len() as u64;
+        lines += buf.iter().filter(|b| **b == b'\n').count();
+    }
+    lines
 }
