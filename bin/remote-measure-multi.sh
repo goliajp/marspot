@@ -36,11 +36,13 @@ for n in "$@"; do
   [[ $n =~ ^[1-9][0-9]?$ ]] || { echo "a window count, not '$n'" >&2; exit 2; }
 done
 
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 remote_sync "$HOST" --name "$REMOTE_NAME"
+# read again after the sync: a checkout that moved in between is dirty
+GIT_SHA="$("$ROOT/bin/_git-sha.sh" "$GIT_SHA")"
 mkdir -p "$OUT_DIR"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
-[[ -z "$(git -C "$ROOT" status --porcelain)" ]] || COMMIT+="-dirty"
-GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
+[[ "$GIT_SHA" != *-dirty ]] || COMMIT+="-dirty"
 
 for n in "$@"; do
   FWD="export MARSPOT_BENCH_COMMIT=$COMMIT MARSPOT_GIT_SHA=$GIT_SHA MULTI_WINDOWS=$n; "

@@ -75,9 +75,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-remote_sync "$HOST" --name "$REMOTE_NAME"
-# the copy has no .git: the binaries built there name this commit
+# the copy has no .git: the binaries built there name this commit,
+# read before and after the sync so a commit landing in between is not
+# taken for the copy's
 GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
+remote_sync "$HOST" --name "$REMOTE_NAME"
+GIT_SHA="$("$ROOT/bin/_git-sha.sh" "$GIT_SHA")"
 
 args=""
 for a in "$@"; do args+=" $(printf '%q' "$a")"; done

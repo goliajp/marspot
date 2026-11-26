@@ -173,6 +173,10 @@ GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 
 remote_sync "$MAC" --name "$NAME" >/dev/null
 remote_sync "$LINUX" --name "$NAME" >/dev/null
+# a checkout that moved during the syncs left copies of neither tree:
+# the build says so and no pass is recorded for $tree
+GIT_SHA="$("$ROOT/bin/_git-sha.sh" "$GIT_SHA")"
+[[ "$GIT_SHA" != *-dirty ]] || clean=0
 
 echo "==> macOS job on $MAC, Linux job on $LINUX"
 run_job "$MAC" mac 'export PATH=$HOME/.cargo/bin:/usr/local/bin:$PATH' \
