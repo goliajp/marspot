@@ -40,9 +40,10 @@ remote_sync "$HOST" --name "$REMOTE_NAME"
 mkdir -p "$OUT_DIR"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
 [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || COMMIT+="-dirty"
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 
 for n in "$@"; do
-  FWD="export MARSPOT_BENCH_COMMIT=$COMMIT MULTI_WINDOWS=$n; "
+  FWD="export MARSPOT_BENCH_COMMIT=$COMMIT MARSPOT_GIT_SHA=$GIT_SHA MULTI_WINDOWS=$n; "
   for v in MEASURE_TERMS MEASURE_ROUNDS MULTI_SLOT_S MULTI_TRIALS MULTI_SCENARIOS; do
     [[ -z "${!v:-}" ]] || FWD+="export $v=$(printf '%q' "${!v}"); "
   done

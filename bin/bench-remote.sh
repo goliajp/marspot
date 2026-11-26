@@ -137,6 +137,8 @@ remote_sync "$HOST" --name "$REMOTE_NAME"
 BENCH_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
 BENCH_DIRTY=0
 [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || BENCH_DIRTY=1
+# and the binaries it builds name it in their fingerprint
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 
 # ---- run -------------------------------------------------------------
 # Quote args once locally so the remote shell can re-tokenise them
@@ -202,7 +204,7 @@ ssh "$HOST" "
   set -e
   cd ~/$REMOTE_DIR
   export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target
-  export MARSPOT_BENCH_COMMIT=$BENCH_COMMIT MARSPOT_BENCH_DIRTY=$BENCH_DIRTY
+  export MARSPOT_BENCH_COMMIT=$BENCH_COMMIT MARSPOT_BENCH_DIRTY=$BENCH_DIRTY MARSPOT_GIT_SHA=$GIT_SHA
   echo \$\$ > $REMOTE_PIDF
   if [ -n '${LOCK_CMD:+1}' ] && [ ! -x /usr/local/bin/bench-lock ]; then
     echo 'bench-remote: /usr/local/bin/bench-lock is not on the runner' >&2

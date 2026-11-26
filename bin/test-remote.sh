@@ -76,6 +76,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
+# the copy has no .git: the binaries built there name this commit
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 
 args=""
 for a in "$@"; do args+=" $(printf '%q' "$a")"; done
@@ -116,6 +118,7 @@ set +e
 ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
   ${MARSPOT_TEST_JOBS:+MARSPOT_TEST_JOBS=$(printf '%q' "$MARSPOT_TEST_JOBS")} \
   ${MARSPOT_FONT_SNAPSHOT:+MARSPOT_FONT_SNAPSHOT=$(printf '%q' "$MARSPOT_FONT_SNAPSHOT")} \
+  MARSPOT_GIT_SHA=$GIT_SHA \
   /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $TIMEOUT \
   sh -c 'MARSPOT_TEST_JOBS=\${MARSPOT_TEST_JOBS:-\$(bin/_runner-jobs.sh)} exec bin/test.sh \"\$@\"' sh$args; \
   rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
