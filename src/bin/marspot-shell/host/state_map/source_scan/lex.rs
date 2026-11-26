@@ -132,8 +132,10 @@ pub(super) fn top_level(b: &[u8], at: usize, stops: &[u8]) -> usize {
     b.len()
 }
 
-/// `text` without the items under `#[cfg(test)]`: a module or function
-/// with its whole body, a `mod name;` or `use` up to its `;`.
+/// `text` without the items under `#[cfg(test)]`: a module, function
+/// or impl with its whole body, a `mod name;` or `use` up to its `;`, a
+/// field, variant or match arm up to its `,` or the bracket that closes
+/// its list.
 pub(super) fn without_tests(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -143,8 +145,7 @@ pub(super) fn without_tests(text: &str) -> String {
             i = end;
         } else if b[i..].starts_with(b"#[cfg(test)]") {
             out.push_str(&text[from..i]);
-            let stop = top_level(b, i + "#[cfg(test)]".len(), b";{");
-            i = if b.get(stop) == Some(&b'{') { close_of(b, stop) } else { (stop + 1).min(b.len()) };
+            i = cfg_item_end(b, i + "#[cfg(test)]".len());
             from = i;
         } else {
             i += 1;
@@ -152,6 +153,36 @@ pub(super) fn without_tests(text: &str) -> String {
     }
     out.push_str(&text[from.min(text.len())..]);
     out
+}
+
+/// Where the item after a `#[cfg(test)]` ends.  A `,` inside the angle
+/// brackets of a type (`HashMap<K, V>`) ends nothing; `->` and `=>` open
+/// none.
+fn cfg_item_end(b: &[u8], at: usize) -> usize {
+    let mut angle = 0usize;
+    let mut i = at;
+    while i < b.len() {
+        if let Some(end) = literal_end(b, i) {
+            i = end;
+            continue;
+        }
+        match b[i] {
+            b'{' => return close_of(b, i),
+            b'(' | b'[' => {
+                i = close_of(b, i);
+                continue;
+            }
+            b';' => return i + 1,
+            b',' if angle == 0 => return i + 1,
+            // the end of the list the field or arm is in stays
+            b'}' | b')' | b']' => return i,
+            b'<' => angle += 1,
+            b'>' if !matches!(b.get(i.wrapping_sub(1)), Some(b'-' | b'=')) => angle = angle.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
 }
 
 /// A function or a closure bound by `let`: where its body is, the

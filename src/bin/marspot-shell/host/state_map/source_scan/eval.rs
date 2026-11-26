@@ -10,13 +10,14 @@ mod calls;
 mod chain;
 pub(super) use chain::with_extension;
 
-/// Stands in a path for a part the source computes: a `format!`
-/// argument, a number turned into text.
+/// Stands in a path for a part the source computes (a `format!`
+/// argument, a number turned into text) or the scan cannot read (a
+/// variable, a call).
 pub(super) const HOLE: char = '\u{1}';
 
 /// The paths the source starts from, by the name of the function that
 /// returns them, and where under the state root they are.
-const BASES: &[(&str, &str)] = &[("state_root", ""), ("sessions_dir", "sessions"), ("binaries_root", "binaries"), ("log_dir", "logs")];
+const BASES: &[(&str, &str)] = &[("state_root", ""), ("default_state_root", ""),("sessions_dir", "sessions"), ("binaries_root", "binaries"), ("log_dir", "logs")];
 
 /// Calls deep enough to follow a path through a helper of a helper.
 const MAX_DEPTH: usize = 6;
@@ -185,6 +186,13 @@ impl<'a> Scan<'a> {
         let mut p = skip_ws(b, at);
         while matches!(b.get(p), Some(b'&' | b'*')) || text[p..].starts_with("mut ") {
             p = skip_ws(b, p + if b[p] == b'm' { 4 } else { 1 });
+        }
+        // a state root built by hand from the variable (marspot-peer's)
+        if text[p..].starts_with("match ") {
+            let open = top_level(b, p + 6, b"{;");
+            if b.get(open) == Some(&b'{') && text[p + 6..open].contains("\"MARSPOT_STATE_DIR\"") {
+                return Some((vec![Val { path: String::new(), os: false }], close_of(b, open), None));
+            }
         }
         let mut q: Vec<&str> = Vec::new();
         let mut j = p;

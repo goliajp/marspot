@@ -1,8 +1,42 @@
 //! Calls: which functions a call reaches, and what they return for
 //! the path values passed to them.
 
-use super::super::lex::top_level;
+use super::super::lex::{is_ident, top_level};
 use super::{Args, Env, MAX_DEPTH, Scan, Val, module_of, norm, skip_ws};
+
+/// Whether `text` has a `use` of `name` from the module `m`: `m::name`,
+/// `m::{.., name, ..}` (or `name as ..`), or `m::*`.
+fn imports(text: &str, m: &str, name: &str) -> bool {
+    let b = text.as_bytes();
+    let head = format!("{m}::");
+    let mut from = 0;
+    while let Some(at) = text[from..].find(&head).map(|i| from + i) {
+        from = at + 1;
+        if at > 0 && is_ident(b[at - 1]) {
+            continue;
+        }
+        let tail = &text[at + head.len()..];
+        let named = |t: &str| t.strip_prefix(name).is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'));
+        if tail.starts_with('*') || named(tail) {
+            return true;
+        }
+        if let Some(group) = tail.strip_prefix('{') {
+            let group = &group[..group.find('}').unwrap_or(group.len())];
+            if group.split(',').any(|p| named(p.trim())) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The files the parent module of the module in `file` may be in.
+fn parent_files(file: &str) -> [String; 4] {
+    let (dir, name) = file.rsplit_once('/').unwrap_or(("", file));
+    let module = if name == "mod.rs" { dir.to_string() } else { format!("{dir}/{}", name.trim_end_matches(".rs")) };
+    let parent = module.rsplit_once('/').map_or("", |(p, _)| p);
+    [format!("{parent}.rs"), format!("{parent}/mod.rs"), format!("{parent}/main.rs"), format!("{parent}/lib.rs")]
+}
 
 impl Scan<'_> {
     /// The functions a call of the path `q` may reach.
@@ -19,12 +53,21 @@ impl Scan<'_> {
             None => {
                 let here: Vec<_> = all.iter().copied().filter(|c| c.0 == si).collect();
                 if !here.is_empty() {
-                    here
-                } else if all.len() == 1 && fn_of(&all[0]).owner.is_none() {
-                    all.clone()
-                } else {
-                    Vec::new()
+                    return here;
                 }
+                let free: Vec<_> = all.iter().copied().filter(|c| fn_of(c).owner.is_none()).collect();
+                if all.len() == 1 {
+                    return free;
+                }
+                // a name defined in several files: the ones this file brings into scope
+                let caller = &self.srcs[si];
+                let parents = parent_files(&caller.file);
+                free.into_iter()
+                    .filter(|c| {
+                        let callee = self.srcs[c.0].file.as_str();
+                        imports(&caller.text, module_of(callee), last) || (parents.iter().any(|p| p == callee) && imports(&caller.text, "super", last))
+                    })
+                    .collect()
             }
         }
     }

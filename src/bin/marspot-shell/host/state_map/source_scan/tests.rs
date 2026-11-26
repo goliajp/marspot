@@ -11,12 +11,12 @@ fn scan(files: &[(&str, &str)]) -> Vec<String> {
 #[test]
 fn the_scan_reads_the_plain_shapes() {
     let got = scan(&[
-        ("x/a.rs", "const F: &str = \"f.tsv\";\nfn p() { state_root().join(\"zombie\")\n    .join(F); }\nfn q() { default_state_root().join(\"no\"); }"),
+        ("x/a.rs", "const F: &str = \"f.tsv\";\nfn p() { state_root().join(\"zombie\")\n    .join(F); }\nfn q() { old_state_root().join(\"no\"); }"),
         ("x/plugins/kimi/b.rs", "fn l(h: &dyn H) { let Ok(dir) = h.state_dir() else { return };\n let t = dir.join(REFUSED); }\nconst REFUSED: &str = \"refused.tsv\";"),
         ("x/c.rs", "fn r() { let root = paths::state_root();\n root.join(\"a\").join(name).join(\"b\"); session_dir(7).join(\"guard\"); }"),
         ("x/e.rs", "#[cfg(test)]\nmod tests;\nfn u() { state_root().join(\"after-a-test-file\"); }"),
     ]);
-    assert_eq!(got, ["a", "after-a-test-file", "plugins/kimi/refused.tsv", "sessions/{}/guard", "zombie/f.tsv"]);
+    assert_eq!(got, ["a/{}/b", "after-a-test-file", "plugins/kimi/refused.tsv", "sessions/{}/guard", "zombie/f.tsv"]);
 }
 
 #[test]
@@ -83,4 +83,58 @@ fn a_hole_is_registered_when_a_placeholder_takes_it() {
     assert!(registered("usage/claude-usage.tmp") && registered("pane-codes.tmp") && registered("autorun.tsv.tmp"));
     assert!(registered(&format!("plugins/claudecode/model/.{HOLE}.tmp")) && registered(&format!("handoff/{HOLE}.tmp")));
     assert!(!registered("zombie/unheard.tmp"));
+}
+
+#[test]
+fn a_test_only_field_variant_or_arm_hides_nothing_after_it() {
+    let got = scan(&[(
+        "x/sidecar.rs",
+        "struct LineExtras {\n a: u8,\n #[cfg(test)]\n probe: HashMap<u8, Vec<u8>>,\n b: u8,\n}\nimpl LineExtras { fn open() { state_root().join(\"after-a-field\"); } }\nenum E { A, #[cfg(test)] B(u8), C }\nfn g() { state_root().join(\"after-a-variant\"); }\nstruct L { #[cfg(test)] last: u8 }\nfn h(e: E) { match e { #[cfg(test)] E::B(_) => state_root().join(\"test-arm\"), _ => state_root().join(\"after-an-arm\") }; }",
+    )]);
+    assert_eq!(got, ["after-a-field", "after-a-variant", "after-an-arm"]);
+}
+
+#[test]
+fn a_part_the_scan_cannot_read_is_a_hole_that_must_match_a_row() {
+    let got = scan(&[
+        ("x/zombie/store.rs", "fn load() { let d = state_root().join(\"zombie\");\n let read = |name: &str| d.join(name);\n let bad = |name: &str| d.join(name).join(\"x.unheard\"); }"),
+        (
+            "x/sidecar.rs",
+            "fn path_for(bin: &Path, ext: &str) -> PathBuf {\n let mut p = bin.as_os_str().to_owned();\n p.push(\".\");\n p.push(ext);\n PathBuf::from(p)\n}\nfn m() { path_for(&session_dir(1).join(\"scrollback.bin\"), \"marks\"); }",
+        ),
+    ]);
+    assert_eq!(got, ["sessions/{}/scrollback.bin", "sessions/{}/scrollback.bin.{}", "zombie", "zombie/{}", "zombie/{}/x.unheard"]);
+    assert!(registered(&format!("zombie/{HOLE}")), "told.tsv and the rest fill it");
+    assert!(!registered(&format!("zombie/{HOLE}/x.unheard")));
+}
+
+#[test]
+fn a_root_built_by_hand_from_the_variable_is_followed() {
+    let got = scan(&[(
+        "x/peer/control/mod.rs",
+        "pub fn socket_path() -> PathBuf {\n let root = match std::env::var_os(\"MARSPOT_STATE_DIR\") {\n Some(d) => PathBuf::from(d),\n None => PathBuf::from(std::env::var_os(\"HOME\").unwrap_or_default()).join(\"Library/Application Support/marspot\"),\n };\n root.join(\"control.sock\")\n}",
+    )]);
+    assert_eq!(got, ["control.sock"]);
+}
+
+#[test]
+fn a_name_defined_in_several_files_reaches_the_one_in_scope() {
+    let got = scan(&[
+        ("x/a/store.rs", "pub fn dir() -> PathBuf { state_root().join(\"zombie\") }"),
+        ("x/b/ledger.rs", "pub fn dir() -> PathBuf { state_root().join(\"handoff\") }"),
+        ("x/c.rs", "use super::store::dir;\nfn f() { dir().join(\"t.tsv\"); }"),
+        ("x/d.rs", "use super::ledger::{other, dir};\nfn g() { dir().join(\"u.ledger\"); }"),
+        ("x/a/store/inner.rs", "use super::*;\nfn h() { dir().join(\"v.tsv\"); }"),
+        ("x/e.rs", "fn k() { dir().join(\"in-no-scope\"); }"),
+    ]);
+    assert_eq!(got, ["handoff", "handoff/u.ledger", "zombie", "zombie/t.tsv", "zombie/v.tsv"]);
+}
+
+#[test]
+fn a_source_path_under_a_left_behind_or_foreign_row_is_not_registered() {
+    assert!(!registered("previous/marspot-shell"), "only older builds wrote previous/");
+    assert!(!registered("binaries/x/marspot-shelld"));
+    assert!(!registered("rescue-20261126/state.bin"));
+    assert!(!registered(&format!("helpers/{HOLE}/state.json")), "a helper's home is the agent's, read by no build");
+    assert!(registered(&format!("helpers/{HOLE}/result.md")), "a file marspot reads there has its own row");
 }

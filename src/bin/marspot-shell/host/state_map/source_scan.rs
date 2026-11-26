@@ -1,17 +1,19 @@
 //! The paths the source builds on the state root, read out of the source
 //! itself so a path no run happened to create is checked too.
 //!
-//! A path starts at `state_root()`, `sessions_dir()`, `session_dir(..)`,
-//! `binaries_root()`, `log_dir()`, `StateStore::open("..")`, or a
-//! plugin's `state_dir()` (`plugins/<plugin>/`).  It is followed
-//! through `let`s, through `.join`, `.push`, `.with_extension` and
-//! `.with_file_name` of a string literal, a `&str` constant, a
-//! `format!` or a number's `to_string()`, through `OsString` appends,
-//! and through the functions and closures it is passed to or returned
-//! from.  A part the source computes is a hole that any placeholder of
-//! the state map may fill.  Production code only: test files and the
-//! items under `#[cfg(test)]` are left out, as test code builds paths
-//! in temporary directories.
+//! A path starts at `state_root()`, `default_state_root()`,
+//! `sessions_dir()`, `session_dir(..)`, `binaries_root()`, `log_dir()`,
+//! `StateStore::open("..")`, a plugin's `state_dir()`
+//! (`plugins/<plugin>/`), or a `match` on `MARSPOT_STATE_DIR` that
+//! builds the root by hand.  It is followed through `let`s, through
+//! `.join`, `.push`, `.with_extension` and `.with_file_name`, through
+//! `OsString` appends, and through the functions and closures it is
+//! passed to or returned from.  A string literal, a `&str` constant or
+//! a `format!` template adds its text; any other part (a number's
+//! `to_string()`, a variable, a call) is a hole that stands for any
+//! text in its segment, and the path must still fall under some row.
+//! Production code only: test files and the items under `#[cfg(test)]`
+//! are left out, as test code builds paths in temporary directories.
 
 mod eval;
 mod lex;
@@ -116,15 +118,21 @@ pub(super) fn paths(sources: &[(String, String)]) -> Vec<Found> {
     scan.found.into_iter().map(|(path, file)| Found { file, path }).collect()
 }
 
-/// What a hole may be: a number, a date, a uuid, a name.
-const HOLE_FILLS: &[&str] = &["1", "20261126", "2fec8734-bf76-478b-8044-20261126b7e4", "x"];
+/// The rows a path today's source builds may fall under.  Not the
+/// catch-alls, which would vouch for anything; not what only older
+/// builds left; not a whole tree that belongs to another program (a
+/// helper agent's home): a path marspot builds there is a file marspot
+/// uses and needs a row of its own.
+fn rows_for_source() -> impl Iterator<Item = &'static super::Entry> {
+    super::STATE_MAP.iter().filter(|e| {
+        !e.path.starts_with("**") && e.writer != super::LEFT_BEHIND && !(e.kind == super::Kind::External && e.path.ends_with("/**"))
+    })
+}
 
-/// Whether the state map knows `path`, for some filling of its holes.
+/// Whether the state map knows `path`, for some filling of its holes:
+/// a file of some row, or a directory some row puts files under.
 pub(super) fn registered(path: &str) -> bool {
-    if !path.contains(HOLE) {
-        return super::is_registered(path) || is_tmp_of_registered(path);
-    }
-    HOLE_FILLS.iter().map(|fill| path.replace(HOLE, fill)).any(|p| super::is_registered(&p) || is_tmp_of_registered(&p))
+    rows_for_source().any(|e| super::pattern::matches(e.path, path) || super::pattern::is_dir_of(e.path, path)) || is_tmp_of_registered(path)
 }
 
 /// The temporary half of an atomic replace (`f.tmp`, `f.<ext>.tmp`,
@@ -134,7 +142,7 @@ fn is_tmp_of_registered(path: &str) -> bool {
     if !path.ends_with(".tmp") {
         return false;
     }
-    super::STATE_MAP.iter().filter(|e| !e.path.starts_with("**")).any(|e| {
+    rows_for_source().any(|e| {
         let (dir, name) = e.path.rsplit_once('/').map_or(("", e.path), |(d, n)| (d, n));
         let dotted = if dir.is_empty() { format!(".{name}.tmp") } else { format!("{dir}/.{name}.tmp") };
         [format!("{}.tmp", e.path), eval::with_extension(e.path, "tmp"), dotted].iter().any(|t| super::pattern::matches(t, path))

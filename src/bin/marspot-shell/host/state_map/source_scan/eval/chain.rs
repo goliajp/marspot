@@ -93,7 +93,8 @@ impl Scan<'_> {
             let arg = &text[open + 1..close - 1];
             match name {
                 "join" | "with_extension" | "with_file_name" | "push" => {
-                    let Some(parts) = self.part(si, arg) else { break };
+                    // a part the scan cannot read is a hole: the path must still match a row
+                    let parts = self.part(si, arg).unwrap_or_else(|| vec![HOLE.to_string()]);
                     vals = vals
                         .iter()
                         .flat_map(|v| {
@@ -121,7 +122,10 @@ impl Scan<'_> {
         }
         if grew {
             let file = &srcs[si].file;
-            self.found.extend(vals.iter().map(|v| (v.path.clone(), file.clone())));
+            // an `OsString` that ends in a dot is a name half assembled (`p.push(".");
+            // p.push(ext)`), no file
+            let whole = vals.iter().filter(|v| !(v.os && v.path.ends_with('.')));
+            self.found.extend(whole.map(|v| (v.path.clone(), file.clone())));
         }
         (vals, at)
     }

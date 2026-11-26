@@ -5,6 +5,10 @@
 //! one or more ASCII letters, digits and dashes, `*` is any run of
 //! characters (none included).  A segment `**` is any number of
 //! segments, none included.
+//!
+//! A path from the source scan may hold holes (U+0001), each standing
+//! for any text within its segment; such a path matches when some
+//! filling of its holes would.
 
 /// Whether `path` (relative, `/`-separated) matches `pattern`.
 pub(crate) fn matches(pattern: &str, path: &str) -> bool {
@@ -40,7 +44,14 @@ fn segments(pat: &[&str], segs: &[&str]) -> bool {
     }
 }
 
+/// A part of a path the source scan could not read: it may stand for
+/// any text in its segment, so it eats any run of the pattern's tokens.
+const HOLE: u8 = 1;
+
 fn segment(p: &[u8], s: &[u8]) -> bool {
+    if s.first() == Some(&HOLE) {
+        return segment(p, &s[1..]) || (!p.is_empty() && segment(after_token(p), s));
+    }
     if p.is_empty() {
         return s.is_empty();
     }
@@ -56,7 +67,17 @@ fn segment(p: &[u8], s: &[u8]) -> bool {
     s.first() == Some(&p[0]) && segment(&p[1..], &s[1..])
 }
 
+fn after_token(p: &[u8]) -> &[u8] {
+    match p.iter().position(|&b| b == b'>') {
+        Some(end) if p[0] == b'<' => &p[end + 1..],
+        _ => &p[1..],
+    }
+}
+
 fn placeholder(name: &[u8], s: &[u8]) -> bool {
+    if s.contains(&HOLE) {
+        return true;
+    }
     match name {
         b"id" | b"n" => s.iter().all(u8::is_ascii_digit),
         b"date" => s.len() == 8 && s.iter().all(u8::is_ascii_digit),
