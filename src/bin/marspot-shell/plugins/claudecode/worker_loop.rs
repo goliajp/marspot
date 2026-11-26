@@ -44,10 +44,10 @@ pub(super) fn worker_main(
 }
 
 /// What each bound pane has that would hold a move, besides its transcript.
-fn holds(result: &ScanResult, focus: Option<u64>) -> HashMap<u64, Hold> {
+pub(super) fn holds(result: &ScanResult, focus: Option<u64>) -> HashMap<u64, Hold> {
     let hold = |sid: u64, m: &BindMeta| {
-        let (child, timer) = result.new_vetoes.get(&sid).copied().unwrap_or_default();
-        Hold { child, timer, helpers: result.helpers.sits_out(sid), focus: focus == Some(sid), claude_pid: m.claude.pid }
+        let vetoes = result.new_vetoes.get(&sid).copied();
+        Hold { child: vetoes.map(|v| v.0), timer: vetoes.map(|v| v.1), helpers: result.helpers.sits_out(sid), focus: focus == Some(sid), claude_pid: m.claude.pid }
     };
     result.new_meta.iter().map(|(sid, m)| (*sid, hold(*sid, m))).collect()
 }

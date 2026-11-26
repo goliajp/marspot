@@ -19,7 +19,7 @@ fn root(name: &str) -> PathBuf {
 }
 
 fn account(profile: u8, week: f64, measured_at: i64) -> AccountIn {
-    AccountIn { profile, week_used: week, fable_used: None, fable_known: true, week_renews: NOW + 3600, fable_renews: NOW + 3600, open: true, measured_at }
+    AccountIn { profile, week_used: week, fable_used: None, fable_known: true, week_renews: NOW + 3600, fable_renews: NOW + 3600, open: true, measured_at, supply: Vec::new() }
 }
 
 fn pane(sid: u64, resting: bool, transcript: &Path) -> PaneIn {
@@ -44,7 +44,7 @@ fn allocation_boundary_one_row_per_turn_end_at_most_one_per_gap_and_none_lost() 
     let t = d.join("s.jsonl");
     fs::write(&t, "").unwrap();
     let mut a = Allocation::new(d.join("alloc_events"));
-    let holds: HashMap<u64, Hold> = [(481, Hold { child: true, focus: true, claude_pid: 7, ..Hold::default() })].into();
+    let holds: HashMap<u64, Hold> = [(481, Hold { child: Some(true), timer: Some(false), focus: true, claude_pid: 7, ..Hold::default() })].into();
     let step = |a: &mut Allocation, at: i64, resting: bool| {
         a.record_more(&snap(at, vec![pane(481, resting, &t)], Vec::new()), &holds);
     };
@@ -80,7 +80,7 @@ fn allocation_boundary_names_live_tasks_and_a_person_writing_and_a_compaction_is
     writeln!(f, r#"{{"type":"user","timestamp":"{}","message":{{"content":"keep going"}}}}"#, at(-100)).unwrap();
     writeln!(f, r#"{{"type":"user","timestamp":"{}","message":{{"content":[{{"type":"tool_result","content":"ok"}}]}},"toolUseResult":{{"isAsync":true,"agentId":"a1"}}}}"#, at(-90)).unwrap();
     let mut a = Allocation::new(d.join("alloc_events"));
-    let holds: HashMap<u64, Hold> = [(441, Hold { claude_pid: 9, ..Hold::default() })].into();
+    let holds: HashMap<u64, Hold> = [(441, Hold { child: Some(false), timer: Some(false), claude_pid: 9, ..Hold::default() })].into();
     a.record_more(&snap(NOW, vec![pane(441, true, &t)], Vec::new()), &holds);
     let got = rows(&a, "boundary");
     assert_eq!(got[0].1, "holds=tasks,user tasks=1 oldest_s=90 helpers=0 child=0 timer=0 user=1 focus=0 tokens=-");
@@ -105,5 +105,69 @@ fn allocation_reading_written_when_it_changes_not_when_only_polled_again_and_kno
     let got: Vec<(i64, String)> = rows(&b, "reading");
     assert_eq!(got.iter().map(|r| r.0).collect::<Vec<_>>(), [NOW, NOW, NOW + 600]);
     assert_eq!(got[2].1, format!("week=0.95 fable=- week_renews={0} fable_renews={0} open=1 measured_at={1}", NOW + 3600, NOW + 600));
+    fs::remove_dir_all(&d).unwrap();
+}
+
+fn stamp(s: i64) -> String {
+    let secs = NOW + s;
+    let (h, m, sec) = ((secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60);
+    format!("2026-11-26T{h:02}:{m:02}:{sec:02}.000Z")
+}
+
+/// No process info for the pane: its row says `child=- timer=-`, and
+/// both hold, as they hold a move; a background shell the transcript
+/// has open is counted, since a live child cannot be ruled out.
+#[test]
+fn allocation_boundary_unread_process_tree_is_unknown_and_holds() {
+    let d = root("unknown");
+    let t = d.join("s.jsonl");
+    let mut f = fs::File::create(&t).unwrap();
+    writeln!(f, r#"{{"type":"user","timestamp":"{}","message":{{"content":[{{"type":"tool_result","content":"ok"}}]}},"toolUseResult":{{"backgroundTaskId":"b1"}}}}"#, stamp(-90)).unwrap();
+    let mut a = Allocation::new(d.join("alloc_events"));
+    let holds: HashMap<u64, Hold> = [(441, Hold { claude_pid: 9, ..Hold::default() })].into();
+    a.record_more(&snap(NOW, vec![pane(441, true, &t)], Vec::new()), &holds);
+    let got = rows(&a, "boundary");
+    assert_eq!(got[0].1, "holds=tasks,child,timer tasks=1 oldest_s=90 helpers=0 child=- timer=- user=0 focus=0 tokens=-");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// A scan without the usage feed lists no pane; the transcript's place
+/// is kept, so a compaction written meanwhile is a row once the feed is
+/// back, not lost to a fresh read from the end.
+#[test]
+fn allocation_turns_kept_through_a_scan_without_the_usage_feed() {
+    let d = root("nofeed");
+    let t = d.join("s.jsonl");
+    let mut f = fs::File::create(&t).unwrap();
+    writeln!(f, r#"{{"type":"user","timestamp":"{}","message":{{"content":"go"}}}}"#, stamp(-100)).unwrap();
+    let mut a = Allocation::new(d.join("alloc_events"));
+    let holds: HashMap<u64, Hold> = [(441, Hold { claude_pid: 9, ..Hold::default() })].into();
+    a.record_more(&snap(NOW, vec![pane(441, false, &t)], Vec::new()), &holds);
+    writeln!(f, r#"{{"type":"system","subtype":"compact_boundary","timestamp":"{}","compactMetadata":{{"trigger":"auto","preTokens":300000}}}}"#, stamp(5)).unwrap();
+    writeln!(f, r#"{{"type":"assistant","timestamp":"{}","message":{{"usage":{{"input_tokens":10,"output_tokens":5}}}}}}"#, stamp(8)).unwrap();
+    let blind = Snapshot { now: NOW + 10, feed_at: None, accounts: Vec::new(), panes: Vec::new(), live: vec![441] };
+    a.record_more(&blind, &holds);
+    a.record_more(&snap(NOW + 20, vec![pane(441, false, &t)], Vec::new()), &holds);
+    assert_eq!(rows(&a, "compacted"), [(NOW + 20, format!("before=300000 after=15 trigger=auto at={}", NOW + 5))]);
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// The roll-up cannot write: said once, not every scan, and said again
+/// only after it has worked in between.
+#[test]
+fn allocation_hours_failure_logged_once_until_it_works() {
+    let d = root("hoursfail");
+    let blocker = d.join("alloc_hours");
+    fs::write(&blocker, "").unwrap();
+    let mut a = Allocation::new(d.join("alloc_events"));
+    let none = HashMap::new();
+    let fails = |a: &mut Allocation, at: i64| a.record_more(&snap(at, Vec::new(), Vec::new()), &none).iter().filter(|(t, _)| *t == "alloc.hours_failed").count();
+    assert_eq!(fails(&mut a, NOW + 60), 1);
+    assert_eq!(fails(&mut a, NOW + 120), 0, "still failing, already said");
+    fs::remove_file(&blocker).unwrap();
+    assert_eq!(fails(&mut a, NOW + 180), 0, "works again");
+    fs::remove_dir_all(&blocker).unwrap();
+    fs::write(&blocker, "").unwrap();
+    assert_eq!(fails(&mut a, NOW + 3600 + 60), 1, "a new failure is said");
     fs::remove_dir_all(&d).unwrap();
 }

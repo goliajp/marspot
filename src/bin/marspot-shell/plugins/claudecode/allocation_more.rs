@@ -28,9 +28,11 @@ pub(super) const USER_S: i64 = 600;
 /// What the scan knows of a pane beyond its transcript.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Hold {
-    /// A process runs under claude that is not on the resting list.
-    pub child: bool,
-    pub timer: bool,
+    /// A process runs under claude that is not on the resting list;
+    /// `None` when the process tree was not read, which holds a move as
+    /// the mover itself does.
+    pub child: Option<bool>,
+    pub timer: Option<bool>,
     /// It is a helper, or helpers work for it.
     pub helpers: bool,
     pub focus: bool,
@@ -52,11 +54,13 @@ pub(super) struct More {
     /// Per account, the reading last written; `None` before the files are read.
     readings: Option<HashMap<u8, String>>,
     pub(super) hours: Hours,
+    /// The roll-up failed and said so; quiet until it works again.
+    hours_failing: bool,
 }
 
 impl More {
     pub(super) fn new(hours: Hours) -> Self {
-        More { turns: Turns::default(), panes: HashMap::new(), readings: None, hours }
+        More { turns: Turns::default(), panes: HashMap::new(), readings: None, hours, hours_failing: false }
     }
 }
 
@@ -86,12 +90,22 @@ impl Allocation {
             let detail = boundary_detail(&self.more.turns, t, hold, self.context_of(p), now);
             self.event(now, p.sid, "boundary", Some(p.profile), p.class, detail, &mut log);
         }
-        let live: std::collections::HashSet<&Path> = snap.panes.iter().filter_map(|p| p.transcript.as_deref()).collect();
-        self.more.turns.retain(|t| live.contains(t));
+        // without the usage feed no pane is listed, and dropping every
+        // watch would read each transcript again and lose the compactions
+        // in between
+        if snap.feed_at.is_some() {
+            let live: std::collections::HashSet<&Path> = snap.panes.iter().filter_map(|p| p.transcript.as_deref()).collect();
+            self.more.turns.retain(|t| live.contains(t));
+        }
         self.more.panes.retain(|sid, _| snap.live.contains(sid));
         self.readings(&snap.accounts, now, &mut log);
-        if let Err(e) = self.more.hours.tick(&self.events, now) {
-            log.push(("alloc.hours_failed", format!("{e}")));
+        match self.more.hours.tick(&self.events, now) {
+            Err(e) if !self.more.hours_failing => {
+                self.more.hours_failing = true;
+                log.push(("alloc.hours_failed", format!("{e}")));
+            }
+            Err(_) => {}
+            Ok(_) => self.more.hours_failing = false,
         }
         log
     }
@@ -124,19 +138,22 @@ impl Allocation {
 /// `holds=` names what would hold a move at this turn end, `-` when
 /// nothing does; then each part on its own.
 fn boundary_detail(turns: &Turns, transcript: &Path, h: Hold, tokens: Option<u64>, now: i64) -> String {
-    let open = turns.open(transcript, h.child, now);
+    // an unread process tree holds, as it does for the mover
+    let (child, timer) = (h.child.unwrap_or(true), h.timer.unwrap_or(true));
+    let open = turns.open(transcript, child, now);
     let user = open.prompt_at.is_some_and(|at| now - at < USER_S);
-    let parts = [("tasks", open.tasks > 0), ("helpers", h.helpers), ("child", h.child), ("timer", h.timer), ("user", user), ("focus", h.focus)];
+    let parts = [("tasks", open.tasks > 0), ("helpers", h.helpers), ("child", child), ("timer", timer), ("user", user), ("focus", h.focus)];
     let holds: Vec<&str> = parts.iter().filter(|(_, on)| *on).map(|(k, _)| *k).collect();
     let b = |on: bool| u8::from(on);
+    let known = |v: Option<bool>| v.map_or_else(|| "-".to_string(), |on| b(on).to_string());
     format!(
         "holds={} tasks={} oldest_s={} helpers={} child={} timer={} user={} focus={} tokens={}",
         if holds.is_empty() { "-".to_string() } else { holds.join(",") },
         open.tasks,
         open.oldest_s.map_or_else(|| "-".to_string(), |s| s.to_string()),
         b(h.helpers),
-        b(h.child),
-        b(h.timer),
+        known(h.child),
+        known(h.timer),
         b(user),
         b(h.focus),
         tokens.map_or_else(|| "-".to_string(), |t| t.to_string()),

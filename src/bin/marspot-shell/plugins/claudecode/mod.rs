@@ -399,6 +399,7 @@ mod tests {
     mod cycle_clicks;
     mod fable_refused;
     mod reset_read;
+    mod boundary_holds;
     mod support;
     use support::*;
 
