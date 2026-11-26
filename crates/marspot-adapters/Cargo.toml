@@ -1,0 +1,17 @@
+[package]
+name = "marspot-adapters"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+# How each agent CLI writes its records, read as pure functions: bytes
+# in, the shared types of marspot-agent out.  Reads no file, starts no
+# thread, links nothing that draws and no messaging code.
+
+[dependencies]
+marspot-agent = { path = "../marspot-agent" }
+marspot-json = { path = "../marspot-json" }
+
+[lints]
+workspace = true

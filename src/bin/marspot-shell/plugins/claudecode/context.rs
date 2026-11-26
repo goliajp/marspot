@@ -200,3 +200,7 @@ mod tests {
         std::fs::remove_file(&p).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "fold_check_tests.rs"]
+mod fold_check_tests;
