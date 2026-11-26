@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.788"  # marspot-term gains the claude.model setting
-core    = "0.12.720"  # the settings panel offers guarding the default model all Claude Code accounts share
+shell   = "0.7.789"  # the lib gains the notice card over a pane (not shown by shell itself)
+core    = "0.12.721"  # a notice from the shell is shown over the focused pane for twelve seconds
 session = "0.11.469"  # marspot-term gains the claude.model setting (not used by session)

@@ -120,6 +120,7 @@ pub(super) fn decode_frame(t: MsgType, payload: &[u8]) -> Option<CoreEvent> {
         | MsgType::PanePlace
         | MsgType::PaneSize
         | MsgType::StripKeys => Some(CoreEvent::ShellPaneControl(Frame::new(t, payload.to_vec()))),
+        MsgType::Notice => marspot::shell_proto::decode_notice(payload).ok().map(CoreEvent::Notice),
         MsgType::HelperStrip => marspot::shell_proto::decode_helper_strip(payload)
             .ok()
             .map(CoreEvent::HelperStrip),

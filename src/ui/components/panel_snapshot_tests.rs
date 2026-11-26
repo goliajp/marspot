@@ -145,7 +145,7 @@ pub(super) fn snapshot_on(
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 1,
     };
     open(renderer, &layout);
