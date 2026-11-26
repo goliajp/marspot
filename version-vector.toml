@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.751"  # the claude record fold is compared with the four readers it is to replace (tests only)
+shell   = "0.7.752"  # every image replacement goes through one exit that walks a hook table
 core    = "0.12.711"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
 session = "0.11.461"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository, as the other build scripts do

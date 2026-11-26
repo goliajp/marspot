@@ -117,11 +117,10 @@ fn new_image() {
 #[test]
 fn exec_prep_both_self_execs_go_through_the_prepared_exec() {
     let src = include_str!("../../self_exec.rs");
-    assert_eq!(src.matches(".exec()").count(), 1, "one exec, inside exec_prepared");
     assert_eq!(src.matches("exec_prepared(&mut cmd)").count(), 2, "the update and the re-registration");
     let prepared = &src[src.find("fn exec_prepared").unwrap()..];
-    let (close, exec) = (prepared.find("close_inboxes()").expect("it closes the inboxes"), prepared.find(".exec()").unwrap());
-    assert!(close < exec, "before the exec");
+    let exit = prepared.find("exec_hooks::exec_prepared(cmd)").expect("the exec goes through the shell's exit");
+    assert!(prepared.find("close_inboxes()").expect("it closes the inboxes") < exit, "before the exec");
 }
 
 /// A worker that does not take the event: the close gives up at its

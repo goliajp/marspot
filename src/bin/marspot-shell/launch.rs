@@ -281,12 +281,9 @@ pub(crate) fn maybe_redirect_to_current_shell() {
         .parent()
         .map(|d| d.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("/"));
-    let err = std::process::Command::new(&current)
-        .arg0(arg0)
-        .args(args.iter().skip(1))
-        .env("MARSPOT_NO_REDIRECT", "1")
-        .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
-        .exec();
+    let mut cmd = std::process::Command::new(&current);
+    cmd.arg0(arg0).args(args.iter().skip(1)).env("MARSPOT_NO_REDIRECT", "1").env("MARSPOT_BUNDLE_DIR", &bundle_dir);
+    let err = crate::platform::exec_hooks::exec_prepared(&mut cmd);
     // exec only returns on failure.
     lx_error!(
         "shell.redirect_failed",
