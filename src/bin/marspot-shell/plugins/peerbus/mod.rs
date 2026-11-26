@@ -178,8 +178,8 @@ impl Plugin for PeerbusPlugin {
         }
         let settled = self.sent.is_empty()
             && self.config_seen == super::agents::changes::count()
-            && crate::plugins::gemini::peers() == self.sent_gemini
-            && crate::plugins::kimi::peers() == self.sent_kimi
+            && crate::plugins::gemini::peers().as_deref() == self.sent_gemini.as_ref()
+            && crate::plugins::kimi::peers().as_deref() == self.sent_kimi.as_ref()
             && !crate::observe::shared().latest().live().any(|s| crate::plugins::codex::pane_codex(s).is_some());
         match self.names_at {
             Some(t) if settled => super::TickDue::At(t),
@@ -220,19 +220,19 @@ impl Plugin for PeerbusPlugin {
         }
         // what the gemini plugin last published: memory, like the title
         if !gone
-            && let Some(gemini) = crate::plugins::gemini::peers().filter(|g| self.sent_gemini.as_ref() != Some(g))
+            && let Some(gemini) = crate::plugins::gemini::peers().filter(|g| self.sent_gemini.as_ref() != Some(&**g))
         {
-            match offer(Event::Gemini(gemini.clone())) {
-                Some(true) => self.sent_gemini = Some(gemini),
+            match offer(Event::Gemini((*gemini).clone())) {
+                Some(true) => self.sent_gemini = Some(std::sync::Arc::unwrap_or_clone(gemini)),
                 Some(false) => {}
                 None => gone = true,
             }
         }
         if !gone
-            && let Some(kimi) = crate::plugins::kimi::peers().filter(|k| self.sent_kimi.as_ref() != Some(k))
+            && let Some(kimi) = crate::plugins::kimi::peers().filter(|k| self.sent_kimi.as_ref() != Some(&**k))
         {
-            match offer(Event::Kimi(kimi.clone())) {
-                Some(true) => self.sent_kimi = Some(kimi),
+            match offer(Event::Kimi((*kimi).clone())) {
+                Some(true) => self.sent_kimi = Some(std::sync::Arc::unwrap_or_clone(kimi)),
                 Some(false) => {}
                 None => gone = true,
             }

@@ -20,7 +20,7 @@ impl CodexPlugin {
         }
         let Some(home) = codex_home() else { return };
         let Some(installed) = update::installed_cli(&home) else { return };
-        let mut threads = crate::plugins::peerbus::threads();
+        let mut threads = std::collections::HashMap::clone(&crate::plugins::peerbus::threads());
         threads.extend(dev_threads(&home, panes));
         for (sid, codex, argv) in panes {
             let Some(running) = self.refresher.release_of(*codex) else { continue };

@@ -95,7 +95,7 @@ impl Checker {
         let suspects = self.watch.check(&s, &mut self.probe);
         self.log_suspects(&suspects, now);
         self.orphans(&obs, &in_pane, &known, now, &l);
-        let reach = crate::plugins::claudecode::reach().into_iter().map(|p| (p.sid, p)).collect();
+        let reach = crate::plugins::claudecode::reach().iter().map(|p| (p.sid, p.clone())).collect();
         let files = &self.files;
         let turn_ended = |sid: u64| files.get(&sid).is_some_and(|f| f.log.main.turn_ended.is_some());
         let cx = Cx { notify, now, scale, dir: &self.dir, reach: &reach, turn_ended: &turn_ended };

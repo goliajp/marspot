@@ -13,7 +13,8 @@ pub(in crate::plugins) mod notice_turn;
 pub(in crate::plugins) mod turns;
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+
+use crate::host::published::Published;
 
 /// How a notice to a helper's parent begins.
 pub(in crate::plugins) const NOTICE_HEAD: &str = "[marspot helper notice]";
@@ -77,29 +78,40 @@ const CHANGES_CAP: usize = 64;
 
 type Waker = std::sync::Arc<dyn Fn() + Send + Sync>;
 
+#[derive(Clone, Default)]
 struct Changes {
     queue: VecDeque<AccountChanged>,
     wake: Option<Waker>,
 }
 
+impl PartialEq for Changes {
+    fn eq(&self, other: &Self) -> bool {
+        let same_wake = match (&self.wake, &other.wake) {
+            (Some(a), Some(b)) => std::ptr::addr_eq(std::sync::Arc::as_ptr(a), std::sync::Arc::as_ptr(b)),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        same_wake && self.queue == other.queue
+    }
+}
+
 // process-global: its tests rely on nextest running each test in its own process
-static CHANGES: Mutex<Changes> = Mutex::new(Changes { queue: VecDeque::new(), wake: None });
+static CHANGES: Published<Changes> = Published::new();
 
 /// Called after each change is queued, so its reader need not look for
 /// changes on a timer.  Replaces any earlier one.
 pub(in crate::plugins) fn on_account_changed(wake: Waker) {
-    CHANGES.lock().unwrap_or_else(|e| e.into_inner()).wake = Some(wake);
+    CHANGES.update(|c| c.wake = Some(wake));
 }
 
 pub(in crate::plugins) fn account_changed(change: AccountChanged) {
-    let mut c = CHANGES.lock().unwrap_or_else(|e| e.into_inner());
-    if c.queue.len() == CHANGES_CAP {
-        c.queue.pop_front();
-    }
-    c.queue.push_back(change);
-    // called unlocked: the waker may well drain the queue itself
-    let wake = c.wake.clone();
-    drop(c);
+    let wake = CHANGES.update(|c| {
+        if c.queue.len() == CHANGES_CAP {
+            c.queue.pop_front();
+        }
+        c.queue.push_back(change);
+        c.wake.clone()
+    });
+    // called after the update: the waker may well drain the queue itself
     if let Some(wake) = wake {
         wake();
     }
@@ -107,7 +119,7 @@ pub(in crate::plugins) fn account_changed(change: AccountChanged) {
 
 /// Every change queued since the last call, oldest first.
 pub(in crate::plugins) fn drain_account_changes() -> Vec<AccountChanged> {
-    CHANGES.lock().unwrap_or_else(|e| e.into_inner()).queue.drain(..).collect()
+    CHANGES.update(|c| c.queue.drain(..).collect())
 }
 
 #[cfg(test)]

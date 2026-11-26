@@ -24,13 +24,14 @@ use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::waste;
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, KAPPA_FABLE, Quant};
+use crate::host::published::Published;
 
 /// Why a pane that has to move stays where it is.
 pub(super) const ALL_OUT: &str = "every account is out";
 pub(super) const NOWHERE: &str = "nowhere else to go";
 
 /// The last sweep's view, for a helper started between sweeps.
-static LAST: std::sync::Mutex<Option<View>> = std::sync::Mutex::new(None);
+static LAST: Published<View> = Published::new();
 
 /// One pane in the plan: session, account, class, speed (weeks an
 /// hour), and whether it is a helper.
@@ -94,7 +95,7 @@ impl View {
 
     /// Keep this view for the helpers started before the next sweep.
     pub(super) fn publish(&self) {
-        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.clone());
+        LAST.publish(self.clone());
     }
 
     /// What a helper started now reads: the accounts as `accounts` read
@@ -102,8 +103,8 @@ impl View {
     /// last sweep had them.  Before any sweep has published a view no
     /// helper pane is known either way, so none is said to be shown.
     pub(super) fn helper_start_scene(now: i64, accounts: Vec<AccountIn>, rooms: &[(u8, Room)]) -> Scene {
-        let last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        let mut scene = View::for_click(now, accounts, last.as_ref()).helper_scene(rooms, None);
+        let last = LAST.get();
+        let mut scene = View::for_click(now, accounts, last.as_deref()).helper_scene(rooms, None);
         if last.is_none() {
             scene.shown = None;
         }

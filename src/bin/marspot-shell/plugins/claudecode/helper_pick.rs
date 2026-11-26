@@ -15,7 +15,6 @@
 //! account it reads, and a batch on such accounts is spread by count.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use marspot::cc_usage::CcUsage;
 
@@ -30,6 +29,7 @@ use crate::plugins::allocation::helper::{Placement, Scene, place};
 use crate::agentsvc::sched::Made;
 use crate::plugins::allocation::replay::{Inputs, Rule, Why};
 use crate::plugins::allocation::{Class, Quant, RHO0};
+use crate::host::published::Published;
 
 #[path = "helper_placed.rs"]
 mod placed_tally;
@@ -45,12 +45,11 @@ pub(in crate::plugins) enum Pool {
 
 /// One tally per pool, shared by the helpers' start and by a refused
 /// helper's move, which both place helpers on accounts.
-static PLACED: Mutex<[Placed; 3]> = Mutex::new([Placed::new(), Placed::new(), Placed::new()]);
+static PLACED: Published<[Placed; 3]> = Published::new();
 
 /// Run `f` on the tally of `pool`.
 pub(in crate::plugins) fn placed<R>(pool: Pool, f: impl FnOnce(&mut Placed) -> R) -> R {
-    let mut all = PLACED.lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut all[pool as usize])
+    PLACED.update(|all| f(&mut all[pool as usize]))
 }
 
 /// The class a helper on `model` is placed as: restricted where the

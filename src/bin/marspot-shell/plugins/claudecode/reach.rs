@@ -5,10 +5,11 @@
 //! long; the person's cursor), whether the pane's account refuses it,
 //! and whether its claude was put to rest.
 
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::ClaudecodePlugin;
+use crate::host::published::Published;
 use crate::plugins::PluginHost;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -26,15 +27,15 @@ pub(crate) struct PaneReach {
     pub dormant: bool,
 }
 
-static REACH: Mutex<Vec<PaneReach>> = Mutex::new(Vec::new());
+static REACH: Published<Vec<PaneReach>> = Published::new();
 
 /// Every claude pane's reach as of the last scan.
-pub(crate) fn reach() -> Vec<PaneReach> {
-    REACH.lock().unwrap().clone()
+pub(crate) fn reach() -> Arc<Vec<PaneReach>> {
+    REACH.get().unwrap_or_default()
 }
 
 fn publish(panes: Vec<PaneReach>) {
-    *REACH.lock().unwrap() = panes;
+    REACH.publish(panes);
 }
 
 impl ClaudecodePlugin {
@@ -81,7 +82,7 @@ mod tests {
     fn zombie_reach_is_what_was_last_published() {
         let p = PaneReach { sid: 7, claude_pid: 10, awaiting_since: Some(5), ..PaneReach::default() };
         publish(vec![p.clone()]);
-        assert_eq!(reach(), vec![p]);
+        assert_eq!(*reach(), vec![p]);
         publish(Vec::new());
     }
 }

@@ -22,9 +22,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::host::published::Published;
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION, TickDue};
 
 mod asking;
@@ -104,7 +105,7 @@ pub(super) struct Shared {
     /// the table's; the state lock is taken only for the apply.
     writing: Mutex<()>,
     /// The table as last changed, for `helper.list`.
-    published: RwLock<Arc<Table>>,
+    published: Published<Table>,
     /// The queue of the worker of the latest start.
     jobs: Mutex<Option<SyncSender<work::Job>>>,
     /// A `Wake` sits in the queue: one is enough.
@@ -194,7 +195,7 @@ impl Shared {
         Shared {
             state: Mutex::new(State::default()),
             writing: Mutex::new(()),
-            published: RwLock::new(Arc::new(Table::default())),
+            published: Published::with(Table::default()),
             jobs: Mutex::new(None),
             wake_queued: AtomicBool::new(false),
             parked: AtomicBool::new(false),
@@ -262,7 +263,11 @@ impl Shared {
                 st.child_gone.insert(p, now);
             }
         }
-        *self.published.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(st.table.clone());
+        // the strips read more of the state than the table: a write that
+        // leaves the table as it was still has them made again
+        if !self.published.publish(st.table.clone()) {
+            self.strip_changed();
+        }
         drop(guard);
         if contained && matches!(ev, Event::Stopped { .. }) {
             container::remove_later(sid, self.root());
@@ -278,7 +283,7 @@ impl Shared {
     }
 
     fn table(&self) -> Arc<Table> {
-        Arc::clone(&self.published.read().unwrap_or_else(|p| p.into_inner()))
+        self.published.get().unwrap_or_default()
     }
 
     fn input_seen(&self, sid: u64) {
