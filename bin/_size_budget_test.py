@@ -12,6 +12,7 @@ build needing it is refused.
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -199,6 +200,37 @@ def _raise_checks(root, work, failures):
     with _Undo(root):
         p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "marspot-peer.raw.tsv"), root)
         _expect(any("must be needed by the build" in x for x in p), f"unneeded raise accepted: {p}", failures)
+        _expect(sb.check(root) == [], "a refused set changed the tree", failures)
+        p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "marspot-peer.raw.tsv"), root)
+        _expect(any("must be needed by the build" in x for x in p), f"a second set raised it: {p}", failures)
+    with _Undo(root):
+        _edit_table(root, "marspot-peer", lambda l: f"# budget\t{0x40000}\n" if l.startswith("# budget\t") else l)
+        p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "marspot-peer.raw.tsv"), root)
+        _expect(any("edited since" in x for x in p), f"table edit then set raised it: {p}", failures)
+    with _Undo(root):
+        bad = os.path.join(work, "badsum.tsv")
+        text = open(os.path.join(work, "marspot-peer.raw.tsv")).read()
+        open(bad, "w").write(re.sub(r"# file_bytes\t\d+", f"# file_bytes\t{0x38000}", text))
+        p = sb.set_budget("marspot-peer", 0x38000, bad, root)
+        _expect(any("add up to" in x for x in p), f"rows not adding up accepted: {p}", failures)
+        _expect(sb.check(root) == [], "a set refused by its table changed the tree", failures)
+    with _Undo(root):
+        p = sb.set_budget("marspot-peer", 0x100, os.path.join(work, "marspot-peer.raw.tsv"), root)
+        _expect(any("under the measured" in x for x in p), f"lower under measured accepted: {p}", failures)
+        _expect(sb.check(root) == [], "a refused lower changed the tree", failures)
+    with _Undo(root):
+        b = json.load(open(os.path.join(root, sb.BUDGET_FILE)))
+        del b["0.18"]["marspot-peer"]
+        json.dump(b, open(os.path.join(root, sb.BUDGET_FILE), "w"))
+        open(os.path.join(root, "Cargo.toml"), "w").write('[package]\nname = "marspot"\nversion = "0.19.0"\n')
+        raw19 = os.path.join(work, "peer19.tsv")
+        open(raw19, "w").write(open(os.path.join(work, "marspot-peer.raw.tsv")).read().replace("0.18.", "0.19."))
+        p = sb.set_budget("marspot-peer", 0x40000, raw19, root)
+        _expect(any("must be needed by the build" in x for x in p), f"json delete then set at 0.19: {p}", failures)
+    with _Undo(root):
+        _edit_budget(root, "marspot-peer", 0x40000)
+        p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "marspot-peer.raw.tsv"), root)
+        _expect(any("must be needed by the build" in x for x in p), f"json edit then set raised it: {p}", failures)
     with _Undo(root):
         big = os.path.join(work, "big")
         _fake_macho(big, 0x38000)

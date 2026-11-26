@@ -46,6 +46,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -85,10 +86,12 @@ def minor_in_force(budgets, minor):
     return max(lower, key=_minor_key) if lower else None
 
 
-def _entry_in_force(budgets, minor, name):
-    """The newest key at or below `minor` with a budget for `name`."""
-    keys = [k for k, v in budgets.items() if re.fullmatch(r"\d+\.\d+", k)
-            and _minor_key(k) <= _minor_key(minor) and name in v]
+def _table_minor(root, minor, name, below=False):
+    """The newest minor at (or below) `minor` with a table on disk for `name`."""
+    d = os.path.join(root, TABLE_DIR)
+    keys = [k for k in (os.listdir(d) if os.path.isdir(d) else []) if re.fullmatch(r"\d+\.\d+", k)
+            and os.path.exists(table_path(root, k, name))
+            and (_minor_key(k) < _minor_key(minor) if below else _minor_key(k) <= _minor_key(minor))]
     return max(keys, key=_minor_key) if keys else None
 
 
@@ -163,6 +166,7 @@ def _check_raise(root, minor, name, e, prev):
     if prev == "none":
         lower = [k for k, v in load(root).items() if re.fullmatch(r"\d+\.\d+", k)
                  and _minor_key(k) < _minor_key(minor) and name in v]
+        lower += [k for k in [_table_minor(root, minor, name, below=True)] if k]
         return [f"{where}: previous_budget none, but {lower[0]} has a budget"] if lower else []
     if not (prev or "").isdigit():
         return [f"{where}: table records no previous_budget"]
@@ -210,27 +214,51 @@ def set_budget(name, budget, raw_path, root):
         raise SystemExit(f"{raw_path} is a table for {head.get('binary')!r}, not {name}")
     minor = minor_of(head["version"])
     budgets = load(root)
-    prev_minor = _entry_in_force(budgets, minor, name)
+    if budget < int(head["file_bytes"]):
+        return [f"{name} {minor}: budget {budget} is under the measured {head['file_bytes']}"]
+    # the budget being replaced comes from the table on disk it replaces,
+    # whose checksum covers it: an edited json cannot feed a raise back in
+    prev_minor = _table_minor(root, minor, name)
     previous = {}
-    head["previous_budget"] = budgets[prev_minor][name]["budget"] if prev_minor else "none"
+    head["previous_budget"] = "none"
     if prev_minor:
         prev_head, previous = read_table(table_path(root, prev_minor, name))
+        if prev_head.get("checksum") != checksum(prev_head, previous):
+            return [f"{name} {prev_minor}: the table being replaced was edited since `set` wrote it"]
+        head["previous_budget"] = prev_head.get("budget", "none")
         head["previous"] = f"{prev_minor} {prev_head.get('file_bytes')}"
+    refused = _check_raise(root, minor, name, {"budget": budget, "measured": int(head["file_bytes"])},
+                           head["previous_budget"])
+    if refused:
+        return refused
     head["budget"] = budget
     head["checksum"] = checksum({k: str(v) for k, v in head.items()}, rows)
-    write_table(table_path(root, minor, name), head, rows, previous)
     budgets.setdefault(minor, {})[name] = {"budget": budget, "measured": int(head["file_bytes"])}
+    # everything check() would say about this binary is said before the tree is touched
+    with tempfile.TemporaryDirectory() as stage:
+        copy_budgets(root, stage)
+        _write_budget(stage, minor, name, head, rows, previous, budgets)
+        refused = [p for p in check(stage) if p.startswith(f"{name} ")]
+    if refused:
+        return refused
+    _write_budget(root, minor, name, head, rows, previous, budgets)
+    return check(root)
+
+
+def _write_budget(root, minor, name, head, rows, previous, budgets):
+    write_table(table_path(root, minor, name), head, rows, previous)
     with open(os.path.join(root, BUDGET_FILE), "w") as f:
         json.dump(budgets, f, indent=2)
         f.write("\n")
-    return check(root)
 
 
 def copy_budgets(src_root, dst_root):
     """Give a throwaway gate root the budgets of a tree: the size rows read them from where they run."""
     import shutil
-    shutil.copytree(os.path.join(src_root, TABLE_DIR), os.path.join(dst_root, TABLE_DIR))
+    if os.path.isdir(os.path.join(src_root, TABLE_DIR)):
+        shutil.copytree(os.path.join(src_root, TABLE_DIR), os.path.join(dst_root, TABLE_DIR))
     for f in ("Cargo.toml", BUDGET_FILE):
+        os.makedirs(os.path.dirname(os.path.join(dst_root, f)) or dst_root, exist_ok=True)
         shutil.copy(os.path.join(src_root, f), os.path.join(dst_root, f))
 
 

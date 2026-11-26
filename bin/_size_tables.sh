@@ -8,7 +8,7 @@
 #   tables   sum each map by crate and module into
 #            bench/results/size-tables/<binary>.tsv (bin/_size_budget.py
 #            raw); refused when a binary differs in size from the
-#            shipped one, where that exists
+#            shipped one
 #
 # Run through `bin/bench-remote.sh --size-tables`: the tables come back in
 # bench/remote-runs/<ts>/size-tables/, and `bin/_size_budget.py set` turns
@@ -43,14 +43,15 @@ case "${1:-}" in
     for bin in $BINS; do
       size="$(stat -f%z "$TD/release/$bin")"
       shipped="$(marspot_bin "$bin")"
-      note=""
-      if [[ -f $shipped ]]; then
-        if [[ "$(stat -f%z "$shipped")" != "$size" ]]; then
-          echo "$bin: the mapped build is $size bytes, the shipped $shipped $(stat -f%z "$shipped"): refusing" >&2
-          exit 1
-        fi
-        note=" (= shipped)"
+      if [[ ! -f $shipped ]]; then
+        echo "$bin: no shipped binary at $shipped to compare the mapped build with: refusing" >&2
+        exit 1
       fi
+      if [[ "$(stat -f%z "$shipped")" != "$size" ]]; then
+        echo "$bin: the mapped build is $size bytes, the shipped $shipped $(stat -f%z "$shipped"): refusing" >&2
+        exit 1
+      fi
+      note=" (= shipped)"
       python3 "$ROOT/bin/_size_budget.py" raw "$MAPS/$bin.map" "$TD/release/$bin" "$bin" "$OUT/$bin.tsv" "$ROOT"
       printf "    %-16s %s bytes%s -> %s\n" "$bin" "$size" "$note" "$OUT/$bin.tsv"
     done
