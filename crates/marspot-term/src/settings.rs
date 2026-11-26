@@ -147,8 +147,8 @@ pub struct Settings {
     ///
     /// A setting because a move restarts the pane's claude: the
     /// conversation resumes, but its prompt cache does not come along.
-    /// `dryrun` (default; also the old `on`/`true` and unknown words) logs each move with every
-    /// input that chose it and moves nothing; only `live` moves; `off`/`false` do neither.
+    /// `live` (default; also `on`/`true`) moves; `dryrun` (also unknown words) logs each move
+    /// with every input that chose it and moves nothing; `off`/`false` do neither.
     /// Leaving an account that runs short and moving a refused pane are not this setting's.
     pub cc_rebalance: Rebalance,
     /// What the kimi and gemini plugins do with the shared allocation, see [`AgentAllocation`].
@@ -179,7 +179,7 @@ impl Default for Settings {
             cc_statusline_hook: true,
             codex_follow_updates: true,
             agents_install: true,
-            cc_rebalance: Rebalance::DryRun,
+            cc_rebalance: Rebalance::Live,
             kimi_allocation: AgentAllocation::Off,
             gemini_allocation: AgentAllocation::Off,
             helper_strip: true,
@@ -503,31 +503,6 @@ mod tests {
         assert_eq!(value_of(&off, "agents.install"), "false");
         let kept = parse(&render(&off, "agents.install = false\n"));
         assert!(!kept.agents_install, "a rewrite keeps it off");
-    }
-
-    /// The three rebalance modes read back as written and a rewrite
-    /// keeps them.  The words an older build wrote for a rule that is
-    /// gone, `on` and `true`, read as a dry run, as does a word that is
-    /// none of them: only `live` moves.
-    #[test]
-    fn rebalance_moves_only_when_live() {
-        for (word, want) in [
-            ("live", Rebalance::Live),
-            ("dryrun", Rebalance::DryRun),
-            ("off", Rebalance::Off),
-            ("on", Rebalance::DryRun),
-            ("true", Rebalance::DryRun),
-            ("ON", Rebalance::DryRun),
-            ("false", Rebalance::Off),
-            ("maybe", Rebalance::DryRun),
-        ] {
-            let body = format!("claudecode.rebalance = {word}\n");
-            let s = parse(&body);
-            assert_eq!(s.cc_rebalance, want, "{word}");
-            assert_eq!(parse(&render(&s, &body)).cc_rebalance, want, "{word} after a rewrite");
-        }
-        assert_eq!(parse("claudecode.rebalance = off\nclaudecode.rebalance = maybe\n").cc_rebalance, Rebalance::DryRun, "unknown is a dry run, not the line before");
-        assert_eq!(value_of(&parse("claudecode.rebalance = live\n"), "claudecode.rebalance"), "live");
     }
 
     /// The kimi allocation is off unless the file says `dryrun` or

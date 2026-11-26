@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.731"  # the placement objective compares accounts over one span, keeps refusals out first, weighs a move by its context and logs its weights; a helper gets Fable only where it takes nothing from the other panes
-core    = "0.12.700"  # the process monitor lists what closed panes left running and ends every process by pid and start time
-session = "0.11.454"  # a pty the parsing loop gives back dry is lent again on the reader's next full chunk, on the rate taken before, and what the loop read before it found the pty dry counts
+shell   = "0.7.732"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
+core    = "0.12.701"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
+session = "0.11.455"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
