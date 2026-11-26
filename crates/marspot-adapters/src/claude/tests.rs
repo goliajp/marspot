@@ -72,3 +72,14 @@ fn claude_fold_from_the_middle_skips_the_line_it_landed_in() {
     assert_eq!(st.called_tool, None, "not read from the top");
     assert_eq!(st.tasks.tasks()[0].started.map(|s| s.known_call), Some(false), "a result whose call was not read");
 }
+
+#[test]
+fn claude_fold_from_the_end_of_a_file_counts_the_first_appended_record() {
+    let before = record_of(&[RESULT, END]);
+    let bytes = [before.clone(), record_of(&[CALL, END])].concat();
+    let (mut st, mut seen) = (RecordFold::from_boundary(before.len() as u64), Seen::default());
+    fold(&bytes[before.len()..], &mut st, &mut seen);
+    assert_eq!(seen.replies.len(), 1, "the first record after the start is whole");
+    assert_eq!((st.spent.output, st.ctx_tokens), (20, Some(1023)));
+    assert_eq!(st.at, bytes.len() as u64);
+}

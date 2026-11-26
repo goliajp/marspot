@@ -15,10 +15,15 @@
 //! them.  A second writer (another log on the same directory in this
 //! process, or another marspot-shell process such as a command-line
 //! mode) does not wait: its append fails with `WouldBlock`, writes
-//! nothing, and the caller decides what the fact is worth; its next
-//! append tries the lock again.  The descriptor is close-on-exec, so an
-//! exec releases the lock and the new image takes it at its first
-//! append.
+//! nothing, and the caller decides what the fact is worth.  Its next
+//! append asks for the lock again and fails the same way for as long as
+//! the holder keeps the day open, which for the running L1 is the whole
+//! day: a command-line marspot-shell cannot write a day L1 is writing.
+//! The descriptor is close-on-exec, so an exec releases the lock and the
+//! new image takes it at its first append.  A child forked just before
+//! (the launch of core) shares the locked description until its own
+//! exec, so the new image's first append in that moment can fail with
+//! `WouldBlock` too.
 //!
 //! A last line an earlier process left cut short is cut off on open: it
 //! was never a whole fact.  Days older than `keep_days` are deleted when

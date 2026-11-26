@@ -195,12 +195,23 @@ impl RecordFold {
         }
     }
 
-    /// A fold of a record read from `at` on; the line there is skipped
-    /// unless `at` is 0.
+    /// A fold of a record read from `at` on, where `at` may fall inside
+    /// a line (a tail of the last so many bytes); the line there is
+    /// skipped unless `at` is 0.
     pub fn from(at: u64) -> RecordFold {
         if at == 0 {
             return RecordFold::from_start();
         }
         RecordFold { at, mid_record: true, called_tool: None, ..RecordFold::from_start() }
+    }
+
+    /// A fold of a record read from `at` on, where `at` is known to start
+    /// a line, such as the end of the file when watching began: the
+    /// first line from there is folded.
+    pub fn from_boundary(at: u64) -> RecordFold {
+        if at == 0 {
+            return RecordFold::from_start();
+        }
+        RecordFold { at, called_tool: None, ..RecordFold::from_start() }
     }
 }

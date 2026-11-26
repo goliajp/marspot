@@ -118,21 +118,10 @@ pub(super) fn paths(sources: &[(String, String)]) -> Vec<Found> {
     scan.found.into_iter().map(|(path, file)| Found { file, path }).collect()
 }
 
-/// The rows a path today's source builds may fall under.  Not the
-/// catch-alls, which would vouch for anything; not what only older
-/// builds left; not a whole tree that belongs to another program (a
-/// helper agent's home): a path marspot builds there is a file marspot
-/// uses and needs a row of its own.
-fn rows_for_source() -> impl Iterator<Item = &'static super::Entry> {
-    super::STATE_MAP.iter().filter(|e| {
-        !e.path.starts_with("**") && e.writer != super::LEFT_BEHIND && !(e.kind == super::Kind::External && e.path.ends_with("/**"))
-    })
-}
-
 /// Whether the state map knows `path`, for some filling of its holes:
 /// a file of some row, or a directory some row puts files under.
 pub(super) fn registered(path: &str) -> bool {
-    rows_for_source().any(|e| super::pattern::matches(e.path, path) || super::pattern::is_dir_of(e.path, path)) || is_tmp_of_registered(path)
+    super::source_rows().any(|e| super::pattern::matches(e.path, path) || super::pattern::is_dir_of(e.path, path)) || is_tmp_of_registered(path)
 }
 
 /// The temporary half of an atomic replace (`f.tmp`, `f.<ext>.tmp`,
@@ -142,7 +131,7 @@ fn is_tmp_of_registered(path: &str) -> bool {
     if !path.ends_with(".tmp") {
         return false;
     }
-    rows_for_source().any(|e| {
+    super::source_rows().any(|e| {
         let (dir, name) = e.path.rsplit_once('/').map_or(("", e.path), |(d, n)| (d, n));
         let dotted = if dir.is_empty() { format!(".{name}.tmp") } else { format!("{dir}/.{name}.tmp") };
         [format!("{}.tmp", e.path), eval::with_extension(e.path, "tmp"), dotted].iter().any(|t| super::pattern::matches(t, path))
