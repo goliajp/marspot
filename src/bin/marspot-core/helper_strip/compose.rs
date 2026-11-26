@@ -34,8 +34,10 @@ pub(in super::super) enum State {
     Done,
     Failed,
     Stopped,
-    /// It waits for an answer.
+    /// It waits for an approval.
     Awaiting,
+    /// It waits for the answer to a question it asked.
+    Asked,
 }
 
 /// Which way its tokens go: up until it has called a tool.
@@ -273,7 +275,7 @@ impl Ink {
         let dot = match row.state {
             State::Done => theme.success(viewed),
             State::Failed | State::Stopped => theme.error(viewed),
-            State::Running | State::Awaiting | State::Idle => task,
+            State::Running | State::Awaiting | State::Asked | State::Idle => task,
         };
         let name = if row.named && !picked { Theme::plain(viewed) } else { task };
         Self { dot, name, task, figures: quiet }

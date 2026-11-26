@@ -23,7 +23,7 @@ impl CoreApp {
             return false;
         };
         self.pane_control.shadows.peeks.held.swallowed(&event.logical);
-        if matches!(state, State::Running | State::Awaiting | State::Idle) {
+        if matches!(state, State::Running | State::Awaiting | State::Asked | State::Idle) {
             lx_event!("HELPER_STRIP_STOP", "x in the strip stops a helper", session = sid);
             self.stop_helper(sid);
         } else if let Some(host) = self.strips.hosts.get_mut(&at.host) {

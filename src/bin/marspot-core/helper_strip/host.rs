@@ -55,6 +55,7 @@ fn state(r: &StripRow) -> State {
     match r.state {
         StripState::Preparing | StripState::Working => State::Running,
         StripState::Waiting => State::Awaiting,
+        StripState::Question => State::Asked,
         StripState::Idle => State::Idle,
         StripState::Exited => State::Done,
         StripState::Stopped => State::Stopped,

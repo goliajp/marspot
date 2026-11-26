@@ -16,6 +16,16 @@ The task says what to do:
   FAKE-BLOCK   ask a question, and wait for an answer
   FAKE-TOKENS  (claude) first register as a Claude session whose last
                response says 115 300 tokens, after a tool call
+  FAKE-MODEL=m (claude) the same, its responses by model m, and the
+               tool's result in: at work
+  FAKE-IDLE=f  (claude, with FAKE-MODEL) once the file f is there, end
+               the turn in the transcript as claude does, draw an empty
+               input box and wait
+  FAKE-APPROVE=f (claude, with FAKE-MODEL) once the file f is there,
+               record a tool call no result follows and ask for approval
+  Either logs `drawn<TAB>IDLE or APPROVE<TAB>epoch seconds` once drawn.
+The Claude session it registers goes under CLAUDE_CONFIG_DIR, else
+~/.claude, and only when that is under /tmp or $MARSPOT_STATE_DIR.
 
 claude shows its first-run dialogs before that, the cursor on "No, exit"
 and with no numbers, when the task holds
@@ -42,6 +52,17 @@ import uuid
 
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
+
+
+def sandboxed(path):
+    """`path`, once known to be under /tmp or the sandbox's state
+    directory; anywhere else it may be a real account's, and this exits."""
+    real = os.path.realpath(path)
+    roots = ["/private/tmp", "/tmp"] + [os.path.realpath(d) for d in [os.environ.get("MARSPOT_STATE_DIR")] if d]
+    if not any(real == r or real.startswith(r + "/") for r in roots):
+        sys.stderr.write("stand-in refuses to write under %s: not /tmp nor the sandbox\n" % real)
+        sys.exit(3)
+    return path
 
 
 def log(line):
@@ -141,9 +162,26 @@ def ps(field):
                           capture_output=True, text=True).stdout.strip()
 
 
-def register():
-    """The record Claude keeps of a running session, and its transcript."""
-    home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.environ["HOME"], ".claude")
+def stamp():
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".%03dZ" % (int(time.time() * 1000) % 1000)
+
+
+def append(transcript, r):
+    with open(transcript, "a") as f:
+        f.write(json.dumps(r, separators=(",", ":")) + "\n")
+
+
+def answered(transcript, model, content, stop):
+    """One more response of `model`, as claude records it."""
+    usage = {"input_tokens": 20, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 116000, "output_tokens": 80}
+    append(transcript, {"type": "assistant", "isSidechain": False, "timestamp": stamp(), "message": {
+        "id": "m2", "role": "assistant", "model": model, "usage": usage, "content": content, "stop_reason": stop}})
+
+
+def register(model=None):
+    """The record Claude keeps of a running session, and its transcript,
+    whose path is returned."""
+    home = sandboxed(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.environ["HOME"], ".claude"))
     sid, now = str(uuid.uuid4()), int(time.time() * 1000)
     project = os.path.join(home, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.getcwd()))
     os.makedirs(project, exist_ok=True)
@@ -152,9 +190,14 @@ def register():
     said = {"type": "assistant", "isSidechain": False, "message": {"id": "m1", "role": "assistant", "usage": usage,
             "content": [{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}]}}
     asked = {"type": "user", "isSidechain": False, "message": {"role": "user", "content": task[:100]}}
-    with open(os.path.join(project, sid + ".jsonl"), "w") as f:
-        for r in (asked, said):
-            f.write(json.dumps(dict(r, sessionId=sid, cwd=os.getcwd()), separators=(",", ":")) + "\n")
+    records = [asked, said]
+    if model:
+        said["message"]["model"] = model
+        records.append({"type": "user", "isSidechain": False, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}})
+    transcript = os.path.join(project, sid + ".jsonl")
+    for r in records:
+        append(transcript, dict(r, sessionId=sid, cwd=os.getcwd(), timestamp=stamp()))
     record = os.path.join(home, "sessions", "%d.json" % os.getpid())
     atexit.register(os.unlink, record)
     with open(record, "w") as f:
@@ -162,13 +205,38 @@ def register():
                    "version": "2.1.308", "peerProtocol": 1, "kind": "interactive", "entrypoint": "cli",
                    "pidDomain": "darwin", "status": "busy", "updatedAt": now, "statusUpdatedAt": now}, f,
                   separators=(",", ":"))
+    return transcript
 
 
-if "FAKE-TOKENS" in task:
+model = re.search(r"FAKE-MODEL=(\S+)", task)
+model = model and model.group(1)
+transcript = None
+if "FAKE-TOKENS" in task or model:
     # what reads the record takes only a program called claude for one
     if os.path.basename(ps("args").split(" ")[0]) != "claude":
         os.execv(ps("comm"), ["claude"] + sys.argv)
-    register()
+    transcript = register(model)
+cue = re.search(r"FAKE-(IDLE|APPROVE)=(\S+)", task)
+if cue and transcript:
+    # its time of drawing is what the strip is timed against
+    beat = 0
+    while not os.path.exists(cue.group(2)):
+        if beat % 5 == 0:
+            print("%s still working" % name, flush=True)
+        beat += 1
+        time.sleep(0.2)
+    if cue.group(1) == "IDLE":
+        answered(transcript, model, [{"type": "text", "text": "done"}], "end_turn")
+        append(transcript, {"type": "system", "subtype": "turn_duration", "durationMs": 5000, "isSidechain": False,
+                            "timestamp": stamp()})
+        sys.stdout.write("\r\n● done\r\n" + "─" * 40 + "\r\n❯ \r\n" + "─" * 40 + "\x1b[1A\x1b[3G")
+    else:
+        answered(transcript, model, [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {}}], "tool_use")
+        sys.stdout.write("\r\n Bash command\r\n\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No\r\n")
+    sys.stdout.flush()
+    log("drawn\t%s\t%.3f" % (cue.group(1), time.time()))
+    while True:
+        time.sleep(3600)
 working = re.search(r"FAKE-WORK=(\S+)", task)
 while working and not os.path.exists(working.group(1)):
     print("%s still working" % name, flush=True)

@@ -91,6 +91,9 @@ for a in claude codex gemini kimi; do ln -s "$ROOT/bin/_fake-helper-agent.py" "$
 ln -s "$ROOT/bin/_fake-docker.sh" "$SB/bin/docker"
 chmod +x "$ROOT/bin/_fake-helper-agent.py"
 export HOME="$SB/home"
+# the stand-ins write where claude would: under this HOME, never into a
+# profile named by the caller's environment
+unset CLAUDE_CONFIG_DIR
 export PATH="$SB/bin:$PATH"
 # the login shell's path_helper puts the system's directories first, where
 # a real gemini or kimi may be: the stand-ins go first again after it, in

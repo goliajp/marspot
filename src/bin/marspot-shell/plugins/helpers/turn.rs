@@ -132,11 +132,19 @@ pub(super) fn turn_reported(h: &Helper) -> bool {
 /// A claude or kimi helper's turn ended (it waits for input), it waits
 /// on an approval, or its program left the pane.
 pub(super) fn turn(s: &Shared, host: &dyn PluginHost, t: &Table, h: &Helper, now_ms: u64, in_turn: &mut HashMap<u64, Turn>) {
-    let Ok(Some(v)) = host.pane_status(h.sid) else { return };
-    // in a turn, not only printing
-    let at_work = matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval));
+    let Ok(Some(mut v)) = host.pane_status(h.sid) else { return };
     let claude = h.started.agent == AgentKind::Claude;
     let look = if claude && v.status != PaneStatus::Empty { turns::look(h.sid) } else { None };
+    let awaiting = PaneStatus::Busy(BusyKind::ToolAwaitingApproval);
+    // its record and its screen say so before the pane is quiet long
+    // enough for its state to
+    let read = |since| s.queue(Job::ReadPrompt { sid: h.sid, since });
+    if claude && v.status != awaiting && s.at_prompt(h.sid, look, now_ms, drawn_ms(h.sid, now_ms), read) {
+        v.status = awaiting;
+        v.held = v.held.max(BLOCKED_AFTER);
+    }
+    // in a turn, not only printing
+    let at_work = matches!(v.status, PaneStatus::Busy(BusyKind::Working | BusyKind::ToolExecuting | BusyKind::ToolAwaitingApproval));
     // over by its own record, it is not, whatever it still draws
     s.at_work(h.sid, at_work && !matches!(look, Some(Look::Over { .. })));
     if at_work {
@@ -225,6 +233,13 @@ fn recorded_end(s: &Shared, t: &Table, h: &Helper, turn: (Option<u64>, u64, Opti
     } else if queue_stop(s, h.sid, seen, Turn::Idle, Stop::Idle) {
         s.lock().turn_told.insert(h.sid, told_now);
     }
+}
+
+/// When pane `sid` last printed, as its session last said (ms after the
+/// epoch, `now_ms` now); None when it has not said.
+fn drawn_ms(sid: u64, now_ms: u64) -> Option<u64> {
+    let at = crate::control_reader::pane_wakes::latest(sid)?.output_at?;
+    Some(now_ms.saturating_sub(at.elapsed().as_millis() as u64))
 }
 
 /// Note the turn as `now` and queue its stop; a stop that did not go

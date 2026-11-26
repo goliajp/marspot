@@ -62,3 +62,22 @@ fn a_row_names_the_model_its_records_say_answered_and_cuts_a_given_name() {
     assert_eq!(got[0].rows[1].task.chars().count(), 120, "and no more than a title has");
     dir_gone(&d);
 }
+
+#[test]
+fn a_row_at_a_question_its_helper_asked_awaits_an_answer() {
+    use crate::plugins::claudecode::with_helpers::turns::Look;
+    use marspot::shell_proto::StripState;
+    let d = temp("strip-question");
+    let (s, _rx) = shared_at(&d);
+    begin(&s, 1, 10, AgentKind::Claude);
+    let obs = panes(&[(10, 0), (1, 10)]);
+    s.publish_turns(&HashMap::from([(1, Turn::BlockedTold)]));
+    let at = |since: u64, question: bool| {
+        s.at_prompt(1, Some(Look::Asking { since, question }), since + 5_000, None, |_| false);
+        strips(&s, &mut Memory::default(), &obs)[0].rows[0].state
+    };
+    assert_eq!(at(1_000, false), StripState::Waiting, "an approval");
+    assert_eq!(at(9_000, true), StripState::Question, "a question claude asked");
+    assert_eq!(at(20_000, false), StripState::Waiting);
+    dir_gone(&d);
+}

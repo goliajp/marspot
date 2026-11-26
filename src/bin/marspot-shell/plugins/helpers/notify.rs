@@ -143,6 +143,17 @@ pub(super) fn prompt_of(screen: &str) -> String {
     rows[start..end].join("\n")
 }
 
+/// Rows at the bottom of a screen that a prompt's choices are among: its
+/// hints under them take a few.
+const CHOICE_ROWS: usize = 8;
+
+/// Whether a numbered choice is among the last rows drawn on `screen`,
+/// as when a prompt waits for an answer.
+pub(super) fn choices_at_bottom(screen: &str) -> bool {
+    let screen = crate::pane_control::run_trailer::drop_status_lines(screen);
+    screen.lines().rev().filter(|r| !r.trim().is_empty()).take(CHOICE_ROWS).any(is_choice)
+}
+
 /// A numbered choice, as `❯ 1. Yes` or `│   2) No │`.
 fn is_choice(row: &str) -> bool {
     let bare = row.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '❯' | '›' | '>' | '→' | '▶' | '●' | '○'));

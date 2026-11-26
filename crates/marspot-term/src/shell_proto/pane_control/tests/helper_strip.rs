@@ -42,7 +42,7 @@ fn helper_strip_round_trips_each_state_and_what_is_not_known() {
     for m in [strip(0), strip(1), strip(24), HelperStrip::empty(9)] {
         assert_eq!(back(&m), m);
     }
-    for state in (0..=5).map(StripState::from_u8) {
+    for state in (0..=6).map(StripState::from_u8) {
         assert!(!matches!(state, StripState::Unknown(_)));
         let r = StripRow { state, running_since_ms: None, ended_ms: Some(7), tokens: Some(0), number: None, ..row(1) };
         let m = HelperStrip { rows: vec![r], ..strip(0) };

@@ -707,7 +707,7 @@ impl WorkerCtx {
             }
             self.note_context(f.shelld_sid, bound_by, jsonl_path.as_deref());
             pane_tokens.extend(jsonl_path.as_ref().map(|p| (f.shelld_sid, self.caches.tokens.recent(p, super::rooms::unix_now()))));
-            turn_looks.extend(turns::look_in(bound_by, tail.as_deref()).map(|l| (f.shelld_sid, l)));
+            turn_looks.extend(turns::look_in(bound_by, tail.as_deref()).map(|l| (f.shelld_sid, turns::unless_running(l, new_activity.get(&f.shelld_sid)))));
             // a read failure is an empty window, which every check below
             // takes as "no evidence"
             let tail = jsonl_path.as_ref().map(|_| tail.unwrap_or_default());
