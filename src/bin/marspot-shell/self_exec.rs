@@ -3,7 +3,7 @@
 
 use marspot::{lx_error, lx_event, lx_warn};
 
-use crate::plugins::peerbus;
+use crate::platform::exec_hooks;
 use crate::{apple_events, sup_log, supervisor, ShellApp};
 
 impl ShellApp {
@@ -99,7 +99,7 @@ impl ShellApp {
             .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
             .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
         apple_events::mark(&mut cmd);
-        let err = exec_prepared(&mut cmd);
+        let err = exec_hooks::exec_prepared(&mut cmd);
         lx_event!(
             "SHELL_UPDATE_FAIL",
             "exec into current/marspot-shell failed",
@@ -147,7 +147,7 @@ impl ShellApp {
             cmd.env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
         }
         apple_events::mark_retry(&mut cmd, n);
-        let err = exec_prepared(&mut cmd);
+        let err = exec_hooks::exec_prepared(&mut cmd);
         lx_error!("shell.ae_check.exec_failed", &format!("{err}"), target = target.display());
         // the frames held were of surfaces released above; the next core
         // brings new ones, and they must not be held for a check that
@@ -159,16 +159,32 @@ impl ShellApp {
     }
 }
 
-/// Exec `cmd` as this process's next image, after what has to end
-/// before it; both ways the shell replaces itself go through here.
-/// Returns only when the exec failed.
-pub(crate) fn exec_prepared(cmd: &mut std::process::Command) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
-    // a relay left open ends after the exec as a child nobody waits for
-    peerbus::close_inboxes();
-    // a forced kill still waiting would be dropped unrecorded
-    crate::plugins::zombie::stop::force::abandon();
-    let err = cmd.exec();
-    peerbus::exec_failed();
-    err
+/// Whether the image before this one was the shell applying an update;
+/// the mark leaves the environment.  Before any thread is started.
+pub(crate) fn arrived_by_update() -> bool {
+    if std::env::var_os("MARSPOT_SHELL_SELF_UPDATE").is_none() {
+        return false;
+    }
+    // Take it out of the environment before anything else is
+    // spawned.  Children inherit it, and every child that runs
+    // this binary logged the line again: 38 of them in a day
+    // against 6 real updates, one a minute, and the log read as if
+    // L1 were re-execing itself all day (2026-09-28 — it sent this
+    // author chasing a self-update that never happened).
+    // SAFETY: single-threaded, before any thread is started.
+    unsafe { std::env::remove_var("MARSPOT_SHELL_SELF_UPDATE") };
+    sup_log::log("SHELL_SELF_UPDATE", "new shell exec'd from current/");
+    // Self-fire SIGUSR1 so the main loop, once it lands on Idle
+    // after the post-execv boot dance (active L2 spawned +
+    // HELLO_ACK + first SurfaceReady), proactively applies any
+    // remaining pending/marspot-core + pending/marspot-session.
+    // Without this, the just-finished L1 swap leaves L2/L3
+    // pending/ sitting there until install-local's 8 s fallback
+    // retrigger or the next user-initiated focus-loss — that's
+    // the "L1 flashes, then several seconds before content
+    // updates and input wakes up" wait the user sees.
+    // (install-local DID stage all three together as one
+    // operation; the post-execv shell should treat them as one
+    // operation too.)
+    true
 }

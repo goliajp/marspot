@@ -73,7 +73,6 @@ pub(crate) use refusal::TurnEnds;
 pub(crate) use views::{ThreadView, publish_threads, threads};
 pub(crate) use codex_locks::cli_main as codex_locks_main;
 pub(crate) use kimi_bind::mail_waiting as kimi_mail_waiting;
-pub(crate) use exec_prep::{close_inboxes, exec_failed};
 pub(in crate::plugins) use pair::{Conversation, conversation_of, conversation_of_agent, record_files};
 
 #[derive(Default)]
@@ -158,6 +157,7 @@ impl Plugin for PeerbusPlugin {
             .spawn(move || w.run())
             .map_err(|e| PluginError::Other(format!("peerbus worker: {e}")))?;
         moving::connect(Some(tx.clone()));
+        exec_prep::register();
         exec_prep::connect(Some(tx.clone()));
         self.tx = Some(tx);
         self.worker = Some(handle);

@@ -94,6 +94,12 @@ impl Plugin for ZombiePlugin {
         PluginMetadata { name: "zombie", api_version: PLUGIN_API_VERSION, tick_interval_ms: every().as_millis() as u32 }
     }
 
+    fn start(&mut self, _host: &dyn PluginHost) -> Result<(), crate::plugins::PluginError> {
+        // after the peerbus plugin's, which starts first: its relays end before the kills drop
+        super::stop::force::register();
+        Ok(())
+    }
+
     fn tick_due(&self) -> TickDue {
         if crate::plugins::claudecode::sessions().is_empty() { TickDue::Event } else { TickDue::At(self.next) }
     }

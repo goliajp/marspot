@@ -76,8 +76,9 @@ fn old_image() {
     std::mem::forget(lingers);
     let mut new = image("new");
     new.env(LEFT, format!("{held_relay},{relay},{lingers_pid}"));
-    // the function both of the shell's self-execs go through
-    let err = crate::self_exec::exec_prepared(&mut new);
+    // the shell's one exec exit, with the hook the plugin registers at start
+    super::register();
+    let err = crate::platform::exec_hooks::exec_prepared(&mut new);
     panic!("exec: {err}");
 }
 
@@ -109,19 +110,6 @@ fn new_image() {
     inbox.close();
     assert!(pidtree::child_pids(me()).is_empty());
     println!("new image: done");
-}
-
-/// Both self-execs reach `exec` only through `exec_prepared`, which the
-/// test above runs; read from the source, since a test cannot run
-/// either of them.
-#[test]
-fn exec_prep_both_self_execs_go_through_the_prepared_exec() {
-    let src = include_str!("../../self_exec.rs");
-    assert_eq!(src.matches(".exec()").count(), 1, "one exec, inside exec_prepared");
-    assert_eq!(src.matches("exec_prepared(&mut cmd)").count(), 2, "the update and the re-registration");
-    let prepared = &src[src.find("fn exec_prepared").unwrap()..];
-    let (close, exec) = (prepared.find("close_inboxes()").expect("it closes the inboxes"), prepared.find(".exec()").unwrap());
-    assert!(close < exec, "before the exec");
 }
 
 /// A worker that does not take the event: the close gives up at its

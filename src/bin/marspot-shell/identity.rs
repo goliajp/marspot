@@ -72,7 +72,7 @@ fn become_image(exe: &Path, pass: &str, extra: &[(&str, &str)]) -> std::io::Erro
         cmd.env(k, v);
     }
     crate::instance::carry_lock(&mut cmd);
-    let err = cmd.exec();
+    let err = crate::platform::exec_hooks::exec_prepared(&mut cmd);
     crate::instance::keep_lock_here();
     err
 }

@@ -67,6 +67,11 @@ pub(crate) fn after(at: Instant, ids: Vec<ProcId>, done: Done) -> bool {
     true
 }
 
+/// Have the shell's exec drop the kills still waiting.  At start-up.
+pub(crate) fn register() {
+    crate::platform::exec_hooks::register(crate::platform::exec_hooks::ExecHook { name: "zombie", before: abandon, failed: None });
+}
+
 /// Drop every kill still waiting, telling each `done` so; for just
 /// before the shell replaces its image.
 pub(crate) fn abandon() {
