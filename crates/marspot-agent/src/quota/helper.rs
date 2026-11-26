@@ -16,7 +16,7 @@ use super::{Class, Load, Quant, RHO0};
 
 /// What a helper's choice reads, besides the helper itself.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Scene {
+pub struct Scene {
     /// The accounts the readings cover for the helper's class.
     pub accounts: Vec<Quant>,
     /// The other panes' speeds on each account, in `accounts`' order.
@@ -30,7 +30,7 @@ pub(crate) struct Scene {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Placement {
+pub enum Placement {
     /// To this account, with every input that chose it.
     To(u8, Inputs),
     /// The plain helper would take what the restricted panes are short
@@ -43,12 +43,12 @@ pub(crate) enum Placement {
 /// Where helper `mover` goes; `from` is the account a refused helper
 /// leaves, `None` for a new one.  `placed` counts the helpers placed on
 /// each account since the reading, by class.
-pub(crate) fn place(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)]) -> Placement {
+pub fn place(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)]) -> Placement {
     place_by(scene, mover, from, placed, Rule::Bands)
 }
 
 /// `place` under `rule`.
-pub(crate) fn place_by(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)], rule: Rule) -> Placement {
+pub fn place_by(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)], rule: Rule) -> Placement {
     let inputs = inputs(scene, mover, from, placed);
     let plan = inputs.plan();
     if let Some((to, _)) = inputs.decide_by(&plan, rule) {
@@ -66,7 +66,7 @@ pub(crate) fn place_by(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[
 }
 
 /// The core's inputs for the choice `place` makes.
-pub(crate) fn inputs(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)]) -> Inputs {
+pub fn inputs(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)]) -> Inputs {
     let mut loads = scene.loads.clone();
     let mut demand = Load { restricted: scene.b_f, plain: scene.b_n };
     for (id, class, n) in placed {

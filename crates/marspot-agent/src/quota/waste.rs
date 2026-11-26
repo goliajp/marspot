@@ -34,18 +34,18 @@ use super::{Class, EPS, Load, Quant};
 /// The prompt cache a restricted pane rewrites when it restarts on
 /// another account, in weeks: the 0.365 points a move cost on the
 /// control plane's records of 2026-11-17 to 11-24.
-pub(crate) const SWITCH_RESTRICTED: f64 = 0.00365;
+pub const SWITCH_RESTRICTED: f64 = 0.00365;
 
 /// The same for a plain pane: 0.073 points.
-pub(crate) const SWITCH_PLAIN: f64 = 0.00073;
+pub const SWITCH_PLAIN: f64 = 0.00073;
 
 /// The context the two costs above stand for, tokens: the median of a
 /// session's context at the end of its turns on this machine.
-pub(crate) const SWITCH_TOKENS: f64 = 460_000.0;
+pub const SWITCH_TOKENS: f64 = 460_000.0;
 
 /// What a refusal costs beyond the move it forces: the turn it breaks
 /// and the wait until the pane runs again, in weeks.
-pub(crate) const STALL: f64 = 0.01;
+pub const STALL: f64 = 0.01;
 
 const WEEK_H: f64 = 168.0;
 
@@ -57,7 +57,7 @@ const TIE: f64 = 1e-6;
 
 /// How the objective is weighed.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Params {
+pub struct Params {
     /// Weight of a move's cost against the waste it saves.
     pub lambda: f64,
     /// What a resting move must save beyond its weighted cost, weeks;
@@ -72,12 +72,12 @@ pub(crate) struct Params {
 /// The weights in force, chosen on the replay of 2026-11-25 and 11-26:
 /// any `lambda` from 0.5 to 4 and `margin` up to 0.01 gave the same
 /// moves there, since a move's cache is small against what it saves.
-pub(crate) const PARAMS: Params = Params { lambda: 1.0, margin: 0.01, per_day: 8, stay_h: 12.0 };
+pub const PARAMS: Params = Params { lambda: 1.0, margin: 0.01, per_day: 8, stay_h: 12.0 };
 
 /// What moving a pane of `class` costs in rewritten prompt cache, for a
 /// context of `tokens`; `None`, where the context is not known, is the
 /// typical one.
-pub(crate) fn switch_cost(class: Class, tokens: Option<u64>) -> f64 {
+pub fn switch_cost(class: Class, tokens: Option<u64>) -> f64 {
     let typical = match class {
         Class::Restricted => SWITCH_RESTRICTED,
         Class::Plain => SWITCH_PLAIN,
@@ -87,7 +87,7 @@ pub(crate) fn switch_cost(class: Class, tokens: Option<u64>) -> f64 {
 
 /// One account run forward over a span.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Outcome {
+pub struct Outcome {
     /// Week lapsing at the renewals inside the span.
     pub w7: f64,
     /// Restricted window lapsing at its renewals inside the span, weeks.
@@ -102,11 +102,11 @@ pub(crate) struct Outcome {
 }
 
 impl Outcome {
-    pub(crate) fn waste(&self) -> f64 {
+    pub fn waste(&self) -> f64 {
         self.w7 + self.wf
     }
 
-    pub(crate) fn out(&self, class: Class) -> Option<f64> {
+    pub fn out(&self, class: Class) -> Option<f64> {
         match class {
             Class::Plain => self.out_plain,
             Class::Restricted => self.out_restricted,
@@ -161,7 +161,7 @@ impl Run {
 /// `kappa` refills a restricted window at its renewal; where it is
 /// unknown no restricted waste is counted and the renewed window only
 /// says the model is served.
-pub(crate) fn forecast(q: &Quant, load: &Load, extra: Option<(Mover, f64)>, kappa: Option<f64>, span_h: f64) -> Outcome {
+pub fn forecast(q: &Quant, load: &Load, extra: Option<(Mover, f64)>, kappa: Option<f64>, span_h: f64) -> Outcome {
     let span = span_h.clamp(0.0, MAX_SPAN_H);
     let mut run = Run { r: q.r.max(0.0), f: q.f.max(0.0), h: 0.0, o: Outcome::default() };
     let (mut mx, mut for_h) = (Load::default(), extra.map_or(0.0, |(_, h)| h.clamp(0.0, span)));
@@ -212,13 +212,13 @@ const STAYS: [f64; 3] = [0.5, 1.0, 2.0];
 
 /// The span every placement is compared over: the longest stay, then a
 /// week in which each account renews once more.
-pub(crate) fn span_h(p: &Params) -> f64 {
+pub fn span_h(p: &Params) -> f64 {
     p.stay_h * STAYS[STAYS.len() - 1] + WEEK_H
 }
 
 /// What a pane adds to one account.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Added {
+pub struct Added {
     /// The account refuses the pane within the horizon.
     pub refuses: bool,
     /// The waste with the pane there against without it, over the stays
@@ -229,7 +229,7 @@ pub(crate) struct Added {
 }
 
 /// What mover `m` adds to account `q` with `load` on it already.
-pub(crate) fn added(q: &Quant, load: &Load, m: Mover, kappa: Option<f64>, horizon_h: f64, p: &Params) -> Added {
+pub fn added(q: &Quant, load: &Load, m: Mover, kappa: Option<f64>, horizon_h: f64, p: &Params) -> Added {
     let span = span_h(p);
     let without = forecast(q, load, None, kappa, span);
     let mut sum = 0.0;
@@ -274,7 +274,7 @@ fn best(accounts: &[Quant], loads: &[Load], m: Mover, costs: &[(usize, f64, bool
 
 /// The account `pick` chooses and what `m` adds to it.
 #[allow(clippy::too_many_arguments)] // one choice's inputs, each a separate piece
-pub(crate) fn placed(accounts: &[Quant], loads: &[Load], m: Mover, from: Option<u8>, kappa: Option<f64>, horizon_h: f64, p: &Params, allow: impl Fn(&Quant) -> bool) -> Option<(u8, Added)> {
+pub fn placed(accounts: &[Quant], loads: &[Load], m: Mover, from: Option<u8>, kappa: Option<f64>, horizon_h: f64, p: &Params, allow: impl Fn(&Quant) -> bool) -> Option<(u8, Added)> {
     let adds: Vec<(usize, Added)> = accounts
         .iter()
         .enumerate()
@@ -291,7 +291,7 @@ pub(crate) fn placed(accounts: &[Quant], loads: &[Load], m: Mover, from: Option<
 /// neither refuse it nor start refusing the panes there within
 /// `horizon_h` first, the cheapest of them; stale readings after fresh.
 #[allow(clippy::too_many_arguments)] // one choice's inputs, each a separate piece
-pub(crate) fn pick(accounts: &[Quant], loads: &[Load], m: Mover, from: Option<u8>, kappa: Option<f64>, horizon_h: f64, p: &Params, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
+pub fn pick(accounts: &[Quant], loads: &[Load], m: Mover, from: Option<u8>, kappa: Option<f64>, horizon_h: f64, p: &Params, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
     placed(accounts, loads, m, from, kappa, horizon_h, p, allow).map(|(id, _)| id)
 }
 
@@ -301,7 +301,7 @@ pub(crate) fn pick(accounts: &[Quant], loads: &[Load], m: Mover, from: Option<u8
 /// Of what a resting pane's inputs carry, the total demand is not
 /// read: whether the accounts are short shows in the forecast itself.
 #[allow(clippy::too_many_arguments)] // one decision's inputs, each a separate piece
-pub(crate) fn decide(accounts: &[Quant], loads: &[Load], m: Mover, here: u8, kappa: Option<f64>, kind: &Kind, moves_day: usize, p: &Params) -> Option<(u8, Why)> {
+pub fn decide(accounts: &[Quant], loads: &[Load], m: Mover, here: u8, kappa: Option<f64>, kind: &Kind, moves_day: usize, p: &Params) -> Option<(u8, Why)> {
     match kind {
         Kind::Out { horizon_h } => pick(accounts, loads, m, Some(here), kappa, *horizon_h, p, |_| true).map(|t| (t, Why::Out)),
         Kind::New { horizon_h } => pick(accounts, loads, m, None, kappa, *horizon_h, p, |_| true).map(|t| (t, Why::Out)),
@@ -384,7 +384,7 @@ fn displaced(q: &Quant, load: &Load, m: Mover, kappa: Option<f64>, p: &Params) -
 /// `p.stay_h` is how long the helper is expected to run.  Never applied
 /// to a pane the person started.
 #[allow(clippy::too_many_arguments)] // one decision's inputs, each a separate piece
-pub(crate) fn restricted_helper(accounts: &[Quant], loads: &[Load], plain: f64, restricted: f64, kappa: Option<f64>, horizon_h: f64, p: &Params) -> bool {
+pub fn restricted_helper(accounts: &[Quant], loads: &[Load], plain: f64, restricted: f64, kappa: Option<f64>, horizon_h: f64, p: &Params) -> bool {
     if kappa.is_none() {
         return false;
     }

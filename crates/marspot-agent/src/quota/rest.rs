@@ -36,36 +36,36 @@ use super::rescue::rescue;
 use super::{Class, EPS, Load, Quant, lasts, plain_lasts, shortage};
 
 /// An account that will not last this long sends its resting panes away.
-pub(crate) const LEAVE_BELOW_H: f64 = 2.0;
+pub const LEAVE_BELOW_H: f64 = 2.0;
 
 /// How long a plain pane's new account has to last it when it leaves
 /// early: longer than a must-move's six hours, so a pane is not sent on
 /// again by the next account running low.
-pub(crate) const LEAVE_TO_H: f64 = 9.0;
+pub const LEAVE_TO_H: f64 = 9.0;
 
 /// No plan-following move this soon after any move of the same pane.
-pub(crate) const BAND_COOLDOWN_H: f64 = 2.0;
+pub const BAND_COOLDOWN_H: f64 = 2.0;
 
 /// No plan-following move back to an account left this recently.
-pub(crate) const NO_RETURN_H: f64 = 6.0;
+pub const NO_RETURN_H: f64 = 6.0;
 
 /// Resting moves one pane makes in a week before it makes no more
 /// that have limits (all but leaving early).
-pub(crate) const MOVES_PER_WEEK: usize = 6;
+pub const MOVES_PER_WEEK: usize = 6;
 
 /// Plan-following moves of all panes, per hour.
-pub(crate) const BAND_PER_HOUR: usize = 4;
+pub const BAND_PER_HOUR: usize = 4;
 
 /// What a plan-following move must be worth, in weeks: what the pane
 /// would use on the target before it renews.
-pub(crate) const BAND_WORTH: f64 = 0.03;
+pub const BAND_WORTH: f64 = 0.03;
 
 /// A plain pane using more of the restricted model than this an hour
 /// (subagents) is not sent where that model is spent.
-pub(crate) const RESTRICTED_USER: f64 = 0.0005;
+pub const RESTRICTED_USER: f64 = 0.0005;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum RestMove {
+pub enum RestMove {
     /// Its account will not last two hours.
     LeaveEarly(u8),
     /// A plain pane: what the restricted model will not take on its
@@ -80,7 +80,7 @@ pub(crate) enum RestMove {
 
 /// One resting pane and what limits moving it.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Resting<'a> {
+pub struct Resting<'a> {
     pub here: u8,
     pub mover: Mover,
     /// Every pane's load per account, this one included.
@@ -107,7 +107,7 @@ pub(crate) struct Resting<'a> {
     pub moves_week: usize,
 }
 
-pub(crate) fn rest_move(accounts: &[Quant], plan: &Plan, p: &Resting) -> Option<RestMove> {
+pub fn rest_move(accounts: &[Quant], plan: &Plan, p: &Resting) -> Option<RestMove> {
     let hi = accounts.iter().position(|q| q.id == p.here)?;
     let class = p.mover.class;
     let mut others = p.loads.to_vec();
@@ -219,6 +219,6 @@ fn band_move(accounts: &[Quant], plan: &Plan, p: &Resting, hi: usize, others: &[
 /// Is pane `me` the one that stays on its account when it runs low:
 /// the slowest of its class there, ties to the lower number.  The
 /// caller passes the other panes of the same class only.
-pub(crate) fn is_keeper(me: (u64, f64), on_same_account: impl Iterator<Item = (u64, f64)>) -> bool {
+pub fn is_keeper(me: (u64, f64), on_same_account: impl Iterator<Item = (u64, f64)>) -> bool {
     on_same_account.filter(|(sid, _)| *sid != me.0).all(|(sid, rate)| (me.1, me.0) < (rate, sid))
 }

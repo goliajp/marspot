@@ -1,0 +1,18 @@
+[package]
+name = "marspot-agent"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+# What is common to every agent CLI marspot runs, as pure code: which
+# account each pane should be on and the simulator that checks it.
+# Reads no file and links nothing that draws: no objc2, no Metal, no
+# messaging code.
+
+[dependencies]
+# None yet.  AgentKind comes from marspot-term (default-features = false)
+# once code here names an agent kind.
+
+[lints]
+workspace = true

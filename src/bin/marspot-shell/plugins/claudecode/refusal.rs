@@ -2,13 +2,14 @@
 //! the CLI writes into its transcript: that it ran out, or that it
 //! could not log in.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use super::fable_need::{ask_of, Ask};
 use super::model::short_model;
-use super::quota::{same_model, Room};
+pub(in crate::plugins) use marspot_agent::quota::room::{Refusal, Window};
+#[cfg(test)]
+pub(super) use marspot_agent::quota::room::mark_logged_out;
 use super::transcript::{record_type, top_level_str};
 use super::worker::WorkerCtx;
 
@@ -247,73 +248,6 @@ fn record_timestamp(line: &str) -> Option<i64> {
     let rest = &line[i..];
     let end = rest.find('"')?;
     marspot::cc_usage::parse_iso_utc(rest[..end].to_string())
-}
-
-/// Treat as logged out every profile a pane has found it cannot log in
-/// to since the feed last read it.
-///
-/// `seen` is, per profile, the newest login failure any pane met
-/// there. The feed keeps reporting such an account by its old numbers
-/// -- it cannot tell it from an idle one -- so without this every
-/// refused pane would be sent back to it. A newer reading means
-/// someone has logged in again, and the feed is believed once more.
-pub(super) fn mark_logged_out(rooms: &mut [(u8, Room)], seen: &HashMap<u8, i64>) {
-    for (p, room) in rooms.iter_mut() {
-        if let Room::Known { status, measured_at, .. } = room
-            && seen.get(p).is_some_and(|at| at > measured_at)
-        {
-            *status = "auth_error".into();
-        }
-    }
-}
-
-/// A pane was told by the API that it had run out.
-#[derive(Debug, Clone, PartialEq)]
-pub(in crate::plugins) struct Refusal {
-    /// Unix seconds, from the record's own timestamp.
-    pub at: i64,
-    /// The model the refusal names, as `short_model` spells it, or
-    /// empty when it could not be read.
-    ///
-    /// Every refusal the CLI writes names one: "You've reached your
-    /// Fable limit." or "Opus 5.5 requires usage credits.". It says
-    /// nothing about any other model on the same account: on
-    /// 2026-10-03 a Fable refusal moved a pane that had just been
-    /// switched to Opus, onto an account where it ran out again.
-    pub model: String,
-    /// The account could not log in at all, rather than being out of
-    /// quota.
-    ///
-    /// The feed cannot tell a logged-out account from an idle one:
-    /// both show as an access token that has expired and was never
-    /// refreshed. Only a claude that tried to use it finds out, and
-    /// that is the only place this is learnt. It names no model.
-    pub logged_out: bool,
-    /// Which of the account's windows ran out.
-    pub window: Window,
-}
-
-/// The window a refusal is about, which is how long it stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::plugins) enum Window {
-    /// "session" and "5-hour": over within five hours.
-    FiveHour,
-    /// The week, a model's cap, or credits.
-    Week,
-}
-
-impl Refusal {
-    /// Does this refusal shut out a pane working in `model`?
-    ///
-    /// One that names no model covers every pane. One that names a
-    /// model covers only panes on it: with no model given, nothing is
-    /// assumed, Fable included.
-    pub(super) fn applies_to(&self, model: Option<&str>) -> bool {
-        if self.model.is_empty() {
-            return true;
-        }
-        model.is_some_and(|m| same_model(&m.to_ascii_lowercase(), &self.model))
-    }
 }
 
 #[cfg(test)]

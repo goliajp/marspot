@@ -18,7 +18,7 @@ use super::{Class, Load, Quant};
 
 /// Why a pane would move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Why {
+pub enum Why {
     /// Its account cannot answer it: rule (a), or (c) for a helper.
     Out,
     /// Its account will not last two hours.
@@ -36,7 +36,7 @@ pub(crate) enum Why {
 }
 
 impl Why {
-    pub(crate) fn word(self) -> &'static str {
+    pub fn word(self) -> &'static str {
         match self {
             Why::Out => "out",
             Why::LeaveEarly => "leave_early",
@@ -47,12 +47,12 @@ impl Why {
         }
     }
 
-    pub(crate) fn from_word(w: &str) -> Option<Why> {
+    pub fn from_word(w: &str) -> Option<Why> {
         [Why::Out, Why::LeaveEarly, Why::UOut, Why::Plan, Why::Rescue, Why::Waste].into_iter().find(|y| y.word() == w)
     }
 
     /// A move of a resting pane, which the weekly limit counts.
-    pub(crate) fn resting(self) -> bool {
+    pub fn resting(self) -> bool {
         self != Why::Out
     }
 }
@@ -61,20 +61,20 @@ impl Why {
 /// `waste` with its weights, which also reads the resting moves of the
 /// last day.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Rule {
+pub enum Rule {
     Bands,
     Waste { moves_day: usize, params: Params },
 }
 
 impl Rule {
     /// The one objective with the weights in force.
-    pub(crate) fn waste(moves_day: usize) -> Rule {
+    pub fn waste(moves_day: usize) -> Rule {
         Rule::Waste { moves_day, params: waste::PARAMS }
     }
 
     /// The weights a choice outside `decide_by` (a badge click, leaving
     /// early, a helper's model) is made with.
-    pub(crate) fn params(self) -> Params {
+    pub fn params(self) -> Params {
         match self {
             Rule::Waste { params, .. } => params,
             Rule::Bands => waste::PARAMS,
@@ -83,7 +83,7 @@ impl Rule {
 
     /// The words a logged line carries after `Inputs::encode` so its
     /// replay uses the same rule and weights; none for the bands.
-    pub(crate) fn words(self) -> String {
+    pub fn words(self) -> String {
         match self {
             Rule::Bands => String::new(),
             Rule::Waste { moves_day, params: p } => {
@@ -92,8 +92,7 @@ impl Rule {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn of_line(line: &str) -> Rule {
+    pub fn of_line(line: &str) -> Rule {
         let get = |k: &str| line.split(' ').find_map(|w| w.strip_prefix(k)?.strip_prefix('='));
         let num = |k: &str, or: f64| get(k).and_then(|v| v.parse().ok()).unwrap_or(or);
         let d = waste::PARAMS;
@@ -115,7 +114,7 @@ impl Rule {
 
 /// What kind of decision, with what only that kind reads.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Kind {
+pub enum Kind {
     /// Must move; `loads` leave the pane out.
     Out { horizon_h: f64 },
     /// A new helper, on no account yet: no account is left out.
@@ -135,7 +134,7 @@ pub(crate) enum Kind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Inputs {
+pub struct Inputs {
     pub accounts: Vec<Quant>,
     pub b_f: f64,
     pub b_n: f64,
@@ -147,12 +146,12 @@ pub(crate) struct Inputs {
 }
 
 impl Inputs {
-    pub(crate) fn plan(&self) -> Plan {
+    pub fn plan(&self) -> Plan {
         plan(&self.accounts, self.b_f, self.b_n, self.kappa)
     }
 
     /// The decision, given the plan these inputs give.
-    pub(crate) fn decide(&self, plan: &Plan) -> Option<(u8, Why)> {
+    pub fn decide(&self, plan: &Plan) -> Option<(u8, Why)> {
         match &self.kind {
             Kind::Out { horizon_h } => pick(&self.accounts, plan, &self.loads, self.mover, Some(self.here), *horizon_h).map(|t| (t, Why::Out)),
             Kind::New { horizon_h } => pick(&self.accounts, plan, &self.loads, self.mover, None, *horizon_h).map(|t| (t, Why::Out)),
@@ -182,14 +181,14 @@ impl Inputs {
     }
 
     /// The decision under `rule`.
-    pub(crate) fn decide_by(&self, plan: &Plan, rule: Rule) -> Option<(u8, Why)> {
+    pub fn decide_by(&self, plan: &Plan, rule: Rule) -> Option<(u8, Why)> {
         match rule {
             Rule::Bands => self.decide(plan),
             Rule::Waste { moves_day, params } => waste::decide(&self.accounts, &self.loads, self.mover, self.here, self.kappa, &self.kind, moves_day, &params),
         }
     }
 
-    pub(crate) fn encode(&self) -> String {
+    pub fn encode(&self) -> String {
         let b = |x: bool| u8::from(x);
         let acc: Vec<String> = self.accounts.iter().map(|q| format!("{}:{}:{}:{}:{}:{}:{}", q.id, q.r, q.f, q.t, q.tf, b(q.open), b(q.stale))).collect();
         let loads: Vec<String> = self.loads.iter().map(|l| format!("{}:{}", l.restricted, l.plain)).collect();
@@ -224,8 +223,7 @@ impl Inputs {
         s
     }
 
-    #[cfg(test)]
-    pub(crate) fn decode(line: &str) -> Option<Inputs> {
+    pub fn decode(line: &str) -> Option<Inputs> {
         let get = |k: &str| line.split(' ').find_map(|w| w.strip_prefix(k)?.strip_prefix('='));
         let num = |k: &str| get(k)?.parse::<f64>().ok();
         let flag = |k: &str| Some(get(k)? == "1");
@@ -263,7 +261,6 @@ impl Inputs {
     }
 }
 
-#[cfg(test)]
 fn quant(f: &[&str]) -> Option<Quant> {
     let n = |i: usize| f.get(i)?.parse::<f64>().ok();
     let b = |i: usize| Some(*f.get(i)? == "1");
@@ -271,8 +268,7 @@ fn quant(f: &[&str]) -> Option<Quant> {
 }
 
 /// What a logged line's inputs decide, read back and run again.
-#[cfg(test)]
-pub(crate) fn replay(line: &str) -> Option<Option<(u8, Why)>> {
+pub fn replay(line: &str) -> Option<Option<(u8, Why)>> {
     let i = Inputs::decode(line)?;
     Some(i.decide_by(&i.plan(), Rule::of_line(line)))
 }

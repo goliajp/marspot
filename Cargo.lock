@@ -166,6 +166,7 @@ dependencies = [
  "foreign-types",
  "golia-ui-core",
  "libc",
+ "marspot-agent",
  "marspot-peer",
  "marspot-term",
  "objc2",
@@ -175,6 +176,10 @@ dependencies = [
  "objc2-quartz-core",
  "png",
 ]
+
+[[package]]
+name = "marspot-agent"
+version = "0.1.0"
 
 [[package]]
 name = "marspot-json"
