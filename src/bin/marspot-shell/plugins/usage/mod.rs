@@ -13,12 +13,12 @@
 //! which can take seconds.
 
 mod claude;
-mod codex;
-mod codex_resets;
+pub(crate) mod codex;
+pub(crate) mod codex_resets;
 mod feed;
 mod feed_load;
 mod feed_month;
-mod http;
+pub(crate) mod http;
 mod iso_time;
 mod kimi;
 mod resets;

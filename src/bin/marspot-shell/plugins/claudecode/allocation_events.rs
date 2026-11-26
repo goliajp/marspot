@@ -161,7 +161,7 @@ pub(super) struct Tail {
 
 /// Delete the `YYYYMMDD.tsv` files in `dir` older than `KEEP_DAYS` as
 /// of `now`.
-pub(in crate::plugins) fn prune_days(dir: &Path, now: i64) -> std::io::Result<()> {
+pub(crate) fn prune_days(dir: &Path, now: i64) -> std::io::Result<()> {
     let oldest = ymd(now - (KEEP_DAYS - 1) * DAY);
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -189,7 +189,7 @@ fn day_of(path: &Path) -> Option<&str> {
 }
 
 /// `YYYYMMDD` of unix seconds, UTC.
-pub(in crate::plugins) fn ymd(secs: i64) -> String {
+pub(crate) fn ymd(secs: i64) -> String {
     let z = secs.div_euclid(DAY) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

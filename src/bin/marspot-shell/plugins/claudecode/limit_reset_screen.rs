@@ -16,7 +16,7 @@ const MISSING: [&str; 3] = ["unknown command", "unknown slash command", "no such
 const INELIGIBLE: [&str; 3] = ["not eligible", "ineligible", "isn't available for your"];
 
 /// The reading the screen `text` gives, as of `now`.
-pub(super) fn read(text: &str, now: i64) -> Resets {
+pub(crate) fn read(text: &str, now: i64) -> Resets {
     let lower = text.to_ascii_lowercase();
     let mut r = Resets::none(now, "limit_reset_screen");
     if MISSING.iter().any(|w| lower.contains(w)) {

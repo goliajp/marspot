@@ -57,7 +57,7 @@ mod plugin;
 mod bind_meta;
 mod allocation_adapter;
 mod allocation_decide;
-pub(in crate::plugins) mod allocation_events;
+pub(crate) mod allocation_events;
 mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
@@ -68,9 +68,7 @@ mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;
 mod alloc_moves;
-// read only by tests until sched.reset_read opens the background pane that shows the screen
-#[cfg_attr(not(test), allow(dead_code))]
-mod limit_reset_screen;
+pub(crate) mod limit_reset_screen;
 mod worker_loop;
 pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;

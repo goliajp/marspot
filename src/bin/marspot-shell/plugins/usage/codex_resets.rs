@@ -39,7 +39,7 @@ fn credit_grant(plan: &str, left: u32, starts_at: Option<i64>, ends_at: Option<i
 
 /// The resets in one app-server's answers, or `None` when the answer
 /// to the limits request carries no credit list.
-pub(super) fn of_replies(replies: &Replies, now: i64) -> Option<Resets> {
+pub(crate) fn of_replies(replies: &Replies, now: i64) -> Option<Resets> {
     let result = replies.limits.as_ref()?.get("result")?;
     let credits = result.get("rateLimitResetCredits").filter(|c| **c != Value::Null)?;
     let plan = replies

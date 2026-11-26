@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 const TIMEOUT_SECS: &str = "20";
 
 #[derive(Debug, PartialEq)]
-pub(super) struct Response {
+pub(crate) struct Response {
     pub status: u16,
     /// The `retry-after` header, in seconds.
     pub retry_after: Option<i64>,
@@ -69,7 +69,7 @@ pub(super) fn get(url: &str, token: &str) -> Option<Response> {
 }
 
 /// The same request without the header only Anthropic asks for.
-pub(super) fn get_bare(url: &str, token: &str) -> Option<Response> {
+pub(crate) fn get_bare(url: &str, token: &str) -> Option<Response> {
     run(&config(url, token, &[])?)
 }
 

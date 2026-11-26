@@ -169,6 +169,7 @@ impl CodexAlloc {
             self.rebuild(snap.now);
         }
         self.forget_gone(snap, &mut log);
+        crate::agentsvc::reset::idle::publish("codex", snap.panes.iter().map(|p| (p.profile, p.idle)));
         let mut keep = HashSet::new();
         for p in &snap.panes {
             self.facts(p, snap.now, &mut log);
