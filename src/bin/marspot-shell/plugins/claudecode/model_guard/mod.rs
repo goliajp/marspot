@@ -34,10 +34,18 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long after a `/model` confirmed at the keyboard the next change
-/// of model counts as that one: long enough to pick from `/model`'s
-/// own list, short enough that a confirmation left unused does not let
-/// a later writer through.
-pub(crate) const CONFIRMED_FOR: Duration = Duration::from_secs(20);
+/// of model counts as that one.  The time starts at the confirming
+/// Enter, and the person may then spend a while in `/model`'s list, so
+/// it is a minute.  It ends sooner on the first change of model the
+/// watch sees, kept or put back: one confirmation is good for one write.
+///
+/// It does not end when the list is closed without a choice.  The core
+/// could look for Claude Code's box coming back, but that redraw and
+/// the settings write of a choice race each other, so ending on it
+/// could put back the very model the person just confirmed; a list left
+/// with Esc therefore leaves the confirmation open for the rest of the
+/// minute.
+pub(crate) const CONFIRMED_FOR: Duration = Duration::from_secs(60);
 
 /// The most notices waiting for the main thread, and own writes
 /// remembered.
@@ -55,9 +63,14 @@ struct Shared {
     /// Text marspot itself wrote, by file: the watch sees those writes
     /// too and says nothing about them.
     own: VecDeque<(PathBuf, u64)>,
+    /// The files being watched, by the path the watch reads: writes to
+    /// any other file (the other agents' configs) are not remembered,
+    /// so they cannot push a watched file's own write out of `own`.
+    watched: Vec<PathBuf>,
 }
 
-static SHARED: Mutex<Shared> = Mutex::new(Shared { confirmed_at: None, notices: VecDeque::new(), own: VecDeque::new() });
+static SHARED: Mutex<Shared> =
+    Mutex::new(Shared { confirmed_at: None, notices: VecDeque::new(), own: VecDeque::new(), watched: Vec::new() });
 
 fn shared() -> std::sync::MutexGuard<'static, Shared> {
     SHARED.lock().unwrap_or_else(|p| p.into_inner())
@@ -87,6 +100,9 @@ fn take_confirmation(now: Instant) -> bool {
 /// Marspot is about to write `text` to `path`.
 pub(crate) fn note_own_write(path: &Path, text: &str) {
     let mut s = shared();
+    if !s.watched.iter().any(|p| p == path) {
+        return;
+    }
     if s.own.len() == OWN_CAP {
         s.own.pop_front();
     }
@@ -137,6 +153,17 @@ pub(crate) fn start() {
 /// Stop watching.
 pub(crate) fn stop() {
     WATCH.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let mut s = shared();
+    s.watched.clear();
+    s.own.clear();
+}
+
+/// `path` is watched from now on.
+fn watching(path: &Path) {
+    let mut s = shared();
+    if !s.watched.iter().any(|p| p == path) {
+        s.watched.push(path.to_path_buf());
+    }
 }
 
 #[cfg(test)]

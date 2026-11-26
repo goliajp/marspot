@@ -12,6 +12,9 @@ use std::ops::Range;
 /// but that member: the caller then leaves the file alone.
 pub(super) fn with_model(text: &str, want: Option<&Value>) -> Option<String> {
     let members = members(text)?;
+    if members.iter().filter(|m| reads_as_model(m.key)).count() > 1 {
+        return None;
+    }
     let found = members.iter().find(|m| m.key == "model");
     let edited = match (found, want) {
         (Some(m), Some(v)) => format!("{}{}{}", &text[..m.value.start], v.to_json(), &text[m.value.end..]),
@@ -20,6 +23,17 @@ pub(super) fn with_model(text: &str, want: Option<&Value>) -> Option<String> {
         (None, None) => text.to_string(),
     };
     same_but_model(text, &edited, want).then_some(edited)
+}
+
+/// Whether `text` is an object with more than one top-level member a
+/// parser reads as `model`, escapes decoded.  Readers disagree on which
+/// of them counts, so nothing is put back from or into such a text.
+pub(super) fn has_two_models(text: &str) -> bool {
+    members(text).is_some_and(|ms| ms.iter().filter(|m| reads_as_model(m.key)).count() > 1)
+}
+
+fn reads_as_model(raw: &str) -> bool {
+    raw == "model" || (raw.contains('\\') && json::parse(&format!("\"{raw}\"")).is_ok_and(|v| v.str() == Some("model")))
 }
 
 /// Whether `edited` parses to `text`'s object with only `model` changed

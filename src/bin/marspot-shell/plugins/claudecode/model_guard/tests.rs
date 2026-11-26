@@ -205,6 +205,44 @@ fn an_own_write_carrying_an_unconfirmed_model_is_put_back() {
     assert_eq!(read(&file), carried.replace("fable", "opus"));
 }
 
+#[test]
+fn writes_to_files_not_watched_are_not_remembered_as_marspots() {
+    managed(true);
+    let (_link, file) = shared_file("unwatched", OPUS);
+    let other = file.with_file_name("config.toml");
+    let write_others = || {
+        for i in 0..OWN_CAP + 4 {
+            crate::plugins::claudecode::write_through_symlink(&other, &format!("n = {i}\n")).unwrap();
+        }
+    };
+    write_others();
+    assert!(shared().own.is_empty(), "nothing remembered before the file is watched");
+    let mut e = Entry::of(file.clone());
+    crate::plugins::claudecode::write_through_symlink(&file, LIGHT).unwrap();
+    write_others();
+    e.look();
+    assert!(take_notices().is_empty(), "the watched file's own write was not pushed out");
+}
+
+#[test]
+fn two_model_keys_on_either_side_are_only_said() {
+    managed(true);
+    let two = "{\n  \"model\": \"opus\",\n  \"model\": \"fable\"\n}\n";
+    let (link, file) = shared_file("two-before", two);
+    let mut e = Entry::of(file.clone());
+    replace(&link, "{\n  \"model\": \"haiku\"\n}\n");
+    e.look();
+    assert_eq!(read(&file), "{\n  \"model\": \"haiku\"\n}\n", "nothing put back from a text with two");
+    assert_eq!(take_notices().len(), 1, "but it is said");
+    let (link, file) = shared_file("two-after", OPUS);
+    let mut e = Entry::of(file.clone());
+    let after = "{\n  \"model\": \"fable\",\n  \"model\": \"opus\"\n}\n";
+    replace(&link, after);
+    e.look();
+    assert_eq!(read(&file), after, "nothing put back into a text with two");
+    assert_eq!(take_notices().len(), 1);
+}
+
 /// The whole watch: a write through the link is put back well within a
 /// second, with nothing polling.
 #[test]

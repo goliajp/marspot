@@ -51,6 +51,7 @@ fn model_name(m: &Option<Value>) -> String {
 
 impl Entry {
     pub(super) fn of(path: PathBuf) -> Entry {
+        watching(&path);
         let mut seen = read(&path);
         for _ in 0..SETTLE_TRIES {
             if seen.is_whole() || seen == Seen::Absent {
@@ -110,12 +111,16 @@ impl Entry {
     fn put_back(&mut self, now: Seen, to: &Option<Value>, back: &Option<Value>) {
         let Seen::Whole { text: current, .. } = &now else { return };
         let file = self.path.display().to_string();
-        let done = model_key::with_model(current, back.as_ref())
-            .ok_or_else(|| "the model cannot be changed in the text alone".to_string())
-            .and_then(|edited| {
-                let written = crate::plugins::claudecode::write_through_symlink(&self.path, &edited);
-                written.map(|()| edited).map_err(|e| e.to_string())
-            });
+        let two = |s: &Seen| matches!(s, Seen::Whole { text, .. } if model_key::has_two_models(text));
+        let edited = if two(&self.seen) || two(&now) {
+            Err("more than one model key in the settings, and readers differ on which counts".to_string())
+        } else {
+            model_key::with_model(current, back.as_ref()).ok_or_else(|| "the model cannot be changed in the text alone".to_string())
+        };
+        let done = edited.and_then(|edited| {
+            let written = crate::plugins::claudecode::write_through_symlink(&self.path, &edited);
+            written.map(|()| edited).map_err(|e| e.to_string())
+        });
         let (to_name, back_name) = (model_name(to), model_name(back));
         match done {
             Ok(edited) => {

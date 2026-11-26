@@ -47,3 +47,14 @@ fn a_model_that_is_not_a_string_goes_back_as_it_was() {
     let v = Value::Obj(vec![("id".into(), s("opus"))]);
     assert_eq!(with_model("{\"model\": \"x\"}", Some(&v)).unwrap(), "{\"model\": {\"id\":\"opus\"}}");
 }
+
+#[test]
+fn a_text_with_two_model_keys_is_never_edited() {
+    for two in ["{\"model\": \"a\", \"model\": \"b\"}", "{\"model\": \"a\", \"mod\\u0065l\": \"b\", \"x\": 1}"] {
+        assert!(has_two_models(two), "{two:?}");
+        assert_eq!(with_model(two, Some(&s("opus"))), None, "{two:?}");
+        assert_eq!(with_model(two, None), None, "{two:?}");
+    }
+    assert!(!has_two_models(LAID_OUT));
+    assert!(!has_two_models("{\"models\": 1, \"model\": 2}"));
+}

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.796"  # the lib tells a start of /model, a Tab on it and a send after a byte it cannot follow (not used by shell)
+shell   = "0.7.797"  # the shared settings watch leaves two model keys alone, gives a confirmation a minute and remembers only its own files' writes
 core    = "0.12.726"  # /mo, /mod, /mode and Tab on them are held; a program's /model in one call and Enter in the next is refused
 session = "0.11.470"  # marspot-term moves the reading of a settings line to its values file (not used by session)
