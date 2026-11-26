@@ -13,6 +13,7 @@
 //! paths keep resolving.
 
 pub mod agent;
+#[cfg(any(test, feature = "alloc-count"))]
 pub mod alloc_count;
 pub mod async_writer;
 pub mod base64;

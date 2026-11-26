@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.741"  # a frame to the core leaves in one vectored write
-core    = "0.12.709"  # the event channel's receiver is not Sync, and a timeout past what an Instant holds waits without end
-session = "0.11.458"  # frames to the core leave in one vectored write
+shell   = "0.7.742"  # the counting allocator is built only for tests
+core    = "0.12.710"  # the counting allocator is built only for tests
+session = "0.11.459"  # the counting allocator is built only for tests

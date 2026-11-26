@@ -208,8 +208,14 @@ fn sample_events() -> Vec<(MarspotKeyEvent, Modifiers)> {
                 ..Default::default()
             },
         ),
+        // the last commit that fits inline, and the first that does not
+        (ev(LogicalKey::Other, Some(&EDGE[1..])), Modifiers::default()),
+        (ev(LogicalKey::Other, Some(EDGE)), Modifiers::default()),
     ]
 }
+
+/// 23 bytes: one past `KeyText`'s inline room.
+const EDGE: &str = "ab日本語入力方法";
 
 /// The bytes on the wire did not change with the buffer-writing
 /// encoders: each sample encodes exactly as the old encoder did, by
@@ -254,4 +260,10 @@ fn a_long_commit_is_delivered_whole() {
     assert_eq!(back.text, ev.text);
     let (short, _) = decode_key_event(&encoded(&event_to_wire(&samples[5].0, *mods), 1)).unwrap();
     assert!(short.text.is_inline());
+    assert_eq!(EDGE.len(), crate::key_text::INLINE + 1);
+    for (i, inline) in [(8, true), (9, false)] {
+        let (w, _) = decode_key_event(&encoded(&event_to_wire(&samples[i].0, *mods), 1)).unwrap();
+        assert_eq!(w.text.is_inline(), inline, "{:?}", w.text);
+        assert_eq!(Some(w.text), samples[i].0.text);
+    }
 }

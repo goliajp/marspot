@@ -152,6 +152,15 @@ mod tests {
         }
         let cap = "x".repeat(INLINE);
         assert!(KeyText::new(&cap).is_inline());
+        assert!(KeyText::from(cap.clone()).is_inline());
+        // one byte past the inline room, ascii and with a CJK tail
+        for over in ["x".repeat(INLINE + 1), format!("ab{}", "日".repeat(7))] {
+            assert_eq!(over.len(), 23);
+            for t in [KeyText::new(&over), KeyText::from(over.clone())] {
+                assert!(!t.is_inline(), "{over:?} stayed inline");
+                assert_eq!(t.as_str(), over);
+            }
+        }
         let long = "这是一段通过输入法一次提交的长句子";
         let t = KeyText::from(long.to_string());
         assert!(!t.is_inline());
