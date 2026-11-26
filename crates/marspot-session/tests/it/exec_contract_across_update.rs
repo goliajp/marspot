@@ -71,3 +71,27 @@ fn exec_contract_an_extra_descriptor_stops_the_new_image() {
 fn exec_contract_an_extra_variable_stops_the_new_image() {
     leaked("var");
 }
+
+/// The update had something extra on hand before its sweep: the new
+/// image resumes and logs no mismatch.
+fn resumes_cleanly(what: &str) {
+    let mut sandbox = Sandbox::new();
+    sandbox.env.set("MARSPOT_TEST_EXEC_LEAK", what);
+    let mut s = start(&mut sandbox);
+    let state = sandbox.path().to_path_buf();
+    update(&mut s, &state, 1);
+    assert_eq!(count_in_log(&state, "L3_EXECV_RESUMED"), 1);
+    assert_eq!(count_in_log(&state, "exec.contract.mismatch"), 0);
+    assert_eq!(s.child.try_wait().unwrap(), None, "the new image went on");
+    s.kill();
+}
+
+#[test]
+fn exec_contract_the_sweep_takes_a_descriptor_out_of_the_way() {
+    resumes_cleanly("fd-before");
+}
+
+#[test]
+fn exec_contract_the_sweep_takes_a_variable_out_of_the_way() {
+    resumes_cleanly("var-before");
+}

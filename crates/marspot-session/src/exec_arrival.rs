@@ -48,20 +48,24 @@ pub(crate) fn inherited_dir_lock(id: u64) -> Option<File> {
 }
 
 /// Debug builds only: hand the next image something the contract does
-/// not carry, for the test that it is caught.  `fd`: a descriptor
-/// without close-on-exec; `var`: an unlisted variable.
+/// not carry, for the tests.  Called before the sweep (`swept` false)
+/// and after it.  `fd`, `var`: a descriptor without close-on-exec, an
+/// unlisted variable, after the sweep, which the new image catches;
+/// `fd-before`, `var-before`: the same before it, which the sweep
+/// removes.
 #[cfg(debug_assertions)]
-pub(crate) fn leak_for_test() {
+pub(crate) fn leak_for_test(swept: bool) {
     use std::os::fd::IntoRawFd;
-    match std::env::var("MARSPOT_TEST_EXEC_LEAK").as_deref() {
-        Ok("fd") => {
+    let what = std::env::var("MARSPOT_TEST_EXEC_LEAK").unwrap_or_default();
+    match (what.as_str(), swept) {
+        ("fd", true) | ("fd-before", false) => {
             let Ok(f) = File::open("/dev/null") else { return };
             let fd = f.into_raw_fd();
             // SAFETY: fcntl on the descriptor just opened
             unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
         }
         // SAFETY: the loop has ended; the threads left do not read the environment
-        Ok("var") => unsafe { std::env::set_var("MARSPOT_LEAKED_BY_TEST", "1") },
+        ("var", true) | ("var-before", false) => unsafe { std::env::set_var("MARSPOT_LEAKED_BY_TEST", "1") },
         _ => {}
     }
 }

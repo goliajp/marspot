@@ -155,10 +155,12 @@ pub(crate) fn do_l3_execv_swap(
     // listener fd open for the new image).
     std::mem::drop(listener);
 
+    #[cfg(debug_assertions)]
+    crate::exec_arrival::leak_for_test(false);
     // SAFETY: the loop has ended; the threads left do not read the environment
     unsafe { exec_contract::prepare_own_exec(ExecKind::SessionUpdate, &[master_fd, listen_fd, control_stream_fd, lock_fd]) };
     #[cfg(debug_assertions)]
-    crate::exec_arrival::leak_for_test();
+    crate::exec_arrival::leak_for_test(true);
 
     // Held across the exec and released by the new image once its own
     // handler is armed — see `set_sigterm_blocked`.

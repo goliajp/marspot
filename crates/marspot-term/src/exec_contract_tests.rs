@@ -70,6 +70,34 @@ fn exec_contract_a_swept_exec_hands_over_nothing_extra() {
     assert!(ok, "{text}");
 }
 
+/// Through the sweep the self-execs use, on this process itself: a
+/// descriptor it holds without the flag does not reach the new image.
+#[test]
+fn exec_contract_the_command_sweep_takes_a_descriptor_out_of_the_way() {
+    let leak = leaky();
+    // above the numbers any kind carries, so that no list keeps it
+    // SAFETY: fcntl on a descriptor of ours; F_DUPFD leaves the flag clear
+    let high = unsafe { libc::fcntl(leak.as_raw_fd(), libc::F_DUPFD, 50) };
+    assert!(high >= 50 && open_without_cloexec().contains(&high), "{high}");
+    let mut c = child("verify", ExecKind::SessionSpawn);
+    prepare_command_exec(ExecKind::SessionSpawn, &mut c, &[]);
+    assert!(!open_without_cloexec().contains(&high), "the sweep left fd {high} without the flag");
+    let (ok, text) = output(c);
+    assert!(ok, "fd {high} reached the new image: {text}");
+}
+
+/// The same for a variable of this process's that the kind does not
+/// carry.
+#[test]
+fn exec_contract_the_command_sweep_takes_a_variable_out_of_the_way() {
+    // SAFETY: nextest runs each test in a process of its own
+    unsafe { std::env::set_var("MARSPOT_LEAKED_BY_TEST", "1") };
+    let mut c = child("verify", ExecKind::SessionSpawn);
+    prepare_command_exec(ExecKind::SessionSpawn, &mut c, &[]);
+    let (ok, text) = output(c);
+    assert!(ok, "the variable reached the new image: {text}");
+}
+
 #[test]
 fn exec_contract_an_extra_descriptor_is_found() {
     let leak = leaky();
