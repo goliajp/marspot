@@ -72,8 +72,8 @@ fn resumable(ledger: &Ledger, to: Agent, to_home: &Path, shell_cwd: Option<&str>
 /// session being resumed was set to when the pane left it.
 fn command(to: Agent, to_home: &Path, resume: Option<&str>, gemini_model: Option<&str>) -> Option<Vec<u8>> {
     let resume = resume.map_or(launch_line::Resume::New, launch_line::Resume::Id);
-    let model = gemini_model.filter(|_| to == Agent::Gemini);
-    let l = launch_line::Launch { resume, model, flags: &[] };
+    let model = launch_line::model_for(to, to_home, resume, gemini_model);
+    let l = launch_line::Launch { resume, model: model.as_deref(), flags: &[] };
     launch_line::agent_command(to, to_home, &l)?.clear_screen_first(true).to_bytes()
 }
 
@@ -326,9 +326,9 @@ mod tests {
         let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
         let mcp = format!("--mcp-config '{}' --allowedTools 'mcp__marspot'", state.join("claude-mcp.json").display());
         let claude = s(command(Agent::Claude, Path::new("/Users/x/.claude-profile-3"), Some("u-1"), None).unwrap());
-        assert!(claude.ends_with(&format!(" claude {mcp} --resume u-1\r")), "{claude}");
+        assert!(claude.ends_with(&format!(" claude {mcp} --resume u-1 --model opus\r")), "{claude}");
         let fresh = s(command(Agent::Claude, Path::new("/Users/x/.claude-profile-3"), None, None).unwrap());
-        assert!(fresh.ends_with(&format!(" claude {mcp}\r")), "{fresh}");
+        assert!(fresh.ends_with(&format!(" claude {mcp} --model opus\r")), "{fresh}");
         assert!(state.join("claude-mcp.json").is_file());
         let codex = s(command(Agent::Codex, Path::new("/Users/x/.codex-profile-2"), None, None).unwrap());
         assert!(!codex.contains("--mcp-config"), "{codex}");
@@ -336,6 +336,7 @@ mod tests {
 
     #[test]
     fn the_command_resumes_by_id_or_starts_fresh() {
+        let _state = marspot_term::test_env::sandbox_state_dir();
         let h = Path::new("/Users/x/.codex-profile-2");
         let s = |b: Vec<u8>| String::from_utf8(b).unwrap();
         assert!(s(command(Agent::Codex, h, Some("t-1"), None).unwrap()).contains("CODEX_HOME='/Users/x/.codex-profile-2' codex resume t-1\r"));
@@ -346,7 +347,7 @@ mod tests {
             claude.contains("CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude "),
             "{claude}"
         );
-        assert!(claude.ends_with(" --resume u-1\r"), "{claude}");
+        assert!(claude.ends_with(" --resume u-1 --model opus\r"), "{claude}");
         // Neither agent is handed anything that runs on the person's
         // keystrokes. A Claude pane used to carry a `UserPromptSubmit`
         // hook so its submits could be confirmed; nothing reads a

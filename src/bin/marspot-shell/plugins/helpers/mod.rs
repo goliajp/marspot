@@ -38,6 +38,7 @@ mod first_screens;
 mod give_up;
 mod inbox_of;
 mod launch;
+mod model_pick;
 mod names;
 mod notify;
 mod pair;

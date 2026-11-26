@@ -102,11 +102,10 @@ pub(super) fn profile_cycle_op(
     // session came back as `devops`, loading devops's rules, and the
     // only sign was the pane's title.
     cmd = cmd.in_dir(project_dir);
-    // The model the session was on, not the new profile's default.
-    // Quoted: an id like `claude-fable-5-1[1m]` is a glob to a shell.
-    if let Some(model) = &choice.model {
-        cmd = cmd.arg("--model").quoted_arg(model.clone());
-    }
+    // The model the session was on, never the shared settings file's
+    // default: without one there is no line. Quoted: an id like
+    // `claude-fable-5-1[1m]` is a glob to a shell.
+    cmd = cmd.arg("--model").quoted_arg(choice.model.clone()?);
     if let Some(effort) = &choice.effort {
         cmd = cmd.arg("--effort").arg(effort.clone());
     }

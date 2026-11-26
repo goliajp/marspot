@@ -24,7 +24,7 @@ use super::*;
 /// is how long, and that it comes after the process check.
 #[test]
 fn the_wake_waits_for_the_repaint_after_the_process_appears() {
-    let op = reclaim_op("u", None, Some(fid(1)), 2, None, &CliChoice::default()).expect("script builds");
+    let op = reclaim_op("u", None, Some(fid(1)), 2, None, &known()).expect("script builds");
     let kinds: Vec<&pty_op::StepKind> = op.steps.iter().map(|s| &s.kind).collect();
     let process_at = kinds
         .iter()
@@ -63,17 +63,17 @@ fn the_wake_waits_for_the_repaint_after_the_process_appears() {
 #[test]
 fn a_pane_with_no_session_file_yet_is_badged_but_never_reclaimed() {
     assert!(
-        reclaim_op("", Some("/Users/x/.claude-profile-2"), Some(fid(4242)), 4200, None, &CliChoice::default()).is_none(),
+        reclaim_op("", Some("/Users/x/.claude-profile-2"), Some(fid(4242)), 4200, None, &known()).is_none(),
         "no uuid ⇒ no resume line ⇒ claude must not be taken down"
     );
     assert!(
-        profile_cycle_op(Some(&resume_word()), "", false, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_none(),
+        profile_cycle_op(Some(&resume_word()), "", false, 3, fid(4242), None, 4200, None, &known()).is_none(),
         "…and the badge-click cycle refuses for the same reason"
     );
     // The same call with a uuid is the normal path, so the guard
     // above is the only thing being tested here.
-    assert!(reclaim_op("u-1", None, Some(fid(4242)), 4200, None, &CliChoice::default()).is_some());
-    assert!(profile_cycle_op(Some(&resume_word()), "u-1", true, 3, fid(4242), None, 4200, None, &CliChoice::default()).is_some());
+    assert!(reclaim_op("u-1", None, Some(fid(4242)), 4200, None, &known()).is_some());
+    assert!(profile_cycle_op(Some(&resume_word()), "u-1", true, 3, fid(4242), None, 4200, None, &known()).is_some());
 }
 
 /// …and the idle policy stops before signalling such a pane, with

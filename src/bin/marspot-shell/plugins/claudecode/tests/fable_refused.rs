@@ -112,6 +112,7 @@ fn an_opus_session_refused_fable_moves_to_an_account_with_fable_and_is_told_to_s
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "moved on the pass that read the refusal");
     let sent = host.sent.lock().unwrap().clone();
     assert!(sent[0].1.contains(".claude-profile-2"), "to P2, which has Fable: {:?}", sent[0].1);
+    assert!(sent[0].1.contains("--model 'claude-opus-5-5'"), "on the model it was on: {:?}", sent[0].1);
     assert!(sent[0].1.contains("Design RFC") && sent[0].1.contains("P2"), "{:?}", sent[0].1);
     assert!(sent[0].1.contains("重新启动这个子代理"), "{:?}", sent[0].1);
     assert!(!sent[0].1.contains(&resume_word()), "{:?}", sent[0].1);

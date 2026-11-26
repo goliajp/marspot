@@ -301,6 +301,11 @@ pub(super) fn record_known_model(uuid: &str) {
     fs::write(push.join(uuid), "opus-5-5\n/t/x.jsonl\nmedium\npids=1\nid=claude-opus-5-5\n").unwrap();
 }
 
+/// A pane's model and effort as a confirmed switch carries them.
+pub(super) fn known() -> CliChoice {
+    CliChoice { model: Some("claude-opus-5-5".into()), effort: Some("medium".into()) }
+}
+
 pub(super) fn scan_with(sid: u64, claude_pid: i32, uuid: &str) -> ScanResult {
     if !uuid.is_empty() {
         record_known_model(uuid);

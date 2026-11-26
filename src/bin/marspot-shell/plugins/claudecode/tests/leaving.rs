@@ -133,6 +133,7 @@ fn rebalance_resting_panes_leave_an_account_with_an_hour_and_a_half_left_but_the
     assert_eq!(moved(&host), vec![201, 203], "the two faster panes leave in one pass");
     let sent = host.sent.lock().unwrap().clone();
     assert!(sent.iter().all(|(_, s)| s.contains(".claude-profile-2")), "{sent:?}");
+    assert!(sent.iter().all(|(_, s)| s.contains("--model 'claude-opus-5-5'")), "on the model each was on: {sent:?}");
     let logged = host.logged.lock().unwrap().clone();
     assert!(logged.iter().any(|(e, l)| e == "quota.short" && l.contains("P1 lasts 1.5h") && l.contains("sid=202 stays")), "{logged:?}");
     assert_eq!(logged.iter().filter(|(e, _)| e == "quota.leaving").count(), 2, "{logged:?}");

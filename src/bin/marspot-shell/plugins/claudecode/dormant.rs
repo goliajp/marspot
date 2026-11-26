@@ -77,13 +77,14 @@ impl ClaudecodePlugin {
             // The same script, started at the park: there is nothing
             // left to kill, and the pid it would have signalled died
             // with the process that armed it.
+            let choice = dormant_choice(host, &d);
             let Some(op) = reclaim_op(
                 &d.uuid,
                 d.config_dir.as_deref(),
                 None,
                 shell_pid_for(d.shelld_sid),
                 d.project_dir.as_deref(),
-                &d.choice,
+                &choice,
             ) else {
                 host.log(
                     LogLevel::Warn,
@@ -198,4 +199,25 @@ impl ClaudecodePlugin {
             );
         }
     }
+}
+
+/// The model a re-armed wake starts claude on: the one its row carries,
+/// else (a row written before the column) the session's own record,
+/// the account's last observed model, the default.
+pub(super) fn dormant_choice(host: &dyn PluginHost, d: &DormantRecord) -> CliChoice {
+    if d.choice.model.is_some() {
+        return d.choice.clone();
+    }
+    use launch_model::Source;
+    let account = config_dir_or_default(d.config_dir.as_deref());
+    let (model, from) = launch_model::first_known(&[
+        (Source::Session, &|| launch_model::session_model(&d.uuid, None)),
+        (Source::Account, &|| launch_model::account_model(&account)),
+    ]);
+    host.log(
+        LogLevel::Info,
+        "hibernate.model_from",
+        &format!("{}: its row names no model; waking on {model} ({})", d.uuid, from.as_str()),
+    );
+    CliChoice { model: Some(model), effort: d.choice.effort.clone() }
 }
