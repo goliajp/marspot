@@ -275,6 +275,8 @@ mod alloc_tests;
 #[cfg(test)]
 mod host_tests;
 #[cfg(test)]
+mod idle_tests;
+#[cfg(test)]
 mod merge_tests;
 #[cfg(test)]
 mod compose_tests;

@@ -94,7 +94,7 @@ pub(super) enum Said {
     /// It has some, and the user cleared every one.
     Cleared,
     /// `need`: the rows for those whose sessions are ready, 0 while
-    /// none was seen at work in this batch.
+    /// every one of this batch had ended when it was first heard of.
     Rows { works: bool, need: u16 },
 }
 

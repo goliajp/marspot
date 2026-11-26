@@ -22,7 +22,9 @@ struct Listed {
 pub(super) struct Host {
     pub height: Height,
     batch: u64,
-    /// One of the batch was seen at work.
+    /// One of the batch was seen at work or not yet ended.  A batch
+    /// first heard of with all its rows ended takes no rows: they go in
+    /// a moment.
     alive: bool,
     /// Those of the record, in its order.
     listed: Vec<Listed>,
@@ -76,7 +78,9 @@ impl Host {
             self.alive = false;
             self.hidden.clear();
         }
-        self.alive |= record.rows.iter().any(|r| r.running_since_ms.is_some());
+        // an idle helper can stay listed for hours, so a core that starts
+        // meanwhile sees only idle rows of the batch
+        self.alive |= record.rows.iter().any(|r| r.running_since_ms.is_some() || !matches!(state(r), State::Done | State::Stopped));
         let old = std::mem::take(&mut self.listed);
         let twice = |r: &StripRow| record.rows.iter().filter(|o| o.name == r.name).count() > 1;
         self.listed = record
