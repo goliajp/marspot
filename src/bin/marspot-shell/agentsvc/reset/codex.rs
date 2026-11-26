@@ -4,6 +4,11 @@
 //! start and end, check that some limit it brings back has less than
 //! 80% left, consume it with the request id as its idempotency key, and
 //! read the limits again for what is left.
+//!
+//! A consume that got no answer may have been done: the same request
+//! asked again sends the same idempotency key, and a credit already
+//! redeemed is asked about again rather than refused, so the answer to
+//! that key (or `alreadyRedeemed` for another key) comes back.
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
@@ -41,12 +46,22 @@ fn home(profile: u8) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap_or(dir)
 }
 
+/// The executable of the release `installed_cli` names, resolved
+/// through the `current` link once, so the binary started is the
+/// release that was checked.
+pub(super) fn cli_exe(home: &Path) -> Option<PathBuf> {
+    crate::plugins::codex::installed_cli(home)?;
+    let current = home.join("packages/standalone/current");
+    let target = std::fs::read_link(&current).ok()?;
+    let release = if target.is_absolute() { target } else { current.parent()?.join(target) };
+    Some(release.join("bin/codex"))
+}
+
 pub(super) fn claim_profile(profile: u8, grant: &Grant, request_id: &str, deadline: Instant) -> Outcome {
     let home = home(profile);
-    if crate::plugins::codex::installed_cli(&home).is_none() {
+    let Some(bin) = cli_exe(&home) else {
         return Outcome::of(Res::Unavailable, "no codex CLI is installed in that account's home");
-    }
-    let bin = home.join("packages/standalone/current/bin/codex");
+    };
     claim(&bin, &home, &format!("codex:{profile}"), grant, request_id, deadline)
 }
 
@@ -102,15 +117,18 @@ pub(super) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_i
     let read = request("rl", "account/rateLimits/read", obj([]));
     let Some(limits) = server.ask(&read, "rl", deadline) else { return Outcome::of(Res::Error, "the app-server did not answer the limits request") };
     let credit = match pick(&limits, grant) {
-        Ok(id) => id,
+        Ok(c) => c,
         Err(o) => return o,
     };
-    if !below_usable(&limits) {
+    if !credit.redeemed && !below_usable(&limits) {
         return Outcome::of(Res::NotLimited, "every limit it brings back has 80% or more left");
     }
-    let params = obj([("creditId", credit.as_str().into()), ("idempotencyKey", request_id.into())]);
+    if Instant::now() >= deadline {
+        return Outcome::of(Res::Error, "the claim's time ran out before the credit was consumed");
+    }
+    let params = obj([("creditId", credit.id.as_str().into()), ("idempotencyKey", request_id.into())]);
     let Some(answer) = server.ask(&request("consume", "account/rateLimitResetCredit/consume", params), "consume", deadline) else {
-        return Outcome::of(Res::Error, "the app-server did not answer the consume request; ask again with the same request id");
+        return Outcome::again(Res::Error, "the app-server did not answer the consume request; ask again with the same request id");
     };
     let mut o = consumed(&answer);
     let after = server.ask(&request("rl2", "account/rateLimits/read", obj([])), "rl2", deadline);
@@ -122,8 +140,17 @@ pub(super) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_i
     o
 }
 
-/// The id of the available credit that starts and ends as `grant` does.
-pub(super) fn pick(limits: &Value, grant: &Grant) -> Result<String, Outcome> {
+/// The credit a claim asks to consume.
+#[derive(Debug, PartialEq)]
+pub(super) struct Credit {
+    pub id: String,
+    /// Already redeemed: consumed again only for the answer to its key.
+    pub redeemed: bool,
+}
+
+/// The credit that starts and ends as `grant` does, an available one
+/// first.
+pub(super) fn pick(limits: &Value, grant: &Grant) -> Result<Credit, Outcome> {
     if grant.starts_at.is_none() && grant.ends_at.is_none() {
         return Err(Outcome::of(Res::Unavailable, "the grant's start and end are not known, so no credit can be told apart"));
     }
@@ -136,8 +163,8 @@ pub(super) fn pick(limits: &Value, grant: &Grant) -> Result<String, Outcome> {
         return Err(Outcome::of(Res::Unavailable, "no credit of this account starts and ends as the confirmed one"));
     };
     match (c.str_at("status"), c.str_at("id")) {
-        (Some("available"), Some(id)) => Ok(id.to_string()),
-        (Some("redeemed"), _) => Err(Outcome::of(Res::AlreadyUsed, "that credit is already redeemed")),
+        (Some(s @ ("available" | "redeemed")), Some(id)) => Ok(Credit { id: id.to_string(), redeemed: s == "redeemed" }),
+        (Some("redeemed"), None) => Err(Outcome::of(Res::AlreadyUsed, "that credit is already redeemed")),
         (status, _) => Err(Outcome::of(Res::Unavailable, &format!("that credit is {}", status.unwrap_or("of no known status")))),
     }
 }

@@ -9,7 +9,9 @@
 //! One claim per account at a time; a request id asked again gets the
 //! answer it got the first time.  The account is waited on until every
 //! pane on it rests, for up to two minutes, so a claim never lands in
-//! the middle of a turn.  Claude goes through the official CLI's
+//! the middle of a turn.  The whole claim, confirmation check included,
+//! ends within [`TOTAL_WITHIN`] of the request: the asker gives up at
+//! 210 s, and nothing is done after it has.  Claude goes through the official CLI's
 //! `/limit-reset` in a background pane under a window marspot opens for
 //! it; Codex through the app-server's consume request.
 
@@ -36,6 +38,8 @@ pub(crate) use status::status;
 const IDLE_WITHIN: Duration = Duration::from_secs(120);
 /// Longest the claim itself may take once the account rests.
 const CLI_WITHIN: Duration = Duration::from_secs(90);
+/// Longest a claim takes from the request to the answer.
+const TOTAL_WITHIN: Duration = Duration::from_secs(200);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Provider {
@@ -152,28 +156,45 @@ fn panel_claim(act: ResetPanelAct) -> Outcome {
     run(ledger(), c, |c| Ok(c.grant.clone()))
 }
 
-/// One claim from start to answer: the answer already given, or hold
-/// the account, `check` the confirmation, wait for the account to rest,
-/// claim, and write the attempt down.
-fn run(ledger: &Arc<Mutex<ledger::Ledger>>, mut c: Claim, check: impl FnOnce(&Claim) -> Result<Grant, Outcome>) -> Outcome {
+fn run(ledger: &Arc<Mutex<ledger::Ledger>>, c: Claim, check: impl FnOnce(&Claim) -> Result<Grant, Outcome>) -> Outcome {
+    run_within(ledger, c, TOTAL_WITHIN, check)
+}
+
+/// One claim from start to answer within `total`: the answer already
+/// given, or hold the account, `check` the confirmation (skipped for a
+/// request confirmed before whose last attempt may be tried again),
+/// wait for the account to rest, claim, and write the attempt down.
+fn run_within(ledger: &Arc<Mutex<ledger::Ledger>>, mut c: Claim, total: Duration, check: impl FnOnce(&Claim) -> Result<Grant, Outcome>) -> Outcome {
+    let deadline = Instant::now() + total;
     if let Some(row) = ledger.lock().unwrap_or_else(|p| p.into_inner()).answered(&c.request_id) {
         return row.outcome.clone();
     }
     let Some(_hold) = ledger::Ledger::hold(ledger, &c) else {
         return record(ledger, &c, Outcome::of(Res::Busy, "a claim on this account or with this request id is running"));
     };
-    let o = match check(&c) {
+    let before = ledger.lock().unwrap_or_else(|p| p.into_inner()).confirmed_before(&c);
+    let o = match before.map_or_else(|| check(&c), Ok) {
         Err(o) => o,
         Ok(grant) => {
             c.grant = grant;
-            if idle::wait_idle(c.provider.as_str(), c.profile, IDLE_WITHIN) {
-                claim(&c, Instant::now() + CLI_WITHIN)
-            } else {
-                Outcome::of(Res::AccountBusy, "a pane on this account kept working for two minutes")
-            }
+            act(&c, deadline)
         }
     };
     record(ledger, &c, o)
+}
+
+/// Wait for the account to rest and claim, all before `deadline`: the
+/// claim keeps its whole [`CLI_WITHIN`], the wait gets what is left.
+fn act(c: &Claim, deadline: Instant) -> Outcome {
+    let wait = deadline.saturating_duration_since(Instant::now()).saturating_sub(CLI_WITHIN).min(IDLE_WITHIN);
+    if !idle::wait_idle(c.provider.as_str(), c.profile, wait) {
+        return Outcome::of(Res::AccountBusy, &format!("a pane on this account kept working for {} s", wait.as_secs()));
+    }
+    let now = Instant::now();
+    if now >= deadline {
+        return Outcome::of(Res::Error, "the claim's time ran out before anything was tried");
+    }
+    claim(c, deadline.min(now + CLI_WITHIN))
 }
 
 fn claim(c: &Claim, deadline: Instant) -> Outcome {

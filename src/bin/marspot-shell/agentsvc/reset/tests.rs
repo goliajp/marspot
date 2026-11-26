@@ -132,3 +132,40 @@ fn reset_nothing_happens_without_devops_or_its_credential() {
     assert_eq!(o.result, Res::Error);
     assert!(verify::access().is_none(), "marspot reads no devops credential yet");
 }
+
+#[test]
+fn reset_nothing_is_tried_once_the_claim_s_time_has_run_out() {
+    let dir = marspot_term::test_env::TempDir::new("reset-deadline");
+    let l = ledger(&dir);
+    let slow = |c: &Claim| {
+        std::thread::sleep(Duration::from_millis(80));
+        Ok(c.grant.clone())
+    };
+    let o = run_within(&l, claim(Provider::Codex, 6, "gg-1"), Duration::from_millis(40), slow);
+    assert_eq!((o.result, o.detail.as_str()), (Res::Error, "the claim's time ran out before anything was tried"));
+}
+
+#[test]
+fn reset_a_request_that_may_be_tried_again_is_not_confirmed_twice() {
+    let dir = marspot_term::test_env::TempDir::new("reset-again-key");
+    let l = ledger(&dir);
+    let mut c = claim(Provider::Codex, 7, "hh-1");
+    c.grant.ends_at = Some(1_796_165_597);
+    let lost = Outcome::again(Res::Error, "the app-server did not answer the consume request; ask again with the same request id");
+    l.lock().unwrap().record(&c, &lost, NOW).unwrap();
+    let asked = Claim { grant: Grant { ends_at: None, ..c.grant.clone() }, ..c.clone() };
+    assert_eq!(l.lock().unwrap().confirmed_before(&asked).and_then(|g| g.ends_at), Some(1_796_165_597), "the grant as devops confirmed it");
+    assert!(l.lock().unwrap().answered("hh-1").is_none(), "not an answer");
+    let elsewhere = Claim { profile: 8, ..asked.clone() };
+    assert_eq!(l.lock().unwrap().confirmed_before(&elsewhere), None, "another account is another request");
+
+    // a restart forgets the confirmation, and the row reads back as not final
+    let l2 = ledger(&dir);
+    assert_eq!(l2.lock().unwrap().confirmed_before(&asked), None);
+    assert!(l2.lock().unwrap().answered("hh-1").is_none());
+    assert!(fact_rows(&dir)[0].contains("\t1\t"), "{:?}", fact_rows(&dir));
+
+    l.lock().unwrap().record(&c, &Outcome::of(Res::Reset, "reset"), NOW).unwrap();
+    assert_eq!(l.lock().unwrap().confirmed_before(&asked), None, "an answer ends it");
+    assert_eq!(l.lock().unwrap().answered("hh-1").map(|r| r.outcome.result), Some(Res::Reset));
+}

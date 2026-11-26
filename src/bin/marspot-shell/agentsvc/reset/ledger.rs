@@ -7,7 +7,10 @@
 //! grant id is ever written.  The answers of the last
 //! [`MAX_ANSWERS`] finished requests are kept in memory, rebuilt from
 //! the facts at start, so a request id asked again gets its first
-//! answer and nothing is claimed twice.
+//! answer and nothing is claimed twice.  An attempt marked `again` is
+//! not an answer: its confirmed claim is kept in memory only, so the
+//! same request asked again before a restart tries again without a
+//! second confirmation; after a restart it must be confirmed anew.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -17,13 +20,16 @@ use std::sync::{Arc, Mutex};
 
 use marspot_peer::json::{self, Value};
 
-use super::{Claim, Outcome, Res};
+use super::{Claim, Grant, Outcome, Res};
 use crate::plugins::claudecode::allocation_events::{prune_days, ymd};
 
-pub(super) const HEADER: &str = "at\trequest_id\tprovider\tprofile\tkind\tgrant_ref\tby\tresult\tleft_after\tdetail\treason\tobserved_after\n";
+pub(super) const HEADER: &str = "at\trequest_id\tprovider\tprofile\tkind\tgrant_ref\tby\tresult\tleft_after\tdetail\treason\tagain\tobserved_after\n";
 
 /// Answers kept for asking again; far more than claims in fifteen days.
 const MAX_ANSWERS: usize = 512;
+/// Confirmed requests that may be tried again; one per account is all
+/// a working machine has.
+const MAX_AGAIN: usize = 32;
 
 /// One finished attempt, as the facts hold it.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,6 +48,9 @@ pub(super) struct Ledger {
     answers: VecDeque<Row>,
     /// `(provider, profile, request id)` of each claim running.
     running: Vec<(String, u8, String)>,
+    /// Each request whose last attempt may be tried again, as it was
+    /// confirmed.
+    again: VecDeque<Claim>,
 }
 
 /// Holds an account for one claim; dropping it lets the next one in.
@@ -70,14 +79,24 @@ impl Ledger {
             marspot::lx_warn!("svc.reset.prune_failed", &e.to_string());
         }
         let mut rows = rebuild(&dir);
-        rows.retain(|r| r.outcome.result.is_final());
+        rows.retain(|r| r.outcome.is_final());
         let skip = rows.len().saturating_sub(MAX_ANSWERS);
-        Ledger { dir, answers: rows.into_iter().skip(skip).collect(), running: Vec::new() }
+        Ledger { dir, answers: rows.into_iter().skip(skip).collect(), running: Vec::new(), again: VecDeque::new() }
     }
 
     /// The answer `request_id` already got, if it finished.
     pub(super) fn answered(&self, request_id: &str) -> Option<&Row> {
         self.answers.iter().rev().find(|r| r.request_id == request_id)
+    }
+
+    /// The grant `c`'s request was confirmed for, when its last attempt
+    /// may be tried again and `c` asks for the same account and grant.
+    pub(super) fn confirmed_before(&self, c: &Claim) -> Option<Grant> {
+        let same = |k: &&Claim| {
+            (k.request_id.as_str(), k.provider, k.profile, k.grant.kind.as_str(), k.grant.grant_ref.as_str())
+                == (c.request_id.as_str(), c.provider, c.profile, c.grant.kind.as_str(), c.grant.grant_ref.as_str())
+        };
+        self.again.iter().find(same).map(|k| k.grant.clone())
     }
 
     /// Every finished attempt kept, oldest first.
@@ -112,7 +131,7 @@ impl Ledger {
         let left = o.left_after.map_or_else(String::new, |n| n.to_string());
         let observed = o.observed_after.as_ref().map_or_else(String::new, Value::to_json);
         let line = format!(
-            "{now}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{left}\t{}\t{}\t{observed}\n",
+            "{now}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{left}\t{}\t{}\t{}\t{observed}\n",
             clean(&c.request_id),
             row.provider,
             c.profile,
@@ -122,8 +141,16 @@ impl Ledger {
             o.result.as_str(),
             clean(&o.detail),
             clean(&c.reason),
+            if o.again { "1" } else { "" },
         );
-        if o.result.is_final() {
+        self.again.retain(|k| k.request_id != c.request_id);
+        if o.again {
+            if self.again.len() >= MAX_AGAIN {
+                self.again.pop_front();
+            }
+            self.again.push_back(c.clone());
+        }
+        if o.is_final() {
             if self.answers.len() >= MAX_ANSWERS {
                 self.answers.pop_front();
             }
@@ -146,15 +173,16 @@ pub(super) fn rebuild(dir: &std::path::Path) -> Vec<Row> {
 }
 
 fn row_of(line: &str) -> Option<Row> {
-    let c: Vec<&str> = line.splitn(12, '\t').collect();
-    if c.len() < 12 {
+    let c: Vec<&str> = line.splitn(13, '\t').collect();
+    if c.len() < 13 {
         return None;
     }
     let outcome = Outcome {
         result: Res::parse(c[7])?,
         left_after: c[8].parse().ok(),
-        observed_after: json::parse(c[11]).ok(),
+        observed_after: json::parse(c[12]).ok(),
         detail: c[9].to_string(),
+        again: c[11] == "1",
     };
     Some(Row { at: c[0].parse().ok()?, request_id: c[1].into(), provider: c[2].into(), profile: c[3].parse().ok()?, kind: c[4].into(), by: c[6].into(), outcome })
 }

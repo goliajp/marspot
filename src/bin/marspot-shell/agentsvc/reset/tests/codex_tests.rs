@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use marspot_peer::json;
 
-use super::super::codex::{below_usable, claim, consumed, pick};
+use super::super::codex::{Credit, below_usable, claim, cli_exe, consumed, pick};
 use super::super::{Grant, Res};
 
 const RL_1: &str = include_str!("../../../plugins/usage/fixtures/codex-1-rate-limits.json");
@@ -28,15 +28,28 @@ fn redeem_second(rl: &str) -> String {
 #[test]
 fn reset_codex_the_credit_is_found_by_its_start_and_end() {
     let limits = json::parse(RL_1).unwrap();
-    assert_eq!(pick(&limits, &second_credit()).unwrap(), "RateLimitResetCredit_redacted2");
+    let second = Credit { id: "RateLimitResetCredit_redacted2".into(), redeemed: false };
+    assert_eq!(pick(&limits, &second_credit()).unwrap(), second);
     let only_end = Grant { starts_at: None, ..second_credit() };
-    assert_eq!(pick(&limits, &only_end).unwrap(), "RateLimitResetCredit_redacted2");
+    assert_eq!(pick(&limits, &only_end).unwrap(), second);
     let unknown = Grant { ends_at: Some(1), ..second_credit() };
     assert_eq!(pick(&limits, &unknown).unwrap_err().result, Res::Unavailable);
     let blind = Grant { starts_at: None, ends_at: None, ..second_credit() };
     assert_eq!(pick(&limits, &blind).unwrap_err().result, Res::Unavailable, "no credit is guessed");
     let redeemed = json::parse(&redeem_second(RL_1)).unwrap();
-    assert_eq!(pick(&redeemed, &second_credit()).unwrap_err().result, Res::AlreadyUsed);
+    assert!(pick(&redeemed, &second_credit()).unwrap().redeemed, "asked again only for the answer to its key");
+    let no_id = json::parse(&redeem_second(RL_1).replace(r#""id":"RateLimitResetCredit_redacted2","#, "")).unwrap();
+    assert_eq!(pick(&no_id, &second_credit()).unwrap_err().result, Res::AlreadyUsed);
+}
+
+#[test]
+fn reset_codex_the_cli_started_is_the_release_the_current_link_names() {
+    let dir = marspot_term::test_env::TempDir::new("reset-codex-exe");
+    let packages = dir.join("packages/standalone");
+    std::fs::create_dir_all(packages.join("releases/0.172.0-aarch64-apple-darwin/bin")).unwrap();
+    assert_eq!(cli_exe(dir.path()), None, "no current link: nothing installed");
+    std::os::unix::fs::symlink("releases/0.172.0-aarch64-apple-darwin", packages.join("current")).unwrap();
+    assert_eq!(cli_exe(dir.path()), Some(packages.join("releases/0.172.0-aarch64-apple-darwin/bin/codex")));
 }
 
 #[test]
@@ -97,4 +110,35 @@ fn reset_codex_a_claim_consumes_the_confirmed_credit_once_with_the_request_id() 
     let o = claim(&bin, dir.path(), "codex:1", &second_credit(), "ee-2", deadline);
     assert_eq!(o.result, Res::NotLimited);
     assert!(!dir.join("asked").exists(), "nothing was asked to consume");
+}
+
+#[test]
+fn reset_codex_a_consume_with_no_answer_is_asked_again_with_the_same_key() {
+    let dir = marspot_term::test_env::TempDir::new("reset-codex-again");
+    let before = with_week_used(64);
+    // an answer to another id: the consume itself is never answered
+    let bin = stand_in(dir.path(), &before, &before, r#"{"id":"other","result":{}}"#);
+    let o = claim(&bin, dir.path(), "codex:1", &second_credit(), "ff-1", Instant::now() + Duration::from_secs(2));
+    assert_eq!((o.result, o.again), (Res::Error, true), "{o:?}");
+    assert!(!o.is_final(), "not an answer to keep");
+
+    // it was done after all: the credit reads redeemed, the 80% rule is
+    // not asked again, and the same key gets the consume's own answer
+    let after = redeem_second(&before);
+    let bin = stand_in(dir.path(), &after, &after, ANSWERS.lines().next().unwrap());
+    let o = claim(&bin, dir.path(), "codex:1", &second_credit(), "ff-1", Instant::now() + Duration::from_secs(20));
+    assert_eq!((o.result, o.again), (Res::Reset, false), "{o:?}");
+    let asked: Vec<json::Value> = std::fs::read_to_string(dir.join("asked")).unwrap().lines().map(|l| json::parse(l).unwrap()).collect();
+    assert_eq!(asked.len(), 2);
+    for a in &asked {
+        assert_eq!(a.at(&["params", "idempotencyKey"]).and_then(json::Value::str), Some("ff-1"));
+        assert_eq!(a.at(&["params", "creditId"]).and_then(json::Value::str), Some("RateLimitResetCredit_redacted2"));
+    }
+
+    // past the deadline nothing is consumed
+    let dir = marspot_term::test_env::TempDir::new("reset-codex-late");
+    let bin = stand_in(dir.path(), &before, &before, ANSWERS.lines().next().unwrap());
+    let o = claim(&bin, dir.path(), "codex:1", &second_credit(), "ff-2", Instant::now());
+    assert_eq!(o.result, Res::Error);
+    assert!(!dir.join("asked").exists(), "{o:?}");
 }

@@ -31,15 +31,6 @@ results! {
     Error = "error",
 }
 
-impl Res {
-    /// The attempt ended and asking again with the same request id gets
-    /// this answer; `busy` means another claim was running, so a later
-    /// ask with that id is a new attempt.
-    pub(crate) fn is_final(self) -> bool {
-        self != Res::Busy
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Outcome {
     pub result: Res,
@@ -50,11 +41,26 @@ pub(crate) struct Outcome {
     /// One line: what the provider or the CLI said, or why nothing was
     /// tried.
     pub detail: String,
+    /// Not known to have ended: asking again with the same request id
+    /// tries again (the provider's own idempotency key makes that safe).
+    pub again: bool,
 }
 
 impl Outcome {
     pub(crate) fn of(result: Res, detail: &str) -> Outcome {
-        Outcome { result, left_after: None, observed_after: None, detail: detail.to_string() }
+        Outcome { result, left_after: None, observed_after: None, detail: detail.to_string(), again: false }
+    }
+
+    /// An error after which the same request may be asked again.
+    pub(crate) fn again(result: Res, detail: &str) -> Outcome {
+        Outcome { again: true, ..Outcome::of(result, detail) }
+    }
+
+    /// The attempt ended and asking again with the same request id gets
+    /// this answer; `busy` means another claim was running, so a later
+    /// ask with that id is a new attempt, as is one marked `again`.
+    pub(crate) fn is_final(&self) -> bool {
+        self.result != Res::Busy && !self.again
     }
 
     /// The answer to the asker of `request_id`.
