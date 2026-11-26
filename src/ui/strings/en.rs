@@ -137,6 +137,8 @@ fn text(m: Msg) -> &'static str {
         Msg::ColRss => "RSS",
         Msg::ColProcess => "Process",
         Msg::ColPid => "pid",
+        Msg::ProcessLeftGroup => "Left by closed panes",
+        Msg::ProcessLeftDetail => "Still running after their pane closed; marspot never ends them itself",
 
         Msg::PanelHelpers => "Helpers",
         Msg::HelpersEmpty => "No helpers are running",

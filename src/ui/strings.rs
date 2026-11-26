@@ -182,6 +182,9 @@ pub enum Msg {
     ColRss,
     ColProcess,
     ColPid,
+    /// The process monitor's entry for what closed panes left running.
+    ProcessLeftGroup,
+    ProcessLeftDetail,
     // Helper panel
     PanelHelpers,
     HelpersEmpty,

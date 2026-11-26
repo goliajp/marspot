@@ -92,67 +92,9 @@ fn env_required<T: std::str::FromStr>(name: &str) -> T {
         .unwrap_or_else(|| panic!("[core] env {name} = {raw:?} failed to parse"))
 }
 
-/// Input event the reader thread converts each control-socket frame
-/// into.  The main loop drains a channel of these once per render
-/// frame and dispatches them into `CoreApp`.
-/// F3+1 — open process-tree panel state.  Holds per-pane trees +
-/// a last-refresh timestamp so the main loop can decide when to
-/// re-walk libproc (≥2 s gap = stale, refresh on next render).
-/// `None` on `CoreApp.process_panel` means the panel is closed —
-/// libproc is NOT walked at all in that state, so the panel has
-/// zero idle cost when invisible.
-struct ProcessPanelState {
-    /// Per pane: (shelld_session_id, root shell pid, optional tree
-    /// rooted at the shell child pid).  Tree is None when the pid
-    /// can't be resolved (session has no entry.toml yet, or the
-    /// shell child died before walk).  Indexed parallel to
-    /// CoreApp.panes so the renderer can pick by pane order.
-    panes: Vec<PanePidTree>,
-    last_refresh: Instant,
-    /// Pid of each row of the process table, in the order drawn.
-    row_pids: Vec<i32>,
-    /// F3+1.3 — kills awaiting SIGTERM→SIGKILL escalation.  Each entry
-    /// is (pid, sent_at) — when sent_at + KILL_ESCALATION_GRACE elapses
-    /// AND pid_is_alive(pid), we send SIGKILL and drop the entry.
-    pending_kills: Vec<(i32, Instant)>,
-    /// F3+4 — which pane (row in the master column) is currently
-    /// selected; the detail column shows that pane's tree.  Clamped
-    /// each render so a closed pane doesn't strand the selection.
-    selected_pane: usize,
-    /// F3+4 — previous-sample CPU times per pid + sample wall clock,
-    /// used to derive CPU% via delta.  Pids that don't reappear on
-    /// the next refresh get dropped.  Cleared when the panel is
-    /// closed so idle has no carrying state.
-    prev_pid_stats: std::collections::HashMap<i32, (u64, Instant)>,
-    /// Where everything in the frame on screen is; clicks, the
-    /// pointer and the wheel are all answered from it.  `None` until
-    /// the first frame is built.
-    layout: Option<marspot::ui::components::process_panel::Layout>,
-    surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::process_view::ProcessSurface>>,
-    /// How far the process list is pushed up, in physical pixels.
-    scroll_y: marspot::ui::Units,
-}
-
-struct PanePidTree {
-    shelld_session_id: u64,
-    shell_child_pid: Option<i32>,
-    tree: Option<marspot::pidtree::ProcNode>,
-    /// F3+4 — aggregate stats over the tree, populated by
-    /// `refresh_process_panel` from the latest pidtree + proc_stat
-    /// sample.  Master column in the renderer reads these.
-    name: String,
-    n_pids: u32,
-    cpu_pct: f32,
-    rss_kb: u64,
-    busy: String,
-}
-
-/// F3+1.3 — how long after a SIGTERM before we escalate to SIGKILL.
-/// Chosen for "user clicks [×] and expects the row to vanish soon":
-/// 2 s is long enough that a graceful shutdown (claude flushing logs,
-/// node closing the socket) can complete, short enough that the user
-/// doesn't think the click was ignored.
-const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
+#[path = "marspot-core/process_state.rs"]
+mod process_state;
+use process_state::{PanePidTree, ProcessPanelState, KILL_ESCALATION_GRACE};
 
 /// Queue one frame for L1, logging if it had to be dropped.
 ///
@@ -2500,6 +2442,8 @@ mod helper_strip;
 mod helper_panel;
 #[path = "marspot-core/process_panel.rs"]
 mod process_panel;
+#[path = "marspot-core/process_orphans.rs"]
+mod process_orphans;
 #[path = "marspot-core/links.rs"]
 mod links;
 #[path = "marspot-core/search.rs"]

@@ -133,6 +133,8 @@ fn text(m: Msg) -> &'static str {
         Msg::ColRss => "RSS",
         Msg::ColProcess => "プロセス",
         Msg::ColPid => "pid",
+        Msg::ProcessLeftGroup => "閉じたペインの残り",
+        Msg::ProcessLeftDetail => "ペインを閉じた後も動いています。marspotが自分で終了することはありません",
 
         Msg::PanelHelpers => "ヘルパー",
         Msg::HelpersEmpty => "実行中のヘルパーはありません",

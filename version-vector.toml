@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.728"  # marspot-peer answers --help with its usage, refuses unknown options before it connects, and takes text after its first word as written
-core    = "0.12.698"  # a helper strip row can say awaiting answer, and its dev dump keeps the gap between columns
+shell   = "0.7.729"  # the zombie watch records what closed panes left running, by the pane names it remembers, and a closed helper's processes are its parent's
+core    = "0.12.700"  # the process monitor lists what closed panes left running and ends every process by pid and start time
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

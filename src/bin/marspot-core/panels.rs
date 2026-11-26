@@ -46,17 +46,7 @@ impl CoreApp {
                 }
             }
             Some(SurfaceKind::Processes) => {
-                w.process_panel = Some(ProcessPanelState {
-                    panes: Vec::new(),
-                    last_refresh: Instant::now() - std::time::Duration::from_secs(10),
-                    row_pids: Vec::new(),
-                    pending_kills: Vec::new(),
-                    selected_pane: 0,
-                    prev_pid_stats: std::collections::HashMap::new(),
-                    layout: None,
-                    surface: Default::default(),
-                    scroll_y: Default::default(),
-                });
+                w.process_panel = Some(ProcessPanelState::new());
                 // Walked now so the first frame already has its rows.
                 self.refresh_process_panel(wi);
             }

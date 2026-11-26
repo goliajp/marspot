@@ -66,7 +66,7 @@ pub(super) fn save(dir: &Path, p: &Pacers) {
 }
 
 /// Replace `at` whole: a reader never sees half a file.
-fn write(at: &Path, body: &str) -> std::io::Result<()> {
+pub(super) fn write(at: &Path, body: &str) -> std::io::Result<()> {
     let tmp = at.with_extension("tsv.new");
     let mut f = OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
     f.write_all(body.as_bytes())?;

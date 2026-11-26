@@ -131,6 +131,8 @@ fn text(m: Msg) -> &'static str {
         Msg::ColRss => "RSS",
         Msg::ColProcess => "进程",
         Msg::ColPid => "pid",
+        Msg::ProcessLeftGroup => "已关闭的窗格留下的",
+        Msg::ProcessLeftDetail => "窗格关闭后仍在运行，marspot 不会自己结束它们",
 
         Msg::PanelHelpers => "帮手",
         Msg::HelpersEmpty => "没有正在运行的帮手",
