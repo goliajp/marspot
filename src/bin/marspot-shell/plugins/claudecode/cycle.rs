@@ -88,7 +88,7 @@ impl ClaudecodePlugin {
         );
         let (from, class) = (meta.profile_num, allocation_view::class_of_judged(needs.as_deref()));
         if self.switch_by_hand(host, shelld_sid, meta, next_profile) {
-            self.record_moved(host, shelld_sid, from, next_profile, class, "badge", inputs.as_ref());
+            self.record_moved(host, shelld_sid, from, next_profile, class, "badge", inputs.as_ref(), None);
         }
     }
 

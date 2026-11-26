@@ -158,8 +158,8 @@ impl ClaudecodePlugin {
             // the inputs and the accounts it was ranked among: rule (a)
             // over those inputs, kept to these accounts, chose `to`
             let (among, inputs) = chosen.into_inner().map_or((Vec::new(), None), |(ids, i)| (ids, Some(i)));
-            let among: Vec<String> = among.iter().map(|p| format!("P{p}")).collect();
-            self.record_moved(host, sid, from, to, class, &format!("leave_early among={}", among.join(";")), inputs.as_ref());
+            let words: Vec<String> = among.iter().map(|p| format!("P{p}")).collect();
+            self.record_moved(host, sid, from, to, class, &format!("leave_early among={}", words.join(";")), inputs.as_ref(), Some(&among));
             return true;
         }
         false

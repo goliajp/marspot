@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.742"  # the counting allocator is built only for tests
+shell   = "0.7.745"  # svc.sched.decide names sid, pane and point, logs sel_rule apart from the shell rule, weighs leave_early among its accounts and does not weigh badge overrides
 core    = "0.12.710"  # the counting allocator is built only for tests
 session = "0.11.459"  # the counting allocator is built only for tests

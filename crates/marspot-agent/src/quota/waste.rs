@@ -325,7 +325,7 @@ pub fn decide(accounts: &[Quant], loads: &[Load], m: Mover, here: u8, kappa: Opt
 /// The slowest pane of its class on an account stays while, without
 /// any pane of that class, part of the account would lapse at its next
 /// renewal: the panes of the other class would not use it up.
-fn keeps_the_rest(q: &Quant, load: &Load, class: Class, kappa: Option<f64>) -> bool {
+pub fn keeps_the_rest(q: &Quant, load: &Load, class: Class, kappa: Option<f64>) -> bool {
     let mut rest = *load;
     rest.add(class, -load.of(class));
     let o = forecast(q, &rest, None, kappa, q.renews_in(class));
