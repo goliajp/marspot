@@ -88,6 +88,7 @@ fn placed(i: &Inputs, from: Option<u8>, horizon_h: f64, p: &Params, allow: &dyn 
     if all.iter().any(|x| !x.2) {
         all.retain(|x| !x.2);
     }
+    // `added`'s cost still prices a refusal's stall (`waste::STALL`) as money until the selector acts
     let mut to: Vec<(usize, Terms)> = all.iter().map(|&(j, cost, refuses, _)| (j, Terms { money: cost * POINTS, efficiency: if refuses { STALL_H } else { 0.0 }, fairness: 0.0 })).collect();
     tie_order(&i.accounts, &i.loads, i, &mut to);
     Cands { to: to.into_iter().map(|(j, t)| (i.accounts[j].id, t)).collect(), stay: None }

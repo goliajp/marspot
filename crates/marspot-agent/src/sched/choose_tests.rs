@@ -71,6 +71,33 @@ fn sched_ties_go_to_fairness_then_fewer_then_order() {
     assert_eq!(c.decided_by, Tier::Fewer, "money within float noise is a tie");
 }
 
+/// Of the dearer candidates efficiency may buy, the most efficient wins
+/// and, among equally efficient ones, the cheapest, whatever the order.
+#[test]
+fn sched_the_best_buy_is_the_most_efficient_then_the_cheapest() {
+    let none = Some(t(0.0, 2.0));
+    let c = choose(&[(1u8, t(0.6, 0.0)), (2, t(0.4, 0.0))], none, 0.0, &POLICY);
+    assert_eq!((c.action, c.decided_by), (Some(2), Tier::BoughtByEfficiency));
+    assert!((c.week_eff_after - 0.4).abs() < 1e-12);
+    let c = choose(&[(1u8, t(0.4, 0.5)), (2, t(0.6, 0.0))], none, 0.0, &POLICY);
+    assert_eq!(c.action, Some(2), "efficiency comes before money among buys");
+    let f = |money: f64, fairness: f64| Terms { money, efficiency: 0.0, fairness };
+    let c = choose(&[(1u8, f(0.4, 2.0)), (2, f(0.4, 1.0))], none, 0.0, &POLICY);
+    assert_eq!(c.action, Some(2), "then fairness");
+}
+
+/// A money term that is not a number never sets the cheapest and never
+/// panics, even when every term is one.
+#[test]
+fn sched_nan_money_counts_as_dearest() {
+    let c = choose(&[(1u8, t(f64::NAN, 0.0)), (2, t(1.0, 0.5))], Some(t(-f64::NAN, 0.0)), 0.0, &POLICY);
+    assert_eq!((c.action, c.decided_by), (Some(2), Tier::Money));
+    let c = choose(&[(1u8, t(f64::NAN, 0.0))], Some(t(f64::NAN, 0.0)), 0.0, &POLICY);
+    assert_eq!((c.action, c.week_eff_after), (None, 0.0));
+    let c = choose(&[(1u8, t(f64::NAN, 0.0)), (2, t(f64::NAN, 1.0))], None, 0.0, &POLICY);
+    assert_eq!(c.action, Some(1));
+}
+
 #[test]
 fn sched_nothing_to_choose_is_doing_nothing() {
     let c = choose::<u8>(&[], None, 0.2, &POLICY);

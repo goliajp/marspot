@@ -6,6 +6,9 @@
 //! candidate can still win when its efficiency beats the cheapest by
 //! more than `delta_eff` and the week's spending for efficiency stays
 //! within `week_eff_cap`; that is the only way efficiency buys money.
+//! Of several such, the most efficient wins, then the cheapest, then
+//! fairness and order.  A money term that is not a number counts as
+//! dearer than every other.
 //! Among the cheapest, efficiency decides, and a move must beat doing
 //! nothing by `delta_eff`; then fairness, then fewer actions (doing
 //! nothing first), then the order the caller listed them in.
@@ -96,18 +99,37 @@ impl<A: Copy> View<'_, A> {
         if self.is_none(i) { None } else { Some(self.cands[i].0) }
     }
 
+    /// The money term to compare by: one that is not a number is dearer
+    /// than any that is, so it never sets the cheapest.
+    fn money(&self, i: usize) -> f64 {
+        let m = self.terms(i).money;
+        if m.is_nan() { f64::INFINITY } else { m }
+    }
+
     /// `a` comes before `b` once money is settled: efficiency, fairness,
     /// doing nothing, the caller's order.
     fn before(&self, a: usize, b: usize) -> bool {
+        self.before_with(a, b, None)
+    }
+
+    /// As `before`, with money (equal within `eps_money`, when given)
+    /// right after efficiency.
+    fn before_with(&self, a: usize, b: usize, eps_money: Option<f64>) -> bool {
         let (ta, tb) = (self.terms(a), self.terms(b));
-        let cmp = |x: f64, y: f64| if (x - y).abs() <= EPS_TERM { std::cmp::Ordering::Equal } else { x.total_cmp(&y) };
+        let near = |x: f64, y: f64, eps: f64| if (x - y).abs() <= eps { std::cmp::Ordering::Equal } else { x.total_cmp(&y) };
+        let cmp = |x: f64, y: f64| near(x, y, EPS_TERM);
+        let money = eps_money.map_or(std::cmp::Ordering::Equal, |e| near(self.money(a), self.money(b), e));
         let fewer = |i: usize| !self.is_none(i);
-        cmp(ta.efficiency, tb.efficiency).then(cmp(ta.fairness, tb.fairness)).then(fewer(a).cmp(&fewer(b))).then(a.cmp(&b)).is_lt()
+        cmp(ta.efficiency, tb.efficiency).then(money).then(cmp(ta.fairness, tb.fairness)).then(fewer(a).cmp(&fewer(b))).then(a.cmp(&b)).is_lt()
     }
 
     fn best(&self, ok: impl Fn(usize) -> bool) -> Option<usize> {
+        self.best_by(ok, |a, b| self.before(a, b))
+    }
+
+    fn best_by(&self, ok: impl Fn(usize) -> bool, before: impl Fn(usize, usize) -> bool) -> Option<usize> {
         (0..self.len()).filter(|i| ok(*i)).fold(None, |b, i| match b {
-            Some(j) if !self.before(i, j) => Some(j),
+            Some(j) if !before(i, j) => Some(j),
             _ => Some(i),
         })
     }
@@ -121,17 +143,19 @@ pub fn choose<A: Copy>(cands: &[(A, Terms)], none: Option<Terms>, week_eff: f64,
     if n == 0 {
         return Choice { action: None, terms: Terms::default(), decided_by: Tier::Money, runner_up: None, week_eff_after: week_eff };
     }
-    let m_min = (0..n).map(|i| v.terms(i).money).fold(f64::INFINITY, f64::min);
-    let cheap = |i: usize| v.terms(i).money <= m_min + p.eps_money;
-    let mut win = settle(&v, &cheap, p);
+    let lo = (0..n).min_by(|a, b| v.money(*a).total_cmp(&v.money(*b))).unwrap_or(0);
+    let m_min = v.money(lo);
+    let cheap = |i: usize| v.money(i) <= m_min + p.eps_money;
+    let mut win = settle(&v, &cheap, lo, p);
     let mut bought = 0.0;
     let base = v.terms(win).efficiency;
     let buyable = |i: usize| {
-        let d = v.terms(i).money - m_min;
+        let d = v.money(i) - m_min;
         !cheap(i) && week_eff + d <= p.week_eff_cap + p.eps_money && v.terms(i).efficiency < base - p.delta_eff
     };
-    if let Some(b) = v.best(buyable) {
-        bought = v.terms(b).money - m_min;
+    // the best buy is the most efficient, then the cheapest of those
+    if let Some(b) = v.best_by(buyable, |a, b| v.before_with(a, b, Some(p.eps_money))) {
+        bought = v.money(b) - m_min;
         win = b;
     }
     let runner = (0..n).filter(|i| *i != win).fold(None, |b: Option<usize>, i| match b {
@@ -148,22 +172,22 @@ pub fn choose<A: Copy>(cands: &[(A, Terms)], none: Option<Terms>, week_eff: f64,
     }
 }
 
-/// The winner among the cheapest: a move has to beat doing nothing by
-/// `delta_eff` when doing nothing is among them.
-fn settle<A: Copy>(v: &View<'_, A>, cheap: &impl Fn(usize) -> bool, p: &Policy) -> usize {
-    let none_cheap = v.none.is_some() && cheap(v.cands.len());
-    let mv = v.best(|i| cheap(i) && !v.is_none(i));
-    match (none_cheap, mv) {
-        (true, Some(m)) if v.terms(m).efficiency < v.terms(v.cands.len()).efficiency - p.delta_eff => m,
-        (true, _) => v.cands.len(),
-        (false, Some(m)) => m,
-        (false, None) => unreachable!("the cheapest entry is a candidate or doing nothing"),
+/// The winner among the cheapest (`lo` is one of them): a move has to
+/// beat doing nothing by `delta_eff` when doing nothing is among them.
+fn settle<A: Copy>(v: &View<'_, A>, cheap: &impl Fn(usize) -> bool, lo: usize, p: &Policy) -> usize {
+    let none = v.cands.len();
+    let none_cheap = v.none.is_some() && cheap(none);
+    match v.best(|i| cheap(i) && !v.is_none(i)) {
+        Some(m) if !none_cheap || v.terms(m).efficiency < v.terms(none).efficiency - p.delta_eff => m,
+        Some(_) => none,
+        // no move is among the cheapest, so `lo` is doing nothing
+        None => lo,
     }
 }
 
 /// The order the runner-up is found by: money, then the rest.
 fn full_before<A: Copy>(v: &View<'_, A>, a: usize, b: usize, p: &Policy) -> bool {
-    let (ma, mb) = (v.terms(a).money, v.terms(b).money);
+    let (ma, mb) = (v.money(a), v.money(b));
     if (ma - mb).abs() > p.eps_money {
         return ma < mb;
     }
@@ -172,7 +196,7 @@ fn full_before<A: Copy>(v: &View<'_, A>, a: usize, b: usize, p: &Policy) -> bool
 
 fn tier_between<A: Copy>(v: &View<'_, A>, win: usize, run: usize, p: &Policy) -> Tier {
     let (w, r) = (v.terms(win), v.terms(run));
-    if (w.money - r.money).abs() > p.eps_money {
+    if (v.money(win) - v.money(run)).abs() > p.eps_money {
         Tier::Money
     } else if (w.efficiency - r.efficiency).abs() > EPS_TERM || v.is_none(win) && r.efficiency < w.efficiency {
         Tier::Efficiency
