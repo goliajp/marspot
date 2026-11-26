@@ -105,6 +105,8 @@ done
 bundle_bin() { echo "$MACOS/$1"; }
 
 source "$(dirname "$0")/_install-status.sh"
+# the per-layer swap decision and its INSTALL_LAYERS record
+source "$(dirname "$0")/_install-layers.sh"
 
 if [[ "$MODE" == status ]]; then
   cmd_status
@@ -229,10 +231,12 @@ if [[ -x "$PEER" ]]; then
     echo "$out" | sed "s/^/    /" >&2
     [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] || adhoc_bail "codesign failed for marspot-peer."
   fi
+  peer_decision "$PEER" "$HOME/.local/bin/marspot-peer"
   mkdir -p "$HOME/.local/bin"
   install -m 0755 "$PEER" "$HOME/.local/bin/marspot-peer"
   echo "==> installed ~/.local/bin/marspot-peer"
 else
+  peer_decision "$PEER" "$HOME/.local/bin/marspot-peer"
   echo "==> marspot-peer not built (--no-build): ~/.local/bin/marspot-peer left as it was"
 fi
 
@@ -272,123 +276,6 @@ plist_is_current() {
 # "did this change?" comparison MUST happen first — otherwise the
 # bundle would compare equal to the build we just copied over it and
 # nothing would ever look changed.
-running_equiv() {
-  # What the running supervisor came from: current/ slot if a prior
-  # update populated it, else the (still-old) bundle binary.
-  local bin="$1"
-  if [[ -f "$TREE/current/$bin" ]]; then echo "$TREE/current/$bin"; else echo "$MACOS/$bin"; fi
-}
-# Extract the git sha embedded by build.rs into a marspot binary. The
-# rodata holds the sha and the build timestamp adjacently — pull just
-# the sha + optional -dirty marker. Empty output = unable to find one
-# (caller falls back to byte-compare).
-binary_git_sha() {
-  local bin="$1"
-  [[ -f "$bin" ]] || { echo ""; return; }
-  # The marspot + marspot-term crates embed a literal `MARSPOT_FP=<sha>|
-  # <ts>|END` static into the binary's rodata so this extractor is
-  # robust to linker ordering — no regex guessing where the sha lives
-  # next to. Returns just the sha portion (with optional `-dirty`).
-  strings "$bin" 2>/dev/null \
-    | grep -oE 'MARSPOT_FP=[0-9a-f]{8}(-dirty)?\|' \
-    | head -1 \
-    | sed -E 's/^MARSPOT_FP=//;s/\|$//'
-}
-
-# Extract the per-layer version (e.g. `0.5.4`) from a binary's
-# `MARSPOT_LAYER_VERS=shell:X|core:Y|session:Z|END` rodata marker.
-# Returns empty when the marker isn't present (older binary, predates
-# the per-layer-version install-local skip path).
-# $1 = binary path, $2 = layer name (shell / core / session).
-binary_layer_ver() {
-  local bin="$1" layer="$2"
-  [[ -f "$bin" && -n "$layer" ]] || { echo ""; return; }
-  strings "$bin" 2>/dev/null \
-    | grep -oE 'MARSPOT_LAYER_VERS=[^[:cntrl:]]*\|END' \
-    | head -1 \
-    | grep -oE "${layer}:[0-9A-Za-z._-]+" \
-    | head -1 \
-    | sed -E "s/^${layer}://"
-}
-
-# L2 (marspot-core) is the canonical version carrier. L1 (marspot-shell)
-# is a thin stable wrapper; L3 (marspot-session) is a per-pane child of
-# L2. They all ride on the same git commit, so we decide "is this
-# install-local a no-op or a real update?" by looking at L2's fingerprint
-# alone:
-#
-#   bundle L2 sha == target L2 sha, no `-dirty` suffix on either side
-#   ⇒ same commit, nothing to do. Skip stage for ALL four binaries so
-#     no SIGUSR1 fires, no shell self-update execv runs, no window
-#     flashes.
-#
-# Any other state ⇒ fall back to the historical per-binary `cmp -s`
-# byte compare, which keeps dirty-workspace dev iteration honest (every
-# touched recompile re-stages and re-execs).
-#
-# The cache is computed once on first `changed()` call and reused for
-# all four binaries within one install-local run.
-_L2_NOOP=""  # "yes" / "no" once decided
-_l2_decision() {
-  if [[ -z "$_L2_NOOP" ]]; then
-    local ref tgt ref_sha tgt_sha
-    ref="$(running_equiv marspot-core)"
-    tgt="$TARGET/marspot-core"
-    if [[ -f "$ref" && -f "$tgt" ]]; then
-      ref_sha="$(binary_git_sha "$ref")"
-      tgt_sha="$(binary_git_sha "$tgt")"
-      if [[ -n "$ref_sha" && -n "$tgt_sha" \
-            && "$ref_sha" == "$tgt_sha" \
-            && "$ref_sha" != *-dirty ]]; then
-        _L2_NOOP=yes
-      else
-        _L2_NOOP=no
-      fi
-    else
-      _L2_NOOP=no
-    fi
-  fi
-  [[ "$_L2_NOOP" == yes ]]
-}
-
-changed() {
-  local bin="$1" ref
-  ref="$(running_equiv "$bin")"
-  [[ -f "$ref" ]] || return 0
-  if _l2_decision; then
-    return 1  # L2 says same clean commit — whole tree is no-op
-  fi
-  # Per-layer version skip: if the binary embeds a
-  # MARSPOT_LAYER_VERS marker AND that layer's version is unchanged
-  # between running and target, the developer's intent (as declared
-  # in version-vector.toml) is "this layer didn't change."  Skip
-  # stage so a pure-L2 install doesn't restage L1 just because the
-  # rebuild bumped the git sha + build timestamp embedded in every
-  # binary's rodata.
-  # Gated on `-dirty` absence: a dirty workspace is mid-iteration,
-  # the version vector may not yet reflect uncommitted source — fall
-  # through to byte-compare so dev's "edit + install + see change"
-  # cycle keeps working.
-  local layer=""
-  case "$bin" in
-    marspot-shell)   layer="shell" ;;
-    marspot-core)    layer="core" ;;
-    marspot-session) layer="session" ;;
-  esac
-  if [[ -n "$layer" ]]; then
-    local tgt_sha
-    tgt_sha="$(binary_git_sha "$TARGET/$bin")"
-    if [[ -n "$tgt_sha" && "$tgt_sha" != *-dirty ]]; then
-      local ref_ver tgt_ver
-      ref_ver="$(binary_layer_ver "$ref" "$layer")"
-      tgt_ver="$(binary_layer_ver "$TARGET/$bin" "$layer")"
-      if [[ -n "$ref_ver" && -n "$tgt_ver" && "$ref_ver" == "$tgt_ver" ]]; then
-        return 1
-      fi
-    fi
-  fi
-  ! cmp -s "$TARGET/$bin" "$ref"
-}
 stage() {
   local bin="$1"
   mkdir -p "$TREE/pending"
@@ -402,6 +289,11 @@ RUNNING=0; prod_shell_running && RUNNING=1
 SHELL_CHANGED=0; changed marspot-shell  && SHELL_CHANGED=1
 CORE_CHANGED=0;  changed marspot-core   && CORE_CHANGED=1
 SESSION_CHANGED=0; changed marspot-session && SESSION_CHANGED=1
+# one line per install: which layers swap, and which paths changed
+LAYERS_LINE="$(install_layers_line "$(binary_git_sha "$TARGET/marspot-core")" \
+  "$(swap_list $SHELL_CHANGED $CORE_CHANGED $SESSION_CHANGED)")"
+echo "==> $LAYERS_LINE"
+sup_log "${LAYERS_LINE%% *}" "${LAYERS_LINE#* }"
 
 # Print the version vector from version-vector.toml so the operator
 # can correlate this install with which layers actually moved. L2
