@@ -15,6 +15,9 @@ use crate::plugins::allocation::replay::Why;
 /// The span the hourly band counts over.
 const HOUR_S: i64 = 3600;
 
+/// The span the daily budget counts over.
+const DAY_S: i64 = 24 * HOUR_S;
+
 /// The reason a `would_move` or `moved` line gives.
 fn why_of(detail: &str) -> Option<Why> {
     detail.split(' ').find_map(|w| w.strip_prefix("why=")).and_then(Why::from_word)
@@ -23,8 +26,11 @@ fn why_of(detail: &str) -> Option<Why> {
 impl Allocation {
     /// One move counted against the limits it falls under.
     pub(in super::super) fn count_move(&mut self, at: i64, sid: u64, why: Why) {
-        if matches!(why, Why::Plan | Why::Rescue | Why::UOut) {
+        if matches!(why, Why::Plan | Why::Rescue | Why::UOut | Why::Waste) {
             self.band_moves.push_back(at);
+        }
+        if why == Why::Waste {
+            self.day_moves.push_back(at);
         }
         if why.resting()
             && let Some(l) = self.last.get_mut(&sid)
@@ -42,6 +48,7 @@ impl Allocation {
             self.count_move(e.at, e.sid, why);
         }
         self.band_moves.retain(|t| now - t < HOUR_S);
+        self.day_moves.retain(|t| now - t < DAY_S);
     }
 
     /// Set the mode for the scans that follow; on a change, count
@@ -55,6 +62,7 @@ impl Allocation {
             return;
         }
         self.band_moves.clear();
+        self.day_moves.clear();
         for l in self.last.values_mut() {
             l.rest_moves.clear();
         }

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.729"  # the zombie watch records what closed panes left running, by the pane names it remembers, and a closed helper's processes are its parent's
+shell   = "0.7.730"  # claude panes are placed by one objective, the quota expected to lapse at the renewals plus what moves cost; helpers may run Fable
 core    = "0.12.700"  # the process monitor lists what closed panes left running and ends every process by pid and start time
 session = "0.11.454"  # a pty the parsing loop gives back dry is lent again on the reader's next full chunk, on the rate taken before, and what the loop read before it found the pty dry counts

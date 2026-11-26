@@ -11,10 +11,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use marspot::cc_usage::CxAccount;
 
-use crate::plugins::allocation::choose::Mover;
-use crate::plugins::allocation::helper::{Placement, Scene, place};
-use crate::plugins::allocation::replay::Inputs;
-use crate::plugins::allocation::{Class, RHO0};
+use crate::plugins::allocation::choose::{HELPER_LAST_H, Mover};
+use crate::plugins::allocation::helper::{Placement, Scene, place_by};
+use crate::plugins::allocation::replay::{Inputs, Rule};
+use crate::plugins::allocation::{Class, RHO0, waste};
 use crate::plugins::claudecode::quota::helper_pick::{self, Accounts, Placed, Pool};
 use crate::plugins::claudecode::quota::Room;
 use crate::plugins::claudecode::rooms::unix_now;
@@ -133,7 +133,10 @@ pub(in crate::plugins) fn choose(
         }
         Some(n)
     };
-    let to = match place(scene, Mover { class, rate: RHO0 }, None, &placed.counts()) {
+    // Claude's helpers are placed by the one objective; the other
+    // agents' accounts know no restricted window to weigh
+    let rule = if agent == Agent::Claude { Rule::Waste { moves_day: 0 } } else { Rule::Bands };
+    let to = match place_by(scene, Mover { class, rate: RHO0 }, None, &placed.counts(), rule) {
         Placement::To(n, inputs) => chosen("placed", n, &inputs),
         Placement::HeldBack(n, inputs) => chosen("held_back_start", n, &inputs),
         Placement::Nowhere => helper_pick::unread_pick(&accounts.rooms, None, model, placed),
@@ -153,6 +156,30 @@ pub(in crate::plugins) fn choose(
             Pick::NoAccount(accounts.rooms.iter().map(|(n, room)| Recovery { number: *n, at: at(*n, room) }).collect())
         }
     }
+}
+
+/// The model a Claude helper started with none asked for runs: Fable
+/// where the expected waste says some Fable window would otherwise
+/// lapse, else none (the account's own default).  Only for helpers: a
+/// pane the person started keeps the model it was started with.
+pub(in crate::plugins) fn claude_helper_model() -> Option<&'static str> {
+    let numbers: Vec<u8> = handoff::profiles(Agent::Claude).iter().map(|(n, _)| *n).collect();
+    if numbers.is_empty() {
+        return None;
+    }
+    let now = unix_now();
+    let (accounts, usage) = helper_pick::claude_accounts(&numbers, now);
+    let scene = helper_pick::claude_scene(&numbers, &accounts.rooms, usage.as_ref(), now);
+    fable_saves(&scene).then_some(HELPER_FABLE)
+}
+
+/// The model named for a helper that runs Fable: the one the Fable
+/// panes on this machine run.
+pub(in crate::plugins) const HELPER_FABLE: &str = "claude-fable-5-2";
+
+/// A Fable helper lowers the expected waste more than any other would.
+pub(in crate::plugins) fn fable_saves(scene: &Scene) -> bool {
+    waste::restricted_helper(&scene.accounts, &scene.loads, RHO0, scene.kappa, HELPER_LAST_H, &waste::PARAMS)
 }
 
 /// The class a helper of `agent` on `model` is placed as.

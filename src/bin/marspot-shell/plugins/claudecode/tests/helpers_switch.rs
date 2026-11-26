@@ -61,15 +61,17 @@ fn helpers_refused_on_their_account_go_where_the_allocation_has_a_gap() {
         let i = host.sent.lock().unwrap().iter().position(|(s, _)| *s == sid).unwrap();
         target(&host, i)
     };
-    assert!(to(79).contains(".claude-profile-2"), "an ordinary pane goes where it renews first: {}", to(79));
-    let helpers = [to(77), to(78)];
-    assert!(helpers.iter().all(|t| t.contains(".claude-profile-3")), "P3 has the gap left: {helpers:?}");
+    // where each went is the one objective's; the three are spread, not
+    // all sent to one account to be refused there together
+    let on = |t: String| if t.contains(".claude-profile-2") { 2 } else if t.contains(".claude-profile-3") { 3 } else { panic!("{t}") };
+    let went = [on(to(77)), on(to(78)), on(to(79))];
+    assert!(went.contains(&2) && went.contains(&3), "{went:?}");
 
     let mut changes = drain_account_changes();
     changes.sort_by_key(|c| c.sid);
     let got: Vec<(u64, &str, u8)> = changes.iter().map(|c: &AccountChanged| (c.sid, c.agent, c.from)).collect();
     assert_eq!(got, [(77, "claude", 1), (78, "claude", 1)], "only the helpers' moves are reported");
-    assert!(changes.iter().all(|c| c.to == 3));
+    assert_eq!(changes.iter().map(|c| c.to).collect::<Vec<_>>(), went[..2]);
 }
 
 /// The next scan after claude writes that its turn is over says so.

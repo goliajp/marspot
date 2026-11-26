@@ -13,7 +13,7 @@ use super::choose::{Mover, pick};
 use super::plan::Plan;
 use super::plan::plan;
 use super::rest::{RestMove, Resting, rest_move};
-use super::{Class, Load, Quant};
+use super::{Class, Load, Quant, waste};
 
 /// Why a pane would move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +29,9 @@ pub(crate) enum Why {
     Plan,
     /// Demand exceeds supply and a restricted window would lapse unused.
     Rescue,
+    /// A resting pane: moving it lowers the expected waste by more than
+    /// the move costs (`waste`).
+    Waste,
 }
 
 impl Why {
@@ -39,16 +42,45 @@ impl Why {
             Why::UOut => "u_out",
             Why::Plan => "plan",
             Why::Rescue => "rescue",
+            Why::Waste => "waste",
         }
     }
 
     pub(crate) fn from_word(w: &str) -> Option<Why> {
-        [Why::Out, Why::LeaveEarly, Why::UOut, Why::Plan, Why::Rescue].into_iter().find(|y| y.word() == w)
+        [Why::Out, Why::LeaveEarly, Why::UOut, Why::Plan, Why::Rescue, Why::Waste].into_iter().find(|y| y.word() == w)
     }
 
     /// A move of a resting pane, which the weekly limit counts.
     pub(crate) fn resting(self) -> bool {
         self != Why::Out
+    }
+}
+
+/// Which rule decides: the bands of the plan, or the one objective of
+/// `waste`, which also reads the resting moves of the last day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rule {
+    Bands,
+    Waste { moves_day: usize },
+}
+
+impl Rule {
+    /// The words a logged line carries after `Inputs::encode` so its
+    /// replay uses the same rule; none for the bands.
+    pub(crate) fn words(self) -> String {
+        match self {
+            Rule::Bands => String::new(),
+            Rule::Waste { moves_day } => format!(" rule=waste day={moves_day}"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of_line(line: &str) -> Rule {
+        let get = |k: &str| line.split(' ').find_map(|w| w.strip_prefix(k)?.strip_prefix('='));
+        match get("rule") {
+            Some("waste") => Rule::Waste { moves_day: get("day").and_then(|d| d.parse().ok()).unwrap_or(0) },
+            _ => Rule::Bands,
+        }
     }
 }
 
@@ -117,6 +149,14 @@ impl Inputs {
                     RestMove::Rescue(t) => Some((t, Why::Rescue)),
                 }
             }
+        }
+    }
+
+    /// The decision under `rule`.
+    pub(crate) fn decide_by(&self, plan: &Plan, rule: Rule) -> Option<(u8, Why)> {
+        match rule {
+            Rule::Bands => self.decide(plan),
+            Rule::Waste { moves_day } => waste::decide(&self.accounts, &self.loads, self.mover, self.here, self.kappa, &self.kind, moves_day, &waste::PARAMS),
         }
     }
 
@@ -204,5 +244,5 @@ fn quant(f: &[&str]) -> Option<Quant> {
 #[cfg(test)]
 pub(crate) fn replay(line: &str) -> Option<Option<(u8, Why)>> {
     let i = Inputs::decode(line)?;
-    Some(i.decide(&i.plan()))
+    Some(i.decide_by(&i.plan(), Rule::of_line(line)))
 }

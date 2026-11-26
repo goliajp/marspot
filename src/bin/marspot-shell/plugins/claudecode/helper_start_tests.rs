@@ -11,7 +11,7 @@ use super::super::super::allocation_events::{Event, EventLog};
 use super::super::super::allocation_inputs::{PaneIn, Snapshot, accounts_of};
 use super::super::super::rooms::unix_now;
 use super::*;
-use crate::plugins::allocation::choose::{HELPER_LAST_H, held_back};
+use crate::plugins::allocation::replay::Rule;
 use crate::plugins::handoff::Agent;
 use crate::plugins::usage::for_helpers::{Pick, choose};
 
@@ -82,10 +82,10 @@ fn rows(events: &Path, now: i64) -> Vec<Event> {
 }
 
 /// P1 refuses; P2 has a little left, which the three Fable panes on P1
-/// are short of.  A refused plain helper would wait; a new one is
-/// started on P2 all the same, and its line says what it cost.
+/// are short of.  The one objective holds no helper back: a new one is
+/// placed on P2, and its line decides the same again.
 #[test]
-fn helpers_a_new_helper_held_back_for_fable_starts_where_it_would_go() {
+fn helpers_a_new_helper_with_fable_short_is_placed_where_there_is_room() {
     let (dir, _env, homes, now) = home("hbs", [("rejected", 1.0, 1.0, 50.0), ("allowed", 0.94, 0.9, 100.0)]);
     let fable: Vec<(PaneIn, (f64, f64))> = (90..93).map(|s| (pane(s, 1, Class::Restricted), (RHO0, 0.0))).collect();
     publish("hbs", now - 60, &fable);
@@ -96,11 +96,9 @@ fn helpers_a_new_helper_held_back_for_fable_starts_where_it_would_go() {
     let got = rows(&events, now);
     assert_eq!(got.len(), 1, "{got:?}");
     let r = &got[0];
-    assert_eq!((r.kind.as_str(), r.profile, r.class.as_str(), r.sid), ("held_back_start", Some(2), "plain", 0));
+    assert_eq!((r.kind.as_str(), r.profile, r.class.as_str(), r.sid), ("placed", Some(2), "plain", 0));
     let inputs = Inputs::decode(&r.detail).expect("the inputs read back");
-    let plan = inputs.plan();
-    assert_eq!(inputs.decide(&plan), None, "the core holds it back");
-    assert_eq!(held_back(&inputs.accounts, &plan, &inputs.loads, inputs.mover, None, HELPER_LAST_H), Some(2));
+    assert_eq!(inputs.decide_by(&inputs.plan(), Rule::of_line(&r.detail)).map(|(to, _)| to), Some(2));
     assert!(inputs.b_f > 0.0, "the Fable panes' demand is in what it read: {inputs:?}");
 }
 
@@ -132,7 +130,7 @@ fn helpers_a_new_helper_avoids_a_busy_account_and_is_counted_once() {
     assert_eq!(got.iter().map(|e| e.profile).collect::<Vec<_>>(), [Some(2), Some(second)]);
     for e in &got {
         let inputs = Inputs::decode(&e.detail).expect("the inputs read back");
-        assert_eq!(inputs.decide(&inputs.plan()).map(|(to, _)| to), e.profile, "the line decides the same again: {}", e.detail);
+        assert_eq!(inputs.decide_by(&inputs.plan(), Rule::of_line(&e.detail)).map(|(to, _)| to), e.profile, "the line decides the same again: {}", e.detail);
     }
     let later = Inputs::decode(&got[1].detail).unwrap();
     let on2 = later.accounts.iter().position(|q| q.id == 2).unwrap();

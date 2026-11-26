@@ -24,6 +24,7 @@ pub(crate) mod replay;
 pub(crate) mod rescue;
 pub(crate) mod rest;
 pub(crate) mod speed;
+pub(crate) mod waste;
 
 #[cfg(test)]
 mod sim;
@@ -41,6 +42,12 @@ mod core_tests;
 mod rest_tests;
 #[cfg(test)]
 mod rescue_tests;
+#[cfg(test)]
+mod waste_tests;
+#[cfg(test)]
+mod waste_world;
+#[cfg(test)]
+mod waste_replay_tests;
 
 /// The share of a Claude week a full Fable window is worth.
 ///

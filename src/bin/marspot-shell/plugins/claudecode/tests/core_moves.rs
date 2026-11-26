@@ -1,5 +1,5 @@
-//! A resting pane moved by the allocation's plan: written down with
-//! everything that chose it under `dryrun`, moved under `live`.
+//! A resting pane moved by the allocation's objective: written down
+//! with everything that chose it under `dryrun`, moved under `live`.
 
 use super::*;
 use crate::plugins::allocation::replay::replay;
@@ -9,11 +9,12 @@ use crate::plugins::claudecode::allocation_inputs::snapshot;
 /// 2026-11-05 00:00 UTC, when the feed below was written.
 const FED: i64 = 1_793_836_800;
 
-/// P1 renews in fifty hours with 90% of its week left and nobody on
-/// it; P2, where the pane is, renews in 2100.  The plan puts the
-/// pane's use on P1, which would lapse otherwise.
+/// P1 renews in 150 hours with 90% of its week left and nobody on it;
+/// P2, where the pane is, renews in 30 with 10% left, which the pane
+/// uses up in half that.  More of what it uses on P1 would lapse.
 fn feed(home: &Path) {
-    let renews = FED + 50 * 3600;
+    let renews = FED + 150 * 3600;
+    let renews2 = FED + 30 * 3600;
     fs::write(
         home.join(".local/state/devops/claude-usage.json"),
         format!(
@@ -23,9 +24,9 @@ fn feed(home: &Path) {
                 "collected_at":"2026-11-05T00:00:00+00:00",
                 "model_limits":[{{"label":"Fable","utilization":0.0,"reset":{renews}}}]}},
                {{"name":"B","email":"plan2@example","status":"allowed","utilization_5h":null,
-                "utilization_7d":0.10,"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x",
+                "utilization_7d":0.90,"reset_5h":null,"reset_7d":{renews2},"tier":"default_claude_max_20x",
                 "collected_at":"2026-11-05T00:00:00+00:00",
-                "model_limits":[{{"label":"Fable","utilization":0.0,"reset":4102444900}}]}}]}}"#
+                "model_limits":[{{"label":"Fable","utilization":0.0,"reset":{renews2}}}]}}]}}"#
         ),
     )
     .unwrap();
@@ -65,8 +66,8 @@ fn rebalance_dryrun_writes_the_plan_move_with_its_inputs_and_live_moves() {
     );
     let mut alloc = Allocation::new(events_dir(&marspot::paths::state_root()));
     let result = scan(&plugin, sid, &mut alloc);
-    let (to, why, _) = result.alloc.as_ref().unwrap().rest.get(&sid).cloned().expect("the plan moves it");
-    assert_eq!((to, why.word()), (1, "plan"));
+    let (to, why, _) = result.alloc.as_ref().unwrap().rest.get(&sid).cloned().expect("the objective moves it");
+    assert_eq!((to, why.word()), (1, "waste"));
     let mode = |m| marspot::settings::set_for_test(marspot::settings::Settings { cc_rebalance: m, ..Default::default() });
 
     mode(marspot::settings::Rebalance::DryRun);
@@ -76,7 +77,7 @@ fn rebalance_dryrun_writes_the_plan_move_with_its_inputs_and_live_moves() {
     assert_eq!(would.len(), 1, "{:?}", host.logged.lock().unwrap());
     // the line carries every input: fed back, the same decision comes out
     let inputs = would[0].split_once(") ").unwrap().1;
-    assert_eq!(replay(inputs).unwrap().map(|(t, w)| (t, w.word())), Some((1, "plan")), "{}", would[0]);
+    assert_eq!(replay(inputs).unwrap().map(|(t, w)| (t, w.word())), Some((1, "waste")), "{}", would[0]);
     plugin.sweep_unusable_profiles(&host, &result);
     assert_eq!(host.logged.lock().unwrap().iter().filter(|(e, _)| e == "rebalance.would_move").count(), 1, "said once");
 
@@ -102,7 +103,7 @@ fn rebalance_dryrun_writes_the_plan_move_with_its_inputs_and_live_moves() {
     let moved: Vec<&str> = text.lines().filter(|l| l.split('\t').nth(3) == Some("moved")).collect();
     assert_eq!(moved.len(), 1, "{text}");
     let detail = moved[0].split('\t').nth(6).unwrap();
-    assert!(detail.starts_with("from=P2 why=plan "), "{detail}");
+    assert!(detail.starts_with("from=P2 why=waste "), "{detail}");
     assert_eq!(replay(detail).unwrap().map(|(t, _)| t), Some(1));
 
     plugin.sweep_unusable_profiles(&host, &result);

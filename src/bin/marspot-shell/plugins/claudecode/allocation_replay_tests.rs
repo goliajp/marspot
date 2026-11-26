@@ -69,8 +69,9 @@ fn allocation_replay_of_every_would_move_is_the_same_decision() {
     let scenes = [
         // refused on a spent P1: rule (a)
         ("out", vec![account(1, 1.0, 1.0, 40), account(2, 0.3, 0.0, 60)], vec![pane(1, 1, plain, false, true)]),
-        // more quota than use: the pane's use goes where it would lapse
-        ("plan", vec![account(1, 0.1, 0.0, 50), account(2, 0.1, 0.0, 300)], vec![pane(1, 2, plain, true, false)]),
+        // more quota than use: the pane goes where more of its use is
+        // what would lapse
+        ("plan", vec![account(1, 0.1, 0.0, 50), account(2, 0.1, 0.0, 300)], vec![pane(1, 1, plain, true, false)]),
         // P1 runs out within the hour: the faster of its two panes leaves
         ("leave", vec![account(1, 0.995, 1.0, 60), account(2, 0.3, 1.0, 90)], vec![pane(1, 1, plain, true, false), pane(2, 1, plain, true, false)]),
         // what Fable will not take on P1 is gone: the plain pane leaves it
@@ -92,12 +93,12 @@ fn allocation_replay_of_every_would_move_is_the_same_decision() {
             if why != "out" {
                 let (t, w, inputs) = view.rest.get(sid).expect("the view carries it");
                 assert_eq!((*t, w.word()), (to, why), "{name}");
-                assert_eq!(&replay(&inputs.encode()).unwrap(), &Some((*t, *w)), "{name}");
+                assert_eq!(&replay(&format!("{}{}", inputs.encode(), view.rule.words())).unwrap(), &Some((*t, *w)), "{name}");
             }
             whys.insert(why.to_string());
         }
     }
-    assert_eq!(whys.into_iter().collect::<Vec<_>>(), ["leave_early", "out", "plan", "u_out"]);
+    assert_eq!(whys.into_iter().collect::<Vec<_>>(), ["out", "waste"]);
 }
 
 /// The view's resting moves are this scan's only: what it decided and
@@ -106,7 +107,7 @@ fn allocation_replay_of_every_would_move_is_the_same_decision() {
 fn allocation_view_holds_this_scans_resting_moves_only() {
     let d = dir("bounded");
     let mut a = Allocation::new(d.clone());
-    let panes = vec![pane(1, 2, Class::Plain, true, false)];
+    let panes = vec![pane(1, 1, Class::Plain, true, false)];
     let at = |now: i64, panes: Vec<PaneIn>| Snapshot {
         now,
         feed_at: Some(now),
@@ -117,7 +118,7 @@ fn allocation_view_holds_this_scans_resting_moves_only() {
     a.observe(&at(NOW - 9000, panes.clone()));
     a.observe(&at(NOW, panes.clone()));
     assert_eq!(a.view.take().map(|v| v.rest.len()), Some(1));
-    let busy = vec![pane(1, 2, Class::Plain, false, false)];
+    let busy = vec![pane(1, 1, Class::Plain, false, false)];
     a.observe(&at(NOW + 60, busy));
     assert_eq!(a.view.take().map(|v| v.rest.len()), Some(0), "busy now: nothing to act on");
     fs::remove_dir_all(&d).unwrap();

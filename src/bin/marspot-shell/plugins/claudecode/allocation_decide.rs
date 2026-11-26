@@ -12,7 +12,7 @@ use super::fable_need::MARK_FOR;
 use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, held_back, loads_of};
 use crate::plugins::allocation::notice::{Stranded, stranded};
 use crate::plugins::allocation::plan::Plan;
-use crate::plugins::allocation::replay::{Inputs, Kind, Why};
+use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::rest::{RESTRICTED_USER, is_keeper};
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, KAPPA_FABLE, Quant, shortage};
@@ -64,10 +64,12 @@ pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'stati
     let mut s = scene(a, snap, stale_feed);
     let short = shortage(&s.accounts, s.b_f + s.b_n);
     a.band_moves.retain(|t| now - t < 3600);
+    a.day_moves.retain(|t| now - t < 24 * 3600);
     let mut moves = Vec::new();
     for i in 0..s.panes.len() {
         let inputs = inputs(a, &s, i);
-        let to = inputs.as_ref().and_then(|x| x.decide(&s.plan));
+        s.view.rule = Rule::Waste { moves_day: a.day_moves.len() };
+        let to = inputs.as_ref().and_then(|x| x.decide_by(&s.plan, s.view.rule));
         moves.push(to.map(|(t, why)| format!("{}→P{t}({})", s.panes[i].p.sid, why.word())));
         note_move(a, &s, i, to, inputs.as_ref(), log);
         if let (Some((t, why)), Some(inputs)) = (to, inputs)
@@ -145,7 +147,7 @@ fn note_move(a: &mut Allocation, s: &Scene, i: usize, to: Option<(u8, Why)>, inp
     if let (Some((t, why)), Some(inputs)) = (to, inputs)
         && was != Some(t)
     {
-        let detail = format!("to=P{t} why={} {}", why.word(), inputs.encode());
+        let detail = format!("to=P{t} why={} {}{}", why.word(), inputs.encode(), s.view.rule.words());
         a.event(s.now, sid, "would_move", Some(x.p.profile), x.p.class, detail, log);
         // in a dry run what live would have done counts against the
         // limits; live, the move made does

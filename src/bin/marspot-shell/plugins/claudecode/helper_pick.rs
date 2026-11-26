@@ -27,7 +27,7 @@ use super::super::allocation_view::View;
 use super::{Move, Room, FIVE_HOUR_SPENT, same_model};
 use crate::plugins::allocation::choose::Mover;
 use crate::plugins::allocation::helper::{Placement, Scene, place};
-use crate::plugins::allocation::replay::Inputs;
+use crate::plugins::allocation::replay::{Inputs, Rule};
 use crate::plugins::allocation::{Class, Quant, RHO0};
 
 #[path = "helper_placed.rs"]
@@ -79,7 +79,8 @@ pub(in crate::plugins) fn claude_scene(numbers: &[u8], rooms: &[(u8, Room)], usa
 /// `kind` on `to`, with every input that chose it.  The helper has no
 /// pane yet, so its session is 0.
 pub(in crate::plugins) fn record_new(dir: &Path, at: i64, kind: &str, to: u8, inputs: &Inputs) {
-    let ev = Event { at, sid: 0, kind: kind.into(), profile: Some(to), class: class_word(inputs.mover.class).into(), detail: inputs.encode() };
+    let detail = format!("{}{}", inputs.encode(), Rule::Waste { moves_day: 0 }.words());
+    let ev = Event { at, sid: 0, kind: kind.into(), profile: Some(to), class: class_word(inputs.mover.class).into(), detail };
     if let Err(e) = EventLog::new(dir.to_path_buf()).append(&ev) {
         marspot::lx_warn!("alloc.events_failed", &format!("{kind} P{to}: {e}"));
     }

@@ -72,6 +72,8 @@ pub(super) struct Allocation {
     pub(super) told: Told,
     /// Plan-following moves of the last hour, counted as `allocation_caps` says.
     pub(super) band_moves: VecDeque<i64>,
+    /// Resting moves of the last day, which the daily budget counts.
+    pub(super) day_moves: VecDeque<i64>,
     pub(super) said: HashMap<&'static str, String>,
     rebuilt: bool,
     /// `claudecode.rebalance` is `live`: moves made count, not would-moves.
@@ -104,6 +106,7 @@ impl Allocation {
             slopes: HashMap::new(),
             told: Told::default(),
             band_moves: VecDeque::new(),
+            day_moves: VecDeque::new(),
             said: HashMap::new(),
             rebuilt: false,
             live: false,
