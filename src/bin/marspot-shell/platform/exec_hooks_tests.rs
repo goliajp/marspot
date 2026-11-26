@@ -67,7 +67,7 @@ fn without_test_module(text: &str) -> &str {
 }
 
 #[test]
-fn exec_hooks_every_image_replacement_goes_through_the_one_exit() {
+fn every_exec_goes_through_exec_prepared() {
     let sources = production_sources();
     let execs: Vec<&str> = sources
         .iter()

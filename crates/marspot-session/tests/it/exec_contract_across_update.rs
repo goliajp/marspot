@@ -33,7 +33,7 @@ fn dir_lock_held() -> bool {
 }
 
 #[test]
-fn exec_contract_updates_carry_only_what_they_list() {
+fn exec_inherits_only_registered_fds_and_env() {
     let mut sandbox = Sandbox::new();
     let mut s = start(&mut sandbox);
     let state = sandbox.path().to_path_buf();
