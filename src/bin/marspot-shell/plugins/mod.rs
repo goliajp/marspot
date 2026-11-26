@@ -182,10 +182,10 @@ pub trait PluginHost: Send + Sync {
     }
 
     // ── Persistence(PERSIST_STATE) ───────────────────────────────
-    /// Plugin-scoped writable directory under
-    /// `~/Library/Caches/marspot/plugins/<plugin_name>/`.  Created on
-    /// first call.  10 MB soft cap — overspend logs WARN but doesn't
-    /// fail writes (Phase 2 will enforce; MVP just observes).
+    /// Plugin-scoped writable directory `plugins/<plugin_name>/` under the
+    /// state root (`marspot_term::paths::state_root`), created on every
+    /// call.  Nothing caps its size here; each file's limit is its row in
+    /// `host::state_map`.
     fn state_dir(&self) -> Result<PathBuf, PluginError>;
 
     // ── Logging(always permitted) ────────────────────────────────

@@ -105,3 +105,4 @@ pub mod shell_proto;
 pub mod terminal;
 pub mod uds_session_client;
 pub mod updater;
+pub mod wire_files;

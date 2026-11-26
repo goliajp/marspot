@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.755"  # its self-execs and the core it starts carry only what their exec lists
-core    = "0.12.712"  # the sessions it starts carry only what their exec lists; it checks what it was handed
-session = "0.11.464"  # it checks a core's spawn list only when it starts cold, not on a resume
+shell   = "0.7.764"  # the state-map run audit follows rotated logs instead of exempting them
+core    = "0.12.713"  # marspot-term gains the fact-line format of the state map (not used by core)
+session = "0.11.465"  # marspot-term gains the fact-line format of the state map (not used by session)

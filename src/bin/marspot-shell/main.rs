@@ -105,15 +105,7 @@ use supervisor_deadlines::{
     MAX_CRASHES_IN_WINDOW, PING_INTERVAL, PONG_DEADLINE, SUPERVISOR_STALL_GAP,
 };
 
-const DEFAULT_TITLE: &str = "Marspot";
-const DEFAULT_W_PT: f64 = 1200.0;
-const DEFAULT_H_PT: f64 = 800.0;
-/// Size of the window a launch with no saved layout opens — a first
-/// run, or the launch after the user closed everything.  Smaller than
-/// `DEFAULT_*` on purpose: one pane, so a window sized for a wall of
-/// them would be mostly empty.
-const FRESH_W_PT: f64 = 800.0;
-const FRESH_H_PT: f64 = 600.0;
+use window_frames::{DEFAULT_H_PT, DEFAULT_TITLE, DEFAULT_W_PT, FRESH_H_PT, FRESH_W_PT};
 // How often the supervisor wakes with nothing to do, while there is
 // anything to poll for (see `pump` for when there is not).
 //

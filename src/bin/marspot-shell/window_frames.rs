@@ -3,6 +3,16 @@
 
 use super::*;
 
+pub(crate) const DEFAULT_TITLE: &str = "Marspot";
+pub(crate) const DEFAULT_W_PT: f64 = 1200.0;
+pub(crate) const DEFAULT_H_PT: f64 = 800.0;
+/// Size of the window a launch with no saved layout opens — a first
+/// run, or the launch after the user closed everything.  Smaller than
+/// `DEFAULT_*` on purpose: one pane, so a window sized for a wall of
+/// them would be mostly empty.
+pub(crate) const FRESH_W_PT: f64 = 800.0;
+pub(crate) const FRESH_H_PT: f64 = 600.0;
+
 /// Fold this process's live window frames into the list already on
 /// disk: index *i* takes the live frame when there is one, otherwise
 /// keeps whatever was saved there, and entries past the live windows
