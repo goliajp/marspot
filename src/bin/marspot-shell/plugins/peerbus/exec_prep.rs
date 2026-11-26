@@ -30,6 +30,16 @@ pub(super) fn connect(tx: Option<SyncSender<Event>>) {
     *WORKER.lock().unwrap() = tx;
 }
 
+/// Have the shell's exec close the inboxes first, and hand the panes
+/// back when it failed.  At start-up.
+pub(super) fn register() {
+    crate::platform::exec_hooks::register(crate::platform::exec_hooks::ExecHook {
+        name: "peerbus",
+        before: close_inboxes,
+        failed: Some(exec_failed),
+    });
+}
+
 /// Close every inbox and wait for its relay.  Returns once the worker
 /// has, or after [`WAIT`]; at once with no worker.  The exec goes ahead
 /// either way: the new image waits for what is left (`inherited`).

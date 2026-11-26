@@ -158,6 +158,7 @@ impl Plugin for PeerbusPlugin {
             .spawn(move || w.run())
             .map_err(|e| PluginError::Other(format!("peerbus worker: {e}")))?;
         moving::connect(Some(tx.clone()));
+        exec_prep::register();
         exec_prep::connect(Some(tx.clone()));
         self.tx = Some(tx);
         self.worker = Some(handle);
