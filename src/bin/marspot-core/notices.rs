@@ -15,9 +15,10 @@ pub(super) const SHOWN_FOR: Duration = Duration::from_secs(12);
 pub(super) struct Notices {
     shell: Option<(String, Instant)>,
     pub(super) guard: Option<super::model_guard::Held>,
-    /// A paste that leaves `/model` in a Claude Code box, by session,
-    /// until the moment it no longer stands for what the box holds.
-    pub(super) pasted: Option<(u64, Instant)>,
+    /// What programs' input left unsent in a Claude Code box, by
+    /// session, until the moment it no longer stands for what the box
+    /// holds (`model_guard::UNSENT_STANDS`); at most `UNSENT_CAP`.
+    pub(super) unsent: Vec<(u64, marspot::pane_read::slash_model::Typed, Instant)>,
 }
 
 impl Notices {

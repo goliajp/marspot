@@ -1,17 +1,20 @@
 //! Claude Code's `/model` writes the default model of every account
 //! that shares the settings file.  While `claude.model` is managed:
 //!
-//! * Enter on a `/model` in a Claude Code input box is held, and a
-//!   notice over the pane says what it does.  `y` sends the held Enter
-//!   and tells the shell, which then keeps the settings file's next
-//!   change of model; Esc drops it and leaves the box as it was.  Any
-//!   other key is swallowed while the question is up.
+//! * Enter or Tab on a `/model` in a Claude Code input box (or on `/mo`,
+//!   `/mod`, `/mode`, which its completion list runs as `/model`) is
+//!   held, and a notice over the pane says what it does.  `y` sends the
+//!   held key and tells the shell, which then keeps the settings file's
+//!   next change of model; Esc drops it and leaves the box as it was.
+//!   Any other key is swallowed while the question is up.
 //! * Input from programs (typing, pastes, injected bytes) that would
 //!   send `/model` from such a box is refused: only the keyboard can
-//!   confirm.
+//!   confirm.  What one program call leaves unsent in the box is
+//!   remembered for a few seconds, so `/model` in one call and the
+//!   Enter in the next is refused before the screen shows the first.
 //!
-//! The check runs only on Enter, and reads cells until it finds Claude
-//! Code's prompt; a key that is not Enter costs one comparison.  It
+//! The check runs only on Enter and Tab, and reads cells until it finds
+//! Claude Code's prompt; any other key costs one comparison.  It
 //! reads the live screen, whatever the pane is scrolled to, and only
 //! while the pane itself has the keys: an Enter for a helper strip is
 //! the strip's.
@@ -24,13 +27,15 @@
 
 use super::*;
 use marspot::input::{KeyState, LogicalKey, NamedKey};
-use marspot::pane_read::slash_model::{claude_box_text, claude_prompt_row, is_model_command, sends_model};
+use marspot::pane_read::slash_model::{claude_box_text, claude_prompt_row, is_model_command, typed_into};
 use marspot::settings::CcModel;
 use marspot::ui::strings::{t, Msg};
 
-/// How long a paste that leaves `/model` in a box stands for what the
-/// box holds, while the screen has yet to show it.
-const PASTE_STANDS: Duration = Duration::from_secs(3);
+/// How long what a program's input left unsent in a box stands for what
+/// the box holds, while the screen has yet to show it, and how many
+/// sessions' are kept.
+pub(super) const UNSENT_STANDS: Duration = Duration::from_secs(3);
+pub(super) const UNSENT_CAP: usize = 16;
 
 /// The refusal a program is given.
 pub(super) const REFUSED: &str = "refused: this would send /model to Claude Code, which changes the default \
@@ -71,9 +76,10 @@ impl CoreApp {
             // focus moved away from the question: it is dropped, as Esc would
             self.drop_guard("focus_moved");
         }
+        // Tab runs the entry Claude Code's completion list has highlighted
         let enter = event.state == KeyState::Pressed
             && !event.repeat
-            && event.logical == LogicalKey::Named(NamedKey::Enter)
+            && matches!(event.logical, LogicalKey::Named(NamedKey::Enter | NamedKey::Tab))
             && plain(mods);
         if !enter || !managed() || self.strip_has_keys(window_id) {
             return false;
@@ -134,25 +140,26 @@ impl CoreApp {
         }
         let Some(held) = self.pane_by_sid_mut(sid).and_then(|p| box_in(p)) else { return false };
         let now = Instant::now();
-        let pasted = self.notices.pasted.is_some_and(|(s, until)| s == sid && now < until);
-        let sends_first = typed.split(['\r', '\n']).next() == Some("") && (enter || (!paste && submits(typed.as_bytes())));
-        let refuse = sends_model(&held, typed, paste, enter) || (pasted && sends_first);
-        if paste && !enter && sends_model(&held, typed, true, true) {
-            self.notices.pasted = Some((sid, now + PASTE_STANDS));
+        let unsent = &mut self.notices.unsent;
+        unsent.retain(|u| now < u.2);
+        let earlier = unsent.iter().position(|u| u.0 == sid).map(|i| unsent.remove(i).1);
+        let on_screen = typed_into(&held, false, typed, paste, enter);
+        let on_earlier = earlier.map(|e| typed_into(&e.left, e.lost, typed, paste, enter));
+        let refuse = on_screen.sends || on_earlier.as_ref().is_some_and(|t| t.sends);
+        // the screen may not show the earlier input yet: what it left goes first
+        let after = on_earlier.unwrap_or(on_screen);
+        if !refuse && (!after.left.is_empty() || after.lost) {
+            if unsent.len() == UNSENT_CAP {
+                unsent.remove(0);
+            }
+            unsent.push((sid, after, now + UNSENT_STANDS));
         }
         if refuse {
-            self.notices.pasted = None;
             lx_event!("MODEL_GUARD_REFUSED", "a program's input would have sent /model to Claude Code", session = sid, from = from);
             self.show_notice(t(Msg::ModelSendRefused).to_string());
         }
         refuse
     }
-}
-
-/// Whether `bytes`, written to a pane's terminal as they are, end a
-/// line.
-fn submits(bytes: &[u8]) -> bool {
-    bytes.iter().any(|b| matches!(b, b'\r' | b'\n'))
 }
 
 #[cfg(test)]

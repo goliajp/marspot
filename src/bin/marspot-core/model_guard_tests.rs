@@ -24,6 +24,7 @@ fn key(app: &mut CoreApp, logical: LogicalKey) {
 
 const ENTER: LogicalKey = LogicalKey::Named(NamedKey::Enter);
 const ESC: LogicalKey = LogicalKey::Named(NamedKey::Escape);
+const TAB: LogicalKey = LogicalKey::Named(NamedKey::Tab);
 
 fn showing(sb: &Sandbox, typed: &str, mode: CcModel) -> (CoreApp, Session) {
     let (mut app, mut s) = app(sb);
@@ -94,8 +95,8 @@ fn a_program_cannot_send_model_and_is_told_why() {
     let (mut app, s) = showing(&sb, "", CcModel::Managed);
     assert_eq!(typed(&mut app, s.sid, "/model fable", true), Route::Answered(DoneCode::Other));
     assert_eq!(app.notices.shell_text(), Some(t(Msg::ModelSendRefused)));
-    assert_ne!(typed(&mut app, s.sid, "/model fable", false), Route::Answered(DoneCode::Other), "typing it alone sends nothing");
     assert_ne!(typed(&mut app, s.sid, "say hi", true), Route::Answered(DoneCode::Other));
+    assert_ne!(typed(&mut app, s.sid, "/model fable", false), Route::Answered(DoneCode::Other), "typing it alone sends nothing");
     assert!(app.model_guard_refuses(s.sid, "/model\r", false, false, "test"), "injected bytes");
     // a paste the screen does not show yet, then the Enter for it
     app.forward_pane_paste(s.sid, "/model opus");
@@ -128,6 +129,40 @@ fn a_program_cannot_send_model_from_a_later_line_or_after_editing_the_box() {
     assert_eq!(typed_raw(&mut app, s.sid, "\x7f\x7f\x7f\x7f\x7f/model\r", false), refused, "backspaces");
     assert!(app.model_guard_refuses(s.sid, "\x1b[200~/model\x1b[201~\r", false, false, "test"), "a bracketed paste injected raw");
     assert_ne!(typed_raw(&mut app, s.sid, "hi\rthere\r", false), refused);
+}
+
+#[test]
+fn model_in_one_program_call_and_the_enter_in_the_next_is_refused() {
+    let sb = Sandbox::new();
+    let (mut app, s) = showing(&sb, "", CcModel::Managed);
+    let refused = Route::Answered(DoneCode::Other);
+    assert_ne!(typed_raw(&mut app, s.sid, "/model", false), refused);
+    assert_eq!(typed_raw(&mut app, s.sid, "\r", false), refused, "the screen has not redrawn: the box holds /model");
+    assert_ne!(typed_raw(&mut app, s.sid, "/mo", false), refused);
+    assert_eq!(typed_raw(&mut app, s.sid, "", true), refused, "an Enter alone");
+    assert_ne!(typed_raw(&mut app, s.sid, "del\x01", false), refused);
+    assert_eq!(typed_raw(&mut app, s.sid, "/mo\r", false), refused, "a byte that could not be followed is carried");
+    assert_ne!(typed_raw(&mut app, s.sid, "hello", false), refused);
+    assert_ne!(typed_raw(&mut app, s.sid, "\r", false), refused);
+    assert_ne!(typed_raw(&mut app, s.sid, "/model", false), refused);
+    app.notices.unsent.iter_mut().for_each(|u| u.2 = Instant::now());
+    assert_ne!(typed_raw(&mut app, s.sid, "\r", false), refused, "what is past its time no longer stands for the box");
+}
+
+#[test]
+fn tab_or_enter_on_a_start_of_model_is_held() {
+    let sb = Sandbox::new();
+    for (typed, k) in [("/mo", TAB), ("/mod", TAB), ("/model", TAB), ("/mode", ENTER)] {
+        let (mut app, mut s) = showing(&sb, typed, CcModel::Managed);
+        key(&mut app, k.clone());
+        assert_eq!(s.keys(&app.windows[0].panes[0]), 0, "{typed:?} is held");
+        assert!(app.notices.guard.is_some(), "{typed:?}");
+        key(&mut app, LogicalKey::Char('y'));
+        assert_eq!(s.keys(&app.windows[0].panes[0]), 2, "{typed:?}: the held key, pressed and let go");
+    }
+    let (mut app, mut s) = showing(&sb, "/m", CcModel::Managed);
+    key(&mut app, TAB);
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 2, "two letters are not held");
 }
 
 #[test]

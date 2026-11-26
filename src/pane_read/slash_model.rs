@@ -34,51 +34,75 @@ pub fn claude_box_text(grid: &Grid) -> Option<String> {
     box_of(grid)
 }
 
-/// Whether `line`, sent from the input box, is `/model` with or without
-/// arguments.
+/// Whether `line`, sent from the input box by Enter or Tab, runs
+/// `/model`: `/model` with or without arguments, or a start of it at
+/// least three long on its own (`/mo`, `/mod`, `/mode`), which Claude
+/// Code's completion list runs as `/model` when that is the entry it
+/// has highlighted.
 pub fn is_model_command(line: &str) -> bool {
-    line.trim_start().strip_prefix("/model").is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    let line = line.trim_start();
+    let (head, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    head == "/model" || (rest.trim().is_empty() && head.len() >= 3 && "/model".starts_with(head))
+}
+
+/// What a program's input does to Claude Code's box.
+#[derive(Debug, PartialEq)]
+pub struct Typed {
+    /// It would run `/model`.
+    pub sends: bool,
+    /// What the box holds after it, as far as it can be followed.
+    pub left: String,
+    /// Whether a byte that cannot be followed went in and no Enter of
+    /// the caller's has sent the box since: `left` may then not be what
+    /// the box shows.
+    pub lost: bool,
 }
 
 /// Whether Claude Code would run `/model` if a program's `typed` went
 /// into the box now holding `held`, followed by an Enter when `enter`.
+pub fn sends_model(held: &str, typed: &str, paste: bool, enter: bool) -> bool {
+    typed_into(held, false, typed, paste, enter).sends
+}
+
+/// What a program's `typed` does to the box now holding `held`, an
+/// Enter after it when `enter`; `lost` carries [`Typed::lost`] of the
+/// input that left `held`.
 ///
 /// A paste goes into the box whole, its line breaks with it, and only
 /// the Enter after it sends.  Typed text sends at every line break and
-/// leaves the box empty after each; backspace, Ctrl-U and Ctrl-W edit
-/// the line as they would.  Any other control byte or escape sequence
-/// (cursor keys, a bracketed paste of its own) cannot be followed, so
-/// text holding one, `/model` in the box or in the text, and a send
-/// counts as sending it.
-pub fn sends_model(held: &str, typed: &str, paste: bool, enter: bool) -> bool {
+/// leaves the box empty after each, and a Tab on a line that is
+/// `/model` runs it from the completion list; backspace, Ctrl-U and
+/// Ctrl-W edit the line as they would.  Any other control byte or escape
+/// sequence (Ctrl-A, Home, cursor keys, a bracketed paste of its own)
+/// cannot be followed: after one, a send of a line holding a `/` counts
+/// as sending `/model`, as does a send with `/model` shown anywhere.
+pub fn typed_into(held: &str, lost: bool, typed: &str, paste: bool, enter: bool) -> Typed {
+    let runs = |line: &str, lost: bool| is_model_command(line) || (lost && line.contains('/'));
     if paste {
-        return enter && is_model_command(&format!("{held}{typed}"));
+        let whole = format!("{held}{typed}");
+        let sends = enter && runs(&whole, lost);
+        return if enter { Typed { sends, left: String::new(), lost: false } } else { Typed { sends, left: whole, lost } };
     }
     let mut line = held.to_string();
-    let (mut sent, mut control) = (false, false);
+    let (mut sent, mut control, mut lost) = (false, false, lost);
     for c in typed.chars() {
         match c {
-            '\r' | '\n' => {
-                if is_model_command(&line) {
-                    return true;
-                }
-                (sent, line) = (true, String::new());
-            }
+            '\r' | '\n' if runs(&line, lost) => return Typed { sends: true, left: line, lost },
+            '\r' | '\n' => (sent, line) = (true, String::new()),
+            '\t' if is_model_command(&line) => return Typed { sends: true, left: line, lost },
             '\x7f' | '\x08' => {
                 line.pop();
             }
             '\x15' => line.clear(),
             '\x17' => line.truncate(line.trim_end().trim_end_matches(|c: char| !c.is_whitespace()).len()),
-            c if c.is_control() => {}
+            c if c.is_control() => lost = true,
             c => line.push(c),
         }
         control |= c.is_control() && !matches!(c, '\r' | '\n');
     }
-    if enter && is_model_command(&line) {
-        return true;
-    }
     let shown: String = held.chars().chain(typed.chars()).filter(|c| !c.is_control()).collect();
-    (sent || enter) && control && shown.contains("/model")
+    let sends = (enter && runs(&line, lost)) || ((sent || enter) && control && shown.contains("/model"));
+    if enter { Typed { sends, left: String::new(), lost: false } } else { Typed { sends, left: line, lost } }
 }
 
 #[cfg(test)]
@@ -102,9 +126,32 @@ mod tests {
         for line in ["/model", "/model opus", "  /model\tsonnet", "/model "] {
             assert!(is_model_command(line), "{line:?}");
         }
-        for line in ["/models", "/modelx", "model", "say /model", "", "/mode"] {
+        for line in ["/models", "/modelx", "model", "say /model", "", "/m", "/", "/mcp", "/mo opus", "/memory"] {
             assert!(!is_model_command(line), "{line:?}");
         }
+    }
+
+    #[test]
+    fn a_start_of_model_the_completion_list_would_run_counts_as_model() {
+        for line in ["/mo", "/mod", "/mode", " /mod "] {
+            assert!(is_model_command(line), "{line:?}");
+        }
+        assert!(sends_model("", "/mod\r", false, false));
+        assert!(sends_model("/mo", "", false, true));
+        assert!(sends_model("", "/mo\t", false, false), "Tab runs the highlighted entry");
+        assert!(!sends_model("", "/help\t", false, false));
+    }
+
+    #[test]
+    fn after_a_byte_that_cannot_be_followed_a_send_of_a_slash_is_refused() {
+        assert!(sends_model("", "del\x01/mo\r", false, false), "Ctrl-A moved the cursor to the start");
+        assert!(sends_model("", "del\x1b[H/mo\r", false, false), "Home");
+        assert!(sends_model("", "del\x01/mo", false, true), "with the Enter after it");
+        assert!(!sends_model("", "del\x01mo\r", false, false), "no slash, nothing refused");
+        let t = typed_into("", false, "del\x01/mo", false, false);
+        assert!(!t.sends && t.lost, "{t:?}");
+        assert!(typed_into(&t.left, t.lost, "\r", false, false).sends, "the next input carries what was lost");
+        assert!(!typed_into("del/mo", false, "\r", false, false).sends);
     }
 
     #[test]
