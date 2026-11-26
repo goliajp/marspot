@@ -176,7 +176,8 @@ remote_sync "$LINUX" --name "$NAME" >/dev/null
 # a checkout that moved during the syncs left copies of neither tree:
 # the build says so and no pass is recorded for $tree
 GIT_SHA="$("$ROOT/bin/_git-sha.sh" "$GIT_SHA")"
-[[ "$GIT_SHA" != *-dirty ]] || clean=0
+moved=0
+if (( clean )) && [[ "$GIT_SHA" == *-dirty ]]; then moved=1; clean=0; fi
 
 echo "==> macOS job on $MAC, Linux job on $LINUX"
 run_job "$MAC" mac 'export PATH=$HOME/.cargo/bin:/usr/local/bin:$PATH' \
@@ -196,6 +197,8 @@ if (( clean )); then
   mkdir -p "$GIT_COMMON/ci-pass"
   touch "$GIT_COMMON/ci-pass/$tree"
   echo "==> passed; tree $tree may be pushed"
+elif (( moved )); then
+  echo "==> passed, but the checkout moved during the sync: nothing recorded"
 else
   echo "==> passed, but the working tree has uncommitted changes: nothing recorded"
 fi
