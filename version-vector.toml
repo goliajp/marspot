@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.799"  # the control socket takes reset.claim and reset.status, answered not_supported for now
+shell   = "0.7.800"  # no scheduled /limit-reset read; claude web_usage resets and per-credit codex ends are facts
 core    = "0.12.728"  # marspot-term gains the ResetPanelAct frame; the file-drop payload moves to its own file
 session = "0.11.471"  # marspot-term gains the ResetPanelAct frame (not used by session)
