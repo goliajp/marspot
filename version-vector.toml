@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.741"  # a frame to the core leaves in one vectored write
-core    = "0.12.707"  # frames leave in one vectored write, header and payload together
+core    = "0.12.708"  # a frame whose encoding panics or is refused leaves nothing in the session writer's queue, and a refused large frame does not keep the queue large
 session = "0.11.458"  # frames to the core leave in one vectored write

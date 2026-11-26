@@ -88,17 +88,20 @@ impl FrameWriter {
         if !q.open {
             return false;
         }
-        let start = q.bytes.len();
-        q.bytes.extend_from_slice(&[0; HEADER_LEN]);
-        encode(&mut q.bytes);
-        let size = q.bytes.len() - start;
+        let frame = Unfinished::start(&mut q.bytes);
+        encode(&mut *frame.bytes);
+        let size = frame.len();
         if self.shared.pending.load(Ordering::SeqCst) + size > self.cap_bytes {
-            q.bytes.truncate(start);
+            drop(frame);
+            // the refused frame may have grown the queue far past use
+            if q.bytes.capacity() > KEEP_CAPACITY {
+                let keep = q.bytes.len().max(START_CAPACITY);
+                q.bytes.shrink_to(keep);
+            }
             self.shared.dropped.fetch_add(size, Ordering::SeqCst);
             return false;
         }
-        q.bytes[start..start + HEADER_LEN]
-            .copy_from_slice(&frame_header(msg_type, size - HEADER_LEN));
+        frame.finish(msg_type);
         self.shared.pending.fetch_add(size, Ordering::SeqCst);
         drop(q);
         self.shared.ready.notify_one();
@@ -129,6 +132,40 @@ impl Drop for FrameWriter {
     }
 }
 
+/// A frame being encoded at the end of the queue.  Dropped unfinished
+/// (refused, or `encode` panicked) it takes its bytes back off, so the
+/// writer thread never sees part of a frame: the queue's lock recovers
+/// from a poisoning panic and goes on being used.
+struct Unfinished<'a> {
+    bytes: &'a mut Vec<u8>,
+    start: usize,
+}
+
+impl<'a> Unfinished<'a> {
+    fn start(bytes: &'a mut Vec<u8>) -> Self {
+        let start = bytes.len();
+        bytes.extend_from_slice(&[0; HEADER_LEN]);
+        Unfinished { bytes, start }
+    }
+
+    /// Header and payload.
+    fn len(&self) -> usize {
+        self.bytes.len() - self.start
+    }
+
+    fn finish(self, msg_type: MsgType) {
+        let header = frame_header(msg_type, self.len() - HEADER_LEN);
+        self.bytes[self.start..self.start + HEADER_LEN].copy_from_slice(&header);
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for Unfinished<'_> {
+    fn drop(&mut self) {
+        self.bytes.truncate(self.start);
+    }
+}
+
 fn drain(shared: &Shared, sink: &mut dyn Write) {
     let mut out = Vec::with_capacity(START_CAPACITY);
     loop {
@@ -152,3 +189,7 @@ fn drain(shared: &Shared, sink: &mut dyn Write) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "frame_bytes_tests.rs"]
+mod tests;

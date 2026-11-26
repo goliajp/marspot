@@ -18,7 +18,16 @@
 //! The shape of the fix is the same everywhere, which is why it lives
 //! here rather than being written a third time: hand the blocking call
 //! to a thread and give the loop a queue.  Idle cost is zero — the
-//! thread parks in `recv`.
+//! thread parks until something is queued.  It comes in two forms:
+//!
+//! - [`FrameWriter`], for the core's sockets to the shell and to each
+//!   session: frames are queued as bytes in a buffer the writer thread
+//!   swaps with its own, and a payload can be encoded straight into the
+//!   queue, so a frame costs no allocation once both buffers have grown
+//!   to the traffic.  A keystroke on its way to a session goes this way.
+//! - [`BoundedWriter`], a queue of items that each know how to write
+//!   themselves, for writers whose items are not plain frames: a
+//!   session's PTY input and its control socket to the core.
 //!
 //! **Whole frames only.**  A frame is queued or refused as a unit and
 //! written by a single owner, so a peer never sees a torn frame.  That
@@ -85,19 +94,16 @@ impl Queued for Frame {
 
 /// A bounded queue in front of a thread that is allowed to block.
 ///
-/// This is the shape every non-blocking writer in the tree needs, which
-/// is the whole reason it is generic rather than copied: the PTY writer,
-/// the L3→L2 control writer, and both L2 writers are the same machine
-/// with a different item type.  (It was in fact hand-written four times
-/// before this got extracted, under a comment claiming it existed so
-/// nobody would write it a third time.)
+/// Generic over the item so the session's PTY writer and its control
+/// writer to the core are one machine with two item types.  An item
+/// costs a channel send, and its own allocation if it owns one; the
+/// core's frame sockets use [`FrameWriter`], which costs neither.
 pub struct BoundedWriter<T: Queued> {
     tx: Option<Sender<T>>,
     pending: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
     cap_bytes: usize,
 }
-
 
 impl<T: Queued> BoundedWriter<T> {
     /// Take over `sink`, writing from a thread named `name`.
