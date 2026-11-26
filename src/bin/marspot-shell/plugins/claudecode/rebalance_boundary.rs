@@ -133,9 +133,9 @@ impl Boundaries {
         if self.closed.get(&sid).is_some_and(|c| abs_diff(started, *c) <= SAME_REST) {
             return lines;
         }
-        if !self.open.contains_key(&sid) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.open.entry(sid) {
             let Some(target) = target else { return lines };
-            self.open.insert(sid, Rest { started, last_at: now, target, seen: Vec::new() });
+            e.insert(Rest { started, last_at: now, target, seen: Vec::new() });
         }
         let Some(r) = self.open.get_mut(&sid) else { return lines };
         let o = match target {
