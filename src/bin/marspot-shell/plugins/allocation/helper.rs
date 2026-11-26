@@ -11,7 +11,7 @@
 //! the other models', so nothing is held back for the restricted ones.
 
 use super::choose::{HELPER_LAST_H, Mover, held_back};
-use super::replay::{Inputs, Kind};
+use super::replay::{Inputs, Kind, Rule};
 use super::{Class, Load, Quant, RHO0};
 
 /// What a helper's choice reads, besides the helper itself.
@@ -44,10 +44,20 @@ pub(crate) enum Placement {
 /// leaves, `None` for a new one.  `placed` counts the helpers placed on
 /// each account since the reading, by class.
 pub(crate) fn place(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)]) -> Placement {
+    place_by(scene, mover, from, placed, Rule::Bands)
+}
+
+/// `place` under `rule`.
+pub(crate) fn place_by(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Class, u32)], rule: Rule) -> Placement {
     let inputs = inputs(scene, mover, from, placed);
     let plan = inputs.plan();
-    if let Some((to, _)) = inputs.decide(&plan) {
+    if let Some((to, _)) = inputs.decide_by(&plan, rule) {
         return Placement::To(to, inputs);
+    }
+    // the one objective holds nothing back: where it finds no account,
+    // no account takes the helper
+    if matches!(rule, Rule::Waste { .. }) {
+        return Placement::Nowhere;
     }
     match held_back(&inputs.accounts, &plan, &inputs.loads, mover, from, HELPER_LAST_H) {
         Some(would) => Placement::HeldBack(would, inputs),

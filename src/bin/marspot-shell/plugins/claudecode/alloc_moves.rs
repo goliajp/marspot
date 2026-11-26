@@ -55,8 +55,9 @@ impl ClaudecodePlugin {
     #[allow(clippy::too_many_arguments)] // one fact, each field a separate piece
     pub(super) fn record_moved(&mut self, host: &dyn PluginHost, sid: u64, from: u8, to: u8, class: Class, why: &str, inputs: Option<&Inputs>) {
         let log = self.alloc_moved.get_or_insert_with(|| EventLog::new(allocation_adapter::events_dir(&marspot::paths::state_root())));
+        let rule = self.alloc_view.as_ref().map_or_else(String::new, |v| v.rule.words());
         let detail = match inputs {
-            Some(i) => format!("from=P{from} why={why} {}", i.encode()),
+            Some(i) => format!("from=P{from} why={why} {}{rule}", i.encode()),
             None => format!("from=P{from} why={why}"),
         };
         let ev = Event { at: rooms::unix_now(), sid, kind: "moved".into(), profile: Some(to), class: class_word(class).into(), detail };
@@ -73,7 +74,7 @@ impl ClaudecodePlugin {
     /// on the same account, and the next pass sees where they went.
     pub(super) fn follow_core(&mut self, host: &dyn PluginHost, view: &mut View, plan: &mut leave_early::Plan, result: &ScanResult, p: Resting) -> bool {
         let sid = p.sid;
-        let Some((target, why, inputs)) = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue)).cloned() else {
+        let Some((target, why, inputs)) = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue | Why::Waste)).cloned() else {
             self.rebalance_said.remove(&sid);
             return false;
         };
@@ -96,7 +97,7 @@ impl ClaudecodePlugin {
         let word = why.word();
         let line = match held {
             Some(reason) => format!("sid={sid} P{from} → P{target} ({word}) waits: {reason}"),
-            None if dry => format!("sid={sid} P{from} → P{target} ({word}) {}", inputs.encode()),
+            None if dry => format!("sid={sid} P{from} → P{target} ({word}) {}{}", inputs.encode(), view.rule.words()),
             None => format!("sid={sid} P{from} → P{target}: {word}"),
         };
         // one line when a pane starts waiting for a target and one when it

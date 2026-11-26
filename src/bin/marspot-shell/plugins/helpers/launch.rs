@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use marspot_peer::control::{AgentKind, ErrorCode, Reject};
+use marspot_peer::control::{AgentKind, ErrorCode, HelperStartArgs, Isolation, Reject};
 
 use crate::plugins::handoff::launch_line::{self, Launch, Resume};
 use crate::plugins::handoff::{self, Agent};
@@ -58,6 +58,16 @@ pub(super) fn pick_account(agent: AgentKind, asked: Option<u8>, model: Option<&s
             format!("every {} account refuses {}; they take work again: {}", agent.as_str(), model.unwrap_or("the default model"), for_helpers::recoveries_text(&r)),
         )),
     }
+}
+
+/// The call with a model filled in, when it asked for none and the
+/// allocation would rather the helper ran Fable: a new Claude helper on
+/// an account it lets marspot choose, outside a container.  One that
+/// resumes a conversation keeps that conversation's model.
+pub(super) fn with_default_model(a: &HelperStartArgs) -> Option<HelperStartArgs> {
+    let ours = matches!(a.agent, AgentKind::Claude) && a.model.is_none() && a.profile.is_none() && a.isolation == Isolation::Host && !a.resume_last;
+    let model = ours.then(for_helpers::claude_helper_model).flatten()?;
+    Some(HelperStartArgs { model: Some(model), ..a.clone() })
 }
 
 /// A Claude helper started on account `n` because the call asked for
@@ -211,4 +221,38 @@ pub(super) fn run_script(agent: AgentKind, account: &Account, model: Option<&str
 #[cfg(test)]
 pub(super) fn test_account(home: &str) -> Account {
     Account { n: 2, home: PathBuf::from(home) }
+}
+
+#[cfg(test)]
+mod default_model_tests {
+    use super::*;
+
+    fn args(agent: AgentKind, model: Option<&str>, profile: Option<u8>, isolation: Isolation) -> HelperStartArgs {
+        HelperStartArgs {
+            agent,
+            task: "t".into(),
+            cwd: None,
+            parent: None,
+            model: model.map(String::from),
+            profile,
+            isolation,
+            mode: None,
+            resume_last: false,
+            budget_minutes: 30,
+            name: None,
+            title: None,
+        }
+    }
+
+    /// Only a Claude helper with no model, no account and no container
+    /// asked for is given one: what the caller named is never replaced.
+    #[test]
+    fn helpers_default_model_only_where_nothing_was_asked() {
+        assert_eq!(with_default_model(&args(AgentKind::Claude, Some("claude-opus-5-5"), None, Isolation::Host)), None);
+        assert_eq!(with_default_model(&args(AgentKind::Claude, None, Some(3), Isolation::Host)), None);
+        assert_eq!(with_default_model(&args(AgentKind::Claude, None, None, Isolation::Container)), None);
+        assert_eq!(with_default_model(&args(AgentKind::Codex, None, None, Isolation::Host)), None);
+        let resumed = HelperStartArgs { resume_last: true, ..args(AgentKind::Claude, None, None, Isolation::Host) };
+        assert_eq!(with_default_model(&resumed), None);
+    }
 }

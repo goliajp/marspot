@@ -140,7 +140,7 @@ impl KimiAlloc {
         let p = &snap.panes[i];
         let table: Vec<(Option<u8>, Class, f64)> = snap.panes.iter().map(|x| (Some(x.profile), Class::Plain, RHO0)).collect();
         let b_n = RHO0 * snap.panes.len() as f64;
-        let mover = Mover { class: Class::Plain, rate: RHO0 };
+        let mover = Mover { class: Class::Plain, rate: RHO0, tokens: None };
         let base = |loads, kind| Inputs { accounts: accounts.to_vec(), b_f: 0.0, b_n, kappa: None, loads, mover, here: p.profile, kind };
         if p.out {
             let horizon_h = if p.helper { HELPER_LAST_H } else { MUST_LAST_H };

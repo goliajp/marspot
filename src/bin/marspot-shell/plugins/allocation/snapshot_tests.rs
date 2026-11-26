@@ -45,7 +45,7 @@ fn place(a: &[Quant], classes: &[Class], horizon: f64) -> Vec<u8> {
     let mut placed: Vec<(Option<u8>, Class, f64)> = Vec::new();
     for &c in classes {
         let loads = loads_of(a, &placed, None);
-        let to = pick(a, &p, &loads, Mover { class: c, rate: rate(c) }, None, horizon).unwrap();
+        let to = pick(a, &p, &loads, Mover { class: c, rate: rate(c), tokens: None }, None, horizon).unwrap();
         placed.push((Some(to), c, rate(c)));
     }
     placed.iter().map(|(on, _, _)| on.unwrap()).collect()
@@ -133,15 +133,15 @@ fn allocation_snapshot_must_move_rows() {
         let p = plan(&a, 0.035, 0.035, Some(KAPPA_SNAPSHOT));
         let none = vec![Load::default(); a.len()];
         for from in [1, 5, 8] {
-            assert_eq!(pick(&a, &p, &none, Mover { class: Class::Plain, rate: N_RATE }, Some(from), MUST_LAST_H), Some(6));
+            assert_eq!(pick(&a, &p, &none, Mover { class: Class::Plain, rate: N_RATE, tokens: None }, Some(from), MUST_LAST_H), Some(6));
         }
         // (c) new helpers: plain P6 then P4; Fable P6
         let helpers = place(&a, &[Class::Plain; 6], HELPER_LAST_H);
         assert_eq!(first_seen(&helpers)[..2], [6, 4]);
-        assert_eq!(pick(&a, &p, &none, Mover { class: Class::Restricted, rate: F_RATE }, None, HELPER_LAST_H), Some(6));
+        assert_eq!(pick(&a, &p, &none, Mover { class: Class::Restricted, rate: F_RATE, tokens: None }, None, HELPER_LAST_H), Some(6));
         // (d) a pane marked as needing Fable on P7, where Fable is spent
         assert!(!a.iter().find(|q| q.id == 7).unwrap().accepts(Class::Restricted));
-        assert_eq!(pick(&a, &p, &none, Mover { class: Class::Restricted, rate: F_RATE }, Some(7), MUST_LAST_H), Some(6));
+        assert_eq!(pick(&a, &p, &none, Mover { class: Class::Restricted, rate: F_RATE, tokens: None }, Some(7), MUST_LAST_H), Some(6));
         // today's rule for the same rows
         assert_eq!(old_pick(&a, Class::Plain, Some(1)), Some(2));
         assert_eq!(old_pick(&a, Class::Restricted, Some(1)), Some(6));
@@ -162,7 +162,7 @@ fn placed_loads(a: &[Quant], on: u8) -> Vec<Load> {
 fn resting<'a>(here: u8, loads: &'a [Load], demand: f64, keeper: bool) -> Resting<'a> {
     Resting {
         here,
-        mover: Mover { class: Class::Plain, rate: N_RATE },
+        mover: Mover { class: Class::Plain, rate: N_RATE, tokens: None },
         loads,
         keeper,
         since_move_h: None,
@@ -223,7 +223,7 @@ fn place_helpers(a: &[Quant], class: Class, n: usize) -> Vec<u8> {
     let mut placed: Vec<(u8, Class, u32)> = Vec::new();
     let mut order = Vec::new();
     for _ in 0..n {
-        let Placement::To(to, inputs) = helper::place(&scene, Mover { class, rate: RHO0 }, None, &placed) else { panic!("no account for a helper") };
+        let Placement::To(to, inputs) = helper::place(&scene, Mover { class, rate: RHO0, tokens: None }, None, &placed) else { panic!("no account for a helper") };
         assert_eq!(inputs.decide(&inputs.plan()).map(|(t, _)| t), Some(to), "the inputs read back give the same answer");
         match placed.iter_mut().find(|(id, c, _)| *id == to && *c == class) {
             Some((_, _, k)) => *k += 1,

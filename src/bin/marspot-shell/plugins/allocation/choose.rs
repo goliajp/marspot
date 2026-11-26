@@ -62,6 +62,9 @@ pub(crate) struct Mover {
     pub class: Class,
     /// What it is believed to use an hour.
     pub rate: f64,
+    /// Its context, which a move rewrites into the new account's prompt
+    /// cache; `None` where it is not known.
+    pub tokens: Option<u64>,
 }
 
 /// Where a pane that has to move goes, or `None` when no account takes

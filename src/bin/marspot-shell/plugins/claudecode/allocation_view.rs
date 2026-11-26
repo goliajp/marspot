@@ -17,18 +17,17 @@ use super::allocation_inputs::{AccountIn, Snapshot};
 use super::fable_need::FABLE;
 use super::quota::helper_pick::{Placed, unread_pick};
 use super::quota::{Move, Room};
-use crate::plugins::allocation::choose::{MUST_LAST_H, Mover, Reserve, held_back, loads_of, pick_where};
-use crate::plugins::allocation::helper::{Placement, Scene, place};
+use crate::plugins::allocation::choose::{MUST_LAST_H, Mover, loads_of};
+use crate::plugins::allocation::helper::{Placement, Scene, place_by};
 use crate::plugins::allocation::notice::stranded;
-use crate::plugins::allocation::plan::{Plan, plan};
-use crate::plugins::allocation::replay::{Inputs, Kind, Why};
+use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
+use crate::plugins::allocation::waste;
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, KAPPA_FABLE, Quant};
 
 /// Why a pane that has to move stays where it is.
 pub(super) const ALL_OUT: &str = "every account is out";
 pub(super) const NOWHERE: &str = "nowhere else to go";
-pub(super) const HELD_BACK: &str = "it waits rather than take what the Fable panes are short of";
 
 /// The last sweep's view, for a helper started between sweeps.
 static LAST: std::sync::Mutex<Option<View>> = std::sync::Mutex::new(None);
@@ -46,6 +45,11 @@ pub(super) struct View {
     /// The resting moves the core decided this scan, each with every
     /// input that decided it.
     pub rest: HashMap<u64, (u8, Why, Inputs)>,
+    /// The rule the choices are made by, with what it read of the
+    /// last day's resting moves.
+    pub rule: Rule,
+    /// Each pane's context where the scan read one, tokens.
+    pub tokens: HashMap<u64, u64>,
 }
 
 impl View {
@@ -63,7 +67,7 @@ impl View {
         // readings also see what nothing here measured
         let b_f = rates.iter().map(|(f, _)| f).sum::<f64>().max(slope_f);
         let b_n = rates.iter().map(|(_, n)| n).sum();
-        View { accounts, b_f, b_n, panes, rest: HashMap::new() }
+        View { accounts, b_f, b_n, panes, rest: HashMap::new(), rule: Rule::waste(0), tokens: HashMap::new() }
     }
 
     /// The same with every pane at the default speed of its class.
@@ -83,6 +87,7 @@ impl View {
             v.panes = last.panes.clone();
             v.b_f = last.b_f;
             v.b_n = last.b_n;
+            v.tokens = last.tokens.clone();
         }
         v
     }
@@ -121,15 +126,14 @@ impl View {
 
     /// Where a refused helper goes, rule (c), with the helpers `placed`
     /// whose panes these loads do not hold yet counted on their
-    /// accounts; with the inputs that chose it when the core chose it.  It is held back for the Fable
-    /// panes as any plain pane is.
+    /// accounts; with the inputs that chose it when the core chose it.
     pub(super) fn helper_must_move(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class, placed: &Placed) -> (Move, Option<Inputs>) {
-        let mover = Mover { class, rate: self.rate_of(sid, class) };
+        let mover = Mover { class, rate: self.rate_of(sid, class), tokens: self.tokens.get(&sid).copied() };
         let scene = self.helper_scene(rooms, Some(sid));
-        match place(&scene, mover, Some(from), &placed.counts()) {
+        match place_by(&scene, mover, Some(from), &placed.counts(), self.rule) {
             Placement::To(to, inputs) => (Move::To(to), Some(inputs)),
-            Placement::HeldBack(..) => (Move::Hold(HELD_BACK), None),
-            Placement::Nowhere => {
+            // the one objective holds no helper back
+            Placement::HeldBack(..) | Placement::Nowhere => {
                 let model = (class == Class::Restricted).then_some(FABLE);
                 match unread_pick(rooms, Some(from), model, placed) {
                     Some(to) => (Move::To(to), None),
@@ -182,7 +186,7 @@ impl View {
         let accounts = self.judged(rooms);
         let table: Vec<(Option<u8>, Class, f64)> = self.panes.iter().filter(|p| p.0 != sid).map(|p| (Some(p.1), p.2, p.3)).collect();
         let loads = loads_of(&accounts, &table, None);
-        let mover = Mover { class, rate: self.rate_of(sid, class) };
+        let mover = Mover { class, rate: self.rate_of(sid, class), tokens: self.tokens.get(&sid).copied() };
         Inputs { accounts, b_f: self.b_f, b_n: self.b_n, kappa: Some(KAPPA_FABLE), loads, mover, here: from, kind: Kind::Out { horizon_h } }
     }
 
@@ -193,13 +197,11 @@ impl View {
     pub(super) fn must_move(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class) -> (Move, Option<Inputs>) {
         let inputs = self.inputs(rooms, sid, from, class, MUST_LAST_H);
         let plan = inputs.plan();
-        if let Some((to, _)) = inputs.decide(&plan) {
+        if let Some((to, _)) = inputs.decide_by(&plan, self.rule) {
             return (Move::To(to), Some(inputs));
         }
         let others: Vec<Quant> = inputs.accounts.iter().filter(|q| q.id != from).cloned().collect();
-        let why = if held_back(&inputs.accounts, &plan, &inputs.loads, inputs.mover, Some(from), MUST_LAST_H).is_some() && stranded(&others, class).is_none() {
-            HELD_BACK
-        } else if let Some(to) = unread_last(rooms, from, class) {
+        let why = if let Some(to) = unread_last(rooms, from, class) {
             return (Move::To(to), None);
         } else if others.is_empty() {
             NOWHERE
@@ -211,24 +213,22 @@ impl View {
         (Move::Hold(why), None)
     }
 
-    /// Where a badge click sends a pane: rule (a)'s order, without
-    /// holding a plain pane back for the Fable panes, since the person
-    /// asked for a switch; an account whose reading is missing last.
+    /// Where a badge click sends a pane: the account where it costs
+    /// least, as for a pane that has to move; an account whose reading
+    /// is missing last.
     pub(super) fn by_hand(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class) -> Option<(u8, Option<Inputs>)> {
         let inputs = self.inputs(rooms, sid, from, class, MUST_LAST_H);
-        let plan = inputs.plan();
-        match pick_where(&inputs.accounts, &plan, &inputs.loads, inputs.mover, Some(from), MUST_LAST_H, Reserve::None, |_| true) {
+        match waste::pick(&inputs.accounts, &inputs.loads, inputs.mover, Some(from), inputs.kappa, MUST_LAST_H, &self.rule.params(), |_| true) {
             Some(to) => Some((to, Some(inputs))),
             None => unread_last(rooms, from, class).map(|to| (to, None)),
         }
     }
 
-    /// Rule (a)'s first choice among `allowed`, for a pane leaving an
-    /// account that runs short, with what chose it.
+    /// The cheapest of `allowed` for a pane leaving an account that runs
+    /// short, with what chose it.
     pub(super) fn rank_among(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class, allowed: &[u8]) -> Option<(u8, Inputs)> {
         let inputs = self.inputs(rooms, sid, from, class, MUST_LAST_H);
-        let plan: Plan = plan(&inputs.accounts, inputs.b_f, inputs.b_n, inputs.kappa);
-        let to = pick_where(&inputs.accounts, &plan, &inputs.loads, inputs.mover, Some(from), MUST_LAST_H, Reserve::None, |q| allowed.contains(&q.id))?;
+        let to = waste::pick(&inputs.accounts, &inputs.loads, inputs.mover, Some(from), inputs.kappa, MUST_LAST_H, &self.rule.params(), |q| allowed.contains(&q.id))?;
         Some((to, inputs))
     }
 }

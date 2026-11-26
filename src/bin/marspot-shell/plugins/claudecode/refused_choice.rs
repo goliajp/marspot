@@ -6,7 +6,7 @@
 //! was written counted where they went, so helpers refused one after
 //! another do not all land on the same account.
 
-use super::super::allocation_view::{HELD_BACK, View};
+use super::super::allocation_view::View;
 use super::super::*;
 use super::super::quota::helper_pick::{Pool, placed};
 use crate::plugins::allocation::Class;
@@ -59,17 +59,5 @@ impl ClaudecodePlugin {
             }
             chosen
         })
-    }
-
-    /// Mark a pane held back for the Fable panes, or no longer held
-    /// back, and log the start of each hold.  The session is not told:
-    /// a line in its inbox starts a turn on the account that refuses it.
-    pub(super) fn note_held_back(&mut self, host: &dyn PluginHost, sid: u64, meta: &BindMeta, why: Option<&str>) {
-        let Some(tally) = self.stranded.get_mut(&sid) else { return };
-        let held = why == Some(HELD_BACK);
-        if held && !tally.held_back {
-            host.log(LogLevel::Info, "quota.held_back_noted", &format!("sid={sid} on P{}: it waits for the Fable panes", meta.profile_num));
-        }
-        tally.held_back = held;
     }
 }

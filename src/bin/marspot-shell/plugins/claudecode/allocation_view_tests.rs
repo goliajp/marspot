@@ -88,18 +88,19 @@ fn allocation_view_fable_pane_goes_only_where_fable_is_left() {
     assert_eq!(view.must_move(&rooms[..2], 1, 1, Class::Restricted).0, Move::Hold(ALL_OUT));
 }
 
-/// While Fable is short a refused plain pane waits rather than take
-/// what the Fable panes need; a badge click still switches it.
+/// A refused plain pane is not held back for the Fable panes: with only
+/// P2 left it goes there, as a badge click sends it.
 #[test]
-fn allocation_view_badge_click_switches_a_pane_the_core_holds_back() {
+fn allocation_view_refused_plain_pane_and_badge_click_go_where_there_is_room() {
     let feed = vec![row(1, "rejected", 1.0, NOW + 50 * 3600, 1.0), row(2, "allowed", 0.94, NOW + 100 * 3600, 0.9)];
     let panes = vec![pane(1, 1, Class::Plain), pane(2, 1, Class::Restricted), pane(3, 1, Class::Restricted), pane(4, 1, Class::Restricted)];
     let (view, rooms) = scene(feed, panes);
-    assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::Hold(HELD_BACK));
+    assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::To(2));
     assert_eq!(view.by_hand(&rooms, 1, 1, Class::Plain).map(|(t, _)| t), Some(2));
 }
 
-/// Leaving early ranks by rule (a) among the accounts it is handed,
+/// Leaving early ranks by the one objective among the accounts it is
+/// handed, near ties to the earlier renewal,
 /// and the panes sent this pass count where they went.
 #[test]
 fn allocation_view_leaving_early_ranks_among_the_lasting_and_counts_placed_panes() {

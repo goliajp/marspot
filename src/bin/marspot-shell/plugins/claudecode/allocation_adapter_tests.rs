@@ -200,8 +200,11 @@ fn allocation_all_out_notice_once_per_pane() {
     fs::remove_dir_all(&d).unwrap();
 }
 
+/// The one objective holds no pane back for the Fable panes: the plain
+/// pane P1 refuses goes to P2, where its use costs the Fable pane less
+/// than leaving P2's week to lapse would.
 #[test]
-fn allocation_held_back_notice_once_per_pane() {
+fn allocation_refused_plain_pane_is_not_held_back() {
     // P1 is out; all of P2's week is Fable's, and the Fable pane there
     // wants more than P2 can give it an hour
     let d = dir("held");
@@ -212,10 +215,11 @@ fn allocation_held_back_notice_once_per_pane() {
     p.out = true;
     let f = PaneIn { class: Class::Restricted, ..pane(2, 2, false) };
     s.panes = vec![p, f];
-    let notices = |log: Vec<(&'static str, String)>| log.into_iter().filter(|(t, _)| *t == "alloc.notice").map(|(_, l)| l).collect::<Vec<_>>();
-    assert_eq!(notices(a.observe(&s)), ["sid=1: waits rather than take what the Fable panes are short of on P2"]);
-    s.now += 2;
-    assert!(notices(a.observe(&s)).is_empty());
+    let log = a.observe(&s);
+    assert!(!log.iter().any(|(t, _)| *t == "alloc.notice"), "{log:?}");
+    let would: Vec<String> = fs::read_dir(&d).unwrap().map(|e| fs::read_to_string(e.unwrap().path()).unwrap()).collect::<String>().lines().filter(|l| l.split('\t').nth(3) == Some("would_move")).map(String::from).collect();
+    assert_eq!(would.len(), 1, "{would:?}");
+    assert!(would[0].contains("to=P2 why=out ") && would[0].contains(" rule=waste "), "{would:?}");
     fs::remove_dir_all(&d).unwrap();
 }
 
@@ -239,7 +243,8 @@ fn allocation_restart_counts_the_week_s_resting_would_moves() {
 #[test]
 fn allocation_same_target_after_busy_is_one_would_move() {
     // P1 runs out within the hour; pane 3, not the slowest plain pane
-    // there, would leave early for P2 each time it rests
+    // there, would leave for P2 each time it rests, once past the
+    // cooldown after it was first seen; pane 1 stays to use up the rest
     let d = dir("again");
     let mut a = Allocation::new(d.clone());
     let at = |now: i64, rest3: bool| {
@@ -251,6 +256,9 @@ fn allocation_same_target_after_busy_is_one_would_move() {
         s
     };
     let would = |kinds: Vec<String>| kinds.iter().filter(|k| *k == "would_move").count();
+    // first seen two and a half hours before: past the cooldown, short of
+    // the half-life that would make its speed a measured zero
+    assert_eq!(would(step(&mut a, &d, &at(NOW - 9000, false))), 0);
     assert_eq!(would(step(&mut a, &d, &at(NOW, true))), 1);
     assert_eq!(would(step(&mut a, &d, &at(NOW + 60, false))), 0);
     assert_eq!(would(step(&mut a, &d, &at(NOW + 120, true))), 0, "the same target is not a second move");

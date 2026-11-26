@@ -277,7 +277,6 @@ impl ClaudecodePlugin {
                     let (event, line) = judged.hold_line(sid, meta.profile_num, why);
                     host.log(LogLevel::Info, event, &line);
                 }
-                self.note_held_back(host, sid, &meta, Some(why));
             }
             quota::Move::To(target) => {
                 let fable_word = judged.for_fable.then(|| self.fable_need.word(sid, meta.profile_num, target)).flatten();
@@ -301,7 +300,6 @@ impl ClaudecodePlugin {
                     (None, false, true) => heads_up::after_ended_work(&resume_word()),
                     (None, false, false) => resume_word(),
                 };
-                self.note_held_back(host, sid, &meta, None);
                 if self.start_profile_cycle_to(host, sid, meta, target, Some(word), choice) {
                     if told_fable {
                         self.fable_need.told(sid);

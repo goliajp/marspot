@@ -13,6 +13,7 @@ use super::choose::{Mover, pick};
 use super::plan::Plan;
 use super::plan::plan;
 use super::rest::{RestMove, Resting, rest_move};
+use super::waste::{self, Params};
 use super::{Class, Load, Quant};
 
 /// Why a pane would move.
@@ -29,6 +30,9 @@ pub(crate) enum Why {
     Plan,
     /// Demand exceeds supply and a restricted window would lapse unused.
     Rescue,
+    /// A resting pane: moving it lowers the expected waste by more than
+    /// the move costs (`waste`).
+    Waste,
 }
 
 impl Why {
@@ -39,16 +43,73 @@ impl Why {
             Why::UOut => "u_out",
             Why::Plan => "plan",
             Why::Rescue => "rescue",
+            Why::Waste => "waste",
         }
     }
 
     pub(crate) fn from_word(w: &str) -> Option<Why> {
-        [Why::Out, Why::LeaveEarly, Why::UOut, Why::Plan, Why::Rescue].into_iter().find(|y| y.word() == w)
+        [Why::Out, Why::LeaveEarly, Why::UOut, Why::Plan, Why::Rescue, Why::Waste].into_iter().find(|y| y.word() == w)
     }
 
     /// A move of a resting pane, which the weekly limit counts.
     pub(crate) fn resting(self) -> bool {
         self != Why::Out
+    }
+}
+
+/// Which rule decides: the bands of the plan, or the one objective of
+/// `waste` with its weights, which also reads the resting moves of the
+/// last day.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Rule {
+    Bands,
+    Waste { moves_day: usize, params: Params },
+}
+
+impl Rule {
+    /// The one objective with the weights in force.
+    pub(crate) fn waste(moves_day: usize) -> Rule {
+        Rule::Waste { moves_day, params: waste::PARAMS }
+    }
+
+    /// The weights a choice outside `decide_by` (a badge click, leaving
+    /// early, a helper's model) is made with.
+    pub(crate) fn params(self) -> Params {
+        match self {
+            Rule::Waste { params, .. } => params,
+            Rule::Bands => waste::PARAMS,
+        }
+    }
+
+    /// The words a logged line carries after `Inputs::encode` so its
+    /// replay uses the same rule and weights; none for the bands.
+    pub(crate) fn words(self) -> String {
+        match self {
+            Rule::Bands => String::new(),
+            Rule::Waste { moves_day, params: p } => {
+                format!(" rule=waste day={moves_day} lambda={} margin={} per_day={} stay={}", p.lambda, p.margin, p.per_day, p.stay_h)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn of_line(line: &str) -> Rule {
+        let get = |k: &str| line.split(' ').find_map(|w| w.strip_prefix(k)?.strip_prefix('='));
+        let num = |k: &str, or: f64| get(k).and_then(|v| v.parse().ok()).unwrap_or(or);
+        let d = waste::PARAMS;
+        match get("rule") {
+            // weights a line does not carry are the ones in force
+            Some("waste") => Rule::Waste {
+                moves_day: get("day").and_then(|d| d.parse().ok()).unwrap_or(0),
+                params: Params {
+                    lambda: num("lambda", d.lambda),
+                    margin: num("margin", d.margin),
+                    per_day: get("per_day").and_then(|v| v.parse().ok()).unwrap_or(d.per_day),
+                    stay_h: num("stay", d.stay_h),
+                },
+            },
+            _ => Rule::Bands,
+        }
     }
 }
 
@@ -120,14 +181,23 @@ impl Inputs {
         }
     }
 
+    /// The decision under `rule`.
+    pub(crate) fn decide_by(&self, plan: &Plan, rule: Rule) -> Option<(u8, Why)> {
+        match rule {
+            Rule::Bands => self.decide(plan),
+            Rule::Waste { moves_day, params } => waste::decide(&self.accounts, &self.loads, self.mover, self.here, self.kappa, &self.kind, moves_day, &params),
+        }
+    }
+
     pub(crate) fn encode(&self) -> String {
         let b = |x: bool| u8::from(x);
         let acc: Vec<String> = self.accounts.iter().map(|q| format!("{}:{}:{}:{}:{}:{}:{}", q.id, q.r, q.f, q.t, q.tf, b(q.open), b(q.stale))).collect();
         let loads: Vec<String> = self.loads.iter().map(|l| format!("{}:{}", l.restricted, l.plain)).collect();
         let class = if self.mover.class == Class::Restricted { "restricted" } else { "plain" };
         let kappa = self.kappa.map_or_else(|| "-".to_string(), |k| k.to_string());
+        let tokens = self.mover.tokens.map_or_else(String::new, |t| format!(" tokens={t}"));
         let mut s = format!(
-            "here={} class={class} rate={} kappa={kappa} bf={} bn={} acc={} loads={}",
+            "here={} class={class} rate={}{tokens} kappa={kappa} bf={} bn={} acc={} loads={}",
             self.here,
             self.mover.rate,
             self.b_f,
@@ -189,7 +259,7 @@ impl Inputs {
                 moves_week: get("week").map_or(Some(0), |w| w.parse().ok())?,
             },
         };
-        Some(Inputs { accounts, b_f: num("bf")?, b_n: num("bn")?, kappa, loads, mover: Mover { class, rate: num("rate")? }, here: get("here")?.parse().ok()?, kind })
+        Some(Inputs { accounts, b_f: num("bf")?, b_n: num("bn")?, kappa, loads, mover: Mover { class, rate: num("rate")?, tokens: get("tokens").and_then(|t| t.parse().ok()) }, here: get("here")?.parse().ok()?, kind })
     }
 }
 
@@ -204,5 +274,5 @@ fn quant(f: &[&str]) -> Option<Quant> {
 #[cfg(test)]
 pub(crate) fn replay(line: &str) -> Option<Option<(u8, Why)>> {
     let i = Inputs::decode(line)?;
-    Some(i.decide(&i.plan()))
+    Some(i.decide_by(&i.plan(), Rule::of_line(line)))
 }

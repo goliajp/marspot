@@ -165,7 +165,7 @@ fn out(s: &Scene, x: &Pane) -> bool {
 fn inputs(a: &CodexAlloc, s: &Scene, i: usize) -> Option<Inputs> {
     let x = &s.panes[i];
     s.accounts.iter().find(|q| q.id == x.p.profile)?;
-    let mover = Mover { class: class_of(x.p), rate: x.rate() };
+    let mover = Mover { class: class_of(x.p), rate: x.rate(), tokens: None };
     let base = |loads, kind| Inputs { accounts: s.accounts.clone(), b_f: s.b_f, b_n: s.b_n, kappa: None, loads, mover, here: x.p.profile, kind };
     if out(s, x) {
         let horizon_h = if x.p.helper { HELPER_LAST_H } else { MUST_LAST_H };
@@ -213,7 +213,6 @@ fn note_move(a: &mut CodexAlloc, s: &Scene, i: usize, to: Option<(u8, Why)>, inp
         let line = match st {
             Stranded::AllOut { back_in_h } => format!("sid={sid}: every codex account is out, the first back in {back_in_h:.1} h"),
             Stranded::RestrictedOut { back_in_h } => format!("sid={sid}: Spark is out on every codex account, back in {back_in_h:.1} h"),
-            Stranded::HeldBack { would } => format!("sid={sid}: waits rather than take P{would}"),
         };
         log.push(("codex.alloc.notice", line));
     }

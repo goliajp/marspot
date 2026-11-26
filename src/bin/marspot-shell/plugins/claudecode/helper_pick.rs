@@ -27,7 +27,7 @@ use super::super::allocation_view::View;
 use super::{Move, Room, FIVE_HOUR_SPENT, same_model};
 use crate::plugins::allocation::choose::Mover;
 use crate::plugins::allocation::helper::{Placement, Scene, place};
-use crate::plugins::allocation::replay::Inputs;
+use crate::plugins::allocation::replay::{Inputs, Rule};
 use crate::plugins::allocation::{Class, Quant, RHO0};
 
 #[path = "helper_placed.rs"]
@@ -75,11 +75,37 @@ pub(in crate::plugins) fn claude_scene(numbers: &[u8], rooms: &[(u8, Room)], usa
     View::helper_start_scene(now, accounts, rooms)
 }
 
+/// The Fable model the panes on this machine run, as claude names it on
+/// its command line, and how many times the week its work costs against
+/// a model with no window of its own: the newest status-line record of
+/// a Fable model.  `None` when no pane has run one in the records' three
+/// days.
+pub(in crate::plugins) fn fable_model() -> Option<(String, f64)> {
+    let dir = super::super::statusline::model_push_dir();
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let Ok(when) = e.metadata().and_then(|m| m.modified()) else { continue };
+        if newest.as_ref().is_some_and(|(t, _)| *t >= when) {
+            continue;
+        }
+        let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+        let id = text.lines().find_map(|l| l.strip_prefix("id=")).map(str::trim).filter(|id| super::super::model::cli_model_ok(id));
+        if let Some(id) = id.filter(|id| super::super::allocation_prices::class_of(id) == Class::Restricted) {
+            newest = Some((when, id.to_string()));
+        }
+    }
+    newest.map(|(_, id)| {
+        let k = super::super::allocation_prices::week_cost_against_plain(&id);
+        (id, k)
+    })
+}
+
 /// A line in `alloc_events` for where a new Claude helper was started:
 /// `kind` on `to`, with every input that chose it.  The helper has no
 /// pane yet, so its session is 0.
 pub(in crate::plugins) fn record_new(dir: &Path, at: i64, kind: &str, to: u8, inputs: &Inputs) {
-    let ev = Event { at, sid: 0, kind: kind.into(), profile: Some(to), class: class_word(inputs.mover.class).into(), detail: inputs.encode() };
+    let detail = format!("{}{}", inputs.encode(), Rule::waste(0).words());
+    let ev = Event { at, sid: 0, kind: kind.into(), profile: Some(to), class: class_word(inputs.mover.class).into(), detail };
     if let Err(e) = EventLog::new(dir.to_path_buf()).append(&ev) {
         marspot::lx_warn!("alloc.events_failed", &format!("{kind} P{to}: {e}"));
     }
@@ -147,7 +173,7 @@ pub(in crate::plugins) fn helper_move(pool: Pool, feed_at: i64, decision: Move, 
     scene.b_n = RHO0;
     placed(pool, |p| {
         p.feed(feed_at, now);
-        let to = match place(&scene, Mover { class, rate: RHO0 }, Some(current), &p.counts()) {
+        let to = match place(&scene, Mover { class, rate: RHO0, tokens: None }, Some(current), &p.counts()) {
             Placement::To(to, _) | Placement::HeldBack(to, _) => Some(to),
             Placement::Nowhere => unread_pick(rooms, Some(current), model, p),
         };

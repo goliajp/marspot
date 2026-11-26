@@ -9,10 +9,10 @@ use super::allocation_inputs::{PaneIn, Snapshot};
 use super::allocation_line::{kappa_check, plan_key, plan_line, say, say_keyed};
 use super::allocation_view::View;
 use super::fable_need::MARK_FOR;
-use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, held_back, loads_of};
+use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of};
 use crate::plugins::allocation::notice::{Stranded, stranded};
 use crate::plugins::allocation::plan::Plan;
-use crate::plugins::allocation::replay::{Inputs, Kind, Why};
+use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::rest::{RESTRICTED_USER, is_keeper};
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, KAPPA_FABLE, Quant, shortage};
@@ -24,12 +24,19 @@ pub(super) const STALE_FEED_S: i64 = 15 * 60;
 /// Fable-less accounts.
 const KEEP_MARKED_S: i64 = 24 * 3600;
 
+/// How long a live resting move decided but not seen made counts
+/// against the daily budget: the main thread makes it within seconds or
+/// not at all.
+const PENDING_S: i64 = 600;
+
 pub(super) struct Pane<'a> {
     pub p: &'a PaneIn,
     /// Restricted and plain speed, weeks an hour.
     pub f: f64,
     pub n: f64,
     pub known: bool,
+    /// Its context, as its transcript's last reply read says.
+    pub tokens: Option<u64>,
 }
 
 impl Pane<'_> {
@@ -64,15 +71,24 @@ pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'stati
     let mut s = scene(a, snap, stale_feed);
     let short = shortage(&s.accounts, s.b_f + s.b_n);
     a.band_moves.retain(|t| now - t < 3600);
+    a.day_moves.retain(|t| now - t < 24 * 3600);
+    a.day_pending.retain(|_, at| now - *at < PENDING_S);
     let mut moves = Vec::new();
     for i in 0..s.panes.len() {
         let inputs = inputs(a, &s, i);
-        let to = inputs.as_ref().and_then(|x| x.decide(&s.plan));
+        s.view.rule = Rule::waste(a.day_moves.len() + a.day_pending.len());
+        let to = inputs.as_ref().and_then(|x| x.decide_by(&s.plan, s.view.rule));
         moves.push(to.map(|(t, why)| format!("{}→P{t}({})", s.panes[i].p.sid, why.word())));
         note_move(a, &s, i, to, inputs.as_ref(), log);
         if let (Some((t, why)), Some(inputs)) = (to, inputs)
             && why.resting()
         {
+            // the panes judged after this one see it where it goes, and
+            // live, the budget counts it before its `moved` line is read
+            s.table[i].0 = Some(t);
+            if a.live && why == Why::Waste {
+                a.day_pending.entry(s.panes[i].p.sid).or_insert(now);
+            }
             s.view.rest.insert(s.panes[i].p.sid, (t, why, inputs));
         }
     }
@@ -89,12 +105,13 @@ fn scene<'a>(a: &Allocation, snap: &'a Snapshot, stale_feed: bool) -> Scene<'a> 
         .iter()
         .map(|p| {
             let (f, n, known) = a.used.get(&p.sid).map_or(default_rate(p.class), |u| u.rate_or_default(now, p.class));
-            Pane { p, f, n, known }
+            Pane { p, f, n, known, tokens: a.context_of(p) }
         })
         .collect();
     let rates: Vec<(f64, f64)> = panes.iter().map(|x| (x.f, x.n)).collect();
     let slope_f: f64 = a.slopes.values().filter_map(|s| s.1.rate()).map(|r| r.max(0.0) * KAPPA_FABLE).sum();
-    let view = View::from_rates(snap, &rates, slope_f);
+    let mut view = View::from_rates(snap, &rates, slope_f);
+    view.tokens = panes.iter().filter_map(|x| Some((x.p.sid, x.tokens?))).collect();
     let plan = crate::plugins::allocation::plan::plan(&view.accounts, view.b_f, view.b_n, Some(KAPPA_FABLE));
     let table = panes.iter().map(|x| (Some(x.p.profile), x.p.class, x.rate())).collect();
     Scene { now, accounts: view.accounts.clone(), b_f: view.b_f, b_n: view.b_n, plan, table, panes, stale_feed, view }
@@ -104,8 +121,11 @@ fn scene<'a>(a: &Allocation, snap: &'a Snapshot, stale_feed: bool) -> Scene<'a> 
 /// to make (busy and able to work).
 fn inputs(a: &Allocation, s: &Scene, i: usize) -> Option<Inputs> {
     let x = &s.panes[i];
-    let mover = Mover { class: x.p.class, rate: x.rate() };
-    let base = |loads, kind| Inputs { accounts: s.accounts.clone(), b_f: s.b_f, b_n: s.b_n, kappa: Some(KAPPA_FABLE), loads, mover, here: x.p.profile, kind };
+    let mover = Mover { class: x.p.class, rate: x.rate(), tokens: x.tokens };
+    // where the pane is as this scan has it: a resting move decided for
+    // it earlier in the scan does not come back to it
+    let here = s.table[i].0.unwrap_or(x.p.profile);
+    let base = |loads, kind| Inputs { accounts: s.accounts.clone(), b_f: s.b_f, b_n: s.b_n, kappa: Some(KAPPA_FABLE), loads, mover, here, kind };
     if x.p.out {
         let horizon_h = if x.p.helper { HELPER_LAST_H } else { MUST_LAST_H };
         return Some(base(loads_of(&s.accounts, &s.table, Some(i)), Kind::Out { horizon_h }));
@@ -116,8 +136,9 @@ fn inputs(a: &Allocation, s: &Scene, i: usize) -> Option<Inputs> {
     let hours = |at: i64| (s.now - at) as f64 / 3600.0;
     let last = a.last.get(&x.p.sid);
     let left: Vec<(u8, f64)> = last.and_then(|l| l.left).map(|(id, at)| (id, hours(at))).into_iter().collect();
-    // the pane that stays when an account runs low is the slowest of its class
-    let same = s.panes.iter().filter(|y| y.p.sid != x.p.sid && y.p.profile == x.p.profile && y.p.class == x.p.class).map(|y| (y.p.sid, y.rate()));
+    // the pane that stays when an account runs low is the slowest of its
+    // class there, counting the moves decided earlier in this scan
+    let same = s.panes.iter().zip(&s.table).filter(|(y, t)| y.p.sid != x.p.sid && t.0 == Some(here) && y.p.class == x.p.class).map(|(y, _)| (y.p.sid, y.rate()));
     // marked now, or the mark ended under a day ago
     let marked_since = x.p.marked_at.or(last.and_then(|l| l.marked_at));
     let marked = marked_since.is_some_and(|at| s.now - at < MARK_FOR.as_secs() as i64 + KEEP_MARKED_S);
@@ -145,7 +166,7 @@ fn note_move(a: &mut Allocation, s: &Scene, i: usize, to: Option<(u8, Why)>, inp
     if let (Some((t, why)), Some(inputs)) = (to, inputs)
         && was != Some(t)
     {
-        let detail = format!("to=P{t} why={} {}", why.word(), inputs.encode());
+        let detail = format!("to=P{t} why={} {}{}", why.word(), inputs.encode(), s.view.rule.words());
         a.event(s.now, sid, "would_move", Some(x.p.profile), x.p.class, detail, log);
         // in a dry run what live would have done counts against the
         // limits; live, the move made does
@@ -159,20 +180,12 @@ fn note_move(a: &mut Allocation, s: &Scene, i: usize, to: Option<(u8, Why)>, inp
     if let (Some((t, _)), Some(l)) = (to, a.last.get_mut(&sid)) {
         l.would = Some(t);
     }
-    let stuck = if x.p.out && to.is_none() { stranded(&s.accounts, x.p.class).or_else(|| held(&s.plan, inputs)) } else { None };
+    let stuck = if x.p.out && to.is_none() { stranded(&s.accounts, x.p.class) } else { None };
     if let Some(st) = a.told.tell(sid, stuck) {
         let line = match st {
             Stranded::AllOut { back_in_h } => format!("sid={sid}: every account is out, the first back in {back_in_h:.1} h"),
             Stranded::RestrictedOut { back_in_h } => format!("sid={sid}: Fable is out on every account, back in {back_in_h:.1} h; the model stays"),
-            Stranded::HeldBack { would } => format!("sid={sid}: waits rather than take what the Fable panes are short of on P{would}"),
         };
         log.push(("alloc.notice", line));
     }
-}
-
-/// A plain pane with nowhere to go only because Fable is short.
-fn held(plan: &Plan, inputs: Option<&Inputs>) -> Option<Stranded> {
-    let x = inputs?;
-    let Kind::Out { horizon_h } = x.kind else { return None };
-    held_back(&x.accounts, plan, &x.loads, x.mover, Some(x.here), horizon_h).map(|would| Stranded::HeldBack { would })
 }

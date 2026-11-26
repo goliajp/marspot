@@ -99,6 +99,8 @@ impl Service {
 
 impl HelperService for Service {
     fn start(&self, port: &mut Port, a: &HelperStartArgs) -> Result<Value, Reject> {
+        let defaulted = launch::with_default_model(a);
+        let a = defaulted.as_ref().unwrap_or(a);
         let parent = match &a.parent {
             Some(p) => port.target(p)?,
             None => port.caller().ok_or_else(|| Reject::new(ErrorCode::BadRequest, "from outside the panes, name the helper's `parent` pane"))?,

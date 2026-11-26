@@ -137,6 +137,18 @@ pub(super) fn weeks(model: &str, t: &Tokens) -> f64 {
     dollars(model, t) / per_point / 100.0
 }
 
+/// A million replies' worth of tokens split as this machine's replies
+/// split their cost at Opus prices: 52% cache reads, 33% cache writes,
+/// 15% output.
+const TYPICAL: Tokens = Tokens { input: 0, cache_5m: 66_000, cache_1h: 0, cache_read: 2_600_000, output: 7_500 };
+
+/// How many times the week the same work costs on `model` what it
+/// costs on a model with no window of its own (Opus, the price of a
+/// model the table does not name).
+pub(super) fn week_cost_against_plain(model: &str) -> f64 {
+    weeks(model, &TYPICAL) / weeks("opus", &TYPICAL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +168,10 @@ mod tests {
         assert!((weeks("claude-opus-5-5", &t(0, 0, 0, 0, m)) - 20.0 / 30.5 / 100.0).abs() < 1e-15);
         assert_eq!(class_of("claude-fable-5-2"), Class::Restricted);
         assert_eq!(class_of("claude-opus-5-5"), Class::Plain);
+        // Fable is twice Opus's price but for cache reads, and a dollar of
+        // it is 30.5 / 11.2 times the week
+        near(week_cost_against_plain("claude-fable-5-2[1m]"), 1.48 * 30.5 / 11.2);
+        near(week_cost_against_plain("claude-opus-5-5"), 1.0);
     }
 
     #[test]
