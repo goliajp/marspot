@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use marspot::agent_resets::AccountResets;
 use marspot_peer::json::{self, Value};
 
 use super::feed::{own_window, Account, Credits, OwnWindow, Reading, Window};
@@ -228,8 +229,9 @@ pub(super) fn apply(account: &mut Account, outcome: Outcome, now: i64) {
 }
 
 /// One pass over every codex home under `home`.  A home whose CLI is
-/// not installed is not asked and keeps what it had.
-pub(super) fn pass(home: &Path, held: Vec<Account>, now: i64) -> Vec<Account> {
+/// not installed is not asked and keeps what it had.  The stored
+/// resets each answer lists go to `resets`.
+pub(super) fn pass(home: &Path, held: Vec<Account>, now: i64, resets: &mut Vec<AccountResets>) -> Vec<Account> {
     let mut held = held;
     let mut out = Vec::new();
     for h in homes(home) {
@@ -238,7 +240,12 @@ pub(super) fn pass(home: &Path, held: Vec<Account>, now: i64) -> Vec<Account> {
             None => Account { name: h.name.clone(), ..Account::default() },
         };
         if let Some(bin) = cli(&h.path) {
-            apply(&mut account, outcome(&ask(&bin, &h.path), now), now);
+            let replies = ask(&bin, &h.path);
+            let profile = super::samples::profile_of(&h.name);
+            if let (Some(r), Some(profile)) = (super::codex_resets::of_replies(&replies, now), profile) {
+                resets.push(AccountResets { agent: "codex".into(), profile, name: h.name.clone(), resets: r });
+            }
+            apply(&mut account, outcome(&replies, now), now);
         }
         account.expire(now);
         out.push(account);

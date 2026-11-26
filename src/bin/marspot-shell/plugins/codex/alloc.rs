@@ -43,6 +43,8 @@ pub(super) struct AccountIn {
     /// The feed does not say it refuses.
     pub open: bool,
     pub measured_at: i64,
+    /// What its stored resets bring back before they end.
+    pub supply: Vec<marspot_agent::sched::reset::Supply>,
 }
 
 /// One codex pane.

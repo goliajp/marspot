@@ -34,7 +34,7 @@ fn would_moves(d: &Path) -> Vec<(u64, String)> {
 
 fn account(profile: u8, week_used: f64, fable_used: f64, renews_h: i64) -> AccountIn {
     let at = NOW + renews_h * H;
-    AccountIn { profile, week_used, fable_used: Some(fable_used), fable_known: true, week_renews: at, fable_renews: at, open: true, measured_at: NOW }
+    AccountIn { profile, week_used, fable_used: Some(fable_used), fable_known: true, week_renews: at, fable_renews: at, open: true, measured_at: NOW, supply: Vec::new() }
 }
 
 fn pane(sid: u64, profile: u8, class: Class, resting: bool, out: bool) -> PaneIn {

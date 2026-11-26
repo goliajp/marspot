@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.776"  # the state map lists the stored resets facts and the file derived from them
-core    = "0.12.716"  # marspot-term gains the two reset settings, sched.reset and sched.reset_read
+shell   = "0.7.777"  # stored resets are read from the codex answers and the devops feed, kept as facts and counted as supply with a deadline
+core    = "0.12.717"  # the stored resets file, as the shell writes it and every layer reads it
 session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)

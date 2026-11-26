@@ -95,6 +95,8 @@ impl ClaudecodePlugin {
         let mut plan = self.plan_pass(result, &rooms, usage, judged, out_for);
         self.say_short(host, &plan);
         let mut view = self.view_for(result);
+        // where reading an account's stored resets starts; it only logs for now
+        let _due = self.reset_reads.due(result, marspot::settings::get().sched_reset_read, rooms::unix_now());
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalanced.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalance_said.retain(|sid, _| result.sessions_seen.contains(sid));

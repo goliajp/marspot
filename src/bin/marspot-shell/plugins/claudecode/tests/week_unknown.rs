@@ -111,6 +111,7 @@ fn view_of(rows: &[(&str, &str, &str, &str)], class: Class) -> (View, Vec<(u8, R
                 fable_renews: *reset_7d,
                 open: !room.refused_for(None),
                 measured_at: (*measured_at).min(NOW),
+                supply: Vec::new(),
             })
         })
         .collect();

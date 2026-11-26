@@ -112,6 +112,7 @@ fn an_account_that_refused_a_pane_is_no_destination() {
         fable_renews: renews,
         open: true,
         measured_at: 1_793_836_800,
+        supply: Vec::new(),
     };
     let pane = super::super::allocation_inputs::PaneIn {
         sid: 1,
