@@ -220,7 +220,7 @@ pub struct CcUsageAccountRender {
     pub windows: Vec<CcUsageWindowRender>,
     /// One line per kind of stored reset: kind, how many are left and
     /// when they can be used.  Empty for an account with none.
-    pub resets: Vec<String>,
+    pub resets: Vec<crate::agent_resets::ResetLine>,
 }
 
 /// One metered window of an account.

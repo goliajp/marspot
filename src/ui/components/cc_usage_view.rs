@@ -8,7 +8,7 @@
 //! timeline is a plot: one node, drawn by `cc_usage_paint`.
 
 use crate::ui::components::cc_usage_layout::{card_rows, cards_and_timeline, Cell, Shape};
-use crate::ui::components::cc_usage_modal::{cut_to_columns, fit_measured_into, metric, CcUsageAccountRender, CcUsageRender, Clock};
+use crate::ui::components::cc_usage_modal::{fit_measured_into, metric, CcUsageAccountRender, CcUsageRender, Clock};
 use crate::ui::components::cc_usage_paint as paint;
 use crate::ui::components::controls::{self, Measure};
 use crate::ui::components::panel_chrome::PanelChrome;
@@ -32,7 +32,7 @@ fn down(ui: &mut Ui<'_>, px: f64) {
 
 /// `f`'s node with its top-left corner `at` pixels from the corner of
 /// the stack it is laid over.
-fn placed(ui: &mut Ui<'_>, at: (f64, f64), f: impl FnOnce(&mut Ui<'_>)) {
+pub(super) fn placed(ui: &mut Ui<'_>, at: (f64, f64), f: impl FnOnce(&mut Ui<'_>)) {
     let none = Length::ZERO;
     ui.vstack(f).padding(Edges {
         top: Length::Px(at.1.max(0.0)),
@@ -92,7 +92,7 @@ fn bar(ui: &mut Ui<'_>, rect: Rect, util: Option<f32>) {
 fn account(
     ui: &mut Ui<'_>,
     m: Measure<'_>,
-    a: &CcUsageAccountRender,
+    (index, a): (usize, &CcUsageAccountRender),
     card: Rect,
     (cell, window_rows, reset_rows): (Cell, usize, usize),
     scratch: &mut String,
@@ -150,15 +150,7 @@ fn account(
         bar(ui, row.bar, w.util);
     }
     // under the tallest card's bars, so a row of cards lines them up
-    for (i, text) in a.resets.iter().enumerate() {
-        let row = rows.bar_row(window_rows + i, 0, cell);
-        scratch.clear();
-        scratch.push_str(text);
-        cut_to_columns(scratch, (rows.right - rows.left) / cell.w);
-        placed(ui, (rows.left, row.top), |ui| {
-            ui.text_copy(TextFont::Mono, Tone::FgMuted.into(), scratch).height(Length::Px(row.h)).align(Align::Leading);
-        });
-    }
+    super::cc_usage_reset_lines::reset_lines(ui, &a.resets, (index, &rows, window_rows, cell), scratch);
 
     let reset = Line { role: metric::RESET, ink: Tone::FgMuted, left, baseline: rows.reset_baseline, max_w };
     line(ui, m, reset, &a.reset_label, scratch);
@@ -225,10 +217,10 @@ pub fn describe(
             let mut bottom = top;
             down(ui, top - y);
             let over = ui.zstack(Align::TopLeading, |ui| {
-                for (a, card) in cc.accounts.iter().zip(cards) {
+                for (index, (a, card)) in cc.accounts.iter().zip(cards).enumerate() {
                     bottom = card.y_top + card.h;
                     let card = Rect { x: card.x - area.x, y_top: card.y_top - top, ..card };
-                    account(ui, &mut *m, a, card, (cell, shape.window_rows, shape.reset_rows), scratch);
+                    account(ui, &mut *m, (index, a), card, (cell, shape.window_rows, shape.reset_rows), scratch);
                 }
             });
             over.width(Length::Pct(1.0)).height(Length::Px(bottom - top));

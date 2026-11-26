@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "reset_panel.rs"]
+mod reset_panel;
+
 /// State behind the toolbar's accounts (usage) panel.
 pub(super) struct CcUsageModalState {
     /// Parsed feed; `None` = file missing/unreadable (modal shows a
@@ -9,6 +12,8 @@ pub(super) struct CcUsageModalState {
     pub(super) data: Option<marspot::cc_usage::CcUsage>,
     pub(super) codex: Option<marspot::cc_usage::CodexUsage>,
     pub(super) resets: Vec<marspot::agent_resets::AccountResets>,
+    /// The reset line armed by a first press.
+    pub(super) buttons: marspot::agent_resets::ResetButtons,
     pub(super) loaded_at: Instant,
     pub(super) surface: std::rc::Rc<std::cell::RefCell<marspot::ui::components::cc_usage_view::CcUsageSurface>>,
 }
@@ -66,6 +71,7 @@ impl CoreApp {
                     data: marspot::cc_usage::read(),
                     codex: marspot::kimi_usage::read_codex_and_kimi(),
                     resets: marspot::agent_resets::read(unix_now()),
+                    buttons: Default::default(),
                     loaded_at: Instant::now(),
                     surface: Default::default(),
                 });
@@ -101,7 +107,7 @@ impl CoreApp {
     /// frame, on neither its header nor its close button.
     pub(super) fn panel_content_press(&mut self, wi: usize, kind: SurfaceKind, x_phys: f64, y_phys: f64) {
         match kind {
-            SurfaceKind::Accounts => {}
+            SurfaceKind::Accounts => self.reset_panel_press(wi, x_phys, y_phys),
             SurfaceKind::Settings | SurfaceKind::Shortcuts | SurfaceKind::Helpers => {
                 self.tree_panel_content_press(wi, kind, x_phys, y_phys);
             }
@@ -206,7 +212,7 @@ impl CoreApp {
                     status_severity: severity(&a.status),
                     reset_label: soonest_reset(&ws),
                     windows: ws.iter().map(window).collect(),
-                    resets: reset_lines(&modal.resets, &["claude"], &a.name),
+                    resets: reset_panel::lines_for(modal, account_of(&modal.resets, &["claude"], &a.name), &ws, now_unix),
                 }
             }));
         }
@@ -218,7 +224,7 @@ impl CoreApp {
                 status_severity: severity(&a.status),
                 reset_label: soonest_reset(&a.windows),
                 windows: a.windows.iter().map(window).collect(),
-                resets: reset_lines(&modal.resets, &["codex", "kimi"], &a.name),
+                resets: reset_panel::lines_for(modal, account_of(&modal.resets, &["codex", "kimi"], &a.name), &a.windows, now_unix),
             }));
         }
         if accounts.is_empty() {
@@ -257,18 +263,14 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The resets of the account named `name` of one of `agents`.
-fn resets_of<'a>(all: &'a [marspot::agent_resets::AccountResets], agents: &[&str], name: &str) -> Option<&'a marspot::agent_resets::Resets> {
-    all.iter().find(|a| a.name == name && agents.contains(&a.agent.as_str())).map(|a| &a.resets)
+/// The account named `name` of one of `agents`.
+fn account_of<'a>(all: &'a [marspot::agent_resets::AccountResets], agents: &[&str], name: &str) -> Option<&'a marspot::agent_resets::AccountResets> {
+    all.iter().find(|a| a.name == name && agents.contains(&a.agent.as_str()))
 }
 
-/// The reset lines of the account named `name` of one of `agents`.
-fn reset_lines(all: &[marspot::agent_resets::AccountResets], agents: &[&str], name: &str) -> Vec<String> {
-    let Some(r) = resets_of(all, agents, name) else { return Vec::new() };
-    marspot::agent_resets::lines(r, unix_now(), |t| {
-        let (month, day, hour, minute) = marspot::cc_usage::local_mdhm(t);
-        format!("{month}/{day} {hour:02}:{minute:02}")
-    })
+/// The resets of the account named `name` of one of `agents`.
+fn resets_of<'a>(all: &'a [marspot::agent_resets::AccountResets], agents: &[&str], name: &str) -> Option<&'a marspot::agent_resets::Resets> {
+    account_of(all, agents, name).map(|a| &a.resets)
 }
 
 /// The most reset lines any account of the open panel lists.

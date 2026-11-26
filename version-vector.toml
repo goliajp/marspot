@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.803"  # the state map lists the reset claim facts
-core    = "0.12.729"  # which grant a reset line claims, and the two-press arming rule
+core    = "0.12.730"  # each claimable reset line on the accounts panel is a button: a press arms it, a second confirms
 session = "0.11.471"  # marspot-term gains the ResetPanelAct frame (not used by session)
