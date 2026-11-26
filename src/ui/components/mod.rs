@@ -83,6 +83,8 @@ mod layout_view_tests;
 #[cfg(test)]
 mod process_view_tests;
 #[cfg(test)]
+mod process_left_snapshot_tests;
+#[cfg(test)]
 mod panel_frames_view_tests;
 
 #[cfg(test)]

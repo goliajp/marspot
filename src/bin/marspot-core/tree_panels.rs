@@ -153,8 +153,8 @@ impl CoreApp {
         let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
         match on {
             ProcessAsk::Kill(row) => {
-                if let Some(pid) = panel.row_pids.get(row).copied() {
-                    self.kill_and_track(wi, pid);
+                if let Some(id) = panel.row_ids.get(row).copied() {
+                    self.kill_and_track(wi, id);
                     self.refresh_process_panel(wi);
                 }
             }

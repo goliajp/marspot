@@ -117,6 +117,8 @@ pub const ALL: &[Msg] = &[
     Msg::ColRss,
     Msg::ColProcess,
     Msg::ColPid,
+    Msg::ProcessLeftGroup,
+    Msg::ProcessLeftDetail,
     Msg::PanelHelpers,
     Msg::HelpersEmpty,
     Msg::HelperViewHere,

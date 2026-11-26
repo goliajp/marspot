@@ -1,5 +1,7 @@
 //! The process panel: rendering it, refreshing its rows, and killing what it lists.
 
+use std::collections::HashMap;
+
 use super::*;
 
 impl CoreApp {
@@ -27,10 +29,12 @@ impl CoreApp {
         panel.selected_pane = panel.selected_pane.min(panel.panes.len().saturating_sub(1));
         let selected_pane = panel.selected_pane;
 
-        // Pane rows are shown busiest first; `selected_pane` is a row
-        // of that order, so map it back to the pane it shows.
+        // Pane rows are shown busiest first, what closed panes left
+        // last; `selected_pane` is a row of that order, so map it back
+        // to the pane it shows.
         let mut order: Vec<usize> = (0..panel.panes.len()).collect();
-        order.sort_by(|&a, &b| panel.panes[b].cpu_pct.total_cmp(&panel.panes[a].cpu_pct));
+        let key = |p: &PanePidTree| (p.orphans.is_some(), -p.cpu_pct);
+        order.sort_by(|&a, &b| key(&panel.panes[a]).partial_cmp(&key(&panel.panes[b])).unwrap_or(std::cmp::Ordering::Equal));
         let pane_rows: Vec<ProcessPanelPaneRow> = order
             .iter()
             .map(|&i| {
@@ -47,10 +51,14 @@ impl CoreApp {
             .collect();
         let mut detail = String::new();
         let mut rows: Vec<ProcessPanelRow> = Vec::new();
+        let mut ids = Vec::new();
         if let Some(pane) = order.get(selected_pane).and_then(|&i| panel.panes.get(i)) {
             let (sid, shell_pid) = (pane.shelld_session_id, pane.shell_child_pid.unwrap_or(0));
-            detail = strings::text(Arg::ProcessDetail { pane: &pane.name, sid, shell_pid });
-            if let Some(tree) = pane.tree.as_ref() {
+            detail = match pane.orphans {
+                Some(_) => t(Msg::ProcessLeftDetail).to_string(),
+                None => strings::text(Arg::ProcessDetail { pane: &pane.name, sid, shell_pid }),
+            };
+            for (label, tree) in pane_trees(pane) {
                 for (depth, node) in marspot::pidtree::flatten_pre_order(tree) {
                     // `prev_pid_stats` holds each pid's cumulative CPU
                     // time at the last refresh; sampling again now
@@ -64,13 +72,12 @@ impl CoreApp {
                         }
                         None => (0.0, 0),
                     };
-                    rows.push(ProcessPanelRow {
-                        depth: depth.min(8) as u8,
-                        pid: node.pid,
-                        comm: node.comm.clone(),
-                        cpu_pct,
-                        rss_kb,
-                    });
+                    let comm = match label {
+                        Some(l) if depth == 0 => l.clone(),
+                        _ => node.comm.clone(),
+                    };
+                    rows.push(ProcessPanelRow { depth: depth.min(8) as u8, pid: node.pid, comm, cpu_pct, rss_kb });
+                    ids.push(marspot::pidtree::ProcId { pid: node.pid, start_us: panel.starts.get(&node.pid).copied().unwrap_or(0) });
                 }
             }
         }
@@ -80,7 +87,7 @@ impl CoreApp {
             frame, top_inset, pane_rows.len(), rows.len(), panel.scroll_y.px(), cell_w, cell_h,
         );
         panel.scroll_y = marspot::ui::Units::from_px(layout.scroll().0);
-        panel.row_pids = rows.iter().map(|r| r.pid).collect();
+        panel.row_ids = ids;
         panel.layout = Some(layout.clone());
         Some(ProcessPanelRender {
             layout,
@@ -93,25 +100,29 @@ impl CoreApp {
         })
     }
 
-    /// F3+1.3 — send SIGTERM to `pid` and track it for SIGKILL
-    /// escalation 2 s later if it hasn't exited.  Logged at Info so
-    /// post-mortem can correlate UI clicks with process deaths.
-    pub(super) fn kill_and_track(&mut self, wi: usize, pid: i32) {
-        match marspot::pidtree::kill_pid(pid, libc::SIGTERM) {
+    /// F3+1.3 — send SIGTERM to the process `id` names and track it
+    /// for SIGKILL escalation 2 s later if it hasn't exited.  The start
+    /// time is checked again right before each signal, so a pid taken
+    /// by another process since the row was listed is left alone.
+    /// Logged at Info so post-mortem can correlate UI clicks with
+    /// process deaths.
+    pub(super) fn kill_and_track(&mut self, wi: usize, id: marspot::pidtree::ProcId) {
+        match marspot::pidtree::signal(id, libc::SIGTERM) {
             Ok(()) => {
                 marspot::lx_event!(
                     "PROCESS_PANEL_SIGTERM",
                     "user clicked panel [×] — SIGTERM sent",
-                    pid = pid
+                    pid = id.pid,
+                    start_us = id.start_us
                 );
                 if let Some(panel) = win!(self, wi).process_panel.as_mut() {
-                    panel.pending_kills.push((pid, Instant::now()));
+                    panel.pending_kills.push((id, Instant::now()));
                 }
             }
             Err(e) => {
                 marspot::lx_warn!(
                     "process_panel.sigterm_failed",
-                    &format!("kill({pid}, SIGTERM): {e}")
+                    &format!("{}@{}: {e}", id.pid, id.start_us)
                 );
             }
         }
@@ -125,105 +136,119 @@ impl CoreApp {
         if panel.pending_kills.is_empty() {
             return;
         }
-        let now = Instant::now();
-        panel.pending_kills.retain(|(pid, sent_at)| {
-            if !marspot::pidtree::pid_is_alive(*pid) {
-                // Gone already — graceful TERM took it.
-                return false;
-            }
-            if now.duration_since(*sent_at) >= KILL_ESCALATION_GRACE {
-                let _ = marspot::pidtree::kill_pid(*pid, libc::SIGKILL);
-                // Drop the entry whether SIGKILL succeeded or failed;
-                // a failure means the pid disappeared between the
-                // is_alive check and the kill, which is a win, not
-                // a loss.
-                return false;
-            }
-            true
-        });
+        escalate(&mut panel.pending_kills, Instant::now());
     }
 
     /// F3+1 — re-walk libproc + read each pane's entry.toml to
-    /// rebuild the process-tree cache.  Called when the panel opens,
-    /// and on the main loop's render path when `last_refresh` is
-    /// older than 2 s.  No-op when the panel is closed.
+    /// rebuild the process-tree cache, and read what closed panes
+    /// left from the zombie watch's record.  Called when the panel
+    /// opens, and on the main loop's render path when `last_refresh`
+    /// is older than 2 s.  No-op when the panel is closed.
     pub(super) fn refresh_process_panel(&mut self, wi: usize) {
-        // F3+4 — walk libproc, sample per-pid stats, compute CPU%
-        // deltas vs the previous refresh, build per-pane aggregates.
-        // Two-pass: pass A snapshots procs + new stats; pass B walks
-        // panes building summaries.  prev_pid_stats is rolled forward
-        // (only pids seen this tick survive into next).
         let w = &mut win!(self, wi);
         let Some(panel) = w.process_panel.as_mut() else { return };
         let all = marspot::pidtree::list_all_procs();
         let now = Instant::now();
-        // Sample CPU + RSS for every pid we'll touch (descendants of
-        // any pane's shell child).  Caller already has the tree so
-        // we'd double-walk if we sampled lazily inside `build_node` —
-        // do it once into a flat map.
-        let mut cur_stats: std::collections::HashMap<i32, marspot::pidtree::ProcStat> =
-            std::collections::HashMap::new();
-        // Snapshot CWD for each pane's shell child for the name col.
-        panel.panes.clear();
+        let mut sampler = Sampler { prev: &panel.prev_pid_stats, now, cur: HashMap::new() };
+        let mut panes = Vec::new();
         for (pane_idx, pane) in w.panes.iter().enumerate() {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let pid = read_shell_child_pid(sid);
             let tree = pid.and_then(|p| marspot::pidtree::tree_rooted_at(p, &all));
-            // Aggregate: walk descendants, sample stats, sum CPU% +
-            // RSS, find top-busy non-shell process.
-            let mut n = 0u32;
-            let mut sum_cpu_pct = 0.0f32;
-            let mut sum_rss_kb = 0u64;
-            let mut top_busy = (0.0f32, String::new());
-            if let Some(ref root) = tree {
-                let flat = marspot::pidtree::flatten_pre_order(root);
-                for (_depth, node) in &flat {
-                    let p = node.pid;
-                    let Some(stat) = marspot::pidtree::proc_stat(p) else { continue };
-                    cur_stats.insert(p, stat);
-                    n += 1;
-                    sum_rss_kb += stat.rss_bytes / 1024;
-                    // CPU% via delta.
-                    let cpu = if let Some(&(prev_cpu, prev_t)) =
-                        panel.prev_pid_stats.get(&p)
-                    {
-                        stat.cpu_pct_since(prev_cpu, now.duration_since(prev_t).as_nanos() as u64)
-                    } else { 0.0 };
-                    sum_cpu_pct += cpu;
-                    if cpu > top_busy.0 && !node.comm.starts_with("-zsh") {
-                        top_busy = (cpu, node.comm.clone());
-                    }
-                }
-            }
+            let sum = sampler.sum(tree.iter());
             // Resolve the pane's name the same way the title strip
             // does: its directory.
-            let name = {
-                if let Some(p) = self.pane_cwds.get(&sid) {
-                    std::path::Path::new(p).file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| format!("sid {sid}"))
-                } else {
-                    format!("{}", pane_idx + 1)
-                }
+            let name = match self.pane_cwds.get(&sid) {
+                Some(p) => std::path::Path::new(p)
+                    .file_name()
+                    .map_or_else(|| format!("sid {sid}"), |n| n.to_string_lossy().into_owned()),
+                None => format!("{}", pane_idx + 1),
             };
-            let busy = if top_busy.0 < 0.1 { String::from("(idle)") } else { top_busy.1 };
-            panel.panes.push(PanePidTree {
-                shelld_session_id: sid,
-                shell_child_pid: pid,
-                tree,
-                name,
-                n_pids: n,
-                cpu_pct: sum_cpu_pct,
-                rss_kb: sum_rss_kb,
-                busy,
-            });
+            panes.push(PanePidTree { shelld_session_id: sid, shell_child_pid: pid, tree, orphans: None, name, ..sum });
+        }
+        if let Some(left) = super::process_orphans::left(&all) {
+            let sum = sampler.sum(left.iter().map(|(_, t)| t));
+            let name = t(Msg::ProcessLeftGroup).to_string();
+            panes.push(PanePidTree { orphans: Some(left), name, ..sum });
         }
         // Roll the stats cache forward: keep only pids we sampled this
         // tick (dead pids drop out automatically).
-        panel.prev_pid_stats.clear();
-        for (pid, stat) in cur_stats {
-            panel.prev_pid_stats.insert(pid, (stat.total_cpu_ns, now));
-        }
+        let cur = sampler.cur;
+        panel.panes = panes;
+        panel.prev_pid_stats = cur.into_iter().map(|(pid, stat)| (pid, (stat.total_cpu_ns, now))).collect();
+        panel.starts = all.iter().map(|r| (r.pid, r.start_us)).collect();
         panel.last_refresh = now;
     }
 }
+
+/// SIGKILL every process of `pending` still running under the same
+/// identity past the grace period; drop the ones gone or past it.
+pub(super) fn escalate(pending: &mut Vec<(marspot::pidtree::ProcId, Instant)>, now: Instant) {
+    pending.retain(|&(id, sent_at)| {
+        if marspot::pidtree::proc_id(id.pid) != Some(id) {
+            // gone, or its pid is another process's now
+            return false;
+        }
+        if now.duration_since(sent_at) >= KILL_ESCALATION_GRACE {
+            // a failure means it went or changed hands meanwhile
+            let _ = marspot::pidtree::signal(id, libc::SIGKILL);
+            return false;
+        }
+        true
+    });
+}
+
+/// The trees a pane's rows come from, each with the label of its
+/// first row when that is not the command's name.
+fn pane_trees(pane: &PanePidTree) -> Vec<(Option<&String>, &marspot::pidtree::ProcNode)> {
+    match &pane.orphans {
+        Some(left) => left.iter().map(|(label, tree)| (Some(label), tree)).collect(),
+        None => pane.tree.iter().map(|tree| (None, tree)).collect(),
+    }
+}
+
+/// F3+4 — samples CPU and RSS of every process a pane shows, and its
+/// CPU% from the delta against the previous refresh.
+struct Sampler<'a> {
+    prev: &'a HashMap<i32, (u64, Instant)>,
+    now: Instant,
+    cur: HashMap<i32, marspot::pidtree::ProcStat>,
+}
+
+impl Sampler<'_> {
+    /// The sums over `trees`, and their busiest non-shell process.
+    fn sum<'t>(&mut self, trees: impl Iterator<Item = &'t marspot::pidtree::ProcNode>) -> PanePidTree {
+        let (mut n, mut cpu_pct, mut rss_kb, mut top) = (0u32, 0.0f32, 0u64, (0.0f32, String::new()));
+        for root in trees {
+            for (_, node) in marspot::pidtree::flatten_pre_order(root) {
+                let Some(stat) = marspot::pidtree::proc_stat(node.pid) else { continue };
+                self.cur.insert(node.pid, stat);
+                n += 1;
+                rss_kb += stat.rss_bytes / 1024;
+                let cpu = self.prev.get(&node.pid).map_or(0.0, |&(prev_cpu, prev_t)| {
+                    stat.cpu_pct_since(prev_cpu, self.now.duration_since(prev_t).as_nanos() as u64)
+                });
+                cpu_pct += cpu;
+                if cpu > top.0 && !node.comm.starts_with("-zsh") {
+                    top = (cpu, node.comm.clone());
+                }
+            }
+        }
+        let busy = if top.0 < 0.1 { String::from("(idle)") } else { top.1 };
+        PanePidTree {
+            shelld_session_id: 0,
+            shell_child_pid: None,
+            tree: None,
+            orphans: None,
+            name: String::new(),
+            n_pids: n,
+            cpu_pct,
+            rss_kb,
+            busy,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "process_panel_tests.rs"]
+mod tests;

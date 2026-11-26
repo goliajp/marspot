@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.729"  # the zombie watch records what closed panes left running, by the pane names it remembers, and a closed helper's processes are its parent's
-core    = "0.12.699"  # the lib reads and writes the record of processes closed panes left running
+core    = "0.12.700"  # the process monitor lists what closed panes left running and ends every process by pid and start time
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it
