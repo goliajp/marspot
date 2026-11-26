@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.781"  # alloc.plan drops the pane counts before it drops an account, so 16 accounts and the move count fit
+shell   = "0.7.782"  # an hour the shell missed is written unknown, not idle; a busy pane stops at its last fact before a restart; a first run sums back 48 h
 core    = "0.12.718"  # the accounts panel lists each account's stored resets under its bars, end before start
 session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)

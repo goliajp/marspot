@@ -12,8 +12,15 @@
 //! points are 1% of one account's week, at the prices of the day the
 //! row is summed; busy pane-hours count the time each bound pane spent
 //! between a `busy` and the next `rest`.
+//!
+//! An hour before this shell started with no fact at all may have had
+//! no shell to see it, and is written with every field `-`: an unknown
+//! hour must not read as an idle fleet.  A pane that turned busy before
+//! this shell started counts busy only up to its last fact before the
+//! start, until this shell sees it turn busy again.  The first shell to
+//! write the files sums back `CATCH_UP` hours from the facts kept.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,7 +31,8 @@ use super::allocation_prices::{Tokens, weeks};
 /// Days of hours kept.
 pub(super) const KEEP_DAYS: i64 = 60;
 const HOUR: i64 = 3600;
-/// Hours summed in one scan when the shell was not running for a while.
+/// Hours summed in one scan when the shell was not running for a while,
+/// or the first time.
 const CATCH_UP: i64 = 48;
 /// How far before an hour the facts are read to know which panes were
 /// busy when it began.
@@ -38,10 +46,15 @@ pub(super) struct Hour {
     pub other: f64,
     pub busy_h: f64,
     pub panes: usize,
+    /// A shell was up through it, or some fact falls in it.
+    pub known: bool,
 }
 
 impl Hour {
     fn line(&self) -> String {
+        if !self.known {
+            return format!("{}\thour\tfable=- other=- busy_h=- panes=-\n", self.at);
+        }
         format!("{}\thour\tfable={:.4} other={:.4} busy_h={:.3} panes={}\n", self.at, self.fable, self.other, self.busy_h, self.panes)
     }
 }
@@ -51,24 +64,27 @@ pub(super) struct Hours {
     dir: PathBuf,
     /// The start of the last hour written; `None` before the files are read.
     last: Option<i64>,
+    /// The first scan of this shell, taken as when it started.
+    started: Option<i64>,
 }
 
 impl Hours {
     pub(super) fn new(dir: PathBuf) -> Self {
-        Hours { dir, last: None }
+        Hours { dir, last: None, started: None }
     }
 
     /// Sum and append every hour that ended since the last one written,
     /// from the facts in `events`, as of `now`.
     pub(super) fn tick(&mut self, events: &EventLog, now: i64) -> std::io::Result<usize> {
+        let started = *self.started.get_or_insert(now);
         let done = now - now.rem_euclid(HOUR) - HOUR;
-        let last = *self.last.get_or_insert_with(|| last_written(&self.dir).unwrap_or(done - HOUR));
+        let last = *self.last.get_or_insert_with(|| last_written(&self.dir).unwrap_or(done - CATCH_UP * HOUR));
         if last >= done {
             return Ok(0);
         }
         let from = (last + HOUR).max(done - (CATCH_UP - 1) * HOUR);
         let facts = events.read_since(from - LEAD_S, done + HOUR - 1);
-        let rows = sum(&facts, from, done);
+        let rows = sum(&facts, from, done, started);
         fs::create_dir_all(&self.dir)?;
         prune(&self.dir, now)?;
         for h in &rows {
@@ -81,26 +97,25 @@ impl Hours {
 }
 
 /// Each hour from `from` to `to`, both starts, out of `facts` (which
-/// begin early enough to know who was busy at `from`).
-pub(super) fn sum(facts: &[Event], from: i64, to: i64) -> Vec<Hour> {
-    let mut rows: Vec<Hour> = (0..=(to - from) / HOUR).map(|k| Hour { at: from + k * HOUR, ..Hour::default() }).collect();
-    let mut busy_since: HashMap<u64, i64> = HashMap::new();
-    let mut seen: Vec<std::collections::HashSet<u64>> = vec![Default::default(); rows.len()];
+/// begin early enough to know who was busy at `from`); the shell has
+/// been up since `up_since`.
+pub(super) fn sum(facts: &[Event], from: i64, to: i64, up_since: i64) -> Vec<Hour> {
+    let mut rows: Vec<Hour> = (0..=(to - from) / HOUR).map(|k| from + k * HOUR).map(|at| Hour { at, known: at >= up_since, ..Hour::default() }).collect();
+    let mut seen: Vec<HashSet<u64>> = vec![HashSet::new(); rows.len()];
     let slot = |at: i64| (at >= from && at < to + HOUR).then(|| ((at - from) / HOUR) as usize);
-    let add_busy = |rows: &mut Vec<Hour>, a: i64, b: i64| {
-        for r in rows.iter_mut() {
-            let (lo, hi) = (a.max(r.at), b.min(r.at + HOUR));
-            if hi > lo {
-                r.busy_h += (hi - lo) as f64 / HOUR as f64;
-            }
-        }
-    };
+    let mut last_before: HashMap<u64, i64> = HashMap::new();
+    for e in facts.iter().filter(|e| e.at < up_since) {
+        last_before.entry(e.sid).and_modify(|a| *a = (*a).max(e.at)).or_insert(e.at);
+    }
+    // busy from before the start: no further than the pane's last fact before it
+    let end_of = |sid: u64, s: i64, e: i64| if s < up_since { last_before.get(&sid).copied().unwrap_or(s).clamp(s, e) } else { e };
+    let mut busy_since: HashMap<u64, i64> = HashMap::new();
     for e in facts {
-        if let Some(k) = slot(e.at)
-            && e.sid != 0
-            && e.profile.is_some()
-        {
-            seen[k].insert(e.sid);
+        if let Some(k) = slot(e.at) {
+            rows[k].known = true;
+            if e.sid != 0 && e.profile.is_some() {
+                seen[k].insert(e.sid);
+            }
         }
         match e.kind.as_str() {
             "used" => {
@@ -110,26 +125,42 @@ pub(super) fn sum(facts: &[Event], from: i64, to: i64) -> Vec<Hour> {
                     if e.class == "fable" { rows[k].fable += pts } else { rows[k].other += pts }
                 }
             }
-            "busy" => {
-                busy_since.entry(e.sid).or_insert(e.at);
-            }
+            "busy" => match busy_since.get(&e.sid).copied() {
+                // seen busy again by this shell: what came before it is closed
+                Some(s) if s < up_since && e.at >= up_since => {
+                    add_busy(&mut rows, s, end_of(e.sid, s, e.at));
+                    busy_since.insert(e.sid, e.at);
+                }
+                Some(_) => {}
+                None => {
+                    busy_since.insert(e.sid, e.at);
+                }
+            },
             // a pane moved to another account goes on being busy
             "rest" | "bound" if e.kind == "rest" || e.profile.is_none() => {
                 if let Some(s) = busy_since.remove(&e.sid) {
-                    add_busy(&mut rows, s, e.at);
+                    add_busy(&mut rows, s, end_of(e.sid, s, e.at));
                 }
             }
             _ => {}
         }
     }
-    let end = to + HOUR;
-    for (_, s) in busy_since {
-        add_busy(&mut rows, s, end);
+    for (sid, s) in busy_since {
+        add_busy(&mut rows, s, end_of(sid, s, to + HOUR));
     }
     for (r, s) in rows.iter_mut().zip(seen) {
         r.panes = s.len();
     }
     rows
+}
+
+fn add_busy(rows: &mut [Hour], a: i64, b: i64) {
+    for r in rows.iter_mut() {
+        let (lo, hi) = (a.max(r.at), b.min(r.at + HOUR));
+        if hi > lo {
+            r.busy_h += (hi - lo) as f64 / HOUR as f64;
+        }
+    }
 }
 
 /// The start of the newest hour in the files.
