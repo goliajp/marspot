@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use marspot_peer::json::{self, Value, obj};
 
+mod claim;
 mod lines;
+pub use claim::{ARMED_FOR_S, Armed, ResetButtons, ResetLine, armed_text, claimable};
 pub use lines::{MAX_LINES, line_count, lines};
 
 /// How a reading of an account's resets ended.
