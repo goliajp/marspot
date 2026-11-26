@@ -8,7 +8,9 @@
 //! fails once the receiver is gone, `recv` fails once every sender is
 //! gone and nothing is left), and the same error types.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 pub use std::sync::mpsc::{RecvError, RecvTimeoutError, SendError, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -38,8 +40,10 @@ pub struct Sender<T> {
     inner: Arc<Inner<T>>,
 }
 
+/// Not `Sync`, as `mpsc::Receiver` is not: one thread receives at a time.
 pub struct Receiver<T> {
     inner: Arc<Inner<T>>,
+    _one_reader: PhantomData<Cell<()>>,
 }
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
@@ -55,7 +59,10 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
         Sender {
             inner: Arc::clone(&inner),
         },
-        Receiver { inner },
+        Receiver {
+            inner,
+            _one_reader: PhantomData,
+        },
     )
 }
 
@@ -124,7 +131,10 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        let deadline = Instant::now() + timeout;
+        // a timeout past what an Instant can hold is a wait without end
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return self.recv().map_err(|RecvError| RecvTimeoutError::Disconnected);
+        };
         let mut s = self.inner.lock();
         loop {
             if let Some(t) = Self::take(&mut s) {
@@ -195,4 +205,25 @@ mod tests {
         drop(rx);
         assert_eq!(tx.send(4), Err(SendError(4)));
     }
+
+    #[test]
+    fn a_timeout_too_long_for_an_instant_waits_for_the_message() {
+        let (tx, rx) = channel();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            tx.send(5).unwrap();
+        });
+        assert_eq!(rx.recv_timeout(Duration::MAX), Ok(5));
+        t.join().unwrap();
+        assert_eq!(rx.recv_timeout(Duration::MAX), Err(RecvTimeoutError::Disconnected));
+    }
+
+    // compiles only while `Receiver` is not `Sync`: were it, the call
+    // below could not tell the two impls apart
+    trait AmbiguousIfSync<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+    const _: fn() = <Receiver<u8> as AmbiguousIfSync<_>>::check;
 }
