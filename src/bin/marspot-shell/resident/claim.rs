@@ -65,7 +65,7 @@ pub(super) fn become_image(exe: &std::path::Path, extra: &[(&str, &str)]) -> std
     crate::instance::carry_lock(&mut cmd);
     crate::reclaim::carry_look(&mut cmd);
     crate::apple_events::mark(&mut cmd);
-    let err = crate::platform::exec_hooks::exec_prepared(&mut cmd);
+    let err = crate::platform::exec_hooks::exec_prepared(marspot_term::exec_contract::ExecKind::ShellResident, &mut cmd);
     crate::instance::keep_lock_here();
     ENDING_IMAGE.store(false, Ordering::SeqCst);
     err

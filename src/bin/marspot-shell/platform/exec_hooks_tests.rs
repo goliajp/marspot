@@ -23,7 +23,7 @@ fn exec_hooks_run_in_registration_order_and_again_when_the_exec_fails() {
     assert_eq!(names.iter().filter(|n| **n == "test-first").count(), 1);
 
     // a real exec, of a file that is not there: it returns
-    let err = exec_prepared(&mut std::process::Command::new("/nonexistent/marspot-shell"));
+    let err = exec_prepared(ExecKind::ShellUpdate, &mut std::process::Command::new("/nonexistent/marspot-shell"));
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
     assert_eq!(*TRACE.lock().unwrap(), [1, 2, 4], "before hooks in order, then the failed one");
 }

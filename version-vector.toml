@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.754"  # self_exec names no cleanup: the exec hooks run once, from the table
-core    = "0.12.711"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
+shell   = "0.7.755"  # its self-execs and the core it starts carry only what their exec lists
+core    = "0.12.712"  # the sessions it starts carry only what their exec lists; it checks what it was handed
 session = "0.11.462"  # an update carries only the descriptors and variables its exec lists; the new image checks
