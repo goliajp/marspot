@@ -29,8 +29,9 @@ const ROW_HAD_TOOL: u8 = 1 << 1;
 // 1 << 2 is set by older shells and read by no one
 
 wire_enum!(
-    /// What a row's helper is doing.
-    StripState { Preparing = 0, Working = 1, Idle = 2, Waiting = 3, Exited = 4, Stopped = 5 }
+    /// What a row's helper is doing.  `Waiting`: at an approval prompt;
+    /// `Question`: at a question it asked, waiting for the answer.
+    StripState { Preparing = 0, Working = 1, Idle = 2, Waiting = 3, Exited = 4, Stopped = 5, Question = 6 }
 );
 wire_enum!(
     /// `Other`: no agent, or none of these.

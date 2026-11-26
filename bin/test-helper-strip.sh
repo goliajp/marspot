@@ -28,11 +28,19 @@
 #   9. a click on a helper's row views it and one on main comes back;
 #      down in the stand-in's empty input box takes the keys, enter
 #      views, x stops a helper, and keys the strip takes never reach
-#      the program while others do.
+#      the program while others do;
+#  10. two claude helpers given a name and a title: each row names the
+#      agent and the model its transcript says answered, says the title,
+#      then `idle` once its turn ended or `awaiting approval`; the strip
+#      is as high as the rows it draws, alone and under Claude's own
+#      list, with no blank row under them; idle and awaiting approval
+#      come within 5 s of the turn's end and of the prompt.
 #
 # Sandbox-only: MARSPOT_STATE_DIR and HOME are redirected and the
 # installed app is never touched.  Opens windows, so it runs on the
 # runner:  bin/test-e2e-remote.sh test-helper-strip.sh
+# With STRIP_SHOTS=<dir> part 10 leaves there what the strip and the pane
+# held and pictures of the sandbox's window.
 # Exits 0 when every check passed.
 
 set -uo pipefail
@@ -40,6 +48,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 source "$ROOT/bin/_sandbox-panes.sh"
+source "$ROOT/bin/_helper-strip-lib.sh"
 
 SD="$MARSPOT_STATE_DIR"
 BIN="$ROOT/target/release"
@@ -63,7 +72,7 @@ cleanup() {
   local rc=$?
   dev_kill_shell_core
   dev_sweep_dead_inboxes
-  (( rc != 0 )) || rm -rf "$SB"
+  (( rc != 0 )) || rm -rf "${SB:?}"
 }
 trap cleanup EXIT
 
@@ -71,123 +80,17 @@ for b in marspot-shell marspot-core marspot-session marspot-peer; do
   [[ -x $BIN/$b ]] || die "$BIN/$b is not built"
 done
 
-rm -rf "$SB"
+rm -rf "${SB:?}"
 mkdir -p "$SB/bin" "$SB/proj" "$REGISTRY"
 mkdir -p "$CLAUDE_HOME/projects"
 for p in .claude-profile-1 .codex-profile-1; do mkdir -p "$SB/home/$p"; done
 ln -s "$CLAUDE_HOME/projects" "$SB/home/.claude-profile-1/projects"
 for a in claude codex; do ln -s "$ROOT/bin/_fake-helper-agent.py" "$SB/bin/$a"; done
 chmod +x "$ROOT/bin/_fake-helper-agent.py"
-export HOME="$SB/home" PATH="$SB/bin:$PATH"
+# the stand-ins write where claude would: never into a real profile
+export HOME="$SB/home" CLAUDE_CONFIG_DIR="$CLAUDE_HOME" PATH="$SB/bin:$PATH"
 printf 'export PATH="%s/bin:$PATH"\n' "$SB" > "$HOME/.zshrc"
 
-pc() { in_sd "$SD" "$PEER" pane "$@"; }
-hc() { in_sd "$SD" "$PEER" helper "$@"; }
-field() { python3 -c 'import json,sys; v=json.load(sys.stdin); r=v.get("result",v); print(r.get(sys.argv[1], ""))' "$1"; }
-start_helper() { # agent, task → the answer's JSON
-  hc start --json --agent "$1" --parent "$P1" --cwd "$SB/proj" --budget 30 "$2"
-}
-started() { # agent, task → its name, once it runs
-  local a n
-  a=$(start_helper "$1" "$2")
-  n=$(field name <<<"$a")
-  [[ -n $n ]] || { echo "a helper did not start: $a" >&2; return 1; }
-  echo "$n"
-}
-
-sizes() { grep -c . "$SIZES" 2>/dev/null || true; }
-rows_now() { awk 'END { print $3 }' "$SIZES"; }
-wait_rows() { # rows, seconds
-  local i
-  for (( i = 0; i < $2 * 5; i++ )); do
-    [[ $(rows_now) == "$1" ]] && return 0
-    sleep 0.2
-  done
-  return 1
-}
-# One more size since `$1` of them, and it is `$2` rows: nothing in
-# between, and nothing for two seconds after.
-one_resize_to() { # how many there were, rows, seconds
-  wait_rows "$2" "$3" || { echo "    rows are $(rows_now), wanted $2"; return 1; }
-  sleep 2
-  [[ $(sizes) == $(( $1 + 1 )) && $(rows_now) == "$2" ]] || { echo "    $(( $(sizes) - $1 )) resizes, rows now $(rows_now)"; return 1; }
-}
-# `$3` more sizes since `$1` of them, each taller than the one before,
-# the last `$2` rows.
-grows_back_to() { # how many there were, rows, how many more, seconds
-  wait_rows "$2" "$4" || { echo "    rows are $(rows_now), wanted $2"; return 1; }
-  sleep 2
-  [[ $(sizes) == $(( $1 + $3 )) ]] || { echo "    $(( $(sizes) - $1 )) resizes, rows now $(rows_now)"; return 1; }
-  tail -n "$3" "$SIZES" | awk 'NR > 1 && $3 <= last { bad = 1 } { last = $3 } END { exit bad }' \
-    || { echo "    not each taller: $(tail -n "$3" "$SIZES" | awk '{ print $3 }' | tr '\n' ' ')"; return 1; }
-}
-strip_now() { grep -a $'\tDEV_STRIP\t' "$LOG" | tail -1 | grep -o $'\tlines=.*' | tr '_' ' '; } # the log writes a space as _
-strip_has() { # text…
-  local t now
-  now=$(strip_now)
-  for t in "$@"; do [[ $now == *"$t"* ]] || { echo "    not in the strip: $t — $now"; return 1; }; done
-}
-wait_strip() { # seconds, text…
-  local i s=$1
-  shift
-  for (( i = 0; i < s * 2; i++ )); do
-    strip_has "$@" >/dev/null && return 0
-    sleep 0.5
-  done
-  strip_has "$@"
-}
-setting() { printf 'appearance.helper_strip = %s\nreclaim.enabled = false\n' "$1" > "$SD/settings.toml"; }
-
-launch_app() { # environment…
-  env MARSPOT_SESSION_BIN="$BIN/marspot-session" MARSPOT_CORE_BIN="$BIN/marspot-core" "$@" \
-    nohup "$CLI" >> "$(dev_run_log helper-strip)" 2>&1 < /dev/null &
-  dev_record_pid $!
-}
-start_app() { # environment…
-  local i
-  dev_kill_shell_core
-  [[ -f $LOG ]] && cp "$LOG" "$SB/marspot.$(date +%s).log"
-  dev_wipe_state
-  rm -rf "$SD/sessions" "$SD/retired" "$SIZES"
-  mkdir -p "$SD/logs"
-  # one window, one pane: no title strip to count in the rows
-  python3 - "$SD" <<'PY' || die "could not write the layout"
-import struct, sys, pathlib
-d = pathlib.Path(sys.argv[1])
-def s(x): b = x.encode(); return struct.pack('<H', len(b)) + b
-body = struct.pack('<II', 0xA5505010, 2) + struct.pack('<HH', 0, 1)
-body += struct.pack('<HHHH', 1, 1, 0, 1) + struct.pack('<Q', 0) + s('') + s('')
-(d / 'shell-state.bin').write_bytes(body)
-frames = struct.pack('<IIH', 0xA5505011, 2, 1) + struct.pack('<Idddd', 0, 80.0, 200.0, 1000.0, 700.0)
-(d / 'window-state.bin').write_bytes(frames)
-PY
-  setting "$SETTING"
-  launch_app "$@"
-  wait_count "$SD" HELLO_ACK 0 90 || die "the core never said hello"
-  wait_count "$SD" PANE_CONTROL_CAPS_SEEN 0 30 || die "the shell never heard what the core does with pane control"
-  P1=""
-  for (( i = 0; i < 100; i++ )); do
-    P1=$(pc list --json 2>/dev/null | python3 -c 'import json,sys; ps=json.load(sys.stdin)["result"]["panes"]; print(ps[0]["id"] if ps else "")' 2>/dev/null)
-    [[ -n $P1 ]] && break
-    sleep 0.5
-  done
-  [[ -n $P1 ]] || die "no pane came up"
-  for (( i = 0; i < 30; i++ )); do pc run "$P1" --timeout 10 true >/dev/null 2>&1 && break; sleep 0.5; done
-}
-start_parent() { # environment of the session
-  local i
-  pc send "$P1" "cd $SB/proj && FAKE_SIZE_LOG=$SIZES $* python3 $ROOT/bin/_peerbus_fake_claude.py $REGISTRY 1500 $SB/inbox.log" >/dev/null \
-    || die "could not start the stand-in Claude session"
-  for (( i = 0; i < 60; i++ )); do
-    pc list --json | python3 -c "import json,sys; ps=json.load(sys.stdin)['result']['panes']; sys.exit(0 if any(p['id']==$P1 and p['agent']=='claude' for p in ps) else 1)" && break
-    sleep 0.5
-  done
-  # the parent's pane is settled: nothing resizes it for another reason
-  sleep 3
-  FULL=$(rows_now)
-  [[ -n $FULL ]] || die "the parent logged no size"
-  echo "==> the parent's terminal has $FULL rows"
-}
 
 SETTING=false
 start_app
@@ -252,11 +155,11 @@ check "and they are listed again" strip_has '⏺ main' 'Read the log' 'Write the
 echo "════ 5. all have ended ════"
 touch "$SB/end3"
 sleep 6
-hc stop "$H3" >/dev/null 2>&1 || echo "    could not stop $H3"
+check "the third stops" quiet hc stop "$H3"
 sleep 2
 n=$(sizes)
 check "still there with one at work" test "$(rows_now)" = $(( FULL - 5 ))
-hc stop "$H2" >/dev/null 2>&1 || echo "    could not stop $H2"
+check "and the second" quiet hc stop "$H2"
 wait_strip 20 'stopped · ' || true
 check "the stopped one is in view" strip_has 'stopped · '
 sleep 4
@@ -285,7 +188,7 @@ else
   check "nothing wakes the core for it" test "$rc" = 0
 fi
 check "the strip is still in view" strip_has 'awaiting approval'
-hc stop "$H5" >/dev/null 2>&1
+check "it stops" quiet hc stop "$H5"
 
 echo "════ 7. under the user's hands ════"
 SETTING=true
@@ -295,7 +198,7 @@ start_parent FAKE_ALT=1
 for (( i = 0; i < 60; i++ )); do shows "$SD" "$P1" xxx && break; sleep 0.5; done
 check "the script types" shows "$SD" "$P1" xxx
 n=$(sizes)
-rm -f "$SB/end6"
+rm -f "${SB:?}/end6"
 H6=$(started codex "Look around. FAKE-WORK=$SB/end6 FAKE-EXIT") || die "no helper"
 sleep 6
 typed_on=$(screen "$SD" "$P1" | tr -cd x | wc -c)
@@ -308,7 +211,7 @@ echo "════ 8. claude on the main screen ════"
 start_app
 start_parent
 n=$(sizes)
-rm -f "$SB"/end7*
+rm -f "${SB:?}"/end7*
 started codex "One. FAKE-WORK=$SB/end7 FAKE-EXIT" >/dev/null || die "no helper"
 check "a blank row, main, its row and a blank row under it" one_resize_to "$n" $(( FULL - 4 )) 30
 n=$(sizes)
@@ -329,7 +232,7 @@ steps+=";until:go-keys;key:down;wait:800;key:down;wait:400;key:enter;wait:1500;c
 steps+=";until:go-x;key:down;wait:800;key:x;wait:2000;key:esc;wait:600;key:down;wait:800;type:a;wait:800"
 start_app MARSPOT_DEV_PANELS="$steps"
 start_parent FAKE_ALT=1 FAKE_KEYS_LOG="$KEYS"
-rm -f "$SB"/end8 "$SB"/end9
+rm -f "${SB:?}/end8" "${SB:?}/end9"
 H8=$(started codex "Eight. FAKE-WORK=$SB/end8 FAKE-EXIT") || die "no helper"
 H9=$(started codex "Nine. FAKE-WORK=$SB/end9 FAKE-EXIT") || die "no helper"
 check "both are listed" wait_strip 30 'Eight.' 'Nine.'
@@ -357,6 +260,63 @@ echo "    keys the agent read: $(tr '\n' ' ' < "$KEYS")"
 check "the agent read each down that took the keys, and nothing the strip took" \
   test "$(grep -c . "$KEYS")" = 4 -a "$(grep -cx 1b5b42 "$KEYS")" = 3
 check "a key that is not the strip's goes back to the agent" grep -qx 61 "$KEYS"
+
+echo "════ 10. what a row says, and no blank row ════"
+check "the row check takes a strip with its last row drawn" rows_drawn "|⏺ main|◯ a|◯ b" 4 head
+check "and fails on one whose last row is blank" not rows_drawn "|⏺ main|◯ a|" 4 head
+check "or holds only spaces" not rows_drawn "|⏺ main|◯ a|  " 4 head
+SETTING=true
+OWN="$SB/own-list"
+rm -f "${OWN:?}" "${SB:?}/idle10" "${SB:?}/ask10"
+# debug: the window's buffers are logged, for a picture of them
+start_app MARSPOT_LOG=debug
+start_parent FAKE_ALT=1 FAKE_OWN_LIST="$OWN"
+EVENTS=$(grep -c '' "$SD/helpers/events.log" 2>/dev/null || true)
+EVENTS=${EVENTS:-0}
+HAIKU='◯ claude haiku {2,}sort the inbox {2,}'
+SONNET='◯ claude sonnet {2,}review the parser {2,}'
+n=$(sizes)
+A=$(started claude "You are working in the mailrs repo. FAKE-MODEL=claude-haiku-4-5-20251001 FAKE-IDLE=$SB/idle10" \
+  --model opus --name mailrs-inbox --title "sort the inbox") || die "no first helper"
+check "the first: a blank row, main and its row, in one resize" one_resize_to "$n" $(( FULL - 3 )) 30
+n=$(sizes)
+B=$(started claude "You are working in the parser. FAKE-MODEL=claude-sonnet-4-6 FAKE-APPROVE=$SB/ask10" \
+  --model haiku --name reviewer --title "review the parser") || die "no second helper"
+check "the second: one more row, in one resize" one_resize_to "$n" $(( FULL - 4 )) 30
+check "the name column: the agent and the model its transcript says answered" wait_strip 30 'claude haiku' 'claude sonnet'
+check "then the title, a column gap from the name" wait_row_is 10 "$HAIKU"
+check "for each" row_is "$SONNET"
+check "not the name it was given, nor its task" bash -c '! grep -qE "mailrs-inbox|reviewer|You are working" <<<"$1"' _ "$(strip_now)"
+check "alone: a blank row, main and the two rows, none under them" drawn 4 head
+n=$(sizes)
+touch "$SB/idle10"
+check "the one whose turn ended says idle" wait_row_is 30 "${HAIKU}idle · "
+check "within 5 s of its turn's end" within 5 "$(drawn_at IDLE)"
+shown=$(count "$SD" DEV_STRIP)
+touch "$SB/ask10"
+check "the one waiting says awaiting approval" wait_row_is 60 "${SONNET}awaiting approval"
+check "within 5 s of its prompt" within 5 "$(drawn_at APPROVE)"
+check "and not before it" bash -c '! grep -a "$1" "$2" | head -n "$3" | grep -q awaiting_approval' _ $'\tDEV_STRIP\t' "$LOG" "$shown"
+check "and the other is still idle" row_is "${HAIKU}idle · "
+check "neither resized the pane" test "$(sizes)" = "$n"
+sleep 1
+shot alone
+n=$(sizes)
+touch "$OWN"
+check "under Claude's own list: its two rows, in one resize" one_resize_to "$n" $(( FULL - 2 )) 20
+for (( i = 0; i < 20; i++ )); do drawn 2 under >/dev/null && break; sleep 0.5; done
+check "with no main, and none under them" drawn 2 under
+check "they still say so" row_is "${SONNET}awaiting approval"
+# past the screen's own judgement of a still prompt, ten seconds on
+asked=$(drawn_at APPROVE)
+while awk -v a="${asked:-0}" -v b="$(now)" 'BEGIN { exit !(b < a + 16) }'; do sleep 1; done
+told=$(tail -n "+$(( EVENTS + 1 ))" "$SD/helpers/events.log" | grep -ac $'\tblocked_noticed')
+check "its parent was told of the prompt once ($told)" test "$told" = 1
+sleep 1
+shot under-claudes-list
+check "the first stops" quiet hc stop "$A"
+check "and the second" quiet hc stop "$B"
+
 
 check "the app is still up" alive "$(dev_shell_pid)"
 check "no panic in the log" bash -c "! grep -qa $'\tPANIC' $(printf '%q' "$LOG")"

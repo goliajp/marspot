@@ -86,6 +86,7 @@ fn figures_say_what_is_known() {
     assert_eq!(at(Row { state: State::Failed, ..ROW }), "failed · 3s");
     assert_eq!(at(Row { state: State::Stopped, tokens: Some(9), ..ROW }), "stopped · 3s · ↑ 9 tokens");
     assert_eq!(at(Row { state: State::Awaiting, tokens: Some(9), ..ROW }), "awaiting approval");
+    assert_eq!(at(Row { state: State::Asked, tokens: Some(9), ..ROW }), "awaiting answer");
     assert_eq!(at(Row { state: State::Idle, tokens: Some(9), ..ROW }), "idle · 3s · ↑ 9 tokens", "its turn is over, it can go on");
     assert_eq!(at(Row { state: State::Done, tokens: Some(9), ..ROW }), "3s · ↑ 9 tokens", "only its dot says it has exited");
 }

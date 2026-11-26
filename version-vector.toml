@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.725"  # the zombie watch tells an idle claude session about its suspects when zombie.notify is live (default dryrun)
-core    = "0.12.697"  # links the zombie notice body, which lists at most 12 items within 4 KiB and says how many it showed
+shell   = "0.7.726"  # links a helper strip row state for a helper that awaits the answer to a question
+core    = "0.12.698"  # a helper strip row can say awaiting answer, and its dev dump keeps the gap between columns
 session = "0.11.452"  # a cold session marks its control fd close-on-exec and drops the env naming it

@@ -98,8 +98,13 @@ pub(super) fn cut(text: &str, room: u16) -> (&str, &'static str) {
 /// How it ended takes no part in how wide the figures' column is.
 pub(super) fn figures(row: &Row, ending: bool) -> Text {
     let mut t = Text::EMPTY;
-    if row.state == State::Awaiting {
-        t.join("awaiting approval");
+    let waits = match row.state {
+        State::Awaiting => Some("awaiting approval"),
+        State::Asked => Some("awaiting answer"),
+        _ => None,
+    };
+    if let Some(w) = waits {
+        t.join(w);
         return t;
     }
     match row.state {
