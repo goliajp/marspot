@@ -30,6 +30,7 @@ mod snapshot_writer;
 use control_reader::ControlReaders;
 use control_writer::ControlWriter;
 use snapshot_writer::SnapshotWriter;
+mod exec_arrival;
 mod execv_swap;
 mod handoff;
 mod input;
@@ -413,12 +414,15 @@ fn main() {
         return println!("{}", env!("MARSPOT_VERSION_SESSION"));
     }
 
+    // SAFETY: no thread yet; before this image opens anything
+    let arrival = unsafe { marspot_term::exec_contract::arrive() };
     // before logx starts its threads: the variables leave the environment
     let mut shadow_cfg = shadow::take_env();
     let control_fd = control_fd::take_env();
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
+    exec_arrival::check_spawn(arrival.as_ref());
     signal_events::leave_the_spawner_group();
     // before the first byte is parsed: a colour query has to be
     // answered from the theme the settings name
@@ -533,19 +537,8 @@ fn main() {
                 control_stream_fd = h.control_stream_fd,
                 child_pid = h.child_pid
             );
-            // RFC-004 C.1 amendment — nudge the PTY's foreground
-            // process group with SIGWINCH after the snapshot restore.
-            // A full-screen TUI (claudecode/vim) can't know the
-            // terminal emulator behind its PTY just swapped images;
-            // if any repaint drift slipped through, WINCH makes it
-            // re-query the size and repaint from scratch.  Harmless
-            // when nothing drifted (repaint is idempotent).
-            unsafe {
-                let pg = libc::tcgetpgrp(h.master_fd);
-                if pg > 0 {
-                    libc::killpg(pg, libc::SIGWINCH);
-                }
-            }
+            crate::exec_arrival::check_resume(arrival.as_ref(), &h, id);
+            execv_swap::nudge_after_resume(h.master_fd);
             let local = LocalSession::from_handoff(
                 id, h.master_fd, h.child_pid, h.cols, h.rows, terminal, h.marks.pos, wake,
             )

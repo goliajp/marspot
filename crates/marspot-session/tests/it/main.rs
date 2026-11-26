@@ -7,6 +7,7 @@ mod build_sha_without_repo;
 mod clusters_across_update;
 mod close_dir;
 mod control_fd_across_update;
+mod exec_contract_across_update;
 mod flood_frames;
 mod flood_interrupt;
 mod focus_reporting;
