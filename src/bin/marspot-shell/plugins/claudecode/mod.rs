@@ -58,6 +58,7 @@ mod bind_meta;
 mod allocation_adapter;
 mod allocation_decide;
 pub(in crate::plugins) mod allocation_events;
+mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
 mod allocation_line;

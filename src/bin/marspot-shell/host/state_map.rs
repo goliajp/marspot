@@ -158,7 +158,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     // madcawl writes its audit itself; no marspot build reads it
     e("logs/madcawl-audit.log", External, "madcawl-shell (started by peerbus)", "madcawl's own", false),
     // services
-    e("helpers/events.log", Fact, "helpers", "8 MiB, rotated", true),
+    e("helpers/events.log", Fact, "helpers (lifetimes read by claudecode allocation_forecast)", "8 MiB, rotated", true),
     e("helpers/events.log.<n>", Fact, "helpers (rotated)", "7 files", true),
     e("helpers/containers/<id>", Draft, "helpers::container::pending", "one per helper", true),
     e("helpers/<id>/task.md", Draft, "helpers", "one per helper", true),
