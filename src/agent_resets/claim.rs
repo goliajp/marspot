@@ -21,6 +21,18 @@ pub struct ResetLine {
     pub armed: bool,
 }
 
+/// Whether marspot can claim a grant of `kind` on an `agent` account:
+/// every Codex credit; of Claude's, only the weekly session reset,
+/// typed as `/limit-reset`.  A stored Claude grant would be chosen from
+/// a list the CLI has never been seen to show, so none is claimed.
+pub fn claim_path_on(agent: &str, kind: &str) -> bool {
+    match agent {
+        "codex" => true,
+        "claude" => kind == "session",
+        _ => false,
+    }
+}
+
 /// The grant line `line` of `r` claims, with its index among the
 /// grants: of that line's kind, one with some left that may be used
 /// now, the one ending first.
@@ -116,6 +128,15 @@ mod tests {
         assert_eq!(claimable(&r, 2), None);
         r.grants[2].usable_now = Some(false);
         assert_eq!(claimable(&r, 0).map(|(i, _)| i), Some(0));
+    }
+
+    #[test]
+    fn of_claude_grants_only_the_session_reset_has_a_claim_path() {
+        assert!(claim_path_on("codex", "codex_full") && claim_path_on("claude", "session"));
+        for kind in ["full", "weekly", "fable"] {
+            assert!(!claim_path_on("claude", kind), "{kind}");
+        }
+        assert!(!claim_path_on("kimi", "session"));
     }
 
     #[test]

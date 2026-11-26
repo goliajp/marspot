@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.808"  # marspot-term drops the sched.reset_read setting
-core    = "0.12.731"  # marspot-term drops the sched.reset_read setting
+shell   = "0.7.809"  # the claude claim asks the shared claim-path rule; the claim facts directory comes from the library
+core    = "0.12.732"  # the library says which reset kinds have a claim path and reads each account's last claim
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

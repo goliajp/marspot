@@ -198,3 +198,17 @@ fn reset_a_request_that_may_be_tried_again_is_not_confirmed_twice() {
     assert_eq!(l.lock().unwrap().confirmed_before(&asked), None, "an answer ends it");
     assert_eq!(l.lock().unwrap().answered("hh-1").map(|r| r.outcome.result), Some(Res::Reset));
 }
+
+#[test]
+fn reset_the_accounts_panel_reads_each_account_s_last_claim_from_the_facts() {
+    let dir = marspot_term::test_env::TempDir::new("reset-panel-reads");
+    let l = ledger(&dir);
+    let c = claim(Provider::Codex, 3, "ii-1");
+    l.lock().unwrap().record(&c, &Outcome::of(Res::NotLimited, "nothingToReset"), NOW).unwrap();
+    let o = Outcome { left_after: Some(2), ..Outcome::of(Res::Reset, "reset") };
+    l.lock().unwrap().record(&claim(Provider::Codex, 3, "ii-2"), &o, NOW + 5).unwrap();
+    let shown = marspot::agent_resets::last_claims(&dir.join("reset_claims"));
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!((shown[0].at, shown[0].agent.as_str(), shown[0].profile, shown[0].kind.as_str()), (NOW + 5, "codex", 3, "codex_full"));
+    assert_eq!(marspot::agent_resets::claimed_text(&shown[0]), "full reset");
+}

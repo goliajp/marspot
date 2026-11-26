@@ -89,7 +89,7 @@ fn open(new_window: bool, parent: Option<String>, command: Option<String>) -> Re
 }
 
 pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
-    if grant.kind != "session" {
+    if !marspot::agent_resets::claim_path_on("claude", &grant.kind) {
         return Outcome::of(Res::Unavailable, "marspot claims no stored Claude reset but the weekly session reset yet");
     }
     let dir = config_dir(profile);

@@ -99,11 +99,7 @@ pub(crate) struct Claim {
 
 fn ledger() -> &'static Arc<Mutex<ledger::Ledger>> {
     static L: OnceLock<Arc<Mutex<ledger::Ledger>>> = OnceLock::new();
-    L.get_or_init(|| Arc::new(Mutex::new(ledger::Ledger::open(claims_dir(), unix_now()))))
-}
-
-pub(crate) fn claims_dir() -> std::path::PathBuf {
-    marspot_term::paths::state_root().join("usage/reset_claims")
+    L.get_or_init(|| Arc::new(Mutex::new(ledger::Ledger::open(marspot::agent_resets::claims_dir(), unix_now()))))
 }
 
 pub(crate) fn unix_now() -> i64 {
