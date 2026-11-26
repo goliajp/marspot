@@ -29,7 +29,7 @@ use marspot::shell_proto::{
     encode_focus, encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
     encode_scroll, encode_surface_attach, encode_surface_attach_window,
     encode_window_chrome, event_to_wire,
-    struct_to_mods_byte, Frame, MsgType,
+    struct_to_mods_byte, MsgType,
     DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID,
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };

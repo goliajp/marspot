@@ -101,7 +101,7 @@ impl ShellApp {
             if let Some(conn) = self.active.as_ref() {
                 conn.send(
                     MsgType::PaneSessionBegin,
-                    marspot::shell_proto::encode_pane_session_begin(
+                    &marspot::shell_proto::encode_pane_session_begin(
                         req.shelld_session_id,
                         caps,
                     ),
@@ -209,7 +209,7 @@ impl ShellApp {
         if let Some(conn) = self.active.as_ref() {
             conn.send(
                 MsgType::PaneSessionEnd,
-                marspot::shell_proto::encode_pane_session_end(sid),
+                &marspot::shell_proto::encode_pane_session_end(sid),
             );
         }
         lx_event!(

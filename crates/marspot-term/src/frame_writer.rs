@@ -34,6 +34,10 @@ use std::thread;
 
 use crate::shell_proto::Frame;
 
+mod frame_bytes;
+/// The L1/L2/L3 protocol sockets.
+pub use frame_bytes::FrameWriter;
+
 /// Queue caps, one place.
 ///
 /// Four call sites used to name this concept four different ways with
@@ -94,8 +98,6 @@ pub struct BoundedWriter<T: Queued> {
     cap_bytes: usize,
 }
 
-/// Frame-carrying specialisation — the L1/L2/L3 protocol sockets.
-pub type FrameWriter = BoundedWriter<Frame>;
 
 impl<T: Queued> BoundedWriter<T> {
     /// Take over `sink`, writing from a thread named `name`.

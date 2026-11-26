@@ -729,7 +729,9 @@ impl MsgType {
 
 mod handshake;
 mod frame_read;
-pub use frame_read::Next;
+pub use frame_read::{FrameReader, Next, Seen};
+mod frame_write;
+pub use frame_write::{frame_header, write_frame};
 pub use handshake::*;
 mod inject;
 pub use inject::{decode_inject_input, encode_inject_input};
@@ -764,15 +766,7 @@ impl Frame {
     }
 
     pub fn write_to<W: Write>(&self, w: &mut W) -> io::Result<usize> {
-        let mut header = [0u8; HEADER_LEN];
-        header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        header[4..8].copy_from_slice(&(self.msg_type as u32).to_le_bytes());
-        header[8..12].copy_from_slice(&(self.payload.len() as u32).to_le_bytes());
-        w.write_all(&header)?;
-        if !self.payload.is_empty() {
-            w.write_all(&self.payload)?;
-        }
-        Ok(HEADER_LEN + self.payload.len())
+        write_frame(w, self.msg_type, &self.payload)
     }
 }
 

@@ -11,7 +11,7 @@ use marspot::shell_proto::{
 };
 use marspot::state::{SavedPane, SavedWindowLayout};
 use marspot_term::session_registry as reg;
-use std::sync::mpsc::Receiver;
+use marspot_term::mailbox::Receiver;
 
 /// Every session started here runs this shell: it reads lines until
 /// one says `q`, then ends.
@@ -72,7 +72,7 @@ pub(crate) fn wait_done(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32
 
 /// A window with one live pane, and the channel its sessions report on.
 pub(crate) fn app_with_parent(sb: &Sandbox) -> (CoreApp, Receiver<CoreEvent>, u64) {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = marspot_term::mailbox::channel();
     let psid = reg::allocate_next_session_id().unwrap();
     let parent = spawn_l3_pane_with_cwd(60, 16, psid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
     let mut app = app_in(sb.dir(), vec![win(1, vec![parent])]);
@@ -146,7 +146,7 @@ fn shadow_open_resize_and_close_through_the_dev_hook() {
 #[test]
 fn shadow_sessions_go_back_to_the_shadows_at_boot_and_a_saved_window_wins() {
     let sb = sandbox();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = marspot_term::mailbox::channel();
     let psid = reg::allocate_next_session_id().unwrap();
     let parent = spawn_l3_pane_with_cwd(60, 16, psid, "", &tx).expect("real L3 spawn");
     let env = ShadowEnv { parent: psid, idle_s: 0 };
@@ -226,8 +226,8 @@ fn shadow_clipboard_writes_bells_and_frames_are_dropped() {
     let token = format!("marspot-shadow-clip-{}", std::process::id());
     let run = |sid: u64| {
         let (mut session, core) = UnixStream::pair().unwrap();
-        let (tx, rx) = mpsc::channel();
-        let (selection_tx, _selection_rx) = mpsc::channel();
+        let (tx, rx) = marspot_term::mailbox::channel();
+        let (selection_tx, _selection_rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || l3_reader_loop(core, sid, tx, selection_tx));
         for (t, p) in [
             (MsgType::GridReady, Vec::new()),

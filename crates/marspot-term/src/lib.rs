@@ -29,6 +29,7 @@ pub mod grid_links;
 pub mod osc8;
 pub mod idle_pages;
 pub mod logx;
+pub mod mailbox;
 pub mod loop_watch;
 pub mod scrollback_search;
 pub(crate) mod segment;

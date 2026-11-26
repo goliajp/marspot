@@ -1,7 +1,7 @@
 //! Viewing shadow panes in place, against real `marspot-session`
 //! processes.
 
-use std::sync::mpsc::Receiver;
+use marspot_term::mailbox::Receiver;
 
 use super::super::held_keys::Went;
 use super::super::shadows::tests::{app_with_parent, done_for, drive, frame, open_shadow, sandbox, wait_done, wait_for};

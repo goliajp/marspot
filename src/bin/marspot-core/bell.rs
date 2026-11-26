@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn a_bell_frame_queues_one_bell_and_an_unknown_frame_is_skipped() {
         let (mut session, core) = UnixStream::pair().unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = marspot_term::mailbox::channel();
         let (selection_tx, _selection_rx) = mpsc::channel();
         let reader = std::thread::spawn(move || l3_reader_loop(core, 7, tx, selection_tx));
         let bell = Frame::new(MsgType::PaneBell, Vec::new());
@@ -125,7 +125,7 @@ mod tests {
         let sandbox = sandbox_state_dir();
         let mut app = app_with(&sandbox, vec![win(1, vec![Pane::new_vacant(7, 80, 24)])]);
         let (mut session, core) = UnixStream::pair().unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = marspot_term::mailbox::channel();
         let (selection_tx, _selection_rx) = mpsc::channel();
         let reader = std::thread::spawn(move || l3_reader_loop(core, 7, tx, selection_tx));
         let writer = std::thread::spawn(move || {

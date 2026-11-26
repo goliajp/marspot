@@ -184,7 +184,7 @@ fn dead_sessions_resurrect_in_saved_slot_order() {
         write_session_entry(&dead_entry(id)).unwrap();
     }
     let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let (panes, reattached) =
         assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(
@@ -213,7 +213,7 @@ fn assembly_binds_the_saved_slots_to_their_sessions() {
         write_session_entry(&dead_entry(id)).unwrap();
     }
     let s = saved(&[(4, ""), (6, "")]);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(pane_sids(&panes), vec![4, 6]);
 }
@@ -225,7 +225,7 @@ fn spawn_failure_yields_vacant_slots_never_compacts() {
     let mut sb = Sandbox::new();
     sb.break_session_bin();
     let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let (panes, _) =
         assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
@@ -245,7 +245,7 @@ fn spawn_failure_yields_vacant_slots_never_compacts() {
 #[test]
 fn orphan_live_session_adopted_not_killed() {
     let _sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     // Bring up a REAL live L3 outside any saved layout.
     let orphan_sid = reg::allocate_next_session_id().unwrap();
     let live = spawn_l3_pane_with_cwd(60, 16, orphan_sid, "", &tx)
@@ -279,7 +279,7 @@ fn unreferenced_dead_dir_retires_to_recycle_bin() {
     std::fs::write(reg::session_dir(31).join("bytelog"), b"HISTORY").unwrap();
     sb.break_session_bin(); // slots don't matter; keep them vacant
     let s = saved(&[(700, "")]);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let (panes, _) =
         assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.len(), 1);
@@ -310,7 +310,7 @@ fn unreferenced_dead_dir_retires_to_recycle_bin() {
 #[test]
 fn a_restore_assembly_leaves_other_windows_sessions_alone() {
     let mut sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     // A live session belonging to some other window.
     let other_sid = reg::allocate_next_session_id().unwrap();
     let live = spawn_l3_pane_with_cwd(60, 16, other_sid, "", &tx)
@@ -351,7 +351,7 @@ fn a_restore_assembly_leaves_other_windows_sessions_alone() {
 #[test]
 fn sessions_owned_by_another_saved_window_are_left_for_it() {
     let mut sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     // Window 2's live session…
     let live_sid = reg::allocate_next_session_id().unwrap();
     let live = spawn_l3_pane_with_cwd(60, 16, live_sid, "", &tx)
@@ -385,7 +385,7 @@ fn sessions_owned_by_another_saved_window_are_left_for_it() {
 fn spawning_past_the_session_population_cap_refuses() {
     let mut sb = Sandbox::new();
     sb.set("MARSPOT_SESSION_CAP", "1");
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let first_sid = reg::allocate_next_session_id().unwrap();
     let _first = spawn_l3_pane_with_cwd(60, 16, first_sid, "", &tx)
         .expect("first spawn fits under the cap");
@@ -418,7 +418,7 @@ fn a_dormant_slot_boots_as_a_placeholder() {
             },
         ],
     };
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let (panes, reattached) =
         assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, Sweep::Full, &Default::default());
     assert_eq!(panes.len(), 2);
@@ -434,7 +434,7 @@ fn duplicate_saved_sid_does_not_double_bind() {
     let mut sb = Sandbox::new();
     sb.break_session_bin();
     let s = saved(&[(9, "a"), (9, "b")]);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let (panes, _) =
         assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, Sweep::Full, &Default::default());
     let sids = pane_sids(&panes);
@@ -448,7 +448,7 @@ fn duplicate_saved_sid_does_not_double_bind() {
 #[test]
 fn a_closed_session_is_not_restored() {
     let sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let kept = reg::allocate_next_session_id().unwrap();
     let dead = reg::allocate_next_session_id().unwrap();
     let live = reg::allocate_next_session_id().unwrap();

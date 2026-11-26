@@ -56,7 +56,7 @@ fn shadow_place_moves_after_the_answer_and_without_one_puts_the_pane_back() {
 #[test]
 fn shadow_place_of_two_panes_at_once_keeps_one_in_the_window() {
     let sb = sandbox();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = marspot_term::mailbox::channel();
     let a = reg::allocate_next_session_id().unwrap();
     let b = reg::allocate_next_session_id().unwrap();
     let pa = spawn_l3_pane_with_cwd(60, 16, a, "", &tx).expect("real L3 spawn (is marspot-session built?)");

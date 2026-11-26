@@ -90,15 +90,13 @@ impl MarspotApp for ShellApp {
         // Active and pending get separate routing: the active core
         // drives what's on screen (resize swap, caret, healthcheck);
         // the pending core only reports its probation progress.
-        let active_inbox: Vec<ShellInbox> = match self.active.as_ref() {
-            Some(conn) => conn.control_rx.try_iter().collect(),
-            None => Vec::new(),
-        };
+        let mut active_inbox = self.take_inbox();
         let owed = self.frame_owed();
         let knocked = self.knocked(&active_inbox);
-        for msg in active_inbox {
+        for msg in active_inbox.drain(..) {
             self.handle_active_msg(msg, ctx);
         }
+        self.keep_inbox(active_inbox);
         self.poll_supervisor(ctx);
         self.settle_pump(knocked, owed);
         self.dev_pass();

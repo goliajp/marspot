@@ -54,13 +54,12 @@ impl CoreConn {
     /// Write a frame to this core.  Logs and drops on EPIPE; a core
     /// dying mid-session is the supervisor's problem, not this path's.
     /// True when the frame was written.
-    pub(super) fn send(&self, msg_type: MsgType, payload: Vec<u8>) -> bool {
-        let frame = Frame::new(msg_type, payload);
+    pub(super) fn send(&self, msg_type: MsgType, payload: &[u8]) -> bool {
         let mut stream = match self.control_tx.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(), // poisoned: still try
         };
-        if let Err(e) = frame.write_to(&mut *stream) {
+        if let Err(e) = marspot::shell_proto::write_frame(&mut *stream, msg_type, payload) {
             lx_warn!(
                 "shell.control_frame_write_failed",
                 &format!("{e}"),
@@ -81,6 +80,25 @@ impl CoreConn {
         if let Some(mut child) = child {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+}
+
+impl ShellApp {
+    /// What the active core has sent since the last wake, in the buffer
+    /// every wake reuses.
+    pub(super) fn take_inbox(&mut self) -> Vec<ShellInbox> {
+        let mut inbox = std::mem::take(&mut self.inbox);
+        if let Some(conn) = self.active.as_ref() {
+            inbox.extend(conn.control_rx.try_iter());
+        }
+        inbox
+    }
+
+    /// Give the emptied buffer back, unless a burst grew it past use.
+    pub(super) fn keep_inbox(&mut self, inbox: Vec<ShellInbox>) {
+        if inbox.capacity() <= 256 {
+            self.inbox = inbox;
         }
     }
 }

@@ -124,7 +124,7 @@ fn l2_forwards_typing_and_watch_once_the_session_says_it_reads_them() {
     )
     .unwrap();
     sb.set("SHELL", &shell.to_string_lossy());
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");

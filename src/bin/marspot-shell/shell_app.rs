@@ -218,4 +218,6 @@ pub(crate) struct ShellApp {
     /// to ask for it.  Writing just the live windows there deleted that
     /// entry — see `save_window_frames`.
     pub(crate) saved_window_frames: Vec<marspot::state::SavedWindow>,
+    /// The active core's messages for one wake, reused by every wake.
+    pub(crate) inbox: Vec<ShellInbox>,
 }

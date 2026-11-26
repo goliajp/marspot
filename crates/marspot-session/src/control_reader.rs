@@ -11,14 +11,13 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 
-use marspot_term::shell_proto::{
-    decode_frame_cells, decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
-    decode_pane_type, decode_pane_watch, decode_paste, decode_search_cancel, decode_search_scrollback,
-    wire_to_event, Frame, MsgType, Next,
-};
+use marspot_term::shell_proto::{FrameReader, Seen};
 
 use crate::SessionEvent;
-use crate::pane_ctl::Request;
+use control_dispatch::dispatch;
+
+#[path = "control_dispatch.rs"]
+mod control_dispatch;
 
 /// Every control reader of this image, and the means to stop them.
 pub(crate) struct ControlReaders {
@@ -65,6 +64,7 @@ impl ControlReaders {
 }
 
 fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEvent>, generation: u64) {
+    let mut frames = FrameReader::new();
     loop {
         if !crate::pty_reader::readable_before_stop(reader.as_raw_fd(), stop) {
             return;
@@ -72,167 +72,13 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
         // one frame per check: a frame of a type this image does not
         // know is followed by none at all as often as not, and a
         // reader blocked for the one after it never sees a stop
-        match Frame::read_next(&mut reader) {
-            Ok(Some(Next::Unknown(_))) => {}
-            Ok(Some(Next::Frame(f))) => match f.msg_type {
-                MsgType::KeyEvent => {
-                    // The trailing window id is an L1↔L2 concern; a
-                    // session belongs to a pane, and a pane does not
-                    // care which window draws it.
-                    if let Ok((w, _window_id)) = decode_key_event(&f.payload) {
-                        let (e, m) = wire_to_event(w);
-                        if tx.send(SessionEvent::Key(e, m)).is_err() {
-                            break;
-                        }
-                        crate::input::arrived();
-                    }
-                }
-                MsgType::GridResize => {
-                    if let Ok((cols, rows)) = decode_grid_resize(&f.payload)
-                        && tx.send(SessionEvent::Resize(cols, rows)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::GridScroll => {
-                    if let Ok(off) = decode_grid_scroll(&f.payload)
-                        && tx.send(SessionEvent::Scroll(off)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::GetSelectionText => {
-                    if let Ok((seq, a, fo, bw)) = decode_get_selection_text(&f.payload)
-                        && tx.send(SessionEvent::GetSelection(seq, a, fo, bw)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::Paste => {
-                    if let Ok(text) = decode_paste(&f.payload) {
-                        if tx.send(SessionEvent::Paste(text)).is_err() {
-                            break;
-                        }
-                        crate::input::arrived();
-                    }
-                }
-                MsgType::PaneHoldGrid => {
-                    if let Ok((_sid, on)) =
-                        marspot_term::shell_proto::decode_pane_hold_grid(&f.payload)
-                        && tx.send(SessionEvent::HoldGrid(on)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::PaneResetAttrs => {
-                    if marspot_term::shell_proto::decode_pane_reset_attrs(&f.payload)
-                        .is_ok()
-                        && tx.send(SessionEvent::ResetAttrs).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneRenderMarkup => {
-                    if let Ok((_sid, on)) =
-                        marspot_term::shell_proto::decode_pane_render_markup(&f.payload)
-                        && tx.send(SessionEvent::RenderMarkup(on)).is_err() {
-                            break;
-                        }
-                }
-                MsgType::InjectInput => {
-                    if let Ok((_sid, bytes)) =
-                        marspot_term::shell_proto::decode_inject_input(&f.payload)
-                    {
-                        if tx.send(SessionEvent::InjectInput(bytes)).is_err() {
-                            break;
-                        }
-                        crate::input::arrived();
-                    }
-                }
-                MsgType::PanePointerInput => {
-                    if let Ok((_sid, ev)) =
-                        marspot_term::shell_proto::decode_pane_pointer_input(&f.payload)
-                        && tx.send(SessionEvent::Pointer(ev)).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneTerminalFocus => {
-                    if let Ok((_sid, focused)) =
-                        marspot_term::shell_proto::decode_pane_terminal_focus(&f.payload)
-                        && tx.send(SessionEvent::TerminalFocus(focused)).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::PaneResetMouseReporting => {
-                    if marspot_term::shell_proto::decode_pane_reset_mouse_reporting(
-                        &f.payload,
-                    )
-                    .is_ok()
-                        && tx.send(SessionEvent::ResetMouseReporting).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::SearchScrollback => {
-                    if let Ok((query_id, case_sensitive, max_total, query)) =
-                        decode_search_scrollback(&f.payload)
-                        && tx
-                            .send(SessionEvent::SearchRequest {
-                                query_id,
-                                case_sensitive,
-                                max_total,
-                                query,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                }
-                MsgType::SearchCancel => {
-                    if let Ok(query_id) = decode_search_cancel(&f.payload)
-                        && tx
-                            .send(SessionEvent::SearchCancelRequested(query_id))
-                            .is_err()
-                        {
-                            break;
-                        }
-                }
-                MsgType::SessionUpdate if tx.send(SessionEvent::UpdateRequested).is_err() => break,
-                MsgType::SessionFrameCells => {
-                    let version = decode_frame_cells(&f.payload).unwrap_or(0);
-                    if tx.send(SessionEvent::FrameCells(generation, version)).is_err() {
-                        break;
-                    }
-                }
-                MsgType::PaneType => {
-                    if let Ok(t) = decode_pane_type(&f.payload) {
-                        if tx.send(SessionEvent::PaneControl(Request::Type(t))).is_err() {
-                            break;
-                        }
-                        crate::input::arrived();
-                    }
-                }
-                MsgType::PaneWatch => {
-                    if let Ok(w) = decode_pane_watch(&f.payload)
-                        && tx.send(SessionEvent::PaneControl(Request::Watch(w))).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::SessionShadow => {
-                    if let Ok(m) = marspot_term::shell_proto::decode_session_shadow(&f.payload)
-                        && tx.send(SessionEvent::Shadow(m)).is_err()
-                    {
-                        break;
-                    }
-                }
-                MsgType::SessionRepublish => {
-                    if let Ok(name) = String::from_utf8(f.payload)
-                        && tx.send(SessionEvent::Republish(name)).is_err()
-                    {
-                        break;
-                    }
-                }
-                _ => {}
-            },
+        let go = frames.read_next(&mut reader, |seen| match seen {
+            Seen::Unknown(_) => true,
+            Seen::Frame(t, payload) => dispatch(t, payload, &tx, generation),
+        });
+        match go {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => break,
             Ok(None) | Err(_) => {
                 let _ = tx.send(SessionEvent::CoreGone(generation));
                 break;
@@ -244,6 +90,7 @@ fn read_frames(mut reader: UnixStream, stop: &UnixStream, tx: Sender<SessionEven
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marspot_term::shell_proto::{Frame, MsgType};
     use marspot_term::shell_proto::{MAGIC, encode_inject_input};
     use std::time::Duration;
 
