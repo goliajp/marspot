@@ -145,12 +145,7 @@ fn the_earliest_ending_resets_are_the_ones_counted_when_there_are_too_many() {
 }
 
 #[test]
-fn reads_are_due_only_when_idle_and_six_hours_after_the_last() {
-    let now = 1_800_000_000;
-    assert!(read_due(None, now, true), "never read");
-    assert!(!read_due(None, now, false), "never during work");
-    assert!(!read_due(Some(now - READ_EVERY_S + 1), now, true));
-    assert!(read_due(Some(now - READ_EVERY_S), now, true));
+fn an_account_is_idle_only_when_every_pane_on_it_rests() {
     assert!(account_idle([]), "an account nobody is on is idle");
     assert!(account_idle([true, true]));
     assert!(!account_idle([true, false]));

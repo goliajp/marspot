@@ -32,6 +32,7 @@ fn answer_within(op: &Op) -> Duration {
     let wait = match op {
         Op::Run(r) => r.timeout_s,
         Op::Read(r) if r.wait.is_some() => r.timeout_s,
+        Op::ResetClaim(_) => super::cli_reset::CLAIM_WITHIN_S,
         _ => 0,
     };
     Duration::from_secs(u64::from(wait) + 30)

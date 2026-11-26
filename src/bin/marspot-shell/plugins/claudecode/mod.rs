@@ -57,7 +57,7 @@ mod plugin;
 mod bind_meta;
 mod allocation_adapter;
 mod allocation_decide;
-pub(in crate::plugins) mod allocation_events;
+pub(crate) mod allocation_events;
 mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
@@ -68,10 +68,6 @@ mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;
 mod alloc_moves;
-// read only by tests until sched.reset_read opens the background pane that shows the screen
-#[cfg_attr(not(test), allow(dead_code))]
-mod limit_reset_screen;
-mod reset_read;
 mod worker_loop;
 pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;
@@ -178,8 +174,6 @@ pub struct ClaudecodePlugin {
     alloc_view: Option<allocation_view::View>,
     /// Where moves made by the allocation's choice are written.
     alloc_moved: Option<allocation_events::EventLog>,
-    /// When each account's stored resets were last due to be read.
-    reset_reads: reset_read::ReadClock,
 
     /// Panes whose claude has been reclaimed and that are waiting for a
     /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
@@ -281,7 +275,6 @@ impl ClaudecodePlugin {
             fable_need: fable_need::Marks::default(),
             alloc_view: None,
             alloc_moved: None,
-            reset_reads: Default::default(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: HashMap::new(),
@@ -402,7 +395,6 @@ mod tests {
     mod helpers_switch;
     mod cycle_clicks;
     mod fable_refused;
-    mod reset_read;
     mod boundary_holds;
     mod support;
     use support::*;

@@ -1,0 +1,5 @@
+{"id":"consume","result":{"outcome":"reset"}}
+{"id":"consume","result":{"outcome":"nothingToReset"}}
+{"id":"consume","result":{"outcome":"noCredit"}}
+{"id":"consume","result":{"outcome":"alreadyRedeemed"}}
+{"id":"consume","error":{"code":-32603,"message":"failed to consume rate limit reset credit: 409 Conflict"}}

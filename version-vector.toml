@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.798"  # the planner forecast (levels, bands, clean rests, helper lifetimes) is built hourly from facts and logged as sched.forecast
-core    = "0.12.727"  # a sent line or Ctrl-U clears what program input could not follow
-session = "0.11.470"  # marspot-term moves the reading of a settings line to its values file (not used by session)
+shell   = "0.7.812"  # curl closes descriptors through the shared helper and keeps proxy and CA variables
+core    = "0.12.734"  # the accounts panel's tests move to a file of their own
+session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

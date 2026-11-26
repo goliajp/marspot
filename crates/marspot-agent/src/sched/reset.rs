@@ -1,5 +1,5 @@
-//! Stored resets as supply with a deadline, when an account's resets
-//! are read, and whether two readings of them agree.
+//! Stored resets as supply with a deadline, when an account counts as
+//! idle, and whether two readings of an account's resets agree.
 //!
 //! An account's quota is what is left of it plus what its resets can
 //! bring back before they end.  A reset that may be used only once the
@@ -154,15 +154,6 @@ pub fn with_supply(q: &Quant, load: &Load, window_full: f64, supply: &[Supply]) 
         }
     }
     out
-}
-
-/// An account's resets are read at most this often.
-pub const READ_EVERY_S: i64 = 6 * 3600;
-
-/// Whether an account's resets are due to be read at `now`: idle, and
-/// not read in the last [`READ_EVERY_S`].
-pub fn read_due(last_read: Option<i64>, now: i64, account_idle: bool) -> bool {
-    account_idle && last_read.is_none_or(|at| now - at >= READ_EVERY_S)
 }
 
 /// An account is idle when every pane on it waits for its user; one

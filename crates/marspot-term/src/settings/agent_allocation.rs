@@ -49,7 +49,6 @@ pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
         "kimi.allocation" => s.kimi_allocation.as_str().to_string(),
         "gemini.allocation" => s.gemini_allocation.as_str().to_string(),
         "sched.reset" => s.sched_reset.as_str().to_string(),
-        "sched.reset_read" => s.sched_reset_read.as_str().to_string(),
         "claude.model" => s.cc_model.as_str().to_string(),
         _ => return None,
     })
@@ -64,7 +63,6 @@ pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
         "kimi.allocation" => s.kimi_allocation = AgentAllocation::parse(v),
         "gemini.allocation" => s.gemini_allocation = AgentAllocation::parse(v),
         "sched.reset" => s.sched_reset = AgentAllocation::parse(v),
-        "sched.reset_read" => s.sched_reset_read = AgentAllocation::parse(v),
         "claude.model" => s.cc_model = CcModel::parse(v),
         _ => return false,
     }
@@ -94,17 +92,17 @@ mod tests {
         assert_eq!(value_of(&parse("gemini.allocation = live\n"), "gemini.allocation"), "live");
     }
 
-    /// Both reset switches are off unless the file says otherwise, and
-    /// read back as written.
+    /// The reset switch is off unless the file says otherwise, and reads
+    /// back as written; the retired screen-read switch is no setting.
     #[test]
-    fn the_reset_switches_are_off_unless_written() {
-        let s = Settings::default();
-        assert_eq!((s.sched_reset, s.sched_reset_read), (AgentAllocation::Off, AgentAllocation::Off));
-        let body = "sched.reset = dryrun\nsched.reset_read = live\n";
+    fn the_reset_switch_is_off_unless_written() {
+        assert_eq!(Settings::default().sched_reset, AgentAllocation::Off);
+        let body = "sched.reset = dryrun\n";
         let s = parse(body);
-        assert_eq!((s.sched_reset, s.sched_reset_read), (AgentAllocation::DryRun, AgentAllocation::Live));
+        assert_eq!(s.sched_reset, AgentAllocation::DryRun);
         assert_eq!(parse(&render(&s, body)), s);
-        assert_eq!(value_of(&s, "sched.reset_read"), "live");
+        assert_eq!(value_of(&s, "sched.reset"), "dryrun");
         assert_eq!(parse("sched.reset = on\n").sched_reset, AgentAllocation::Off);
+        assert_eq!(parse("sched.reset_read = live\n"), Settings::default(), "an old line changes nothing");
     }
 }

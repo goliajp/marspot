@@ -295,6 +295,10 @@ impl Hub {
             panel_act::take(payload);
             return true;
         }
+        if msg == MsgType::ResetPanelAct {
+            crate::agentsvc::reset::from_panel(payload);
+            return true;
+        }
         self.links.route(msg, payload)
     }
 }

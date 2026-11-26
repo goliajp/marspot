@@ -1,8 +1,10 @@
 //! One pass over the accounts' stored resets: Codex from what the
-//! collector read itself or, while devops collects, from the devops
-//! feed; Kimi, which has none, as an empty list.  Each reading goes to
-//! the store; where an account was read both ways, whether the two
-//! agree is logged when it changes.
+//! collector read itself or, while devops collects and lists each
+//! credit, from the devops feed; Claude from the devops feed where
+//! devops read the account's usage page on the web; Kimi, which has
+//! none, as an empty list.  Each reading goes to the store; where an
+//! account was read both ways, whether the two agree is logged when it
+//! changes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,19 +30,22 @@ impl Resets {
         Resets { store: ResetStore::new(usage, now), agreed: HashMap::new() }
     }
 
-    /// `own` is what the collector read from the Codex accounts itself,
-    /// none while `devops` collects them; `devops_codex` is the devops
-    /// Codex feed, fresh or not.
-    pub(super) fn pass(&mut self, devops: bool, devops_codex: &Path, own: Vec<AccountResets>, kimi: &[Account], now: i64) {
+    /// `own` is what the collector read from the Codex accounts itself;
+    /// while `devops` collects them it is read only when the feed gives a
+    /// count without the credits behind it, and is preferred then.
+    /// `devops_codex` and `devops_claude` are the devops feeds, fresh or
+    /// not.
+    pub(super) fn pass(&mut self, devops: bool, devops_codex: &Path, devops_claude: &Path, own: Vec<AccountResets>, kimi: &[Account], now: i64) {
         let feed = codex_resets::of_feed(&std::fs::read_to_string(devops_codex).unwrap_or_default());
         let mut readings = own;
-        if devops {
+        if devops && readings.is_empty() {
             readings = feed.iter().filter_map(|(name, r)| codex_account(name, r.clone())).collect();
         } else {
             for (name, verdict, mine, theirs) in codex_resets::settle(&mut readings, &feed, now) {
                 self.tell(name, verdict, mine, theirs);
             }
         }
+        readings.extend(claude_of_feed(&std::fs::read_to_string(devops_claude).unwrap_or_default()));
         for a in kimi.iter().filter(|a| a.has_reading()) {
             let Some(profile) = profile_of(&a.name) else { continue };
             readings.push(AccountResets { agent: "kimi".into(), profile, name: a.name.clone(), resets: Reading::none(now, "none") });
@@ -89,6 +94,21 @@ impl Resets {
 /// A Codex account of the devops feed as a reading of its own.
 fn codex_account(name: &str, r: Reading) -> Option<AccountResets> {
     Some(AccountResets { agent: "codex".into(), profile: profile_of(name)?, name: name.to_string(), resets: r })
+}
+
+/// The Claude accounts of a devops feed whose resets devops read from
+/// the account's usage page on the web.  Any other block is no reading:
+/// `not_read` says nobody looked, not that there are none.
+pub(super) fn claude_of_feed(body: &str) -> Vec<AccountResets> {
+    let Ok(v) = marspot_peer::json::parse(body) else { return Vec::new() };
+    let rows = v.get("accounts").map(marspot_peer::json::Value::arr).unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| {
+            let block = row.get("resets").filter(|b| b.str_at("source") == Some("web_usage"))?;
+            let name = row.str_at("name")?;
+            Some(AccountResets { agent: "claude".into(), profile: profile_of(name)?, name: name.to_string(), resets: Reading::from_value(block)? })
+        })
+        .collect()
 }
 
 #[cfg(test)]

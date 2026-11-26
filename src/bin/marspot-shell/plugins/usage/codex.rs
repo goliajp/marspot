@@ -66,7 +66,7 @@ fn cli(codex_home: &Path) -> Option<PathBuf> {
 
 /// The two answers wanted from one app-server, as whole messages.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct Replies {
+pub(crate) struct Replies {
     pub account: Option<Value>,
     pub limits: Option<Value>,
 }

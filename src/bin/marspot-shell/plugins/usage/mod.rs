@@ -13,12 +13,12 @@
 //! which can take seconds.
 
 mod claude;
-mod codex;
-mod codex_resets;
+pub(crate) mod codex;
+pub(crate) mod codex_resets;
 mod feed;
 mod feed_load;
 mod feed_month;
-mod http;
+pub(crate) mod http;
 mod iso_time;
 mod kimi;
 mod resets;
@@ -187,12 +187,17 @@ impl Collector {
             write("claude", &self.own_claude, &self.claude, now);
         }
         let mut own_resets = Vec::new();
-        if !devops_collects("codex", &self.sources.codex, &mut self.by_devops[1], now) {
+        let by_devops = devops_collects("codex", &self.sources.codex, &mut self.by_devops[1], now);
+        // a feed that only counts credits gives them all one end; each has its own
+        let flat = by_devops && codex_resets::feed_lacks_grants(&std::fs::read_to_string(&self.sources.codex).unwrap_or_default());
+        if !by_devops || flat {
             self.codex = codex::pass(home, std::mem::take(&mut self.codex), now, &mut own_resets);
+        }
+        if !by_devops {
             sample(&mut self.samples, "codex", &self.codex, now);
             write("codex", &self.own_codex, &self.codex, now);
         }
-        self.resets.pass(self.by_devops[1] == Some(true), &self.sources.codex, own_resets, &self.kimi, now);
+        self.resets.pass(by_devops, &self.sources.codex, &self.sources.claude, own_resets, &self.kimi, now);
     }
 }
 

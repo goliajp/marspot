@@ -7,6 +7,7 @@
 pub mod cc_usage_layout;
 pub mod cc_usage_modal;
 pub mod cc_usage_paint;
+pub mod cc_usage_reset_lines;
 pub mod cc_usage_view;
 pub mod chrome_target;
 pub mod controls;

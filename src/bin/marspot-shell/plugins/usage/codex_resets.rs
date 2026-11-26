@@ -39,7 +39,7 @@ fn credit_grant(plan: &str, left: u32, starts_at: Option<i64>, ends_at: Option<i
 
 /// The resets in one app-server's answers, or `None` when the answer
 /// to the limits request carries no credit list.
-pub(super) fn of_replies(replies: &Replies, now: i64) -> Option<Resets> {
+pub(crate) fn of_replies(replies: &Replies, now: i64) -> Option<Resets> {
     let result = replies.limits.as_ref()?.get("result")?;
     let credits = result.get("rateLimitResetCredits").filter(|c| **c != Value::Null)?;
     let plan = replies
@@ -77,6 +77,18 @@ pub(super) fn of_replies(replies: &Replies, now: i64) -> Option<Resets> {
 pub(super) fn of_feed(body: &str) -> Vec<(String, Resets)> {
     let Ok(v) = json::parse(body) else { return Vec::new() };
     v.get("accounts").map(Value::arr).unwrap_or_default().iter().filter_map(account_of_feed).collect()
+}
+
+/// Whether a devops Codex feed gives some account's credits only as a
+/// count and one end, not one by one.  The collector then reads the
+/// credits itself, each with its own start and end.
+pub(super) fn feed_lacks_grants(body: &str) -> bool {
+    let Ok(v) = json::parse(body) else { return false };
+    v.get("accounts").map(Value::arr).unwrap_or_default().iter().any(|row| {
+        let listed = row.get("resets").and_then(Resets::from_value).is_some();
+        let counted = row.at(&["credits", "resets_available"]).and_then(Value::i64).is_some_and(|n| n > 0);
+        counted && !listed
+    })
 }
 
 fn account_of_feed(row: &Value) -> Option<(String, Resets)> {

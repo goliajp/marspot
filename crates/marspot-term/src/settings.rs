@@ -159,11 +159,6 @@ pub struct Settings {
     /// itself (`live`), only logs when it would (`dryrun`), or neither.
     /// Off: nothing in this build uses one in any mode.
     pub sched_reset: AgentAllocation,
-    /// Whether marspot reads a Claude account's stored resets through
-    /// the CLI's own screen in a background pane; off, and nothing in
-    /// this build opens one in any mode: `dryrun` and `live` only log
-    /// when an account's reading would be due.
-    pub sched_reset_read: AgentAllocation,
     /// Whether marspot guards the default model all Claude Code accounts
     /// share, see [`CcModel`].
     pub cc_model: CcModel,
@@ -196,7 +191,6 @@ impl Default for Settings {
             kimi_allocation: AgentAllocation::Off,
             gemini_allocation: AgentAllocation::Off,
             sched_reset: AgentAllocation::Off,
-            sched_reset_read: AgentAllocation::Off,
             cc_model: CcModel::Managed,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),

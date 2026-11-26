@@ -26,13 +26,24 @@ pub(in crate::plugins) const NOTICE_HEAD: &str = "[marspot helper notice]";
 pub(in crate::plugins) struct HelperRoles {
     shadows: Vec<u64>,
     hosts: Vec<u64>,
+    /// A reset claim's window and the CLI pane under it.
+    claims: Vec<u64>,
 }
 
 impl HelperRoles {
     /// From each live session's `(id, shadow_of)`.
+    #[cfg(test)]
     pub(in crate::plugins) fn of(live: impl IntoIterator<Item = (u64, u64)>) -> Self {
+        Self::of_with_claims(live, &[])
+    }
+
+    /// The same, with the windows reset claims have open.
+    pub(in crate::plugins) fn of_with_claims(live: impl IntoIterator<Item = (u64, u64)>, claim_windows: &[u64]) -> Self {
         let mut roles = Self::default();
         for (sid, parent) in live {
+            if claim_windows.contains(&sid) || claim_windows.contains(&parent) {
+                roles.claims.push(sid);
+            }
             if parent != 0 {
                 roles.shadows.push(sid);
                 if !roles.hosts.contains(&parent) {
@@ -44,7 +55,7 @@ impl HelperRoles {
     }
 
     pub(in crate::plugins) fn of_observation(obs: &crate::observe::Observation) -> Self {
-        Self::of(obs.live().map(|s| (s.entry.id, s.entry.shadow_of)))
+        Self::of_with_claims(obs.live().map(|s| (s.entry.id, s.entry.shadow_of)), &crate::agentsvc::reset::panes::windows())
     }
 
     pub(in crate::plugins) fn is_helper(&self, sid: u64) -> bool {
@@ -55,9 +66,14 @@ impl HelperRoles {
         self.hosts.contains(&sid)
     }
 
+    /// A pane of a reset claim: no account rule touches it at all.
+    pub(in crate::plugins) fn is_reset_claim(&self, sid: u64) -> bool {
+        self.claims.contains(&sid)
+    }
+
     /// Left out of idle reclaim and of moves made only because it rests.
     pub(in crate::plugins) fn sits_out(&self, sid: u64) -> bool {
-        self.is_helper(sid) || self.has_helpers(sid)
+        self.is_helper(sid) || self.has_helpers(sid) || self.is_reset_claim(sid)
     }
 }
 
@@ -135,6 +151,14 @@ mod tests {
         assert!(roles.is_helper(5) && roles.has_helpers(5));
         assert!(roles.sits_out(6) && roles.sits_out(7) && roles.sits_out(9));
         assert!(HelperRoles::of([(2, 0)]).hosts.is_empty(), "a pane whose helpers have gone takes part again");
+    }
+
+    #[test]
+    fn helpers_a_reset_claim_s_window_and_cli_pane_sit_out() {
+        let roles = HelperRoles::of_with_claims([(1, 0), (40, 0), (41, 40), (5, 1)], &[40]);
+        assert!(roles.is_reset_claim(40) && roles.is_reset_claim(41));
+        assert!(roles.sits_out(41) && roles.sits_out(40));
+        assert!(!roles.is_reset_claim(1) && !roles.is_reset_claim(5), "an ordinary helper is no claim");
     }
 
     #[test]

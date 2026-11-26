@@ -196,6 +196,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     // the accounts panel (L2) reads it
     e("usage/resets.json", Derived, "usage resets", "one per account", true),
     e("usage/resets/<date>.tsv", Fact, "usage resets", "15 days", true),
+    e("usage/reset_claims/<date>.tsv", Fact, "reset claims", "15 days", true),
     e("zombie/told.tsv", Derived, "zombie store", "2048 rows", true),
     e("zombie/clock.tsv", Derived, "zombie store", "one row per process", true),
     e("zombie/told-dryrun.tsv", Derived, "zombie store (dry run)", "2048 rows", true),

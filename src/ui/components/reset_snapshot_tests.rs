@@ -9,7 +9,7 @@ use crate::ui::components::cc_usage_modal::{self, CcUsageRender};
 /// reset and one the provider says cannot have any.
 pub(super) fn accounts_with_resets(renderer: &mut MetalRenderer, layout: &Layout) {
     let (mut accounts, updated_label, clock) = accounts_data();
-    let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let lines = |l: &[&str]| l.iter().map(|s| crate::agent_resets::ResetLine { text: s.to_string(), ..Default::default() }).collect::<Vec<_>>();
     accounts[0].resets = lines(&["full 2/3 to 12/1 05:26 from 11/28 09:00", "fable 1/1 to 12/5 09:00 not now"]);
     accounts[2].resets = lines(&["resets: ineligible (surface)"]);
     accounts[8].resets = lines(&["full 4/4 to 11/30 05:26"]);

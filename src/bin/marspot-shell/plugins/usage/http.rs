@@ -2,15 +2,19 @@
 //!
 //! The token goes to curl in a config read from its stdin and nowhere
 //! else: an argument is visible to every process on the machine through
-//! `ps`, and a file outlives the request.
+//! `ps`, and a file outlives the request.  curl starts with an empty
+//! environment and no descriptor of ours but its stdin, stdout and
+//! stderr, so nothing else of the process reaches it either.
 
 use std::io::Write as _;
+use std::os::unix::process::CommandExt as _;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const TIMEOUT_SECS: &str = "20";
 
 #[derive(Debug, PartialEq)]
-pub(super) struct Response {
+pub(crate) struct Response {
     pub status: u16,
     /// The `retry-after` header, in seconds.
     pub retry_after: Option<i64>,
@@ -69,14 +73,60 @@ pub(super) fn get(url: &str, token: &str) -> Option<Response> {
 }
 
 /// The same request without the header only Anthropic asks for.
-pub(super) fn get_bare(url: &str, token: &str) -> Option<Response> {
+pub(crate) fn get_bare(url: &str, token: &str) -> Option<Response> {
     run(&config(url, token, &[])?)
 }
 
+#[cfg(test)]
+thread_local! {
+    static CURL: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `curl` standing in for `/usr/bin/curl` on this thread.
+#[cfg(test)]
+pub(crate) fn with_curl<T>(curl: PathBuf, f: impl FnOnce() -> T) -> T {
+    CURL.with(|c| *c.borrow_mut() = Some(curl));
+    let out = f();
+    CURL.with(|c| *c.borrow_mut() = None);
+    out
+}
+
+fn curl() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = CURL.with(|c| c.borrow().clone()) {
+        return p;
+    }
+    PathBuf::from("/usr/bin/curl")
+}
+
+/// Mark every descriptor above stderr close-on-exec in the child: std
+/// marks only those it opens, and one opened through libc or handed
+/// over by a parent may lack the mark.
+fn close_ours_on_exec(cmd: &mut Command) {
+    let limit = marspot_term::inherited_fds::close_limit();
+    // SAFETY: the limit is read before the fork; the hook only calls fcntl
+    unsafe {
+        cmd.pre_exec(move || {
+            marspot_term::inherited_fds::close_inherited(limit, &[]);
+            Ok(())
+        });
+    }
+}
+
+/// What curl may still read from the environment: where a proxy is and
+/// which CA bundle to trust, none of which is a secret.
+const PASSED_ENV: [&str; 8] =
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "CURL_CA_BUNDLE"];
+
 fn run(config: &str) -> Option<Response> {
-    let mut child = Command::new("/usr/bin/curl")
-        // -q first: the user's ~/.curlrc is not part of this request
+    let mut cmd = Command::new(curl());
+    close_ours_on_exec(&mut cmd);
+    let mut child = cmd
+        // -q first: the user's ~/.curlrc is not part of this request;
+        // an absolute path and a config on stdin need no other variable
         .args(["-q", "-sS", "-i", "--max-time", TIMEOUT_SECS, "-w", "\\n%{http_code}", "-K", "-"])
+        .env_clear()
+        .envs(PASSED_ENV.iter().filter_map(|k| std::env::var_os(k).map(|v| (*k, v))))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

@@ -85,6 +85,20 @@ fn helpers_switch_a_helper_is_not_held_back_for_fable_either() {
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "{:?}", host.logged.lock().unwrap());
 }
 
+/// The same pane as the CLI of a reset claim, under the window the
+/// claim opened: it is not moved, nor judged.
+#[test]
+fn helpers_switch_a_reset_claim_s_pane_is_never_moved() {
+    rebalance_mode(marspot::settings::Rebalance::DryRun);
+    let (_home, host, mut plugin, mut result) = scene("hbr", 76);
+    result.helpers = HelperRoles::of_with_claims([(50, 0), (76, 50)], &[50]);
+    view(&plugin, &mut result);
+    sweep(&mut plugin, &host, &mut result);
+    assert!(host.submitted.lock().unwrap().is_empty(), "{:?}", host.logged.lock().unwrap());
+    assert!(host.sent.lock().unwrap().is_empty());
+    assert!(!host.logged.lock().unwrap().iter().any(|(e, l)| e.starts_with("quota.") && l.starts_with("sid=76 ")), "{:?}", host.logged.lock().unwrap());
+}
+
 /// P1 refuses; P2 has the most room left and renews in a week, P3 less
 /// and renews in ten hours.  Neither would be used up by the pane, so
 /// all it uses is what would lapse on either; the one objective sends a
