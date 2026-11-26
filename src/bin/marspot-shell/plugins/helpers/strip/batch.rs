@@ -1,6 +1,8 @@
 //! Which helpers a pane's strip lists.  The helpers under one top pane
-//! are a batch from the first to start (or to go back to work) until a
-//! moment after none is at work; what ends in it stays listed until then.
+//! are a batch from the first to start (or to go back to work) for as
+//! long as the pane of one of them is open, idle or not: one that ended
+//! its turn can still be talked to.  One whose pane closed stays a
+//! moment, longer when it was closed at work, then goes on its own.
 //!
 //! Derived from the events alone, at the times they carry, so replaying
 //! the log gives the batches the shell had before it started over.
@@ -15,7 +17,7 @@ use super::super::table::{Event, Helper, Table};
 const ENDED_MAX: usize = HELPER_STRIP_ROWS;
 /// A chain of parents that loops ends here.
 const WALK_MAX: usize = 16;
-/// How long a batch stays once its last helper ended.
+/// How long one whose pane closed when it was not idle stays.
 pub(super) const OVER_MS: u64 = 3_000;
 /// How long one closed while at work stays.
 pub(super) const STOPPED_MS: u64 = 30_000;
@@ -39,9 +41,16 @@ impl Ended {
         !self.was_idle && !self.helper.exited && self.helper.delivered_ms.is_some()
     }
 
-    /// When it alone keeps its batch no longer.
+    /// When it is listed no more.  One that was idle and could still be
+    /// talked to goes with its pane, as it leaves the title's count.
     fn until_ms(&self) -> u64 {
-        if self.was_stopped() { self.at_ms + STOPPED_MS } else { self.helper.clock.ended_ms + OVER_MS }
+        if self.was_stopped() {
+            self.at_ms + STOPPED_MS
+        } else if self.was_idle && !self.helper.exited {
+            self.at_ms
+        } else {
+            self.helper.clock.ended_ms + OVER_MS
+        }
     }
 }
 
@@ -116,22 +125,19 @@ impl Batches {
         self.ended.push(Ended { root, helper, at_ms, was_idle });
     }
 
-    /// When the batch of `root` is over; None while one of it is at work.
+    /// When the batch of `root` is over; None while the pane of one of it
+    /// is open.
     fn over_ms(&self, table: &Table, root: u64, batch: &Batch) -> Option<u64> {
-        let mut until = 0;
-        for h in batch.open.iter().filter_map(|sid| table.map.get(sid)) {
-            if h.clock.runs() {
-                return None;
-            }
-            until = until.max(h.clock.ended_ms + OVER_MS);
+        if batch.open.iter().any(|sid| table.map.contains_key(sid)) {
+            return None;
         }
-        Some(self.ended.iter().filter(|e| e.root == root).map(Ended::until_ms).fold(until, u64::max))
+        Some(self.ended.iter().filter(|e| e.root == root).map(Ended::until_ms).fold(0, u64::max))
     }
 
     /// Forget what is over at `now_ms`; whether anything was.
     pub(in crate::plugins::helpers) fn expire(&mut self, table: &Table, now_ms: u64) -> bool {
         let before = self.ended.len() + self.of.len();
-        self.ended.retain(|e| !e.was_stopped() || e.until_ms() > now_ms);
+        self.ended.retain(|e| e.until_ms() > now_ms);
         let over: Vec<u64> = self.of.iter().filter(|(r, b)| self.over_ms(table, **r, b).is_some_and(|t| t <= now_ms)).map(|(r, _)| *r).collect();
         for root in &over {
             self.of.remove(root);
@@ -142,7 +148,7 @@ impl Batches {
 
     /// When the next of it is over (ms after the epoch).
     pub(in crate::plugins::helpers) fn next_ms(&self, table: &Table) -> Option<u64> {
-        let rows = self.ended.iter().filter(|e| e.was_stopped()).map(Ended::until_ms);
+        let rows = self.ended.iter().map(Ended::until_ms);
         let batches = self.of.iter().filter_map(|(r, b)| self.over_ms(table, *r, b));
         rows.chain(batches).min()
     }

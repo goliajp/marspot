@@ -183,39 +183,41 @@ fn elapsed_leaves_out_the_time_between_two_turns() {
 }
 
 #[test]
-fn a_batch_is_over_three_seconds_after_its_last_end() {
+fn a_batch_lasts_while_a_pane_of_it_is_open_and_closed_rows_go_on_their_own() {
     let d = temp("strip-batch");
     let (s, _rx) = shared_at(&d);
     let (obs, mut m) = (panes(&[(10, 0), (1, 10), (2, 10), (3, 10)]), Memory::default());
     for sid in 1..=3 {
         begin_at(&s, sid, 10, T + sid);
     }
-    s.used(1, "c", used::Used { tokens: Some(100), had_tool: Some(false), model: None });
+    s.used(3, "c", used::Used { tokens: Some(100), had_tool: Some(false), model: None });
     let a = strips_at(&s, &mut m, &obs, T + 10);
     assert_eq!(a[0].batch, T + 1);
     at(&s, 1, T + 100, vec![Event::IdleNoticed]);
     strips_at(&s, &mut m, &obs, T + 100);
+    // idle and closed: gone with its pane; closed at work: a moment later
     at(&s, 1, T + 50_000, vec![Event::Stopped { exited: false }]);
     at(&s, 2, T + 50_000, vec![Event::ExitedNoticed, Event::Stopped { exited: false }]);
     let left = panes(&[(10, 0), (3, 10)]);
-    let a = strips_at(&s, &mut m, &left, T + 90_000);
-    assert_eq!(states(&a[0]), [(1, StripState::Idle, true), (2, StripState::Exited, true), (3, StripState::Working, false)]);
-    let one = &a[0].rows[0];
-    assert_eq!((one.ended_ms, one.tokens, one.had_tool), (Some(T + 100), Some(100), false));
-    assert_eq!(s.lock().batches.next_ms(&s.table()), None, "nothing is waited for while one is at work");
-    // the last ends its turn; its pane stays
+    let a = strips_at(&s, &mut m, &left, T + 50_000);
+    assert_eq!(states(&a[0]), [(2, StripState::Exited, true), (3, StripState::Working, false)]);
+    assert_eq!(s.lock().batches.next_ms(&s.table()), Some(T + 53_000));
+    assert_eq!(states(&strips_at(&s, &mut m, &left, T + 53_000)[0]), [(3, StripState::Working, false)]);
+    assert_eq!(s.lock().batches.next_ms(&s.table()), None, "nothing is waited for while a pane is open");
+    // the last ends its turn; its pane stays, and so does its row
     at(&s, 3, T + 91_000, vec![Event::IdleNoticed]);
-    assert_eq!(strips_at(&s, &mut m, &left, T + 91_000)[0].rows.len(), 3);
-    assert_eq!(s.lock().batches.next_ms(&s.table()), Some(T + 94_000));
-    assert_eq!(strips_at(&s, &mut m, &left, T + 93_999).len(), 1);
-    assert!(strips_at(&s, &mut m, &left, T + 94_000).is_empty());
+    for now in [T + 91_000, T + 94_000, T + 3_600_000] {
+        let x = strips_at(&s, &mut m, &left, now);
+        assert_eq!((states(&x[0]), x[0].batch), (vec![(3, StripState::Idle, false)], T + 1), "at {now}");
+        assert_eq!((x[0].rows[0].ended_ms, x[0].rows[0].tokens), (Some(T + 91_000), Some(100)));
+    }
     assert_eq!(s.lock().batches.next_ms(&s.table()), None);
-    // back at work, it is a batch of its own
-    at(&s, 3, T + 100_000, vec![Event::InputSeen]);
-    let b = strips_at(&s, &mut m, &left, T + 100_000);
-    assert_eq!((states(&b[0]), b[0].batch), (vec![(3, StripState::Working, false)], T + 100_000));
-    assert_eq!(b[0].rows[0].elapsed_ms(T + 100_500), 91_000 - 3 + 500);
-    assert_eq!((m.numbers.len(), s.lock().used.len()), (1, 0));
+    // back at work, in the same batch
+    at(&s, 3, T + 3_600_000, vec![Event::InputSeen]);
+    let b = strips_at(&s, &mut m, &left, T + 3_600_000);
+    assert_eq!((states(&b[0]), b[0].batch), (vec![(3, StripState::Working, false)], T + 1));
+    assert_eq!(b[0].rows[0].elapsed_ms(T + 3_600_500), 91_000 - 3 + 500);
+    assert_eq!((m.numbers.len(), s.lock().used.len()), (1, 1));
     dir_gone(&d);
 }
 
@@ -235,7 +237,9 @@ fn a_row_closed_at_work_stays_thirty_seconds_on_its_own() {
     let a = strips_at(&s, &mut m, &obs, T + 31_000);
     assert_eq!(states(&a[0]), [(2, StripState::Stopped, true), (3, StripState::Working, false)]);
     at(&s, 3, T + 32_000, vec![Event::ExitedNoticed, Event::Stopped { exited: false }]);
-    assert_eq!(strips_at(&s, &mut m, &obs, T + 49_999)[0].rows.len(), 2, "it keeps the batch");
+    assert_eq!(strips_at(&s, &mut m, &obs, T + 34_999)[0].rows.len(), 2);
+    let a = strips_at(&s, &mut m, &obs, T + 49_999);
+    assert_eq!(states(&a[0]), [(2, StripState::Stopped, true)], "each goes on its own");
     assert!(strips_at(&s, &mut m, &obs, T + 50_000).is_empty());
     dir_gone(&d);
 }
@@ -261,12 +265,13 @@ fn a_batch_survives_a_start_of_the_shell_and_one_long_over_does_not() {
     at(&s, 2, t + 12_000, vec![Event::Stopped { exited: false }]);
     at(&s, 5, now - 2_000, vec![Event::Stopped { exited: false }]);
     let before = strips_at(&s, &mut m, &obs, now);
-    assert_eq!(before.len(), 1);
+    assert_eq!(before.iter().map(|x| x.root_sid).collect::<Vec<_>>(), [10, 20]);
     assert_eq!(before[0].batch, t + 10_002);
     let (again, _rx2) = shared_at(&d);
     rebuild::rebuild(&again, || HashSet::from([3, 4, 7]));
     let after = strips_at(&again, &mut Memory::default(), &obs, now);
-    assert_eq!(states(&after[0]), [(2, StripState::Idle, true), (3, StripState::Working, false), (4, StripState::Working, false), (5, StripState::Stopped, true)]);
+    assert_eq!(states(&after[0]), [(3, StripState::Working, false), (4, StripState::Working, false), (5, StripState::Stopped, true)]);
+    assert_eq!(states(&after[1]), [(7, StripState::Idle, false)], "idle, its pane open");
     assert_eq!(after, before);
     assert_eq!(again.table(), s.table());
     dir_gone(&d);

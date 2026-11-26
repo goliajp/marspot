@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.767"  # StateStore debug checks refuse what the source scan refuses: left-behind rows and whole external trees
+shell   = "0.7.768"  # an idle helper whose pane is open stays in its parent's strip until it is stopped or exits
 core    = "0.12.713"  # marspot-term gains the fact-line format of the state map (not used by core)
 session = "0.11.465"  # marspot-term gains the fact-line format of the state map (not used by session)
