@@ -617,6 +617,10 @@ pub enum MsgType {
     HelperPanelAct = 143,
     HelperStrip = 144,
     StripKeys = 145,
+    /// L1 → L2: a sentence to show over the focused pane; see `notice`.
+    Notice = 146,
+    /// L2 → L1: a `/model` the keyboard confirmed was sent; see `model_confirmed`.
+    ModelConfirmed = 147,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -721,6 +725,8 @@ impl MsgType {
             143 => MsgType::HelperPanelAct,
             144 => MsgType::HelperStrip,
             145 => MsgType::StripKeys,
+            146 => MsgType::Notice,
+            147 => MsgType::ModelConfirmed,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -738,6 +744,10 @@ pub use inject::{decode_inject_input, encode_inject_input};
 
 mod pane_events;
 pub use pane_events::*;
+mod notice;
+pub use notice::*;
+mod model_confirmed;
+pub use model_confirmed::*;
 mod surface_attach;
 pub use surface_attach::*;
 mod pointer;
@@ -1361,33 +1371,6 @@ pub fn decode_pane_reset_attrs(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
-}
-
-/// PaneRenderMarkup payload: `session_id u64 LE, on u8`.
-pub fn encode_pane_agent_tui(session_id: u64, on: bool) -> Vec<u8> {
-    encode_pane_render_markup(session_id, on)
-}
-
-pub fn decode_pane_agent_tui(payload: &[u8]) -> io::Result<(u64, bool)> {
-    decode_pane_render_markup(payload)
-}
-
-pub fn encode_pane_render_markup(session_id: u64, on: bool) -> Vec<u8> {
-    let mut v = Vec::with_capacity(9);
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.push(on as u8);
-    v
-}
-
-pub fn decode_pane_render_markup(payload: &[u8]) -> io::Result<(u64, bool)> {
-    if payload.len() < 9 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "PaneRenderMarkup payload too short",
-        ));
-    }
-    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    Ok((sid, payload[8] != 0))
 }
 
 /// PaneInjectPaste payload: `session_id u64 LE, len u32 LE, utf8`.
@@ -2933,20 +2916,4 @@ mod msg_type_table_tests {
 }
 
 #[cfg(test)]
-mod render_markup_tests {
-    use super::*;
-
-    #[test]
-    fn pane_render_markup_round_trips() {
-        for on in [true, false] {
-            let (sid, got) =
-                decode_pane_render_markup(&encode_pane_render_markup(4_242, on)).unwrap();
-            assert_eq!((sid, got), (4_242, on));
-        }
-    }
-
-    #[test]
-    fn a_truncated_payload_is_an_error_not_a_guess() {
-        assert!(decode_pane_render_markup(&[0u8; 8]).is_err());
-    }
-}
+mod render_markup_tests;

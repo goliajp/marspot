@@ -95,6 +95,33 @@ pub fn decode_focus(payload: &[u8]) -> io::Result<bool> {
     Ok(payload[0] != 0)
 }
 
+/// PaneRenderMarkup payload: `session_id u64 LE, on u8`.
+pub fn encode_pane_agent_tui(session_id: u64, on: bool) -> Vec<u8> {
+    encode_pane_render_markup(session_id, on)
+}
+
+pub fn decode_pane_agent_tui(payload: &[u8]) -> io::Result<(u64, bool)> {
+    decode_pane_render_markup(payload)
+}
+
+pub fn encode_pane_render_markup(session_id: u64, on: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(9);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.push(on as u8);
+    v
+}
+
+pub fn decode_pane_render_markup(payload: &[u8]) -> io::Result<(u64, bool)> {
+    if payload.len() < 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneRenderMarkup payload too short",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    Ok((sid, payload[8] != 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

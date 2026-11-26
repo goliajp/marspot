@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.786"  # the boundary map uses the entry api, a constant check runs at compile time
-core    = "0.12.718"  # the accounts panel lists each account's stored resets under its bars, end before start
-session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)
+shell   = "0.7.787"  # marspot-term gains the Notice and ModelConfirmed messages
+core    = "0.12.719"  # marspot-term gains the Notice and ModelConfirmed messages
+session = "0.11.468"  # marspot-term gains the Notice and ModelConfirmed messages (not used by session)
