@@ -130,7 +130,36 @@ fn reset_nothing_happens_without_devops_or_its_credential() {
     };
     let o = verify::verify(&verify::Access { base, key: "k".into() }, &c, "t").unwrap_err();
     assert_eq!(o.result, Res::Error);
-    assert!(verify::access().is_none(), "marspot reads no devops credential yet");
+
+    // a stand-in home: the user's own devops files are never read here
+    let home = marspot_term::test_env::TempDir::new("reset-devops-home");
+    let none = verify::access_in(home.path()).err().expect("no files");
+    assert_eq!((none.result, none.detail.as_str()), (Res::Error, "no devops credential"));
+    std::fs::create_dir_all(home.join(".config/devops")).unwrap();
+    std::fs::write(home.join(".config/devops/api-key"), "dk_test_2\n").unwrap();
+    assert_eq!(verify::access_in(home.path()).err().map(|o| o.detail), Some("no devops credential".into()), "a key and no address");
+}
+
+#[test]
+fn reset_the_devops_files_give_the_address_and_the_key_goes_only_in_the_header() {
+    let home = marspot_term::test_env::TempDir::new("reset-devops-files");
+    let (base, server) = devops(vec![(200, CONFIRMED.into()), (403, r#"{"error":"no"}"#.into())]);
+    std::fs::create_dir_all(home.join(".config/devops")).unwrap();
+    std::fs::write(home.join(".config/devops/api-url"), format!("{base}/\n")).unwrap();
+    std::fs::write(home.join(".config/devops/api-key"), "dk_secret_9\n").unwrap();
+    let access = verify::access_in(home.path()).ok().expect("both files");
+    let c = claim(Provider::Codex, 2, "cc-1");
+    verify::verify(&access, &c, "tok-9").ok().expect("confirmed");
+    let refused = verify::verify(&access, &c, "tok-9").err().expect("403");
+    assert!(!refused.detail.contains("dk_secret_9") && !refused.reply("cc-1").to_json().contains("dk_secret_9"));
+    let heads = server.join().unwrap();
+    for head in &heads {
+        let (request_line, headers) = head.split_once("\r\n").unwrap();
+        assert!(request_line.starts_with("GET /api/ai/accounts/codex/2/reset/verify?confirm=tok-9&"), "{request_line}");
+        assert!(!request_line.contains("dk_secret_9"), "the key is not in the address");
+        let with_key: Vec<&str> = headers.lines().filter(|l| l.contains("dk_secret_9")).collect();
+        assert_eq!(with_key, ["authorization: Bearer dk_secret_9"], "{head}");
+    }
 }
 
 #[test]

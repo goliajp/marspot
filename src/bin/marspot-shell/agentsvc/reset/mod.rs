@@ -118,10 +118,7 @@ pub(crate) fn from_socket(a: &ResetClaimArgs) -> Value {
     let grant = Grant { kind: a.kind.clone(), grant_ref: a.grant_ref.clone(), ..Grant::default() };
     let c = Claim { provider, profile: a.profile, grant, request_id: a.request_id.clone(), reason: a.reason.clone(), by: By::DevopsUi };
     let confirm = a.confirm.clone();
-    run(ledger(), c, move |c| match verify::access() {
-        Some(access) => verify::verify(&access, c, &confirm),
-        None => Err(Outcome::of(Res::Error, "marspot has no devops credential to check the confirmation with")),
-    })
+    run(ledger(), c, move |c| verify::verify(&verify::access()?, c, &confirm))
     .reply(&a.request_id)
 }
 

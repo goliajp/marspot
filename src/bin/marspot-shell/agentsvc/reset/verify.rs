@@ -2,6 +2,15 @@
 //! GET of `/api/ai/accounts/{provider}/{profile}/reset/verify`, which
 //! answers 200 once for a token it issued in the last minute, with the
 //! grant the user confirmed there.  Nothing else counts as confirmed.
+//!
+//! The address and key are the devops CLI's own files, read when a
+//! claim asks and dropped after its one request.  The key goes out only
+//! as the `authorization: Bearer` header of that GET, the form the
+//! devops tools send, through `/usr/bin/curl`'s config on its stdin
+//! (never an argument or the environment); it is never logged, written
+//! or put in an answer.
+
+use std::path::Path;
 
 use marspot_peer::json::{self, Value};
 
@@ -15,11 +24,23 @@ pub(super) struct Access {
     pub key: String,
 }
 
-/// The devops address and key marspot asks with.  marspot reads no
-/// devops credential anywhere yet, so there is none, and a claim from
-/// the socket is refused before anything is tried.
-pub(super) fn access() -> Option<Access> {
-    None
+/// Under the home directory: the only two files of that directory read.
+const URL_FILE: &str = ".config/devops/api-url";
+const KEY_FILE: &str = ".config/devops/api-key";
+
+/// The devops address and key, from the user's home.
+pub(super) fn access() -> Result<Access, Outcome> {
+    access_in(Path::new(&std::env::var_os("HOME").unwrap_or_default()))
+}
+
+/// The devops address and key under `home`; both files must say
+/// something, or the claim is refused before anything is tried.
+pub(super) fn access_in(home: &Path) -> Result<Access, Outcome> {
+    let read = |f: &str| std::fs::read_to_string(home.join(f)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    match (read(URL_FILE), read(KEY_FILE)) {
+        (Some(base), Some(key)) => Ok(Access { base, key }),
+        _ => Err(Outcome::of(Res::Error, "no devops credential")),
+    }
 }
 
 /// `s` as one query value.
