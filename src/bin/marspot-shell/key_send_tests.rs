@@ -8,7 +8,9 @@ use marspot::input::{KeyText, LogicalKey, NamedKey};
 use marspot::shell_proto::{Frame, FrameReader, MsgType, decode_key_event, wire_to_event};
 use std::os::unix::net::UnixStream;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use crate::pump::Pump;
+use marspot::app::EventProxy;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -83,34 +85,37 @@ fn keys() -> Vec<(MarspotKeyEvent, Modifiers)> {
     ]
 }
 
-/// What `ShellApp::key_event` does with a key that is not the
-/// new-window command, minus the AppKit context it is handed.
-fn key_event(conn: &CoreConn, buf: &mut Vec<u8>, ev: &MarspotKeyEvent, mods: Modifiers) {
-    if opens_window(ev, mods) {
-        return;
-    }
-    crate::pane_control::key_pressed();
-    encode_key(buf, ev, mods, 3);
-    assert!(conn.send(MsgType::KeyEvent, buf));
+fn key_event(pump: &Pump, conn: &CoreConn, buf: &mut Vec<u8>, ev: &MarspotKeyEvent, mods: Modifiers) {
+    assert!(forward_key(Some(pump), Some(conn), buf, ev, mods, 3));
 }
 
 #[test]
 fn a_key_reaches_the_core_socket_without_allocating() {
     let (ours, mut theirs) = UnixStream::pair().unwrap();
     let conn = conn_to(ours);
+    // an hour's beat: the clock's thread stays out of the way
+    let mut pump = Pump::start_with(EventProxy::new(), Duration::from_secs(3600));
     let keys = keys();
     let mut buf = Vec::new();
     for (ev, mods) in &keys {
-        key_event(&conn, &mut buf, ev, *mods);
+        key_event(&pump, &conn, &mut buf, ev, *mods);
     }
     const ROUNDS: usize = 8;
-    let (tally, ()) = counted(|| {
-        for _ in 0..ROUNDS {
-            for (ev, mods) in &keys {
-                key_event(&conn, &mut buf, ev, *mods);
+    // half the rounds awake, half at rest, where a key also wakes the
+    // main thread
+    let mut tally = counted(|| ()).0;
+    for resting in [false, true] {
+        pump.rest(resting);
+        let (t, ()) = counted(|| {
+            for _ in 0..ROUNDS / 2 {
+                for (ev, mods) in &keys {
+                    key_event(&pump, &conn, &mut buf, ev, *mods);
+                }
             }
-        }
-    });
+        });
+        tally.allocs += t.allocs;
+        tally.first = tally.first.or(t.first);
+    }
 
     // the control: the frame as the shell built it before, a payload
     // Vec and a Frame per key, is seen by the same meter

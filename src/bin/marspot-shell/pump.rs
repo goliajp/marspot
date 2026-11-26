@@ -129,7 +129,7 @@ impl Pump {
         Self::start_with(proxy, Duration::from_millis(super::REDRAW_INTERVAL_MS))
     }
 
-    fn start_with(proxy: EventProxy, beat: Duration) -> Pump {
+    pub(crate) fn start_with(proxy: EventProxy, beat: Duration) -> Pump {
         let shared = Arc::new(Shared {
             plan: Mutex::new((Plan::At(Instant::now() + beat), 0)),
             changed: Condvar::new(),
@@ -200,7 +200,7 @@ impl Pump {
     }
 
     #[cfg(test)]
-    fn rest(&mut self, resting: bool) {
+    pub(crate) fn rest(&mut self, resting: bool) {
         self.plan(if resting { Plan::Rest } else { Plan::At(Instant::now()) });
     }
 

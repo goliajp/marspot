@@ -118,16 +118,18 @@ impl MarspotApp for ShellApp {
             mods_byte = struct_to_mods_byte(mods),
             state = format!("{:?}", event.state)
         );
-        if key_send::opens_window(&event, mods) {
+        let window = Self::event_window(ctx);
+        let sent = key_send::forward_key(
+            self.pump.as_ref(),
+            self.active.as_ref(),
+            &mut self.key_buf,
+            &event,
+            mods,
+            window,
+        );
+        if !sent {
             self.open_new_window();
-            return;
         }
-        pane_control::key_pressed();
-        let mut buf = std::mem::take(&mut self.key_buf);
-        key_send::encode_key(&mut buf, &event, mods, Self::event_window(ctx));
-        self.send(MsgType::KeyEvent, &buf);
-        self.key_buf = buf;
-        marspot::latency_trace::mark(marspot::latency_trace::Stage::KeySent, 0);
     }
 
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {

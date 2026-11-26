@@ -2,6 +2,23 @@
 
 use super::*;
 
+/// [`ShellApp::send`] on the parts of the shell it uses, for callers
+/// that hold another field of the shell mutably.
+pub(super) fn send_to(
+    pump: Option<&pump::Pump>,
+    active: Option<&CoreConn>,
+    msg_type: MsgType,
+    payload: &[u8],
+) {
+    // whatever the core is sent, short of a ping, is something happening
+    if let Some(p) = pump.filter(|_| msg_type != MsgType::Ping) {
+        p.touch();
+    }
+    if let Some(conn) = active {
+        conn.send(msg_type, payload);
+    }
+}
+
 impl ShellApp {
     pub(super) fn shutdown_active(&mut self, reason: &'static str) {
         match self.active.take() { Some(conn) => {
@@ -79,13 +96,7 @@ impl ShellApp {
     /// focus all target `active` only — a `pending` core on probation
     /// receives none of them (it rebuilds independently from shelld).
     pub(super) fn send(&self, msg_type: MsgType, payload: impl AsRef<[u8]>) {
-        // whatever the core is sent, short of a ping, is something happening
-        if let Some(p) = self.pump.as_ref().filter(|_| msg_type != MsgType::Ping) {
-            p.touch();
-        }
-        if let Some(conn) = self.active.as_ref() {
-            conn.send(msg_type, payload.as_ref());
-        }
+        send_to(self.pump.as_ref(), self.active.as_ref(), msg_type, payload.as_ref());
     }
 
     /// Spawn a core process rendering into `surface_id` and return the
