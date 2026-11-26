@@ -14,6 +14,8 @@ use super::allocation_adapter::class_word;
 use super::allocation_events::{Event, EventLog};
 use super::allocation_inputs::snapshot;
 use super::allocation_view::View;
+use super::rebalance::Veto;
+use super::rebalance_boundary::{Outcome, Target};
 use super::*;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::replay::{Inputs, Rule, Why};
@@ -86,13 +88,25 @@ impl ClaudecodePlugin {
     /// on the same account, and the next pass sees where they went.
     pub(super) fn follow_core(&mut self, host: &dyn PluginHost, view: &mut View, plan: &mut leave_early::Plan, result: &ScanResult, p: Resting) -> bool {
         let sid = p.sid;
-        let Some((target, why, inputs)) = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue | Why::Waste)).cloned() else {
+        let from = p.meta.profile_num;
+        let decided = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue | Why::Waste)).cloned();
+        let transcript_rests = matches!(result.new_activity.get(&sid), Some(CcActivity::AwaitingUser));
+        let status = host.pane_status(sid).ok().flatten();
+        let rest = status.filter(|v| matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)).map(|v| v.held);
+        match &decided {
+            Some((to, why, _)) => self.boundaries.stand(sid, Target { from, to: *to, word: why.word() }),
+            None if transcript_rests => self.boundaries.drop_target(sid),
+            None => {}
+        }
+        let Some((target, why, inputs)) = decided else {
             self.rebalance_said.remove(&sid);
+            let veto = if transcript_rests { Veto::CoreStays } else { Veto::TranscriptBusy };
+            self.boundary(host, sid, from, rest, Outcome::Held(veto));
             return false;
         };
-        let from = p.meta.profile_num;
         // an account that refused a pane since the feed was written is no target
         if plan.rooms().iter().find(|(n, _)| *n == target).is_none_or(|(_, r)| r.refused_for(p.model)) {
+            self.boundary(host, sid, from, rest, Outcome::Held(Veto::RefusedThere));
             return false;
         }
         let pane = self.resting(host, sid, p.meta, result, p.in_flight, self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()));
@@ -104,18 +118,24 @@ impl ClaudecodePlugin {
         // would hold every one of them
         let short_there = why != Why::UOut && plan.lasts(target, p.model, plan.speed_of(sid)) < leave_early::TARGET_H;
         let held = rebalance::not_now(&pane)
-            .or(short_there.then_some("it would run short there at the speed its readings show"))
-            .or((p.already_moved_one && !dry).then_some("another pane moved this pass"));
+            // waiting for the user while the screen still moves
+            .map(|v| if v == Veto::Working && rest.is_some() { Veto::ScreenBusy } else { v })
+            .or(short_there.then_some(Veto::ShortThere))
+            .or((p.already_moved_one && !dry).then_some(Veto::AnotherMoved));
         let word = why.word();
         let line = match held {
-            Some(reason) => format!("sid={sid} P{from} → P{target} ({word}) waits: {reason}"),
+            Some(v) => format!("sid={sid} P{from} → P{target} ({word}) waits: {}", v.phrase()),
             None if dry => format!("sid={sid} P{from} → P{target} ({word}) {}{}", inputs.encode(), view.rule.words()),
             None => format!("sid={sid} P{from} → P{target}: {word}"),
         };
-        // one line when a pane starts waiting for a target and one when it
-        // moves; the reason it waits flips every pass or two, which is
-        // not news
-        let key = format!("{target}|{}", held.is_some());
+        match (held, dry) {
+            (Some(v), _) => self.boundary(host, sid, from, rest, Outcome::Held(v)),
+            (None, true) => self.boundary(host, sid, from, rest, Outcome::WouldMove),
+            (None, false) => {}
+        }
+        // one line when a pane starts waiting for a target, one each time
+        // the reason it waits changes, and one when it moves
+        let key = format!("{target}|{}", held.map_or("go", Veto::key));
         let new_answer = self.rebalance_said.get(&sid) != Some(&key);
         if new_answer {
             self.rebalance_said.insert(sid, key);
@@ -140,10 +160,26 @@ impl ClaudecodePlugin {
         if !self.start_profile_cycle_to(host, sid, p.meta.clone(), target, said, p.choice.clone()) {
             return false;
         }
+        self.boundary(host, sid, from, rest, Outcome::Moved);
         self.rebalanced.insert(sid, (Instant::now(), target));
         plan.place(target, p.model, plan.speed_of(sid));
         view.placed(sid, target);
         self.record_moved(host, sid, from, target, inputs.mover.class, word, Some(&inputs), None);
         true
+    }
+
+    /// One look at a pane for `rebalance.boundary`.
+    fn boundary(&mut self, host: &dyn PluginHost, sid: u64, from: u8, rest: Option<Duration>, o: Outcome) {
+        let target = self.boundaries.standing(sid, from);
+        for line in self.boundaries.look(sid, Instant::now(), rest, target, o) {
+            host.log(LogLevel::Info, "rebalance.boundary", &line);
+        }
+    }
+
+    /// Forget the boundaries of panes that are gone.
+    pub(super) fn retain_boundaries(&mut self, host: &dyn PluginHost, result: &ScanResult) {
+        for line in self.boundaries.retain(|sid| result.sessions_seen.contains(&sid)) {
+            host.log(LogLevel::Info, "rebalance.boundary", &line);
+        }
     }
 }

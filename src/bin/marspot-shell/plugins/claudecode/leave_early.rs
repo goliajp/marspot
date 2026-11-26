@@ -140,7 +140,7 @@ impl ClaudecodePlugin {
             return false;
         };
         let pane = self.resting(host, sid, meta, result, move_in_flight, None);
-        let held = rebalance::not_now(&pane);
+        let held = rebalance::not_now(&pane).map(rebalance::Veto::phrase);
         let why = format!("P{from} lasts {}, P{to} {} with it", hours(part.hours), hours(Some(lasts)));
         if let Some(reason) = held {
             let line = format!("sid={sid} P{from} → P{to} ({why}) waits: {reason}");

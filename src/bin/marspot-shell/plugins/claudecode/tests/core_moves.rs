@@ -121,3 +121,49 @@ fn rebalance_dryrun_writes_the_plan_move_with_its_inputs_and_live_moves() {
     plugin.sweep_unusable_profiles(&host, &result);
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "not again while it lands");
 }
+
+/// The same target held first by the user, then by the machine's load:
+/// two waiting lines, not one; the rest ends with one boundary line
+/// naming both, and a third look with the same reason adds nothing.
+#[test]
+fn rebalance_waiting_line_follows_the_reason_and_the_rest_gets_one_boundary_line() {
+    // the feed names the accounts by the emails of the "plan" home
+    let home = quota_home("plan");
+    feed(&home);
+    let host = FakeHost::new(home.join("state"));
+    let sid = 81u64;
+    let mut on_p2 = pane_on_p1(&home, "u-81");
+    on_p2.profile_num = 2;
+    on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
+    let mut plugin = stranded_plugin(on_p2.clone(), sid);
+    let mut beside = on_p2;
+    beside.uuid = "u-80".into();
+    plugin.last_meta.insert(BESIDE, beside);
+    let status = |s| crate::plugins::PaneStatusView { status: s, held: Duration::from_secs(600), quiescent: true };
+    host.status.lock().unwrap().insert(sid, status(marspot::pane_state::PaneStatus::AwaitingUser));
+    let mut alloc = Allocation::new(events_dir(&marspot::paths::state_root()));
+    let result = scan(&plugin, sid, &mut alloc);
+    marspot::settings::set_for_test(marspot::settings::Settings { cc_rebalance: marspot::settings::Rebalance::Live, ..Default::default() });
+    let lines = |tag: &str| -> Vec<String> { host.logged.lock().unwrap().iter().filter(|(e, _)| e == tag).map(|(_, l)| l.clone()).collect() };
+
+    plugin.focused_sid = Some(sid);
+    plugin.host_load = || None;
+    plugin.sweep_unusable_profiles(&host, &result);
+    plugin.focused_sid = None;
+    plugin.host_load = || Some(99.0);
+    plugin.sweep_unusable_profiles(&host, &result);
+    plugin.sweep_unusable_profiles(&host, &result);
+    let waiting = lines("rebalance.waiting");
+    assert_eq!(waiting.len(), 2, "{waiting:?}");
+    assert!(waiting[0].ends_with("P2 → P1 (waste) waits: the user is in it"), "{waiting:?}");
+    assert!(waiting[1].ends_with("P2 → P1 (waste) waits: the machine is overloaded"), "{waiting:?}");
+    assert!(host.submitted.lock().unwrap().is_empty());
+    assert!(lines("rebalance.boundary").is_empty(), "the rest goes on");
+
+    host.status.lock().unwrap().insert(sid, status(marspot::pane_state::PaneStatus::Unknown));
+    plugin.sweep_unusable_profiles(&host, &result);
+    let boundary = lines("rebalance.boundary");
+    assert_eq!(boundary.len(), 1, "{boundary:?}");
+    assert!(boundary[0].starts_with("sid=81 P2 → P1 (waste) rest_s="), "{boundary:?}");
+    assert!(boundary[0].contains(" outcome=held why=overloaded seen=user_here@") && boundary[0].contains(",overloaded@"), "{boundary:?}");
+}

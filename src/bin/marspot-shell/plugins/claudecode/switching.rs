@@ -98,6 +98,7 @@ impl ClaudecodePlugin {
         self.moved_at.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalanced.retain(|sid, _| result.sessions_seen.contains(sid));
         self.rebalance_said.retain(|sid, _| result.sessions_seen.contains(sid));
+        self.retain_boundaries(host, result);
         self.heads_up.retain(|sid, _| result.sessions_seen.contains(sid));
         let (mode, mut rebalanced_this_pass) = (marspot::settings::get().cc_rebalance, false);
         self.unjudged.retain(|sid| result.sessions_seen.contains(sid));
