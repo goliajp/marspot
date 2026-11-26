@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.732"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
-core    = "0.12.701"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
+shell   = "0.7.733"  # the json reader is a crate of its own; marspot_peer::json forwards to it
+core    = "0.12.702"  # the json reader is a crate of its own; marspot_peer::json forwards to it
 session = "0.11.455"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live

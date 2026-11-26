@@ -15,6 +15,9 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+# The JSON reader the records and frames go through.  In-tree, ours,
+# zero deps.
+marspot-json = { path = "../marspot-json" }
 
 [lints]
 workspace = true

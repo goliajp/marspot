@@ -177,6 +177,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "marspot-json"
+version = "0.1.0"
+
+[[package]]
 name = "marspot-linkify"
 version = "0.1.0"
 
@@ -185,6 +189,7 @@ name = "marspot-peer"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "marspot-json",
 ]
 
 [[package]]
