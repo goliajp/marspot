@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.783"  # boundary rows say child=- timer=- when the process tree was not read; watches survive a scan without usage; hours_failed said once
+shell   = "0.7.784"  # a transcript line longer than one read is stepped over instead of stalling the reader
 core    = "0.12.718"  # the accounts panel lists each account's stored resets under its bars, end before start
 session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)

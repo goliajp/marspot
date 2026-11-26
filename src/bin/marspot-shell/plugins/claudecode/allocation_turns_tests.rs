@@ -110,3 +110,24 @@ fn allocation_turns_know_when_a_person_last_wrote_not_a_notice() {
     assert_eq!(turns.open(&big, false, at(1)), Open::default());
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// A line longer than one read (a pasted image) is stepped over, and
+/// what follows it is still read.
+#[test]
+fn allocation_turns_step_over_a_line_longer_than_the_read() {
+    let d = dir("longline");
+    let t = d.join("s.jsonl");
+    fs::write(&t, "").unwrap();
+    let mut turns = Turns::default();
+    assert!(turns.read(&t, 10).is_empty());
+    let image = format!(r#"{{"type":"user","timestamp":"{}","x":"{}"}}"#, ts(20), "A".repeat(READ_CAP as usize + (1 << 20)));
+    append(&t, &[prompt(10, "look"), image]);
+    assert!(turns.read(&t, 10).is_empty(), "the prompt, and the image line up to the read's end");
+    assert_eq!(turns.open(&t, false, at(30)).prompt_at, Some(at(10)));
+    assert!(turns.read(&t, 10).is_empty(), "inside the image line");
+    append(&t, &[compact(40, 250_000), reply(50, 30_000), prompt(60, "next")]);
+    let got = turns.read(&t, 10);
+    assert_eq!(got, [Compacted { at: at(40), before: 250_000, after: 30_000, auto: true }]);
+    assert_eq!(turns.open(&t, false, at(70)).prompt_at, Some(at(60)));
+    fs::remove_dir_all(&d).unwrap();
+}

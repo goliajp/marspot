@@ -14,7 +14,8 @@
 //! Only bytes appended since the last read are parsed.  A transcript is
 //! first read from up to `HISTORY` bytes before its end, so a task begun
 //! before the shell started is known; compactions in that history were
-//! written before and are not written again.
+//! written before and are not written again.  A line longer than one
+//! read is skipped whole.
 
 use std::collections::HashMap;
 use std::fs;
@@ -53,6 +54,8 @@ pub(super) struct Compacted {
 #[derive(Debug, Default)]
 struct Watch {
     offset: u64,
+    /// `offset` is inside a line, whose rest is not read.
+    mid_line: bool,
     /// The claude the open tasks belong to.
     pid: i32,
     live: Vec<Task>,
@@ -86,6 +89,7 @@ impl Turns {
         let w = self.watches.entry(transcript.to_path_buf()).or_default();
         if first {
             w.offset = len.saturating_sub(HISTORY);
+            w.mid_line = w.offset > 0;
             w.pid = pid;
         } else if w.pid != pid {
             w.pid = pid;
@@ -93,9 +97,9 @@ impl Turns {
         }
         if len < w.offset {
             w.offset = len;
+            w.mid_line = false;
         }
-        let skip_partial = first && w.offset > 0;
-        follow(transcript, len, w, skip_partial, if first { None } else { Some(&mut out) });
+        follow(transcript, len, w, if first { None } else { Some(&mut out) });
         out
     }
 
@@ -114,7 +118,7 @@ impl Turns {
     }
 }
 
-fn follow(path: &Path, len: u64, w: &mut Watch, skip_partial: bool, mut out: Option<&mut Vec<Compacted>>) {
+fn follow(path: &Path, len: u64, w: &mut Watch, mut out: Option<&mut Vec<Compacted>>) {
     if len == w.offset {
         return;
     }
@@ -123,10 +127,19 @@ fn follow(path: &Path, len: u64, w: &mut Watch, skip_partial: bool, mut out: Opt
     if f.seek(SeekFrom::Start(w.offset)).is_err() || f.take(READ_CAP).read_to_end(&mut buf).is_err() {
         return;
     }
-    let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return };
+    let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
+        // a line longer than the read (an inlined image) would stall the
+        // reader at its start for good: step over it
+        if buf.len() as u64 >= READ_CAP || w.mid_line {
+            w.offset += buf.len() as u64;
+            w.mid_line = true;
+        }
+        return;
+    };
     let mut from = 0;
-    if skip_partial {
+    if w.mid_line {
         from = buf.iter().position(|b| *b == b'\n').map_or(end, |i| i + 1);
+        w.mid_line = false;
     }
     w.offset += end as u64 + 1;
     if from >= end {
