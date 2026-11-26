@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use super::quota::{Refusal, Scope, pacific_midnight_after};
 use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of};
+use crate::agentsvc::sched::Made;
 use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::{Class, Quant, RHO0};
 use crate::plugins::claudecode::allocation_events::{DAY, Event, EventLog};
@@ -231,7 +232,7 @@ impl GeminiAlloc {
     /// A move made: one line, with what chose it.
     pub(super) fn moved(&mut self, now: i64, m: &Move, log: &mut Log) {
         let via = if m.resume { "resume" } else { "handoff" };
-        crate::agentsvc::sched::once("gemini", m.sid, &m.inputs, Rule::Bands, Some((m.to, Why::Out)), None);
+        self.sched.once(&Made { agent: "gemini", sid: Some(m.sid), inputs: &m.inputs, rule: Rule::Bands, did: Some((m.to, Why::Out.word())) }, None);
         self.event(now, m.sid, "moved", m.from, format!("to=P{} why=out via={via} {}", m.to, m.inputs.encode()), log);
     }
 

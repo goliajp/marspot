@@ -74,6 +74,12 @@ impl State {
         (p, c)
     }
 
+    /// The prices last used for account `id`, when any were.
+    pub fn held(&self, id: u8) -> Option<Price> {
+        let s = self.accounts.get(usize::from(id)).filter(|s| s.used)?;
+        Some(Price { week: f64::from(s.week), window: f64::from(s.window) })
+    }
+
     /// Points spent for efficiency in the week that holds `now`.
     pub fn week_eff(&mut self, now: i64) -> f64 {
         if self.week_from.is_none_or(|from| now - from >= WEEK_S) {
@@ -116,6 +122,8 @@ mod tests {
         assert!((p.week - 0.4).abs() < 1e-6 && !c.week);
         let (p, c) = s.price(3, Price { week: 0.7, window: 0.0 });
         assert!((p.week - 0.7).abs() < 1e-6 && c.week);
+        assert!((s.held(3).map_or(0.0, |p| p.week) - 0.7).abs() < 1e-6);
+        assert_eq!(s.held(4), None);
         assert_eq!(s.price(200, Price { week: 0.9, window: 0.1 }).0.week, 0.9);
         s.set_week_eff(0.6, 100);
         assert_eq!(s.week_eff(100 + WEEK_S - 1), 0.6);

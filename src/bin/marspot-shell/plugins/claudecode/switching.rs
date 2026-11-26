@@ -310,7 +310,7 @@ impl ClaudecodePlugin {
                     if !helper {
                         view.placed(sid, target);
                     }
-                    self.record_moved(host, sid, from, target, class, if helper { "helper" } else { "out" }, inputs.as_ref());
+                    self.record_moved(host, sid, from, target, class, if helper { "helper" } else { "out" }, inputs.as_ref(), None);
                     let tally = self.stranded.entry(sid).or_default();
                     tally.moves += 1;
                     tally.last_target = Some(target);

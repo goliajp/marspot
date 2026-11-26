@@ -6,6 +6,11 @@
 //! selector, given the candidates and terms `sched::alloc` builds from
 //! the same inputs, must decide the same: the account, or staying.
 //!
+//! The assertion covers waste-rule decisions only: a row logged under
+//! the bands is decided again by the objective (with no resting moves
+//! counted that day), never by the bands, as the shell's
+//! `svc.sched.decide` line weighs it (`rule=bands sel_rule=waste`).
+//!
 //! What the rows logged was decided by the rules of their day (the
 //! bands for lines with no `rule=` word, and a leave-early move ranked
 //! among the accounts it allowed); those decisions are counted against

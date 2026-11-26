@@ -17,6 +17,7 @@ use super::allocation_view::View;
 use super::*;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::replay::{Inputs, Rule, Why};
+use crate::agentsvc::sched;
 use marspot::agent::AgentKind;
 use marspot::settings::Rebalance;
 
@@ -52,15 +53,20 @@ impl ClaudecodePlugin {
     /// A `moved` fact: from where to where, why, and what chose it.
     ///
     /// `why` may carry words after the reason, such as the accounts a
-    /// pane leaving early was ranked among.
+    /// pane leaving early was ranked among; those accounts are `among`.
     #[allow(clippy::too_many_arguments)] // one fact, each field a separate piece
-    pub(super) fn record_moved(&mut self, host: &dyn PluginHost, sid: u64, from: u8, to: u8, class: Class, why: &str, inputs: Option<&Inputs>) {
+    pub(super) fn record_moved(&mut self, host: &dyn PluginHost, sid: u64, from: u8, to: u8, class: Class, why: &str, inputs: Option<&Inputs>, among: Option<&[u8]>) {
         let log = self.alloc_moved.get_or_insert_with(|| EventLog::new(allocation_adapter::events_dir(&marspot::paths::state_root())));
         let in_force = self.alloc_view.as_ref().map_or(Rule::Bands, |v| v.rule);
         let rule = in_force.words();
         if let Some(i) = inputs {
-            let reason = Why::from_word(why.split(' ').next().unwrap_or_default()).unwrap_or(Why::Out);
-            crate::agentsvc::sched::once(AgentKind::Claude.as_str(), sid, i, in_force, Some((to, reason)), None);
+            let reason = why.split(' ').next().unwrap_or_default();
+            let made = sched::Made { agent: AgentKind::Claude.as_str(), sid: Some(sid), inputs: i, rule: in_force, did: Some((to, reason)) };
+            if reason == "badge" {
+                sched::overridden(&made);
+            } else {
+                sched::once(&made, among);
+            }
         }
         let detail = match inputs {
             Some(i) => format!("from=P{from} why={why} {}{rule}", i.encode()),
@@ -137,7 +143,7 @@ impl ClaudecodePlugin {
         self.rebalanced.insert(sid, (Instant::now(), target));
         plan.place(target, p.model, plan.speed_of(sid));
         view.placed(sid, target);
-        self.record_moved(host, sid, from, target, inputs.mover.class, word, Some(&inputs));
+        self.record_moved(host, sid, from, target, inputs.mover.class, word, Some(&inputs), None);
         true
     }
 }

@@ -12,6 +12,7 @@ use marspot::cc_usage::CxAccount;
 
 use crate::plugins::allocation::choose::{HELPER_LAST_H, Mover};
 use crate::plugins::allocation::helper::{Placement, Scene, place_by};
+use crate::agentsvc::sched::Made;
 use crate::plugins::allocation::replay::{Inputs, Rule, Why};
 use crate::plugins::allocation::{Class, RHO0, waste};
 use crate::plugins::claudecode::quota::helper_pick::{self, Accounts, Placed, Pool};
@@ -132,7 +133,7 @@ pub(in crate::plugins) fn choose(
         if let Some(dir) = events {
             helper_pick::record_new(dir, now, kind, n, inputs);
         }
-        crate::agentsvc::sched::once(agent.key(), 0, inputs, rule, Some((n, Why::Out)), None);
+        crate::agentsvc::sched::once(&Made { agent: agent.key(), sid: None, inputs, rule, did: Some((n, Why::Out.word())) }, None);
         Some(n)
     };
     let rate = match (agent, class) {

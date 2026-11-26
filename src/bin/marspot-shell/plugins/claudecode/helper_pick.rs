@@ -27,6 +27,7 @@ use super::super::allocation_view::View;
 use super::{Move, Room, FIVE_HOUR_SPENT, same_model};
 use crate::plugins::allocation::choose::Mover;
 use crate::plugins::allocation::helper::{Placement, Scene, place};
+use crate::agentsvc::sched::Made;
 use crate::plugins::allocation::replay::{Inputs, Rule, Why};
 use crate::plugins::allocation::{Class, Quant, RHO0};
 
@@ -180,7 +181,7 @@ pub(in crate::plugins) fn helper_move(pool: Pool, feed_at: i64, decision: Move, 
                     Pool::Codex => "codex",
                     Pool::Kimi => "kimi",
                 };
-                crate::agentsvc::sched::once(agent, 0, &inputs, Rule::Bands, Some((to, Why::Out)), None);
+                crate::agentsvc::sched::once(&Made { agent, sid: None, inputs: &inputs, rule: Rule::Bands, did: Some((to, Why::Out.word())) }, None);
                 Some(to)
             }
             Placement::Nowhere => unread_pick(rooms, Some(current), model, p),
