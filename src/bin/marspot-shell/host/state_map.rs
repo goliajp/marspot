@@ -30,7 +30,7 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     /// What happened: only ever appended to, unless its row is in
-    /// [`NOT_APPEND_ONLY`].
+    /// [`NOT_APPEND_ONLY`] or [`ROTATED`].
     Fact,
     /// Computed from facts or read from the outside world; deleting it
     /// loses nothing that cannot be had again.
@@ -113,7 +113,8 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("download/marspot-update.<n>.pub", Derived, "updater::verify (from the built-in keys)", "fixed", false),
     e("download/marspot.tar.d/**", Runtime, "updater (the release unpacked)", "one release", false),
     e("pending-bundle/**", Draft, "install-local.sh, its land.sh", "one bundle", true),
-    e("shell_launches.tsv", Fact, "L1 launch (crash-loop journal)", "last rows, trimmed in place", true),
+    // trimmed to its last rows in place, so working state rather than a fact
+    e("shell_launches.tsv", Draft, "L1 launch (crash-loop journal)", "last rows, trimmed in place", true),
     e("shell.pid", Runtime, "L1 launch", "one number", true),
     // the next L1, of whatever build, takes the lock or hands over through the socket
     e("shell.lock", Runtime, "L1 instance", "empty", true),
@@ -151,8 +152,10 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("logs/marspot.log.rotate-lock", Runtime, "logx rotate", "lock", true),
     // older builds wrote it, today's `marspot-shell --status` reads it
     e("logs/supervisor.log", Fact, "none now; read by marspot-shell --status", "none written", true),
-    // madcawl writes its own logs; no marspot build reads them
-    e("logs/madcawl-host.log", External, "madcawl-shell (started by peerbus)", "madcawl's own", false),
+    // madcawl's output; the L1 of every build opens it to append and empties it past
+    // a size cap before starting madcawl
+    e("logs/madcawl-host.log", External, "madcawl-shell (its output), L1 peerbus (opens, empties past the cap)", "1 MiB", true),
+    // madcawl writes its audit itself; no marspot build reads it
     e("logs/madcawl-audit.log", External, "madcawl-shell (started by peerbus)", "madcawl's own", false),
     // services
     e("helpers/events.log", Fact, "helpers", "8 MiB, rotated", true),
@@ -235,17 +238,21 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("**/.DS_Store", External, "Finder", "one per directory", false),
 ];
 
-/// The fact rows whose files are not only appended to: trimmed in
-/// place, rotated by a rename that leaves a fresh file, or consumed.
-/// The run audit does not hold them to "only appended".
-pub(crate) const NOT_APPEND_ONLY: &[&str] = &[
-    "shell_launches.tsv",
-    "control-audit.log",
-    "helpers/events.log",
-    "zombie/dryrun.log",
-    "logs/marspot.log",
-    "peerbus/gemini/*.jsonl",
-    "peerbus/kimi/*.jsonl",
+/// The fact rows whose files are consumed: taken whole and removed, and
+/// a new file of the same name started later.  The run audit does not
+/// hold them to "only appended".
+pub(crate) const NOT_APPEND_ONLY: &[&str] = &["peerbus/gemini/*.jsonl", "peerbus/kimi/*.jsonl"];
+
+/// The fact rows rotated by a rename, and the rows of the files their
+/// bytes move to (`.gz` ones compressed).  The run audit lets such a
+/// file restart only when its earlier bytes now begin one of those; the
+/// rotated files themselves are only renamed over, aged out or, for
+/// `zombie/dryrun.log.1`, replaced.
+pub(crate) const ROTATED: &[(&str, &[&str])] = &[
+    ("control-audit.log", &["control-audit.log.<n>"]),
+    ("helpers/events.log", &["helpers/events.log.<n>"]),
+    ("zombie/dryrun.log", &["zombie/dryrun.log.1"]),
+    ("logs/marspot.log", &["logs/marspot.<n>.log", "logs/marspot.<n>.log.gz"]),
 ];
 
 /// The row of the file at `path`, relative to the state root.

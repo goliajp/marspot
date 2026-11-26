@@ -34,20 +34,41 @@ fn settled(bytes: &[u8]) -> &[u8] {
 /// What a run left that the table does not know, and the fact files
 /// whose earlier bytes changed.
 fn audit(before: &Path, after: &Path) -> (Vec<String>, Vec<String>) {
-    let unknown = files_under(after).into_iter().filter(|f| lookup(f).is_none()).collect();
+    let listed = files_under(after);
+    let unknown = listed.iter().filter(|f| lookup(f).is_none()).cloned().collect();
     let mut rewritten = Vec::new();
     for f in files_under(before) {
-        if lookup(&f).is_none_or(|e| e.kind != Kind::Fact || NOT_APPEND_ONLY.contains(&e.path)) {
+        let Some(e) = lookup(&f) else { continue };
+        let rotated_copy = ROTATED.iter().any(|(_, to)| to.contains(&e.path));
+        if e.kind != Kind::Fact || NOT_APPEND_ONLY.contains(&e.path) || rotated_copy {
             continue;
         }
         // gone is allowed: a pruned day
         let Ok(now) = std::fs::read(after.join(&f)) else { continue };
         let then = std::fs::read(before.join(&f)).expect("the copy taken before");
-        if !now.starts_with(settled(&then)) {
+        let kept = settled(&then);
+        if !now.starts_with(kept) && !moved_on(e.path, kept, after, &listed) {
             rewritten.push(format!("{f} ({} bytes then, {} now)", then.len(), now.len()));
         }
     }
     (unknown, rewritten)
+}
+
+/// Whether `kept`, the bytes a file of the fact row `row` held, now
+/// begin one of the files that row rotates to.
+fn moved_on(row: &str, kept: &[u8], after: &Path, listed: &[String]) -> bool {
+    let Some((_, to)) = ROTATED.iter().find(|(r, _)| *r == row) else { return false };
+    listed.iter().filter(|f| lookup(f).is_some_and(|e| to.contains(&e.path))).any(|f| contents(&after.join(f)).starts_with(kept))
+}
+
+/// A file's bytes, a `.gz` one decompressed.
+fn contents(path: &Path) -> Vec<u8> {
+    if path.extension().is_none_or(|x| x != "gz") {
+        return std::fs::read(path).expect("a listed file");
+    }
+    let out = std::process::Command::new("/usr/bin/gzip").arg("-dc").arg(path).output().expect("gzip runs");
+    assert!(out.status.success(), "{} does not decompress", path.display());
+    out.stdout
 }
 
 fn env_dir(var: &str) -> PathBuf {
@@ -97,7 +118,7 @@ fn the_audit_finds_an_unknown_file_and_a_rewritten_fact() {
 }
 
 #[test]
-fn the_audit_lets_a_dropped_count_rise_and_a_rotated_file_restart() {
+fn the_audit_lets_a_dropped_count_rise_and_a_trimmed_draft_change() {
     let tmp = marspot_term::test_env::TempDir::new("state-map-audit-allowed");
     let (before, after) = (tmp.join("before"), tmp.join("after"));
     let day = "usage/usage_samples/20261126.tsv";
@@ -115,6 +136,36 @@ fn the_audit_lets_a_dropped_count_rise_and_a_rotated_file_restart() {
 }
 
 #[test]
+fn the_audit_lets_a_log_restart_only_when_its_bytes_moved_to_a_rotated_file() {
+    let tmp = marspot_term::test_env::TempDir::new("state-map-audit-rotated");
+    let (before, after) = (tmp.join("before"), tmp.join("after"));
+    for d in [&before, &after] {
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+    }
+    std::fs::write(before.join("control-audit.log"), "a\nb\n").unwrap();
+    std::fs::write(after.join("control-audit.log"), "b\n").unwrap();
+    assert_eq!(audit(&before, &after).1, ["control-audit.log (4 bytes then, 2 now)"], "cut in place, moved nowhere");
+    std::fs::write(after.join("control-audit.log"), "snapshot\n").unwrap();
+    std::fs::write(after.join("control-audit.log.1"), "a\nb\nc\n").unwrap();
+    std::fs::write(before.join("control-audit.log.1"), "older\n").unwrap();
+    assert_eq!(audit(&before, &after), (vec![], vec![]), "rotated: the old bytes begin .1, and .1 itself was renamed over");
+
+    std::fs::write(before.join("logs/marspot.log"), "x\ny\n").unwrap();
+    std::fs::write(after.join("logs/marspot.log"), "z\n").unwrap();
+    assert_eq!(audit(&before, &after).1.len(), 1);
+    let gz = after.join("logs/marspot.00000000000000000002.log.gz");
+    let mut zip = std::process::Command::new("/usr/bin/gzip")
+        .arg("-c")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&gz).unwrap())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut zip.stdin.take().unwrap(), b"x\ny\nq\n").unwrap();
+    assert!(zip.wait().unwrap().success());
+    assert_eq!(audit(&before, &after), (vec![], vec![]), "the old bytes begin the compressed rotated log");
+}
+
+#[test]
 fn every_pattern_is_well_formed_and_listed_once() {
     for (i, e) in STATE_MAP.iter().enumerate() {
         assert!(!e.path.starts_with('/') && !e.path.ends_with('/'), "{}", e.path);
@@ -128,6 +179,9 @@ fn every_pattern_is_well_formed_and_listed_once() {
         assert!(!e.writer.is_empty() && !e.cap.is_empty(), "{}", e.path);
     }
     for p in NOT_APPEND_ONLY {
+        assert!(STATE_MAP.iter().any(|e| e.path == *p && e.kind == Kind::Fact), "{p} is no fact row");
+    }
+    for p in ROTATED.iter().flat_map(|(from, to)| std::iter::once(from).chain(to.iter())) {
         assert!(STATE_MAP.iter().any(|e| e.path == *p && e.kind == Kind::Fact), "{p} is no fact row");
     }
 }
