@@ -169,7 +169,7 @@ fn out(s: &Scene, x: &Pane) -> bool {
 fn inputs(a: &CodexAlloc, s: &Scene, i: usize) -> Option<Inputs> {
     let x = &s.panes[i];
     s.accounts.iter().find(|q| q.id == x.p.profile)?;
-    let mover = Mover { class: class_of(x.p), rate: x.rate(), tokens: None };
+    let mover = Mover { class: class_of(x.p), rate: x.rate(), tokens: None, fable: None };
     let base = |loads, kind| Inputs { accounts: s.accounts.clone(), b_f: s.b_f, b_n: s.b_n, kappa: None, loads, mover, here: x.p.profile, kind };
     if out(s, x) {
         let horizon_h = if x.p.helper { HELPER_LAST_H } else { MUST_LAST_H };

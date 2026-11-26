@@ -33,7 +33,7 @@
 use super::choose::{MUST_LAST_H, Mover, Reserve, pick_where};
 use super::plan::Plan;
 use super::rescue::rescue;
-use super::{Class, EPS, Load, Quant, lasts, plain_lasts, shortage};
+use super::{Class, EPS, Load, Quant, lasts_of, plain_lasts, shortage};
 
 /// An account that will not last this long sends its resting panes away.
 pub const LEAVE_BELOW_H: f64 = 2.0;
@@ -111,7 +111,7 @@ pub fn rest_move(accounts: &[Quant], plan: &Plan, p: &Resting) -> Option<RestMov
     let hi = accounts.iter().position(|q| q.id == p.here)?;
     let class = p.mover.class;
     let mut others = p.loads.to_vec();
-    others[hi].add(class, -p.mover.rate);
+    others[hi].add_mover(p.mover, -1.0);
     let q = &accounts[hi];
     let limited = p.moves_week >= MOVES_PER_WEEK;
     // what is left once U is gone is the restricted panes', keeper or not
@@ -157,9 +157,9 @@ fn leave(accounts: &[Quant], plan: &Plan, p: &Resting, others: &[Load]) -> Optio
     let allow = |q: &Quant| !q.stale && !(p.keeps_restricted && class == Class::Plain && q.phi() <= EPS);
     let to = pick_where(accounts, plan, others, p.mover, Some(p.here), horizon, Reserve::U, allow)?;
     let ti = accounts.iter().position(|q| q.id == to)?;
-    let mut there = lasts(&accounts[ti], &others[ti], class, p.mover.rate);
+    let mut there = lasts_of(&accounts[ti], &others[ti], p.mover);
     if class == Class::Plain {
-        there = there.min(plain_lasts(plan.u[ti], &others[ti], p.mover.rate));
+        there = there.min(plain_lasts(plan.u[ti], &others[ti], p.mover.b()));
     }
     (there >= horizon).then_some(to)
 }
@@ -189,7 +189,7 @@ fn band_move(accounts: &[Quant], plan: &Plan, p: &Resting, hi: usize, others: &[
         Class::Restricted => plan.t_f[i],
         Class::Plain => plan.t_n[i],
     };
-    if p.loads[hi].of(class) - target(hi) < p.mover.rate {
+    if p.loads[hi].of(class) - target(hi) < p.mover.of(class) {
         return None;
     }
     let worth = if p.speed_known { BAND_WORTH } else { 2.0 * BAND_WORTH };
@@ -203,10 +203,10 @@ fn band_move(accounts: &[Quant], plan: &Plan, p: &Resting, hi: usize, others: &[
             continue;
         }
         let d = target(i) - p.loads[i].of(class);
-        if d < p.mover.rate || lasts(q, &others[i], class, p.mover.rate) < MUST_LAST_H {
+        if d < p.mover.of(class) || lasts_of(q, &others[i], p.mover) < MUST_LAST_H {
             continue;
         }
-        if d.min(p.mover.rate) * q.renews_in(class).min(q.t) < worth {
+        if d.min(p.mover.of(class)) * q.renews_in(class).min(q.t) < worth {
             continue;
         }
         if best.is_none_or(|b| q.renews_in(class) < accounts[b].renews_in(class)) {

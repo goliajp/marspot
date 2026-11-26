@@ -173,7 +173,7 @@ pub(in crate::plugins) fn helper_move(pool: Pool, feed_at: i64, decision: Move, 
     scene.b_n = RHO0;
     placed(pool, |p| {
         p.feed(feed_at, now);
-        let to = match place(&scene, Mover { class, rate: RHO0, tokens: None }, Some(current), &p.counts()) {
+        let to = match place(&scene, Mover { class, rate: RHO0, tokens: None, fable: None }, Some(current), &p.counts()) {
             Placement::To(to, inputs) | Placement::HeldBack(to, inputs) => {
                 let agent = match pool {
                     Pool::Claude => "claude",

@@ -166,7 +166,7 @@ pub fn forecast(q: &Quant, load: &Load, extra: Option<(Mover, f64)>, kappa: Opti
     let mut run = Run { r: q.r.max(0.0), f: q.f.max(0.0), h: 0.0, o: Outcome::default() };
     let (mut mx, mut for_h) = (Load::default(), extra.map_or(0.0, |(_, h)| h.clamp(0.0, span)));
     if let Some((m, _)) = extra {
-        mx.add(m.class, m.rate);
+        mx.add_mover(m, 1.0);
     }
     // no week is longer than this; a later renewal is a reading gone wrong
     let mut week = q.t.clamp(0.0, WEEK_H);
@@ -266,7 +266,7 @@ fn best(accounts: &[Quant], loads: &[Load], m: Mover, costs: &[(usize, f64, bool
         .filter(|(i, c, x)| rank(*i, *x) == low.0 && key(*c) - low.1 < TIE)
         .min_by(|(a, ..), (b, ..)| {
             let (qa, qb) = (&accounts[*a], &accounts[*b]);
-            let lasts = |i: usize| super::lasts(&accounts[i], &loads[i], m.class, m.rate);
+            let lasts = |i: usize| super::lasts_of(&accounts[i], &loads[i], m);
             qa.renews_in(m.class).total_cmp(&qb.renews_in(m.class)).then(lasts(*b).total_cmp(&lasts(*a))).then(qa.id.cmp(&qb.id))
         })
         .map(|(i, ..)| *i)
@@ -339,7 +339,7 @@ pub fn keeps_the_rest(q: &Quant, load: &Load, class: Class, kappa: Option<f64>) 
 /// than it costs; `loads` count the pane where it is.
 fn rest(accounts: &[Quant], loads: &[Load], m: Mover, hi: usize, kappa: Option<f64>, p: &Params, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
     let mut others = loads.to_vec();
-    others[hi].add(m.class, -m.rate);
+    others[hi].add_mover(m, -1.0);
     let stays = added(&accounts[hi], &others[hi], m, kappa, MUST_LAST_H, p).cost;
     let cost = p.lambda * switch_cost(m.class, m.tokens);
     let gains: Vec<(usize, f64, bool)> = accounts
@@ -389,7 +389,7 @@ pub fn restricted_helper(accounts: &[Quant], loads: &[Load], plain: f64, restric
         return false;
     }
     let at = |class: Class, rate: f64| {
-        let m = Mover { class, rate, tokens: None };
+        let m = Mover { class, rate, tokens: None, fable: None };
         let (id, a) = placed(accounts, loads, m, None, kappa, horizon_h, p, |_| true)?;
         let i = accounts.iter().position(|q| q.id == id)?;
         Some((accounts[i].stale, a.refuses, displaced(&accounts[i], &loads[i], m, kappa, p)))

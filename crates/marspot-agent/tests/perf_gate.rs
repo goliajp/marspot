@@ -78,7 +78,7 @@ fn sched_alloc_perf_gate() {
         keeps_restricted: false,
         moves_week: 0,
     };
-    let mover = Mover { class: Class::Restricted, rate: 0.004, tokens: Some(300_000) };
+    let mover = Mover { class: Class::Restricted, rate: 0.004, tokens: Some(300_000), fable: None };
     let i = Inputs { accounts, b_f: 0.02, b_n: 0.08, kappa: Some(0.528), loads, mover, here: 3, kind };
     let mut times = Vec::new();
     for _ in 0..1000 {

@@ -77,7 +77,7 @@ pub fn inputs(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[(u8, Clas
         }
     }
     if from.is_none() {
-        demand.add(mover.class, mover.rate);
+        demand.add_mover(mover, 1.0);
     }
     let (b_f, b_n) = match scene.kappa {
         Some(_) => (demand.restricted, demand.plain),

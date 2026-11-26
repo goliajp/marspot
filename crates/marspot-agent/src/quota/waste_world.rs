@@ -197,7 +197,7 @@ impl World {
             },
             Ev::New(sid, to, class) => {
                 let to = match self.policy {
-                    Policy::Waste(p) => self.place(at, Mover { class, rate: super::RHO0, tokens: None }, None, Kind::New { horizon_h: HELPER_LAST_H }, &p).unwrap_or(to),
+                    Policy::Waste(p) => self.place(at, Mover { class, rate: super::RHO0, tokens: None, fable: None }, None, Kind::New { horizon_h: HELPER_LAST_H }, &p).unwrap_or(to),
                     _ => to,
                 };
                 self.add(at, sid, to, class);
@@ -284,7 +284,7 @@ impl World {
 
     fn mover(&self, now: i64, sid: u64) -> Mover {
         let (f, n, _) = self.rates(now, sid);
-        Mover { class: self.panes[&sid].class, rate: f + n, tokens: None }
+        Mover { class: self.panes[&sid].class, rate: f + n, tokens: None, fable: None }
     }
 
     /// The first resting pane the objective would move, moved.

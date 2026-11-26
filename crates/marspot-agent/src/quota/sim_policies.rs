@@ -53,7 +53,7 @@ fn inputs(a: &[Quant], panes: &[SimPane], i: usize, t: f64, kappa: f64, skip_sel
         b_n,
         kappa: Some(kappa),
         loads: loads_of(a, &tab, skip_self.then_some(i)),
-        mover: Mover { class: panes[i].class, rate: panes[i].est, tokens: None },
+        mover: Mover { class: panes[i].class, rate: panes[i].est, tokens: None, fable: None },
         // a pane not on any account leaves none: no account is numbered 0
         here: panes[i].on.unwrap_or(0),
         kind,

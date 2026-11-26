@@ -5,7 +5,9 @@
 //! `key=value` words separated by spaces; numbers as Rust prints an
 //! `f64`, which reads back to the same bits.  Accounts are
 //! `id:R:f:T:T_F:open:stale` and loads `restricted:plain`, each list
-//! joined by `;`.  Words it does not know are skipped.  Reading a line
+//! joined by `;`.  A pane's two speeds are `a=` and `b=`; a line without
+//! them reads the whole `rate` under its class.  Words it does not know
+//! are skipped.  Reading a line
 //! back is for the replay of a dry run and its tests; the shell only
 //! writes them.
 
@@ -195,8 +197,9 @@ impl Inputs {
         let class = if self.mover.class == Class::Restricted { "restricted" } else { "plain" };
         let kappa = self.kappa.map_or_else(|| "-".to_string(), |k| k.to_string());
         let tokens = self.mover.tokens.map_or_else(String::new, |t| format!(" tokens={t}"));
+        let split = self.mover.fable.map_or_else(String::new, |_| format!(" a={} b={}", self.mover.a(), self.mover.b()));
         let mut s = format!(
-            "here={} class={class} rate={}{tokens} kappa={kappa} bf={} bn={} acc={} loads={}",
+            "here={} class={class} rate={}{split}{tokens} kappa={kappa} bf={} bn={} acc={} loads={}",
             self.here,
             self.mover.rate,
             self.b_f,
@@ -257,7 +260,7 @@ impl Inputs {
                 moves_week: get("week").map_or(Some(0), |w| w.parse().ok())?,
             },
         };
-        Some(Inputs { accounts, b_f: num("bf")?, b_n: num("bn")?, kappa, loads, mover: Mover { class, rate: num("rate")?, tokens: get("tokens").and_then(|t| t.parse().ok()) }, here: get("here")?.parse().ok()?, kind })
+        Some(Inputs { accounts, b_f: num("bf")?, b_n: num("bn")?, kappa, loads, mover: Mover { class, rate: num("rate")?, tokens: get("tokens").and_then(|t| t.parse().ok()), fable: num("a") }, here: get("here")?.parse().ok()?, kind })
     }
 }
 

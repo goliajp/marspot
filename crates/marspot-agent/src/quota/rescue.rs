@@ -61,7 +61,7 @@ pub fn rescue(accounts: &[Quant], p: &Resting, hi: usize, others: &[Load]) -> Op
         if i == hi || !q.accepts(Class::Restricted) || q.stale || returning || q.tf >= here.tf {
             continue;
         }
-        if lapses(q, p.loads[i].restricted) < p.mover.rate * q.tf.min(RESCUE_WORTH_H) {
+        if lapses(q, p.loads[i].restricted) < p.mover.a() * q.tf.min(RESCUE_WORTH_H) {
             continue;
         }
         // the week there has to last the pane as long as the rescue is worth

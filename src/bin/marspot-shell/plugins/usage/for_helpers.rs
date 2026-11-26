@@ -140,7 +140,7 @@ pub(in crate::plugins) fn choose(
         (Agent::Claude, Class::Restricted) => RHO0 * helper_pick::fable_model().map_or(1.0, |(_, k)| k),
         _ => RHO0,
     };
-    let to = match place_by(scene, Mover { class, rate, tokens: None }, None, &placed.counts(), rule) {
+    let to = match place_by(scene, Mover { class, rate, tokens: None, fable: None }, None, &placed.counts(), rule) {
         Placement::To(n, inputs) => chosen("placed", n, &inputs),
         // only the bands, which no Claude helper is placed by, hold one back
         Placement::HeldBack(n, inputs) => chosen("held_back_start", n, &inputs),

@@ -226,7 +226,7 @@ impl GeminiAlloc {
         let loads = loads_of(&accounts, &table, Some(i));
         let horizon_h = if p.helper { HELPER_LAST_H } else { MUST_LAST_H };
         let b_n = RHO0 * snap.panes.len() as f64;
-        Inputs { accounts, b_f: 0.0, b_n, kappa: None, loads, mover: Mover { class: Class::Plain, rate: RHO0, tokens: None }, here: p.profile, kind: Kind::Out { horizon_h } }
+        Inputs { accounts, b_f: 0.0, b_n, kappa: None, loads, mover: Mover { class: Class::Plain, rate: RHO0, tokens: None, fable: None }, here: p.profile, kind: Kind::Out { horizon_h } }
     }
 
     /// A move made: one line, with what chose it.

@@ -55,6 +55,8 @@ mod waste_tests;
 mod waste_world;
 #[cfg(test)]
 mod waste_replay_tests;
+#[cfg(test)]
+mod split_tests;
 
 /// The share of a Claude week a full Fable window is worth.
 ///
@@ -155,6 +157,12 @@ impl Load {
         }
     }
 
+    /// Add `m`'s two speeds, or take them away with `sign` -1.
+    pub fn add_mover(&mut self, m: choose::Mover, sign: f64) {
+        self.restricted += sign * m.a();
+        self.plain += sign * m.b();
+    }
+
     pub fn add(&mut self, class: Class, rate: f64) {
         match class {
             Class::Plain => self.plain += rate,
@@ -170,6 +178,18 @@ pub fn lasts(q: &Quant, load: &Load, class: Class, extra: f64) -> f64 {
     let restricted = load.restricted + if class == Class::Restricted { extra } else { 0.0 };
     let mut t = if total > 0.0 { q.r / total } else { 1e9 };
     if class == Class::Restricted && restricted > 0.0 {
+        t = t.min(q.f / restricted);
+    }
+    t
+}
+
+/// `lasts` for a pane placed with both its speeds: the week runs out at
+/// the whole load, the restricted window at what uses that model.
+pub fn lasts_of(q: &Quant, load: &Load, m: choose::Mover) -> f64 {
+    let total = load.total() + m.rate;
+    let restricted = load.restricted + m.a();
+    let mut t = if total > 0.0 { q.r / total } else { 1e9 };
+    if m.class == Class::Restricted && restricted > 0.0 {
         t = t.min(q.f / restricted);
     }
     t
