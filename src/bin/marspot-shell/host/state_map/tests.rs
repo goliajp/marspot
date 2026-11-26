@@ -1,0 +1,141 @@
+use std::path::{Path, PathBuf};
+
+use super::*;
+
+/// Every file under `root` that is not a directory, relative and
+/// `/`-separated, links included and not followed.
+fn files_under(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).expect("a readable directory") {
+            let p = e.expect("a readable entry").path();
+            let meta = std::fs::symlink_metadata(&p).expect("an entry that is there");
+            if meta.is_dir() {
+                walk(root, &p, out);
+            } else {
+                out.push(p.strip_prefix(root).expect("under the root").to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// What a run left that the table does not know, and the fact files
+/// whose earlier bytes changed.
+fn audit(before: &Path, after: &Path) -> (Vec<String>, Vec<String>) {
+    let unknown = files_under(after).into_iter().filter(|f| lookup(f).is_none()).collect();
+    let mut rewritten = Vec::new();
+    for f in files_under(before) {
+        if lookup(&f).is_none_or(|e| e.kind != Kind::Fact) {
+            continue;
+        }
+        // gone is allowed: delivered mail, a pruned day, a rotation
+        let Ok(now) = std::fs::read(after.join(&f)) else { continue };
+        let then = std::fs::read(before.join(&f)).expect("the copy taken before");
+        if !now.starts_with(&then) {
+            rewritten.push(format!("{f} ({} bytes then, {} now)", then.len(), now.len()));
+        }
+    }
+    (unknown, rewritten)
+}
+
+fn env_dir(var: &str) -> PathBuf {
+    let dir = std::env::var_os(var).unwrap_or_else(|| panic!("{var} names no directory: run this through bin/test-state-map.sh"));
+    let dir = PathBuf::from(dir);
+    assert!(dir.is_dir(), "{} is not a directory", dir.display());
+    dir
+}
+
+/// After a sandbox run of the app (`bin/test-state-map.sh`): every file
+/// in its state root is in the table, and every fact file the run had
+/// written to halfway was only appended to afterwards.
+#[test]
+#[ignore = "reads the state root a sandbox run left; bin/test-state-map.sh runs it"]
+fn state_map_covers_every_file() {
+    let (before, after) = (env_dir("MARSPOT_STATE_MAP_BEFORE"), env_dir("MARSPOT_STATE_MAP_ROOT"));
+    let listed = files_under(&after);
+    assert!(listed.iter().any(|f| f.starts_with("sessions/")), "the run left no session: it did not run the app");
+    for f in &listed {
+        let e = lookup(f).map_or("UNREGISTERED".into(), |e| format!("{:?} {}", e.kind, e.path));
+        println!("{f}\t{e}");
+    }
+    let (unknown, rewritten) = audit(&before, &after);
+    assert!(unknown.is_empty(), "files the state map does not know:\n  {}", unknown.join("\n  "));
+    assert!(rewritten.is_empty(), "fact files whose earlier bytes changed:\n  {}", rewritten.join("\n  "));
+    println!("{} files, all registered; fact files only appended to", listed.len());
+}
+
+#[test]
+fn the_audit_finds_an_unknown_file_and_a_rewritten_fact() {
+    let tmp = marspot_term::test_env::TempDir::new("state-map-audit");
+    let (before, after) = (tmp.join("before"), tmp.join("after"));
+    for d in [&before, &after] {
+        std::fs::create_dir_all(d.join("helpers")).unwrap();
+        std::fs::create_dir_all(d.join("zombie")).unwrap();
+    }
+    std::fs::write(before.join("helpers/events.log"), "a\nb\n").unwrap();
+    std::fs::write(after.join("helpers/events.log"), "a\nB\nc\n").unwrap();
+    std::fs::write(before.join("zombie/told.tsv"), "1\n").unwrap();
+    std::fs::write(after.join("zombie/told.tsv"), "2\n").unwrap();
+    std::fs::write(after.join("surprise.bin"), "").unwrap();
+    let (unknown, rewritten) = audit(&before, &after);
+    assert_eq!(unknown, ["surprise.bin"]);
+    assert_eq!(rewritten, ["helpers/events.log (4 bytes then, 6 now)"], "a rewritten derived file is no finding");
+    std::fs::write(after.join("helpers/events.log"), "a\nb\nc\n").unwrap();
+    assert!(audit(&before, &after).1.is_empty());
+}
+
+#[test]
+fn every_pattern_is_well_formed_and_listed_once() {
+    for (i, e) in STATE_MAP.iter().enumerate() {
+        assert!(!e.path.starts_with('/') && !e.path.ends_with('/'), "{}", e.path);
+        let mut rest = e.path;
+        while let Some(at) = rest.find('<') {
+            let end = rest[at..].find('>').unwrap_or_else(|| panic!("unclosed placeholder in {}", e.path)) + at;
+            assert!(["id", "n", "date", "uuid"].contains(&&rest[at + 1..end]), "unknown placeholder in {}", e.path);
+            rest = &rest[end + 1..];
+        }
+        assert!(!STATE_MAP[..i].iter().any(|o| o.path == e.path), "{} is listed twice", e.path);
+        assert!(!e.writer.is_empty() && !e.cap.is_empty(), "{}", e.path);
+    }
+}
+
+#[test]
+fn files_of_today_find_their_rows() {
+    let cases = [
+        ("sessions/41/entry.toml", Kind::Draft, true),
+        ("sessions/41/bytelog.seg.3", Kind::Draft, true),
+        ("sessions/41/state.bin.tmp", Kind::Runtime, false),
+        ("plugins/claudecode/alloc_events/20261126.tsv", Kind::Fact, true),
+        ("plugins/claudecode/model/2fec8734-bf76-478b-8044-20261126b7e4", Kind::Derived, true),
+        ("plugins/claudecode/model/.2fec8734-bf76-478b-8044-20261126b7e4.tmp", Kind::Runtime, false),
+        ("usage/usage_samples/20261126.tsv", Kind::Fact, true),
+        ("peerbus/kimi/session_abc.jsonl", Kind::Fact, true),
+        ("peerbus/3-in.sock", Kind::Runtime, false),
+        ("helpers/7/home/.claude.json", Kind::External, false),
+        ("zombie/orphans.tsv", Kind::Derived, true),
+        ("handoff/483.md", Kind::Draft, true),
+        ("settings.toml", Kind::UserConfig, true),
+        ("logs/marspot.00000000001764115200.log.gz", Kind::Fact, false),
+        ("test-shell-core.run.log", Kind::Runtime, false),
+    ];
+    for (path, kind, across) in cases {
+        let e = lookup(path).unwrap_or_else(|| panic!("{path} has no row"));
+        assert_eq!((e.kind, e.across_images), (kind, across), "{path} matched {}", e.path);
+    }
+    assert!(lookup("zombie/unheard-of.tsv").is_none());
+    assert!(lookup("sessions/x/entry.toml").is_none());
+}
+
+#[test]
+fn directories_are_known_by_the_files_under_them() {
+    for dir in ["plugins", "plugins/claudecode", "plugins/kimi", "zombie", "helpers", "peerbus/gemini", "sessions", "usage"] {
+        assert!(has_dir(dir), "{dir}");
+    }
+    assert!(!has_dir("nobody"));
+    assert!(!has_dir("settings.toml"));
+    assert!(is_registered("zombie/told.tsv") && is_registered("plugins/claudecode/model"));
+    assert!(!is_registered("anything.tmp"), "the catch-all rows vouch for no path the source names");
+}
