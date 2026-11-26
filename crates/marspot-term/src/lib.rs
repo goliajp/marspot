@@ -12,6 +12,7 @@
 //! surface (`pub use marspot_term::*`) so existing `marspot::grid::...`
 //! paths keep resolving.
 
+pub mod agent;
 pub mod async_writer;
 pub mod base64;
 pub mod binary_tree;
