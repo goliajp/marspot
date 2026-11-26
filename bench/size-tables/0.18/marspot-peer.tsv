@@ -1,15 +1,18 @@
 # binary	marspot-peer
 # version	0.18.0
-# commit	f8d75686
+# commit	f3d5667aaec20c77b4cdec2206c13ee0d8f06862
 # file_bytes	857200
 # budget	1048576
+# previous_budget	none
 # previous	-
+# checksum	sha256:34036379b7ee076e9b4bb1ca6cb965f77bd6fdccf9ab7963fde8422fed69fd56
 module	bytes	previous	delta
-(unmapped: headers, linkedit, signature, padding)	188912	0	+188912
+(__LINKEDIT: symbols, strings, signature)	152688	0	+152688
 core	137265	0	+137265
 std	78240	0	+78240
 marspot_peer::control	64908	0	+64908
 (__TEXT,__eh_frame)	50208	0	+50208
+(unmapped: headers, padding)	36224	0	+36224
 gimli	32904	0	+32904
 marspot_peer::main	32540	0	+32540
 alloc	27116	0	+27116

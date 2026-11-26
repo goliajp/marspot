@@ -1,11 +1,13 @@
 # binary	marspot-shell
 # version	0.18.0
-# commit	f8d75686
+# commit	f3d5667aaec20c77b4cdec2206c13ee0d8f06862
 # file_bytes	6346592
 # budget	7340032
+# previous_budget	none
 # previous	-
+# checksum	sha256:3e995d204e9909dc98803b3911c32e1945f7b5ba69a59d63735629874810aeb6
 module	bytes	previous	delta
-(unmapped: headers, linkedit, signature, padding)	942073	0	+942073
+(__LINKEDIT: symbols, strings, signature)	907104	0	+907104
 core	616279	0	+616279
 std	447172	0	+447172
 marspot_shell::plugins::claudecode	393064	0	+393064
@@ -35,6 +37,7 @@ marspot_shell::plugins::handoff	59252	0	+59252
 marspot_shell::main	50764	0	+50764
 marspot_shell::app_events	43988	0	+43988
 marspot_term::scrollback	35604	0	+35604
+(unmapped: headers, padding)	34969	0	+34969
 marspot_shell::pane_upkeep	33760	0	+33760
 alloc <- marspot_shell	33736	0	+33736
 gimli	32904	0	+32904

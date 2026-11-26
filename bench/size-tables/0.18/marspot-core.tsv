@@ -1,11 +1,13 @@
 # binary	marspot-core
 # version	0.18.0
-# commit	f8d75686
+# commit	f3d5667aaec20c77b4cdec2206c13ee0d8f06862
 # file_bytes	2678288
 # budget	2883584
+# previous_budget	none
 # previous	-
+# checksum	sha256:45f7f94552dd56cf0b8e57ac4452650b6fa586066b6d4d6015754af21c2819d8
 module	bytes	previous	delta
-(unmapped: headers, linkedit, signature, padding)	439776	0	+439776
+(__LINKEDIT: symbols, strings, signature)	400912	0	+400912
 core	232095	0	+232095
 std	179624	0	+179624
 marspot::ui	156868	0	+156868
@@ -19,6 +21,7 @@ marspot_term::terminal	56212	0	+56212
 marspot_term::grid	46652	0	+46652
 marspot_term::scrollback	43892	0	+43892
 core <- marspot_core	40276	0	+40276
+(unmapped: headers, padding)	38864	0	+38864
 marspot_core::draw	37672	0	+37672
 marspot_core::helper_strip	36459	0	+36459
 marspot::pane	35324	0	+35324
