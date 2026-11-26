@@ -84,14 +84,9 @@ fn parse_log_event(args: &[String]) -> Option<(&str, String)> {
     Some((tag, args.get(2..).unwrap_or(&[]).join(" ")))
 }
 
-fn env_required<T: std::str::FromStr>(name: &str) -> T {
-    let raw = std::env::var(name)
-        .unwrap_or_else(|_| panic!("[core] missing required env var {name}"));
-    raw.parse::<T>()
-        .ok()
-        .unwrap_or_else(|| panic!("[core] env {name} = {raw:?} failed to parse"))
-}
-
+#[path = "marspot-core/boot_env.rs"]
+mod boot_env;
+use boot_env::env_required;
 #[path = "marspot-core/process_state.rs"]
 mod process_state;
 use process_state::{PanePidTree, ProcessPanelState, KILL_ESCALATION_GRACE};
@@ -2648,6 +2643,8 @@ struct CoreApp {
 }
 
 fn main() {
+    // SAFETY: no thread yet; before this image opens anything
+    let arrival = unsafe { marspot_term::exec_contract::arrive() };
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if probe_args::answer(&args) {
@@ -2665,6 +2662,7 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("core");
+    arrival.inspect(|a| a.verify(&[]));
     marspot_term::signals::log_fatal_senders("L2_SIGNAL");
     // Start the async path oracle before the first frame.  Without it
     // `link_probe::oracle()` falls back to the blocking `FsOracle`: right

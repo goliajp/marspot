@@ -85,6 +85,7 @@ pub mod paste;
 pub mod pane_code;
 pub mod paths;
 pub mod host_load;
+pub mod exec_contract;
 pub mod inherited_fds;
 pub mod platform;
 pub mod submit_receipt;

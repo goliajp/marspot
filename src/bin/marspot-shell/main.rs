@@ -127,6 +127,8 @@ const FRESH_H_PT: f64 = 600.0;
 const REDRAW_INTERVAL_MS: u64 = 1_000;
 
 fn main() {
+    // SAFETY: no thread yet; before this image opens anything
+    let arrival = unsafe { marspot_term::exec_contract::arrive() };
     // the child that checks the registration: one event and out
     if std::env::args().nth(1).as_deref() == Some(apple_events::CHECK_ARG) {
         std::process::exit(apple_events::check_main(std::env::args().nth(2).as_deref()));
@@ -164,6 +166,7 @@ fn main() {
     marspot_term::signals::log_fatal_senders("L1_SIGNAL");
     apple_events::report();
     inherited::report();
+    arrival.inspect(|a| a.verify(&[]));
 
     // Rollback subcommands dispatch BEFORE the redirect: when
     // current/ is broken, exec'ing into it would eat the command.
@@ -438,15 +441,7 @@ Usage:\n\
     // compares against a release tag.
     let updater = marspot::updater::spawn(marspot::PRODUCT_VERSION.to_string());
 
-    // Frame restore: the predecessor shell (self-update execv) hands
-    // its exact window frame over via env so this process reopens in
-    // place instead of jumping to the default rect.  Consumed here —
-    // removed from our env so spawned children (core) don't carry it.
-    let restore_frame = std::env::var("MARSPOT_RESTORE_FRAME").ok().and_then(|s| {
-        // SAFETY: startup path in main(), before any thread is spawned.
-        unsafe { std::env::remove_var("MARSPOT_RESTORE_FRAME") };
-        supervisor::parse_restore_frame(&s)
-    });
+    let restore_frame = self_exec::take_restore_frame();
     // F3+6.1 — fall back to the persisted window-state.bin when the
     // env-var path (used by L1 self-execv to round-trip through itself)
     // didn't carry a frame.  Sane bounds: w/h > 50 pt guards against a

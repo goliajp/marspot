@@ -78,7 +78,7 @@ fn old_image() {
     new.env(LEFT, format!("{held_relay},{relay},{lingers_pid}"));
     // the shell's one exec exit, with the hook the plugin registers at start
     super::register();
-    let err = crate::platform::exec_hooks::exec_prepared(&mut new);
+    let err = crate::platform::exec_hooks::exec_prepared(marspot_term::exec_contract::ExecKind::ShellUpdate, &mut new);
     panic!("exec: {err}");
 }
 

@@ -3,6 +3,8 @@
 
 use marspot::{lx_error, lx_event, lx_warn};
 
+use marspot_term::exec_contract::ExecKind;
+
 use crate::platform::exec_hooks;
 use crate::{apple_events, sup_log, supervisor, ShellApp};
 
@@ -99,7 +101,7 @@ impl ShellApp {
             .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
             .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
         apple_events::mark(&mut cmd);
-        let err = exec_hooks::exec_prepared(&mut cmd);
+        let err = exec_hooks::exec_prepared(ExecKind::ShellUpdate, &mut cmd);
         lx_event!(
             "SHELL_UPDATE_FAIL",
             "exec into current/marspot-shell failed",
@@ -147,7 +149,7 @@ impl ShellApp {
             cmd.env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"));
         }
         apple_events::mark_retry(&mut cmd, n);
-        let err = exec_hooks::exec_prepared(&mut cmd);
+        let err = exec_hooks::exec_prepared(ExecKind::ShellReplace, &mut cmd);
         lx_error!("shell.ae_check.exec_failed", &format!("{err}"), target = target.display());
         // the frames held were of surfaces released above; the next core
         // brings new ones, and they must not be held for a check that
@@ -187,4 +189,14 @@ pub(crate) fn arrived_by_update() -> bool {
     // operation; the post-execv shell should treat them as one
     // operation too.)
     true
+}
+
+/// The window frame the predecessor shell handed over, so this one
+/// reopens in place instead of at the default rect; taken out of the
+/// environment so that children (the core) do not carry it.
+pub(crate) fn take_restore_frame() -> Option<(f64, f64, f64, f64)> {
+    let s = std::env::var("MARSPOT_RESTORE_FRAME").ok()?;
+    // SAFETY: startup path in main(), as it always was here
+    unsafe { std::env::remove_var("MARSPOT_RESTORE_FRAME") };
+    supervisor::parse_restore_frame(&s)
 }

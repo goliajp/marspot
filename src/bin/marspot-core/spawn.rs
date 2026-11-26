@@ -115,10 +115,8 @@ fn spawn_l3_with_cwd(
         cmd.env("MARSPOT_SHADOW_OF", sh.parent.to_string())
             .env("MARSPOT_SHADOW_IDLE_S", sh.idle_s.to_string());
     }
-    // Ensure the child does NOT inherit any control-socket env from
-    // the L2 parent — RFC-003 step 3b leaves the inherited-fd path
-    // behind entirely.
-    cmd.env_remove(ENV_CONTROL_FD);
+    // nothing of this core's own (its control fd, its surfaces) reaches the session
+    marspot_term::exec_contract::sweep_env(marspot_term::exec_contract::ExecKind::SessionSpawn, &mut cmd);
     // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
     // libc calls (dup2/close/fcntl) are used.
     let close_limit = marspot_term::inherited_fds::close_limit();

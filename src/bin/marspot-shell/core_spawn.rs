@@ -181,6 +181,8 @@ impl ShellApp {
             .env(ENV_SURFACE_SCALE, scale.to_string())
             .env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
             .env(marspot::ui::system::macos::icons::FROM_SHELL_ENV, "1");
+        marspot_term::exec_contract::sweep_env(marspot_term::exec_contract::ExecKind::CoreSpawn, &mut cmd);
+        let close_limit = marspot_term::inherited_fds::close_limit();
         // SAFETY: pre_exec runs in the forked child between fork and
         // exec.  Only async-signal-safe libc calls are allowed; we
         // only use dup2/close/fcntl which are all on the AS-safe list.
@@ -201,6 +203,8 @@ impl ShellApp {
                         flags & !libc::FD_CLOEXEC,
                     );
                 }
+                // the control socket is the one descriptor the core is meant to have
+                marspot_term::inherited_fds::close_inherited(close_limit, &[DEFAULT_CONTROL_FD]);
                 Ok(())
             });
         }

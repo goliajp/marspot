@@ -8,6 +8,8 @@
 
 use std::sync::Mutex;
 
+use marspot_term::exec_contract::{self, ExecKind};
+
 /// Hooks a binary may register; a handful exist.
 const CAP: usize = 8;
 
@@ -43,15 +45,16 @@ fn snapshot() -> Vec<ExecHook> {
 }
 
 /// Exec `cmd` as this process's next image, after every hook's
-/// `before`.  Returns only when the exec failed, after every hook's
-/// `failed`.
-pub(crate) fn exec_prepared(cmd: &mut std::process::Command) -> std::io::Error {
+/// `before`, carrying what an exec of `kind` carries and nothing else.
+/// Returns only when the exec failed, after every hook's `failed`.
+pub(crate) fn exec_prepared(kind: ExecKind, cmd: &mut std::process::Command) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     // copied out: a hook may register, and the lock is not held across the exec
     let hooks = snapshot();
     for h in &hooks {
         (h.before)();
     }
+    exec_contract::prepare_command_exec(kind, cmd, &[]);
     let err = cmd.exec();
     for f in hooks.iter().filter_map(|h| h.failed) {
         f();

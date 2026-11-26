@@ -5,6 +5,7 @@ use std::os::fd::RawFd;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
+use marspot_term::exec_contract::{self, ExecKind};
 use marspot_term::{lx_error, lx_event};
 
 use crate::control_writer::ControlWriter;
@@ -116,6 +117,7 @@ pub(crate) fn do_l3_execv_swap(
         None => -1,
     };
 
+    let lock_fd = listener.dir_lock_fd();
     let manifest_path = handoff_manifest_path();
     let handoff = L3Handoff {
         master_fd, child_pid, listen_fd, cols, rows, control_stream_fd, marks, shadow, socket,
@@ -153,6 +155,13 @@ pub(crate) fn do_l3_execv_swap(
     // listener fd open for the new image).
     std::mem::drop(listener);
 
+    #[cfg(debug_assertions)]
+    crate::exec_arrival::leak_for_test(false);
+    // SAFETY: the loop has ended; the threads left do not read the environment
+    unsafe { exec_contract::prepare_own_exec(ExecKind::SessionUpdate, &[master_fd, listen_fd, control_stream_fd, lock_fd]) };
+    #[cfg(debug_assertions)]
+    crate::exec_arrival::leak_for_test(true);
+
     // Held across the exec and released by the new image once its own
     // handler is armed — see `set_sigterm_blocked`.
     marspot_term::signals::set_sigterm_blocked(true);
@@ -163,8 +172,24 @@ pub(crate) fn do_l3_execv_swap(
     let err = std::io::Error::last_os_error();
     lx_error!("l3.execv.failed", &format!("{err}"), target = target.display());
     unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
+    unsafe { std::env::remove_var(exec_contract::KIND_ENV); }
     let _ = std::fs::remove_file(&manifest_path);
     Err(err)
+}
+
+/// For the image that resumed: the PTY's foreground process group gets
+/// a SIGWINCH after the snapshot restore.  A full-screen TUI cannot know
+/// the terminal behind its PTY swapped images; if any repaint drift
+/// slipped through, it re-queries the size and repaints from scratch,
+/// and a repaint with nothing drifted changes nothing.
+pub(crate) fn nudge_after_resume(master_fd: RawFd) {
+    // SAFETY: two calls on a descriptor and a group number
+    unsafe {
+        let pg = libc::tcgetpgrp(master_fd);
+        if pg > 0 {
+            libc::killpg(pg, libc::SIGWINCH);
+        }
+    }
 }
 
 #[cfg(test)]

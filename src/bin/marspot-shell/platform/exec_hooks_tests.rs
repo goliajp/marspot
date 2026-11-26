@@ -23,7 +23,7 @@ fn exec_hooks_run_in_registration_order_and_again_when_the_exec_fails() {
     assert_eq!(names.iter().filter(|n| **n == "test-first").count(), 1);
 
     // a real exec, of a file that is not there: it returns
-    let err = exec_prepared(&mut std::process::Command::new("/nonexistent/marspot-shell"));
+    let err = exec_prepared(ExecKind::ShellUpdate, &mut std::process::Command::new("/nonexistent/marspot-shell"));
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
     assert_eq!(*TRACE.lock().unwrap(), [1, 2, 4], "before hooks in order, then the failed one");
 }
@@ -67,7 +67,7 @@ fn without_test_module(text: &str) -> &str {
 }
 
 #[test]
-fn exec_hooks_every_image_replacement_goes_through_the_one_exit() {
+fn every_exec_goes_through_exec_prepared() {
     let sources = production_sources();
     let execs: Vec<&str> = sources
         .iter()

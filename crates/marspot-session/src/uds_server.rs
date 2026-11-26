@@ -237,8 +237,9 @@ impl SessionListener {
             socket_id: socket_id.or_else(|| crate::own_socket::SocketId::of(&session_socket_path(id))),
             // RFC-004 A.3 — the pre-execv image's lock fd is still
             // open in this same process (CLOEXEC cleared before the
-            // swap), so the flock is already ours; nothing to acquire.
-            dir_lock: None,
+            // swap), so the flock is already ours: taken over by its
+            // descriptor, so that the next update carries it by name
+            dir_lock: crate::exec_arrival::inherited_dir_lock(id),
         })
     }
 
@@ -305,6 +306,11 @@ impl SessionListener {
     pub fn leave_unreachable(mut self) {
         self.ended = true;
         crate::own_socket::remove_if_ours(&session_socket_path(self.id), self.socket_id);
+    }
+
+    /// The session directory lock's descriptor; -1 without one.
+    pub(crate) fn dir_lock_fd(&self) -> RawFd {
+        self.dir_lock.as_ref().map_or(-1, |l| l.as_raw_fd())
     }
 
     pub(crate) fn socket_id(&self) -> Option<crate::own_socket::SocketId> {
