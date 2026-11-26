@@ -14,12 +14,15 @@
 
 mod claude;
 mod codex;
+mod codex_resets;
 mod feed;
 mod feed_load;
 mod feed_month;
 mod http;
 mod iso_time;
 mod kimi;
+mod resets;
+mod resets_store;
 mod samples;
 mod sha256;
 pub(in crate::plugins) mod for_helpers;
@@ -130,6 +133,8 @@ struct Collector {
     /// Who wrote the Claude and the Codex feed at the last pass: true
     /// for devops.  Logged when it changes.
     by_devops: [Option<bool>; 2],
+    /// The stored resets each pass reads.
+    resets: resets::Resets,
 }
 
 impl Collector {
@@ -150,6 +155,7 @@ impl Collector {
             kimi,
             samples,
             by_devops: [None; 2],
+            resets: resets::Resets::new(own_claude.parent().map(Path::to_path_buf).unwrap_or_default(), now_unix()),
             kimi_state: kimi::Kimi::default(),
             kimi_only: false,
             sources,
@@ -180,11 +186,13 @@ impl Collector {
             sample(&mut self.samples, "claude", &self.claude, now);
             write("claude", &self.own_claude, &self.claude, now);
         }
+        let mut own_resets = Vec::new();
         if !devops_collects("codex", &self.sources.codex, &mut self.by_devops[1], now) {
-            self.codex = codex::pass(home, std::mem::take(&mut self.codex), now);
+            self.codex = codex::pass(home, std::mem::take(&mut self.codex), now, &mut own_resets);
             sample(&mut self.samples, "codex", &self.codex, now);
             write("codex", &self.own_codex, &self.codex, now);
         }
+        self.resets.pass(self.by_devops[1] == Some(true), &self.sources.codex, own_resets, &self.kimi, now);
     }
 }
 

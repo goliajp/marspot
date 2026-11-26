@@ -93,6 +93,7 @@ pub mod app_pointer;
 pub mod app_menu;
 mod app_menu_script;
 pub mod cc;
+pub mod agent_resets;
 pub mod cc_usage;
 pub mod kimi_usage;
 pub mod commands;

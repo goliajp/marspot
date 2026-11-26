@@ -24,7 +24,7 @@ fn lines(d: &Path) -> Vec<String> {
 }
 
 fn account(profile: u8) -> AccountIn {
-    AccountIn { profile, week_used: 0.5, fable_used: Some(0.0), fable_known: true, week_renews: NOW + 100 * 3600, fable_renews: NOW + 100 * 3600, open: true, measured_at: NOW }
+    AccountIn { profile, week_used: 0.5, fable_used: Some(0.0), fable_known: true, week_renews: NOW + 100 * 3600, fable_renews: NOW + 100 * 3600, open: true, measured_at: NOW, supply: Vec::new() }
 }
 
 fn pane(sid: u64, profile: u8, resting: bool) -> PaneIn {

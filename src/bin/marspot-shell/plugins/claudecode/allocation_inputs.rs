@@ -17,7 +17,9 @@ use std::time::SystemTime;
 use super::fable_need::{self, MARK_FOR, Marks};
 use super::quota::{self, Room};
 use super::{BindMeta, CcActivity, ScanResult, SessionInfo, rooms};
-use crate::plugins::allocation::{Class, KAPPA_FABLE, Quant};
+use crate::agentsvc::sched::supply;
+use crate::plugins::allocation::{Class, KAPPA_FABLE, Load, Quant};
+use marspot_agent::sched::reset::{Supply, with_supply};
 
 /// A reading older than this is extrapolated and ranked after fresh ones.
 pub(super) const STALE_ACCOUNT_S: i64 = 30 * 60;
@@ -34,6 +36,8 @@ pub(super) struct AccountIn {
     pub fable_renews: i64,
     pub open: bool,
     pub measured_at: i64,
+    /// What its stored resets bring back before they end.
+    pub supply: Vec<Supply>,
 }
 
 impl AccountIn {
@@ -46,7 +50,8 @@ impl AccountIn {
         let f = if self.fable_known { KAPPA_FABLE * (1.0 - self.fable_used.unwrap_or(0.0)).max(0.0) } else { 0.0 };
         let r = (1.0 - w).max(0.0);
         let hours = |at: i64| (at - now) as f64 / 3600.0;
-        Quant { id: self.profile, r, f, t: hours(self.week_renews), tf: hours(self.fable_renews), open: self.open, stale }
+        let q = Quant { id: self.profile, r, f, t: hours(self.week_renews), tf: hours(self.fable_renews), open: self.open, stale };
+        with_supply(&q, &Load { restricted: 0.0, plain: rate_since }, KAPPA_FABLE, &self.supply)
     }
 }
 
@@ -92,12 +97,15 @@ pub(super) fn snapshot(result: &ScanResult, seen: &HashMap<PathBuf, SessionInfo>
 /// Each numbered profile's account as the feed reads it, `profiles`
 /// pairing each with its address.
 pub(super) fn accounts_of(profiles: &[(u8, Option<String>)], usage: &marspot::cc_usage::CcUsage, now: i64) -> Vec<AccountIn> {
+    let resets = marspot::agent_resets::read(now);
     profiles
         .iter()
         .filter_map(|(p, mail)| {
             let a = usage.accounts.iter().find(|a| Some(&a.email) == mail.as_ref())?;
             let fable_reset = a.model_limits.iter().find(|m| quota::same_model("fable", &m.label.to_ascii_lowercase())).and_then(|m| m.reset);
-            account_in(*p, &rooms::room_of(a, now), fable_reset.filter(|r| *r > now))
+            let mut ac = account_in(*p, &rooms::room_of(a, now), fable_reset.filter(|r| *r > now))?;
+            ac.supply = supply::of_account(&resets, "claude", *p, None, now);
+            Some(ac)
         })
         .collect()
 }
@@ -114,6 +122,7 @@ fn account_in(profile: u8, room: &Room, fable_renews: Option<i64>) -> Option<Acc
         fable_renews: fable_renews.unwrap_or(*reset_7d),
         open: !room.refused_for(None),
         measured_at: *measured_at,
+        supply: Vec::new(),
     })
 }
 

@@ -12,6 +12,8 @@
 //! where the shell decided by the bands (`rule=bands`), `agree=` says
 //! whether two different rules happened to agree.
 
+pub(crate) mod supply;
+
 use marspot_agent::quota::replay::{Inputs, Kind, Rule, Why};
 use marspot_agent::quota::{Load, Quant};
 use marspot_agent::sched::price::pool;

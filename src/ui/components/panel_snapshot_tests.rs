@@ -393,6 +393,7 @@ fn account(
         status_label: t(if limited { Msg::StatusLimit } else { Msg::StatusOk }).to_string(),
         status_severity: if limited { 2 } else { 0 },
         reset_label: strings::text(Arg::ResetAt(MonthDayTime { month, day, hour, minute })),
+        resets: Vec::new(),
         windows: windows
             .iter()
             .map(|&(label, util, hours, hm)| CcUsageWindowRender {
@@ -406,13 +407,8 @@ fn account(
     }
 }
 
-/// Ten accounts, some at their limit, one with an address too long
-/// for its card.
-fn accounts_panel(renderer: &mut MetalRenderer, layout: &Layout) {
-    open_accounts(renderer, layout, None);
-}
-
-/// What the accounts pictures show: ten accounts, when the feed was
+/// What the accounts pictures show: ten accounts, some at their limit,
+/// one with an address too long for its card; when the feed was
 /// written, and the moment it is read at.
 pub(crate) fn accounts_data() -> (Vec<CcUsageAccountRender>, String, Clock) {
     let accounts = vec![
@@ -468,14 +464,14 @@ pub(super) fn open_accounts(
 /// Wide enough for the ten cards to sit in one row.
 #[test]
 pub(super) fn panel_snapshot_accounts() {
-    snapshot("accounts", 2800, 1300, accounts_panel);
+    snapshot("accounts", 2800, 1300, |r, l| { open_accounts(r, l, None); });
 }
 
 /// The same panel where one row would make the cards too narrow: two
 /// rows of five.
 #[test]
 pub(super) fn panel_snapshot_accounts_narrow() {
-    snapshot("accounts_narrow", 1700, 1500, accounts_panel);
+    snapshot("accounts_narrow", 1700, 1500, |r, l| { open_accounts(r, l, None); });
 }
 
 /// Before either feed has been read: the header, the close button

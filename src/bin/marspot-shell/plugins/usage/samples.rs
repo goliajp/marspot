@@ -116,7 +116,7 @@ fn line(agent: &str, r: &Row) -> String {
 }
 
 /// `Claude 3` is 3; the unnumbered home (`Claude`, `Codex`, `Kimi`) is 0.
-fn profile_of(name: &str) -> Option<u8> {
+pub(super) fn profile_of(name: &str) -> Option<u8> {
     match name.rsplit_once(' ') {
         Some((_, n)) => n.parse().ok(),
         None => Some(0),

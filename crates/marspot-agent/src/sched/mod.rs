@@ -12,6 +12,7 @@ pub mod alloc;
 pub mod choose;
 pub mod constrain;
 pub mod price;
+pub mod reset;
 pub mod state;
 
 pub use choose::{Choice, POLICY, Policy, Terms, Tier, choose};

@@ -47,6 +47,8 @@ pub struct Shape {
     /// timeline row is sized for it, because rows of different heights
     /// read as different kinds of thing.
     pub window_rows: usize,
+    /// Most lines of stored resets any card lists, below its bars.
+    pub reset_rows: usize,
     /// Longest account name, in characters.
     pub name_cols: usize,
     /// Longest tag right of a timeline bar, in characters.
@@ -59,6 +61,7 @@ impl Shape {
         Self {
             accounts: accounts.len(),
             window_rows: accounts.iter().map(|a| a.windows.len()).max().unwrap_or(0),
+            reset_rows: accounts.iter().map(|a| a.resets.len()).max().unwrap_or(0),
             name_cols: accounts.iter().map(|a| a.name.chars().count()).max().unwrap_or(0),
             tag_cols: windows().map(|w| w.tag_cols()).max().unwrap_or(0),
         }
@@ -77,8 +80,8 @@ pub fn card_columns(content_w: f64, n: usize) -> usize {
     n.div_ceil(n.div_ceil(fit))
 }
 
-/// Height of an account card whose accounts are metered on up to
-/// `window_rows` windows.
+/// Height of an account card with `window_rows` rows under the address:
+/// a bar per metered window, then a line per kind of stored reset.
 pub fn card_height(cell_h: f64, window_rows: usize) -> f64 {
     spec::px(
         metric::CARD_PAD
@@ -113,13 +116,13 @@ fn timeline_fixed_height(cell_h: f64) -> f64 {
 }
 
 /// Height of everything under the header for `n` accounts.
-pub fn content_height(content_w: f64, cell_h: f64, n: usize, window_rows: usize) -> f64 {
+pub fn content_height(content_w: f64, cell_h: f64, n: usize, (window_rows, reset_rows): (usize, usize)) -> f64 {
     if n == 0 {
         return spec::px(metric::EMPTY_H);
     }
     let card_rows = n.div_ceil(card_columns(content_w, n)) as f64;
     panel_chrome::heading_height()
-        + card_rows * card_height(cell_h, window_rows)
+        + card_rows * card_height(cell_h, window_rows + reset_rows)
         + (card_rows - 1.0) * spec::px(space::CARD_TO_CARD)
         + spec::px(space::CARD_TO_HEADING)
         + panel_chrome::heading_height()
@@ -152,7 +155,7 @@ pub fn cards_and_timeline(content: Rect, cell: Cell, shape: &Shape) -> (impl Ite
     let gap = spec::px(space::CARD_TO_CARD);
     let cols = card_columns(content.w, shape.accounts);
     let card_w = (content.w - gap * (cols as f64 - 1.0)) / cols as f64;
-    let card_h = card_height(cell.h, shape.window_rows);
+    let card_h = card_height(cell.h, shape.window_rows + shape.reset_rows);
     let cards_top = content.y_top + panel_chrome::heading_height();
     let card_at = move |i: usize| Rect {
         x: content.x + (i % cols) as f64 * (card_w + gap),
@@ -390,7 +393,7 @@ mod tests {
     const CELL: Cell = Cell { w: 8.0, h: 16.0, ascent: 12.0 };
 
     fn shape(accounts: usize, window_rows: usize) -> Shape {
-        Shape { accounts, window_rows, name_cols: 8, tag_cols: 16 }
+        Shape { accounts, window_rows, reset_rows: 0, name_cols: 8, tag_cols: 16 }
     }
 
     /// The content rect of the panel in a `w × h` window.
@@ -504,6 +507,22 @@ mod tests {
         }
     }
 
+    /// Lines of stored resets make every card taller by a row each and
+    /// leave the timeline's rows as they were.
+    #[test]
+    fn reset_lines_grow_the_cards_and_not_the_timeline() {
+        let s = shape(10, 2);
+        let with = Shape { reset_rows: 2, ..s };
+        let area = content(1700.0, 4000.0, &with);
+        let (a, b) = (layout(area, CELL, &s), layout(area, CELL, &with));
+        assert!((b.cards[0].h - a.cards[0].h - 2.0 * table::row_h(CELL.h)).abs() < SLACK);
+        let (ta, tb) = (a.timeline.unwrap(), b.timeline.unwrap());
+        assert_eq!(ta.row_h, tb.row_h);
+        let card_rows_n = (b.cards.last().unwrap().y_top > b.cards[0].y_top) as usize + 1;
+        let grown = content_height(area.w, CELL.h, 10, (2, 2)) - content_height(area.w, CELL.h, 10, (2, 0));
+        assert!((grown - card_rows_n as f64 * 2.0 * table::row_h(CELL.h)).abs() < SLACK, "{grown}");
+    }
+
     /// An address longer than its card is cut to the card's inner
     /// width, and the cut is marked.
     #[test]
@@ -548,7 +567,7 @@ mod tests {
             (14, 4, 1200.0, 1000.0),
             (3, 1, 500.0, 700.0),
         ] {
-            let s = Shape { accounts: n, window_rows, name_cols: 9, tag_cols: tag.chars().count() };
+            let s = Shape { accounts: n, window_rows, reset_rows: 0, name_cols: 9, tag_cols: tag.chars().count() };
             let c = content(window_w, window_h, &s);
             let l = layout(c, CELL, &s);
             let Some(t) = l.timeline else {
@@ -623,6 +642,7 @@ mod tests {
             status_severity: 0,
             reset_label: String::new(),
             windows,
+            resets: Vec::new(),
         };
         let s = Shape::of(&[
             account("Claude 1", vec![window("11:59"), window("06:00")]),

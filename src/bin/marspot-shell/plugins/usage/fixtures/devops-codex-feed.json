@@ -1,0 +1,49 @@
+{
+ "generated_at": "2026-11-26T18:55:38.168338+00:00",
+ "accounts": [
+  {
+   "name": "Codex 1",
+   "status": "allowed",
+   "utilization_5h": null,
+   "utilization_7d": 0.02,
+   "reset_5h": null,
+   "reset_7d": 1796309547,
+   "model_limits": [],
+   "credits": {
+    "enabled": true,
+    "unlimited": false,
+    "balance": 60000.0,
+    "used": null,
+    "limit": null,
+    "utilization": null,
+    "disabled_reason": null,
+    "resets_available": 4,
+    "resets_expire_at": 1796070363
+   },
+   "tier": "pro",
+   "collected_at": "2026-11-26T18:55:36.256083+00:00"
+  },
+  {
+   "name": "Codex 2",
+   "status": "allowed",
+   "utilization_5h": null,
+   "utilization_7d": 0.01,
+   "reset_5h": null,
+   "reset_7d": 1796051701,
+   "model_limits": [],
+   "credits": {
+    "enabled": true,
+    "unlimited": false,
+    "balance": 60000.0,
+    "used": null,
+    "limit": null,
+    "utilization": null,
+    "disabled_reason": null,
+    "resets_available": 3,
+    "resets_expire_at": 1796164310
+   },
+   "tier": "pro",
+   "collected_at": "2026-11-26T18:55:37.572767+00:00"
+  }
+ ]
+}

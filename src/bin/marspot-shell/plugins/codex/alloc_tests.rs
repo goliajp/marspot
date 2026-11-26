@@ -122,8 +122,8 @@ pub(super) fn append(path: &Path, lines: &[String]) {
 
 pub(super) fn accounts(now: i64) -> Vec<AccountIn> {
     vec![
-        AccountIn { profile: 1, week_used: 0.30, week_renews: now + 40 * H, spark: None, open: true, measured_at: now - 300 },
-        AccountIn { profile: 2, week_used: 0.10, week_renews: now + 140 * H, spark: None, open: true, measured_at: now - 300 },
+        AccountIn { profile: 1, week_used: 0.30, week_renews: now + 40 * H, spark: None, open: true, measured_at: now - 300, supply: Vec::new() },
+        AccountIn { profile: 2, week_used: 0.10, week_renews: now + 140 * H, spark: None, open: true, measured_at: now - 300, supply: Vec::new() },
     ]
 }
 
@@ -222,4 +222,19 @@ fn codex_alloc_heads_up_once_per_account_week() {
     assert!(a.observe(&snap(&w, NOW + 60, false)).1.is_empty());
     assert!(CodexAlloc::new(w.dir.clone()).observe(&snap(&w, NOW + 120, false)).1.is_empty(), "nor after a restart");
     assert!(super::alloc_wire::body(1, 0.4).contains("P1"));
+}
+
+/// An account with a reset left counts what it brings back before it
+/// ends; one with none reads as it always did.
+#[test]
+fn a_reset_left_before_its_end_adds_to_the_account() {
+    use marspot_agent::sched::reset::Supply;
+    let plain = &accounts(NOW)[0];
+    let before = super::alloc_decide::quant(plain, None, NOW, 0.01);
+    assert_eq!(before, super::alloc_decide::quant(&AccountIn { supply: Vec::new(), ..plain.clone() }, None, NOW, 0.01));
+    let reset = Supply { week: true, window: false, gives_back_week: false, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(10.0), left: 1, usable_below_left: Some(0.8) };
+    let with = super::alloc_decide::quant(&AccountIn { supply: vec![reset], ..plain.clone() }, None, NOW, 0.01);
+    // 0.70 left at 0.01 an hour, used at its end in 10 h with 0.60 left: 0.40 comes back
+    assert!((before.r - 0.7).abs() < 1e-9 && (with.r - 1.1).abs() < 1e-9, "{with:?}");
+    assert!((with.t - (10.0 + 168.0)).abs() < 1e-9, "the week moves to a week after the use");
 }

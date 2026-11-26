@@ -71,7 +71,8 @@ pub(super) fn quant(a: &AccountIn, rollout: Option<(i64, f64, i64)>, now: i64, r
         Some((used, at)) if at > now => (if used < 1.0 { r } else { 0.0 }, hours(at)),
         _ => (r, hours(renews)),
     };
-    Quant { id: a.profile, r, f, t: hours(renews), tf, open: a.open, stale }
+    let q = Quant { id: a.profile, r, f, t: hours(renews), tf, open: a.open, stale };
+    marspot_agent::sched::reset::with_supply(&q, &Load { restricted: 0.0, plain: rate_on }, 1.0, &a.supply)
 }
 
 /// Decisions are made again at least this often with unchanged inputs,

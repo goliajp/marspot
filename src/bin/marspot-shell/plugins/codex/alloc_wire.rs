@@ -26,6 +26,10 @@ use crate::plugins::{LogLevel, PluginHost};
 /// How often the codex feed is read again.
 const FEED_EVERY_S: i64 = 60;
 
+/// A Codex reset credit may be used only while the week it brings back
+/// has less than this share left.
+const CREDIT_USABLE_BELOW_LEFT: f64 = 0.8;
+
 /// How often a thread whose rollout was not found is looked for again.
 const SEARCH_EVERY_S: i64 = 120;
 
@@ -172,13 +176,16 @@ impl AllocPass {
         }
         let numbers: Vec<u8> = super::profile_dirs().into_iter().map(|(n, _)| n).collect();
         let read = codex_accounts(&numbers, marspot::cc_usage::read_codex(), now);
+        let resets = marspot::agent_resets::read(now);
         let feed_at = (read.feed_at > 0).then_some(read.feed_at);
         let accounts: Vec<AccountIn> = read
             .rooms
             .iter()
             .filter_map(|(n, room)| {
                 let spark_at = read.resets.iter().find(|(m, _)| m == n).and_then(|(_, r)| r.models.iter().find(|(l, _)| l == "spark").map(|(_, at)| *at));
-                account_in(*n, room, spark_at)
+                let mut ac = account_in(*n, room, spark_at)?;
+                ac.supply = crate::agentsvc::sched::supply::of_account(&resets, "codex", *n, Some(CREDIT_USABLE_BELOW_LEFT), now);
+                Some(ac)
             })
             .collect();
         self.feed = Some((now, feed_at, accounts.clone()));
@@ -190,7 +197,7 @@ impl AllocPass {
 fn account_in(profile: u8, room: &Room, spark_at: Option<i64>) -> Option<AccountIn> {
     let Room::Known { util_7d: Some(w), reset_7d, models, measured_at, .. } = room else { return None };
     let spark = models.iter().find(|(l, _)| l == "spark").and_then(|(_, u)| *u).zip(spark_at);
-    Some(AccountIn { profile, week_used: *w, week_renews: *reset_7d, spark, open: !room.refused_for(None), measured_at: *measured_at })
+    Some(AccountIn { profile, week_used: *w, week_renews: *reset_7d, spark, open: !room.refused_for(None), measured_at: *measured_at, supply: Vec::new() })
 }
 
 /// The inbox the peerbus relays to this codex.

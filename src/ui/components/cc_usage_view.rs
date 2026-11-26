@@ -8,7 +8,7 @@
 //! timeline is a plot: one node, drawn by `cc_usage_paint`.
 
 use crate::ui::components::cc_usage_layout::{card_rows, cards_and_timeline, Cell, Shape};
-use crate::ui::components::cc_usage_modal::{fit_measured_into, metric, CcUsageAccountRender, CcUsageRender, Clock};
+use crate::ui::components::cc_usage_modal::{cut_to_columns, fit_measured_into, metric, CcUsageAccountRender, CcUsageRender, Clock};
 use crate::ui::components::cc_usage_paint as paint;
 use crate::ui::components::controls::{self, Measure};
 use crate::ui::components::panel_chrome::PanelChrome;
@@ -94,7 +94,7 @@ fn account(
     m: Measure<'_>,
     a: &CcUsageAccountRender,
     card: Rect,
-    (cell, window_rows): (Cell, usize),
+    (cell, window_rows, reset_rows): (Cell, usize, usize),
     scratch: &mut String,
 ) {
     placed(ui, (card.x, card.y_top), |ui| {
@@ -103,7 +103,7 @@ fn account(
             .border(Length::Px(card_spec::BORDER_PX as f64), Tone::CardBorder.into())
             .radius(Length::Pt(card_spec::RADIUS));
     });
-    let rows = card_rows(card, cell.h, window_rows);
+    let rows = card_rows(card, cell.h, window_rows + reset_rows);
 
     // The chip takes what it needs first; the name gets the rest of
     // the line, so no pairing of lengths can make them collide.
@@ -148,6 +148,16 @@ fn account(
             ui.text_copy(TextFont::Mono, ink.into(), scratch).height(Length::Px(row.h)).align(Align::Leading);
         });
         bar(ui, row.bar, w.util);
+    }
+    // under the tallest card's bars, so a row of cards lines them up
+    for (i, text) in a.resets.iter().enumerate() {
+        let row = rows.bar_row(window_rows + i, 0, cell);
+        scratch.clear();
+        scratch.push_str(text);
+        cut_to_columns(scratch, (rows.right - rows.left) / cell.w);
+        placed(ui, (rows.left, row.top), |ui| {
+            ui.text_copy(TextFont::Mono, Tone::FgMuted.into(), scratch).height(Length::Px(row.h)).align(Align::Leading);
+        });
     }
 
     let reset = Line { role: metric::RESET, ink: Tone::FgMuted, left, baseline: rows.reset_baseline, max_w };
@@ -218,7 +228,7 @@ pub fn describe(
                 for (a, card) in cc.accounts.iter().zip(cards) {
                     bottom = card.y_top + card.h;
                     let card = Rect { x: card.x - area.x, y_top: card.y_top - top, ..card };
-                    account(ui, &mut *m, a, card, (cell, shape.window_rows), scratch);
+                    account(ui, &mut *m, a, card, (cell, shape.window_rows, shape.reset_rows), scratch);
                 }
             });
             over.width(Length::Pct(1.0)).height(Length::Px(bottom - top));
