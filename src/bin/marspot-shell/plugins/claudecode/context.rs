@@ -204,3 +204,7 @@ mod tests {
 #[cfg(test)]
 #[path = "fold_check_tests.rs"]
 mod fold_check_tests;
+
+#[cfg(test)]
+#[path = "fold_tail_check_tests.rs"]
+mod fold_tail_check_tests;

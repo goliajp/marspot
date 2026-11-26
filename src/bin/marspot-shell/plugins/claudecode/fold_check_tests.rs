@@ -25,7 +25,7 @@ use crate::plugins::helpers::used::Model;
 /// What the sink saw: each reply, and the task changes joined the way
 /// the zombie reader joins calls, results and notifications.
 #[derive(Default)]
-struct Sink {
+pub(super) struct Sink {
     replies: Vec<Reply>,
     calls: HashMap<String, (String, Option<String>)>,
     started: HashMap<String, (String, bool, Option<String>)>,
@@ -63,7 +63,7 @@ impl FoldSink for Sink {
     }
 }
 
-fn records() -> Vec<PathBuf> {
+pub(super) fn records() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut v: Vec<PathBuf> = std::fs::read_dir(root.join("zombie/records")).unwrap().map(|e| e.unwrap().path()).collect();
     v.retain(|p| p.extension().is_some_and(|e| e == "jsonl"));
@@ -75,7 +75,7 @@ fn records() -> Vec<PathBuf> {
 
 /// Where the records are cut: not at all, at every byte, every 7 and 97
 /// bytes, and at pseudo-random places.
-fn cut_plans(len: usize) -> Vec<Vec<usize>> {
+pub(super) fn cut_plans(len: usize) -> Vec<Vec<usize>> {
     let mut plans = vec![Vec::new()];
     for step in [1, 7, 97] {
         plans.push((step..len).step_by(step).collect());
@@ -183,7 +183,7 @@ fn rows_of_readers(path: &Path, bytes: &[u8]) -> String {
     s + &format!("total {}\n", total.words())
 }
 
-fn rows_of_fold(st: &RecordFold, sink: &Sink) -> String {
+pub(super) fn rows_of_fold(st: &RecordFold, sink: &Sink) -> String {
     let mut s = String::new();
     for r in sink.replies.iter().filter(|r| !r.grew.is_empty()) {
         if let Some(m) = r.model {
