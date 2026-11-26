@@ -14,6 +14,7 @@ mod render_frame_allocations;
 mod shortcuts_are_real;
 mod site_claims;
 mod state_guard;
+mod table_geometry;
 mod text_layer_is_portable;
 mod ui_strings;
 mod ui_strings_ratchet;
