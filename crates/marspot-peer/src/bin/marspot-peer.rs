@@ -13,6 +13,7 @@
 //! marspot-peer pane …
 //! marspot-peer helper …
 //! marspot-peer procs …
+//! marspot-peer reset …
 //! ```
 //!
 //! On the command line the sender is the Codex session this runs
@@ -45,6 +46,7 @@ fn main() -> ExitCode {
     let result = match top {
         Top::Control("pane", rest) => return ExitCode::from(marspot_peer::control::cli::main(&rest)),
         Top::Control("helper", rest) => return ExitCode::from(marspot_peer::control::cli_helper::main(&rest)),
+        Top::Control("reset", rest) => return ExitCode::from(marspot_peer::control::cli_reset::main(&rest)),
         Top::Control(_, rest) => return ExitCode::from(marspot_peer::control::cli_proc::main(&rest)),
         Top::List => list(),
         Top::Whoami => whoami(),

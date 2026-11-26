@@ -99,6 +99,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
         Op::Place { target, place, force } => ops_pane::place(conn, ctx, target, *place, *force),
         Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::helpers_port::serve(conn, ctx, op),
         Op::ProcStop(a) => super::ops_proc::stop(conn, ctx, a),
+        Op::ResetClaim(_) | Op::ResetStatus => Err(Reject::new(ErrorCode::NotSupported, "this build does not handle stored resets")),
     }
 }
 
@@ -117,6 +118,8 @@ fn static_name(op: &Op) -> &'static str {
         Op::HelperList { .. } => "helper.list",
         Op::HelperStop(_) => "helper.stop",
         Op::ProcStop(_) => "proc.stop",
+        Op::ResetClaim(_) => "reset.claim",
+        Op::ResetStatus => "reset.status",
     }
 }
 

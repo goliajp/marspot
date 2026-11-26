@@ -1,7 +1,7 @@
 use super::*;
 use crate::control::request::helper::{AgentKind, HelperStop};
 use crate::control::{Input, Op, OpenArgs, SendArgs};
-use crate::control::{cli, cli_helper, cli_proc};
+use crate::control::{cli, cli_helper, cli_proc, cli_reset};
 
 fn w(s: &str) -> Vec<String> {
     s.split_whitespace().map(String::from).collect()
@@ -13,6 +13,7 @@ fn decide(line: &str) -> Result<Option<(Op, bool)>, Stop> {
     match parse(&w(line))? {
         Top::Control("pane", rest) => cli::parse_cmd(&rest).map(Some),
         Top::Control("helper", rest) => cli_helper::parse_cmd(&rest).map(Some),
+        Top::Control("reset", rest) => cli_reset::parse(&rest).map(Some),
         Top::Control(_, rest) => cli_proc::parse_cmd(&rest).map(Some),
         _ => Ok(None),
     }
@@ -45,6 +46,9 @@ const LINES: &[&str] = &[
     "helper stop",
     "procs",
     "procs stop",
+    "reset",
+    "reset claim",
+    "reset status",
 ];
 
 /// Lines whose words after the target are text: a help word there is a

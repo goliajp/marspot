@@ -13,11 +13,13 @@
 use std::io;
 
 mod input;
+mod reset_panel;
 mod retire;
 mod run_trailer;
 mod wire;
 
 pub use input::*;
+pub use reset_panel::*;
 pub use retire::*;
 pub use run_trailer::{RUN_END_MARK, run_trailer};
 use wire::{Rd, finish, put_text};

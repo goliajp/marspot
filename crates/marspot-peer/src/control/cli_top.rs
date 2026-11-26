@@ -15,6 +15,7 @@ pub const USAGE: &str = "usage:
   marspot-peer pane ...    (see `marspot-peer pane --help`)
   marspot-peer helper ...  (see `marspot-peer helper --help`)
   marspot-peer procs ...   (see `marspot-peer procs --help`)
+  marspot-peer reset ...   (see `marspot-peer reset --help`)
 any of them takes -h / --help for its usage";
 
 /// The exit code of a usage mistake outside `pane`, `helper` and `procs`
@@ -23,7 +24,7 @@ pub const USAGE_CODE: u8 = 1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Top {
-    /// `pane`, `helper` or `procs` and the words after it, parsed there.
+    /// `pane`, `helper`, `procs` or `reset` and the words after it, parsed there.
     Control(&'static str, Vec<String>),
     List,
     Whoami,
@@ -45,6 +46,7 @@ pub fn parse(args: &[String]) -> Result<Top, Stop> {
         "pane" => return control("pane"),
         "helper" => return control("helper"),
         "procs" => return control("procs"),
+        "reset" => return control("reset"),
         // options go before the name; after it every word is text
         "send" => Spec { flags: &["--now"], values: &[], whole_after: None, text_after: Some(1) },
         "mcp" => return mcp(rest),

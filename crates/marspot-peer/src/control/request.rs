@@ -35,6 +35,8 @@ pub enum Op {
     HelperList { all: bool },
     HelperStop(HelperStop),
     ProcStop(ProcStopArgs),
+    ResetClaim(ResetClaimArgs),
+    ResetStatus,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -140,12 +142,14 @@ impl Op {
             Op::HelperList { .. } => "helper.list",
             Op::HelperStop(_) => "helper.stop",
             Op::ProcStop(_) => "proc.stop",
+            Op::ResetClaim(_) => "reset.claim",
+            Op::ResetStatus => "reset.status",
         }
     }
 
     /// Asking again after a lost answer cannot do anything twice.
     pub fn is_read_only(&self) -> bool {
-        matches!(self, Op::List | Op::Read(_) | Op::Audit { .. } | Op::HelperList { .. })
+        matches!(self, Op::List | Op::Read(_) | Op::Audit { .. } | Op::HelperList { .. } | Op::ResetStatus)
     }
 }
 
@@ -245,6 +249,8 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
         "helper.list" => Op::HelperList { all: a.bool("all", false)? },
         "helper.stop" => Op::HelperStop(helper::stop(&a)?),
         "proc.stop" => Op::ProcStop(proc::stop(&a)?),
+        "reset.claim" => Op::ResetClaim(reset::claim(&a)?),
+        "reset.status" => Op::ResetStatus,
         other => return Err(bad(format!("unknown op `{other}`"))),
     };
     if let Op::Resize { cols, rows, .. } = &op
@@ -283,6 +289,10 @@ pub use helper::{AgentKind, HelperStartArgs, HelperStop, Isolation};
 #[path = "request_proc.rs"]
 pub mod proc;
 pub use proc::ProcStopArgs;
+
+#[path = "request_reset.rs"]
+pub mod reset;
+pub use reset::ResetClaimArgs;
 
 #[path = "request_json.rs"]
 mod encode;

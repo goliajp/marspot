@@ -37,6 +37,8 @@ impl Request {
             Op::HelperList { all } => put(&mut a, "all", *all),
             Op::HelperStop(h) => a = super::helper::stop_json(h),
             Op::ProcStop(p) => a = super::proc::stop_json(p),
+            Op::ResetClaim(c) => a = super::reset::claim_json(c),
+            Op::ResetStatus => {}
             Op::Open(o) => {
                 put_opt(&mut a, "cwd", &o.cwd);
                 put(&mut a, "shadow", o.shadow);
