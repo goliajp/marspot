@@ -180,6 +180,7 @@ impl CoreApp {
             shadow: true,
             no_focus: true,
             helper: false,
+            new_window: false,
             parent_sid: parent,
             idle_s: 0,
             cols: 0,

@@ -66,6 +66,13 @@ impl CoreApp {
             }
             // The pane closed while the window was opening — fall
             // through and let the fresh-pane path fill the window.
+        // L1 opened this window because a pane was asked for in one of
+        // its own, unless it names a saved record: a reopened window
+        let restoring = slot.is_some_and(|s| self.saved_windows.iter().any(|(q, _)| *q == s));
+        if !restoring && let Some(req) = self.take_new_window_spawn(Instant::now()) {
+            self.adopt_window_for_spawn(window_id, (w_phys, h_phys), slot, req);
+            return;
+        }
         // RFC-005 step 6b — a queued record means L1 is reopening a
         // window from the last session, not making a new one.  The
         // window comes up with its saved grid and one "starting…"
@@ -88,43 +95,8 @@ impl CoreApp {
             self.adopt_restored_window(window_id, slot, record, w_phys, h_phys, scale);
             return;
         }
-        let (cell_w, cell_h) = self.renderer.cell_dims();
-        let cols = ((w_phys / cell_w) as u16).max(INITIAL_COLS);
-        let rows = ((h_phys / cell_h) as u16).max(INITIAL_ROWS);
-        let pane = match allocate_next_session_id() {
-            // A new window has no pane to inherit a directory from.
-            Ok(id) => spawn_l3_pane_async(cols, rows, id, String::new(), &self.event_tx),
-            Err(e) => {
-                lx_error!("core.window.session_id_failed", &format!("{e}"));
-                return;
-            }
-        };
-        let mut w = WindowState::new(
-            window_id,
-            vec![pane],
-            0,
-            1,
-            1,
-            w_phys,
-            h_phys,
-        );
-        w.frame_index = self.slot_for_new_window(slot);
-        // A brand-new window has never been painted.
-        w.render.mark_bg_clear_required();
-        self.windows.push(w);
-        let wi = self.windows.len() - 1;
-        // A freshly-opened window takes keyboard focus — that is a
-        // statement about focus, not about rank: every other window
-        // keeps pumping, painting and persisting exactly as before.
-        self.key_window = wi;
-        self.rebuild_layout(wi);
-        lx_event!(
-            "WINDOW_ADOPTED",
-            "core took on a new window",
-            window_id = window_id,
-            windows = self.windows.len()
-        );
-        self.save_session_state();
+        // a new window has no pane to inherit a directory from
+        self.push_fresh_window(window_id, (w_phys, h_phys), slot, String::new());
     }
 
     /// RFC-005 step 6b — bring up a window from its saved record.

@@ -131,7 +131,7 @@ impl Port<'_, '_> {
     /// `pane.list` shows for it.
     pub fn open_shadow(&mut self, parent: u64, cwd: &str) -> Result<(u64, String), Reject> {
         let (cols, rows) = helper_size(self.conn.hub.caps());
-        let a = OpenArgs { cwd: Some(cwd.to_string()), shadow: true, parent: Some(parent.to_string()), cols, rows, command: None };
+        let a = OpenArgs { cwd: Some(cwd.to_string()), shadow: true, new_window: false, parent: Some(parent.to_string()), cols, rows, command: None };
         let v = ops_pane::open_helper(self.conn, self.ctx, &a)?;
         let sid = v.get("id").and_then(Value::i64).map(|i| i as u64).ok_or_else(|| Reject::new(ErrorCode::Internal, "the new pane has no id"))?;
         let name = v.str_at("name").map_or_else(|| sid.to_string(), str::to_string);

@@ -12,7 +12,11 @@ fn pane_control_cli_reads_every_subcommand() {
     assert_eq!(p("list"), Ok(Op::List));
     assert_eq!(
         p("open --visible --cwd /w --size 80x24 -- make -j 4"),
-        Ok(Op::Open(OpenArgs { cwd: Some("/w".into()), shadow: false, parent: None, cols: 80, rows: 24, command: Some("make -j 4".into()) }))
+        Ok(Op::Open(OpenArgs { cwd: Some("/w".into()), shadow: false, new_window: false, parent: None, cols: 80, rows: 24, command: Some("make -j 4".into()) }))
+    );
+    assert_eq!(
+        p("open --new-window --cwd /w"),
+        Ok(Op::Open(OpenArgs { cwd: Some("/w".into()), shadow: false, new_window: true, parent: None, cols: 120, rows: 40, command: None }))
     );
     assert_eq!(
         p("send spg --no-enter hello there"),
@@ -39,7 +43,7 @@ fn pane_control_cli_reads_every_subcommand() {
 
 #[test]
 fn pane_control_cli_usage_mistakes() {
-    for bad in ["", "fly", "send spg", "keys spg", "run spg", "read", "read a b", "read a --wait-change --wait-exit", "resize 3 big", "place 3 moon", "read a -n"] {
+    for bad in ["", "fly", "send spg", "keys spg", "run spg", "read", "read a b", "read a --wait-change --wait-exit", "resize 3 big", "place 3 moon", "read a -n", "open --new-window --visible", "open --new-window --parent 3"] {
         assert!(p(bad).is_err(), "{bad:?}");
     }
 }

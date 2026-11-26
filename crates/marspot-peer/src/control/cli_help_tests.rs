@@ -83,7 +83,7 @@ fn cli_help_and_unknown_options_send_nothing() {
 
 #[test]
 fn cli_help_words_after_double_dash_pass_through() {
-    let open = |c: &str| Ok(Some((Op::Open(OpenArgs { cwd: None, shadow: true, parent: None, cols: 120, rows: 40, command: Some(c.into()) }), false)));
+    let open = |c: &str| Ok(Some((Op::Open(OpenArgs { cwd: None, shadow: true, new_window: false, parent: None, cols: 120, rows: 40, command: Some(c.into()) }), false)));
     assert_eq!(decide("pane open -- cmd --help"), open("cmd --help"));
     assert_eq!(decide("pane open --json -- jq -h --json").map(|o| o.map(|(_, j)| j)), Ok(Some(true)));
     let text = |t: &str| Ok(Some((Op::Send(SendArgs { target: "spg".into(), input: Input::Text { text: t.into(), enter: true }, force: false }), false)));

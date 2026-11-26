@@ -7,7 +7,8 @@ description: Use when running inside the marspot terminal and you need to see or
 
 `marspot-peer pane …` controls the panes of the marspot app you are running in.
 A new pane is a shadow pane by default: it has no window, and it ends when the
-pane that opened it ends.
+pane that opened it ends. `--new-window` opens one alone in a new window, with
+no parent; closing it closes the window.
 
 Panes are for driving a terminal. To hand work to another agent (codex,
 gemini, kimi, another claude), start a helper instead: see the
@@ -23,7 +24,7 @@ state (`detached`, `dormant`, `shadow`), place and the agent in front.
 
 ```
 marspot-peer pane list
-marspot-peer pane open [--visible] [--parent PANE] [--cwd DIR] [--size 120x40] [-- COMMAND...]
+marspot-peer pane open [--visible | --new-window] [--parent PANE] [--cwd DIR] [--size 120x40] [-- COMMAND...]
 marspot-peer pane send PANE [--no-enter] [--force] <text... | - | -- TEXT...> # then Enter; - is stdin
 marspot-peer pane keys PANE [--force] KEY...                         # ctrl-c enter esc tab up down f1 ...
 marspot-peer pane run PANE [--timeout S] [--force] COMMAND...
@@ -39,14 +40,13 @@ marspot-peer pane audit [-n N]
 the text starts; text starting with `-` goes after `--`.
 
 - `pane run` types the command into the pane's shell, waits for it to end and
-  prints the screen. Its exit code is the command's own exit code. If the
+  prints the screen, exiting with the command's own code. If the
   command is still running at `--timeout` (default 110 s), it prints
   `timeout (pos N)` on stderr and exits 1; keep waiting with
   `pane read PANE --wait-command-end --since N`.
 - `pane read` with one `--wait-…` waits for that and then reads. `-n` adds up to
   2000 lines of history. `--since POS` counts the wait from an earlier answer's
-  `pos`. A wait that did not succeed prints its reason on stderr (`timeout`,
-  `session_ended`, `restarting`).
+  `pos`.
 - The screen text leaves out the status line `pane run` typed after the
   command and keeps what stands before it on its row (a prompt, or output
   without a final newline); a row with nothing else is left out. So the text

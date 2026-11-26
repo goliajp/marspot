@@ -20,6 +20,7 @@ pub(super) fn spawn() -> PaneSpawn {
         shadow: true,
         no_focus: true,
         helper: false,
+        new_window: false,
         parent_sid: 0xAB_CDEF,
         idle_s: 21600,
         cols: 120,
@@ -67,6 +68,7 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
                 ok: false,
                 sid: 0,
                 err: "no room".into(),
+                window_id: 0,
             })
             .unwrap(),
             |p| shown(decode_pane_spawned(p)),
@@ -237,11 +239,15 @@ fn pane_control_each_frame_round_trips() {
         ok: true,
         sid: u64::MAX - 1,
         err: String::new(),
+        window_id: 0xBEEF,
     };
-    assert_eq!(
-        decode_pane_spawned(&encode_pane_spawned(&m).unwrap()).unwrap(),
-        m
-    );
+    let p = encode_pane_spawned(&m).unwrap();
+    assert_eq!(decode_pane_spawned(&p).unwrap(), m);
+    let old = PaneSpawned { window_id: 0, ..m.clone() };
+    assert_eq!(decode_pane_spawned(&p[..p.len() - 4]).unwrap(), old, "a core from before sends no window");
+    let n = PaneSpawn { new_window: true, shadow: false, parent_sid: 0, ..spawn() };
+    assert_eq!(decode_pane_spawn(&encode_pane_spawn(&n).unwrap()).unwrap(), n);
+    assert_eq!(encode_pane_spawn(&n).unwrap()[4], 0b1010, "bit 3 asks for a new window");
     let m = PaneRetire {
         req_id: 1,
         sid: 2,
@@ -363,7 +369,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
     let w = 4 + 1 + 8 + 4 + 2;
     let expected = [
         23 + cwd,
-        15 + 7,
+        19 + 7,
         14,
         22,
         12 + w + 12,
@@ -420,7 +426,12 @@ fn pane_control_truncated_payloads_are_refused_at_every_length() {
     for (t, p, decode) in samples() {
         assert!(decode(&p).is_ok(), "{t:?} decodes whole");
         // the last byte came later, and may be missing
-        let least = p.len() - usize::from(matches!(t, MsgType::HelperPanelAct | MsgType::PanePlace | MsgType::PaneRetire));
+        let late = match t {
+            MsgType::HelperPanelAct | MsgType::PanePlace | MsgType::PaneRetire => 1,
+            MsgType::PaneSpawned => 4,
+            _ => 0,
+        };
+        let least = p.len() - late;
         for n in 0..least {
             assert!(
                 decode(&p[..n]).is_err(),

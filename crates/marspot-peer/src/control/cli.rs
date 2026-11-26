@@ -12,7 +12,8 @@ use super::{Input, Op, OpenArgs, ReadArgs, Request, Response, RunArgs, SendArgs,
 
 pub const USAGE: &str = "usage:
   marspot-peer pane list
-  marspot-peer pane open [--visible] [--parent PANE] [--cwd DIR] [--size 120x40] [-- COMMAND...]
+  marspot-peer pane open [--visible | --new-window] [--parent PANE] [--cwd DIR] [--size 120x40] [-- COMMAND...]
+                         (--new-window: alone in a new window, no parent; closing it closes the window)
   marspot-peer pane send PANE [--no-enter] [--force] <text... | - | -- TEXT...>
   marspot-peer pane keys PANE [--force] KEY...
   marspot-peer pane run PANE [--timeout S] [--force] [--] COMMAND...   (options end at the command)
@@ -100,7 +101,7 @@ pub fn parse_cmd(args: &[String]) -> Result<(Op, bool), Stop> {
     let Some((sub, rest)) = args.split_first() else { return Err(Stop::Usage(String::new())) };
     let spec = match sub.as_str() {
         "list" | "resize" | "close" => Spec::flags(&["--json"]),
-        "open" => Spec { flags: &["--json", "--visible"], values: &["--parent", "--cwd", "--size"], whole_after: None, text_after: None },
+        "open" => Spec { flags: &["--json", "--visible", "--new-window"], values: &["--parent", "--cwd", "--size"], whole_after: None, text_after: None },
         // options stop at the text's first word: agents send any text
         "send" => Spec { flags: &["--json", "--no-enter", "--force"], values: &[], whole_after: Some(2), text_after: None },
         "keys" | "place" => Spec::flags(&["--json", "--force"]),
@@ -130,7 +131,12 @@ fn op(sub: &str, a: &Args) -> Result<Op, Stop> {
             }
             let (cols, rows) = a.value("--size").map_or(Ok((120, 40)), |s| size(&s))?;
             let command = a.tail.as_ref().map(|t| t.join(" ")).filter(|c| !c.is_empty());
-            Op::Open(OpenArgs { cwd: a.value("--cwd"), shadow: !a.flag("--visible"), parent: a.value("--parent"), cols, rows, command })
+            let new_window = a.flag("--new-window");
+            if new_window && (a.flag("--visible") || a.value("--parent").is_some()) {
+                return Err("--new-window takes neither --visible nor --parent".into());
+            }
+            let shadow = !new_window && !a.flag("--visible");
+            Op::Open(OpenArgs { cwd: a.value("--cwd"), shadow, new_window, parent: a.value("--parent"), cols, rows, command })
         }
         "send" if words.len() >= 2 => {
             let text = text_or_stdin(&a.after_first())?;

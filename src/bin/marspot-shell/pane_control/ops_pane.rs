@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use marspot::shell_proto::{
-    CAP_PEEK, CAP_SHADOWS, DoneCode, MsgType, PanePlace, PaneRetire, PaneSize, PaneSpawn, PaneType, PlaceWhere, RetireMode,
+    CAP_NEW_WINDOW, CAP_PEEK, CAP_SHADOWS, DoneCode, MsgType, PanePlace, PaneRetire, PaneSize, PaneSpawn, PaneType, PlaceWhere, RetireMode,
     WatchBody, WatchKind, encode_pane_place, encode_pane_retire, encode_pane_size, encode_pane_spawn, encode_pane_type,
 };
 use marspot_peer::control::{ErrorCode, OpenArgs, Reject, Where};
@@ -96,9 +96,11 @@ fn check_open(conn: &Conn, ctx: &Ctx, tree: &Tree, parent: u64, shadow: bool) ->
     limits.admit_spawn(&ctx.cfg, root, now)
 }
 
-/// The pane a new pane opens under (0: none, a window pane from outside).
+/// The pane a new pane opens under (0: none, a window pane from outside
+/// or one in a new window).
 fn open_parent(ctx: &Ctx, a: &OpenArgs) -> Result<u64, Reject> {
     Ok(match (&a.parent, ctx.caller) {
+        _ if a.new_window => 0,
         (Some(p), _) => target(ctx, p)?,
         (None, CallerKey::Pane(sid)) => sid,
         (None, CallerKey::External) if a.shadow => {
@@ -116,15 +118,21 @@ pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Dura
 fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: bool) -> Result<Value, Reject> {
     let parent = open_parent(ctx, a)?;
     conn.need_caps(CAP_SHADOWS)?;
+    if a.new_window {
+        conn.need_caps(CAP_NEW_WINDOW)?;
+    }
     let gate = conn.hub.shadow_gate.enter(GATE_WITHIN)?;
     // the view from before the wait in the gate can be far behind
     check_open(conn, ctx, &gate.tree(&ctx.view_now()), parent, a.shadow)?;
-    let cwd = a.cwd.clone().or_else(|| names::cwd_of(parent, &ctx.obs)).unwrap_or_default();
+    // a pane in a new window has no parent, but starts where the caller is
+    let cwd_of = if a.new_window { ctx.caller.sid().unwrap_or(0) } else { parent };
+    let cwd = a.cwd.clone().or_else(|| names::cwd_of(cwd_of, &ctx.obs)).unwrap_or_default();
     let spawn = PaneSpawn {
         req_id: 0,
         shadow: a.shadow,
         no_focus: true,
         helper,
+        new_window: a.new_window,
         // a pane for a window opens in the window holding this one
         parent_sid: parent,
         idle_s: SHADOW_IDLE_S,
@@ -134,8 +142,8 @@ fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: b
     };
     let built = |req_id| encode_pane_spawn(&PaneSpawn { req_id, ..spawn.clone() });
     let shadow_parent = if a.shadow { parent } else { 0 };
-    let sid = match conn.ask(parent, MsgType::PaneSpawn, built, false, within) {
-        Ok(Reply::Spawned(s)) if s.ok => s.sid,
+    let (sid, window_id) = match conn.ask(parent, MsgType::PaneSpawn, built, false, within) {
+        Ok(Reply::Spawned(s)) if s.ok => (s.sid, s.window_id),
         Ok(Reply::Spawned(s)) => return Err(Reject::new(ErrorCode::SpawnFailed, s.err)),
         Ok(Reply::Done(d)) => return Err(done_reject(d.code, &d.text)),
         Ok(_) => return Err(Reject::new(ErrorCode::Internal, "an answer of the wrong kind")),
@@ -152,7 +160,12 @@ fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: b
     let name = marspot::pane_name::PaneRef::new(sid, cwd.clone()).full_name();
     conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).opened(Opened { sid, cwd, parent: shadow_parent }, Instant::now());
     conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened(ctx.caller, sid, a.shadow);
-    audit(conn, ctx, "pane.open", sid, a.command.clone().map(String::into_bytes), false, if a.shadow { "shadow" } else { "window" });
+    let placed = match (a.shadow, a.new_window) {
+        (true, _) => "shadow",
+        (false, true) => "new_window",
+        (false, false) => "window",
+    };
+    audit(conn, ctx, "pane.open", sid, a.command.clone().map(String::into_bytes), false, placed);
     if let Some(cmd) = &a.command {
         type_once_at_prompt(conn, ctx, sid, cmd);
     }
@@ -161,6 +174,7 @@ fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: b
         ("id", (sid as i64).into()),
         ("name", name.into()),
         ("pos", pos.map_or(Value::Null, |p| (p as i64).into())),
+        ("window", if window_id == 0 { Value::Null } else { i64::from(window_id).into() }),
     ]))
 }
 

@@ -110,6 +110,7 @@ fn l2_typing_and_watch_caps_go_to_l1_once_after_hello() {
             | marspot::shell_proto::CAP_PEEK
             | marspot::shell_proto::CAP_HELPER_PANEL
             | marspot::shell_proto::CAP_HELPER_STRIP
+            | marspot::shell_proto::CAP_NEW_WINDOW
     );
 }
 

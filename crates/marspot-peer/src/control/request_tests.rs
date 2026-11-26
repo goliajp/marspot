@@ -58,7 +58,8 @@ fn pane_control_limits_are_clamped() {
 fn pane_control_every_request_round_trips() {
     let reqs = [
         Op::List,
-        Op::Open(OpenArgs { cwd: Some("/w".into()), shadow: false, parent: Some("self".into()), cols: 90, rows: 30, command: Some("ls".into()) }),
+        Op::Open(OpenArgs { cwd: Some("/w".into()), shadow: false, new_window: false, parent: Some("self".into()), cols: 90, rows: 30, command: Some("ls".into()) }),
+        Op::Open(OpenArgs { cwd: None, shadow: false, new_window: true, parent: None, cols: 120, rows: 40, command: None }),
         Op::Send(SendArgs { target: "spg#1".into(), input: Input::Text { text: "a\nb".into(), enter: false }, force: true }),
         Op::Send(SendArgs { target: "1".into(), input: Input::Keys(vec!["ctrl-c".into(), "up".into()]), force: false }),
         Op::Send(SendArgs { target: "1".into(), input: Input::Bytes(vec![0, 27, 255]), force: false }),
@@ -125,4 +126,17 @@ fn helpers_start_defaults_and_refusals() {
     let big = "x".repeat(64 * 1024 + 1);
     let line = format!(r#"{{"op":"helper.start","args":{{"agent":"codex","task":"{big}"}}}}"#);
     assert_eq!(code_of(&line), ErrorCode::LimitBytes);
+}
+
+#[test]
+fn pane_control_open_in_a_new_window() {
+    let r = parse(r#"{"op":"pane.open","args":{"new_window":true}}"#).unwrap();
+    let Op::Open(a) = r.op else { panic!() };
+    assert!(a.new_window && !a.shadow && a.parent.is_none(), "a new window means no shadow by default");
+    for bad in [r#"{"new_window":true,"shadow":true}"#, r#"{"new_window":true,"parent":"self"}"#] {
+        let line = format!(r#"{{"op":"pane.open","args":{bad}}}"#);
+        assert_eq!(parse(&line).unwrap_err().code, ErrorCode::BadRequest, "{bad}");
+    }
+    let Op::Open(a) = parse(r#"{"op":"pane.open","args":{}}"#).unwrap().op else { panic!() };
+    assert!(!a.new_window && a.shadow, "the default stays a shadow pane");
 }

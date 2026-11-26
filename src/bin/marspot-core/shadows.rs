@@ -38,6 +38,7 @@ pub(super) struct Shadows {
     pub(super) places: super::shadow_place::Places,
     pub(super) peeks: super::peek::Peeks,
     pub(super) family: super::helper_panel::Family,
+    new_windows: spawn_window::NewWindows,
     /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
     /// to open under the first pane, and when.
     pub(super) dev: Option<(usize, Instant)>,
@@ -121,7 +122,8 @@ impl CoreApp {
     }
 
     pub(super) fn spawned(&mut self, req_id: u32, sid: u64, err: &str) -> Route {
-        let m = PaneSpawned { req_id, ok: err.is_empty(), sid, err: err.to_string() };
+        let window_id = self.find_window_pane_by_sid(sid).map_or(0, |(wi, _)| win!(self, wi).window_id);
+        let m = PaneSpawned { req_id, ok: err.is_empty(), sid, err: err.to_string(), window_id };
         lx_event!(
             "PANE_SPAWN_REPLY",
             "answered L1's request for a new pane",
@@ -135,10 +137,14 @@ impl CoreApp {
         if err.is_empty() { Route::Answered(DoneCode::Ok) } else { Route::Answered(DoneCode::Other) }
     }
 
-    /// `PaneSpawn`: a shadow pane under `parent_sid`, or a pane in the
+    /// `PaneSpawn`: a shadow pane under `parent_sid`, a pane in the
     /// window that holds `parent_sid` (the key window when none does),
-    /// which leaves the keyboard focus where it is.
+    /// which leaves the keyboard focus where it is, or a pane in a new
+    /// window of its own.
     fn spawn_pane(&mut self, m: PaneSpawn) -> Route {
+        if m.new_window {
+            return self.spawn_in_new_window(m);
+        }
         let (cols, rows) = self.spawn_size(&m);
         if !size_ok(cols, rows) {
             return self.spawned(m.req_id, 0, "size out of range");
@@ -289,6 +295,9 @@ fn recycle_session(sid: u64) {
         r.delete();
     }
 }
+
+#[path = "spawn_window.rs"]
+mod spawn_window;
 
 #[cfg(test)]
 #[path = "close_dir_tests.rs"]
