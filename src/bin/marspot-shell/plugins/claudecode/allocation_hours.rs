@@ -161,6 +161,28 @@ fn add_busy(rows: &mut [Hour], a: i64, b: i64) {
     }
 }
 
+/// Every row in the files, oldest first: weeks by class (restricted
+/// first), `None` for an hour no shell saw.
+pub(super) fn read_rows(dir: &Path) -> Vec<(i64, Option<[f64; 2]>)> {
+    let mut names: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| month_of(p).is_some()).collect();
+    names.sort();
+    let mut rows = Vec::new();
+    for text in names.iter().filter_map(|p| fs::read_to_string(p).ok()) {
+        rows.extend(text.lines().filter_map(row_of));
+    }
+    rows.sort_by_key(|r| r.0);
+    rows
+}
+
+fn row_of(line: &str) -> Option<(i64, Option<[f64; 2]>)> {
+    let mut f = line.split('\t');
+    let at = f.next()?.parse().ok()?;
+    let rest = f.nth(1)?;
+    let word = |k: &str| rest.split(' ').find_map(|w| w.strip_prefix(k));
+    let pts = |k: &str| word(k)?.parse::<f64>().ok().map(|p| p / 100.0);
+    Some((at, pts("fable=").zip(pts("other=")).map(|(a, b)| [a, b])))
+}
+
 /// The start of the newest hour in the files.
 fn last_written(dir: &Path) -> Option<i64> {
     let mut names: Vec<PathBuf> = fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| month_of(p).is_some()).collect();
