@@ -13,13 +13,15 @@
 # install the three CLIs, keep its state where the docs say, put
 # ~/.local/bin on the pane's PATH, and write its hooks and skill into
 # the config dirs the installers create.  And what it must not do: put
-# anything on screen but its main window, or ask for more than one
-# system permission at its first run.
+# anything on screen but its main window, ask for more than one
+# system permission at its first run, or run an agent CLI beyond the
+# installs' own version checks: this host is a runner, and a stand-in
+# codex usage feed keeps the app's usage collector off `codex app-server`.
 #
 # It reaches the network (three vendor downloads) and takes a few
 # minutes.  Everything it starts carries the scratch HOME in its
-# environment, and that is how the cleanup finds it: nothing else on
-# the host is touched.
+# environment or runs from a binary under it, and that is how the
+# cleanup finds it: nothing else on the host is touched.
 #
 # Exit 0 every check passed, 1 one failed, 3 none failed but the prompt
 # count could not be measured on this host.
@@ -40,7 +42,9 @@ set -uo pipefail
 DMG="$1"; RUN_ID="$2"; WAIT="$3"
 # one more NAME=value for the app
 EXTRA="${4:-MARSPOT_FRESH=1}"
-FRESH="$(mktemp -d "/tmp/marspot-$RUN_ID.XXXXXX")"
+FRESH="$(mktemp -d "/tmp/marspot-$RUN_ID.XXXXXX")" || exit 1
+# launchd and bundle APIs report the resolved /private/tmp spelling
+REAL="$(cd "$FRESH" && pwd -P)" || exit 1
 MNT="$FRESH/mnt"
 STATE="$FRESH/Library/Application Support/marspot"
 LOG="$FRESH/Library/Logs/Marspot/marspot.log"
@@ -49,15 +53,19 @@ TCC_PROMPTS="/tmp/marspot-$RUN_ID-tcc.sh"
 fail=0
 unmeasured=0
 check() { if "${@:2}"; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=1; fi; }
-ours() { ps -axww -E -o pid=,command= | grep -F "HOME=$FRESH" | grep -v grep; }
+ours() {
+  ps -axww -E -o pid=,command= | awk -v home="HOME=$FRESH" -v fresh="$FRESH/" -v real="$REAL/" \
+    'index($0, home) || index($2, fresh) == 1 || index($2, real) == 1'
+}
 
 cleanup() {
+  [ -n "${SAMPLER_PID:-}" ] && kill "$SAMPLER_PID" 2>/dev/null
   for sig in TERM KILL; do
     for p in $(ours | awk '{print $1}'); do kill -$sig "$p" 2>/dev/null; done
     sleep 2
   done
   hdiutil detach "$MNT" -quiet 2>/dev/null
-  rm -rf "$FRESH" "$DMG" "$TCC_PROMPTS"
+  rm -rf "${FRESH:?}" "${DMG:?}" "${TCC_PROMPTS:?}"
 }
 trap cleanup EXIT
 
@@ -95,11 +103,72 @@ prompt_windows() {
     .map(function (w) { return w.kCGWindowNumber + " " + w.kCGWindowOwnerName; }).join("\n")' | sort
 }
 prompt_windows > "$FRESH/prompt-windows.before"
+# Real agent CLIs never run on a runner.  The app's usage collector asks
+# each installed codex through `codex app-server` (first pass 10 s after
+# launch, then every 300 s), and it stands down for any provider whose
+# external feed is fresh.  So a stand-in external codex feed, fresh for
+# the whole run, keeps the collector off codex; the claude and kimi
+# passes start no agent CLI and stay as a fresh Mac has them.
+mkdir -p "$FRESH/.local/state/devops"
+printf '{"generated_at":"%s","accounts":[]}\n' "$(date -u -v+3H +%Y-%m-%dT%H:%M:%SZ)" \
+  > "$FRESH/.local/state/devops/codex-usage.json"
+# Every agent CLI process under the app, sampled each half second while
+# it runs, as "<pid> <argv>".  Under the app means descended from the
+# shell, from a pane's shell (launchd's child), carrying HOME=$FRESH or
+# run from a binary under $FRESH (a LaunchAgent would be launchd's child):
+# `ps` shows no environment for Apple's own binaries, a zsh among them.
+# Allowed: `--version` (the app checks each install with it) and the
+# claude bootstrap's `install`; anything else, `codex app-server` above
+# all, fails the run.  FRESH_CHECK marks the CLIs this script runs itself.
+# by the registry: launchd starts a pane's shell, so it is not its session's child
+pane_shells() { sed -n 's/^shell_child_pid = \([0-9][0-9]*\)$/\1/p' "$STATE"/sessions/*/entry.toml 2>/dev/null; }
+agent_procs() {
+  local roots
+  roots=" $(cat "$FRESH/roots" 2>/dev/null) $(pane_shells | tr '\n' ' ') "
+  ps -axww -E -o pid=,ppid=,command= | awk -v home="HOME=$FRESH" -v fresh="$FRESH/" -v real="$REAL/" -v roots="$roots" '
+    function env(s) { return s ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
+    { pid[NR] = $1; ppid[NR] = $2; row[NR] = $0
+      mine = index($0, home) || index($3, fresh) == 1 || index($3, real) == 1
+      if (index(roots, " " $1 " ") || (mine && !index($0, " FRESH_CHECK=1"))) under[$1] = 1 }
+    END {
+      for (grew = 1; grew; ) { grew = 0
+        for (r = 1; r <= NR; r++) if (!(pid[r] in under) && (ppid[r] in under)) { under[pid[r]] = 1; grew = 1 } }
+      for (r = 1; r <= NR; r++) { if (!(pid[r] in under)) continue
+        nf = split(row[r], f, " ")
+        for (k = 3; k <= 4 && k <= nf; k++) { n = split(f[k], a, "/"); if (a[n] ~ /^(claude|codex|gemini|kimi)([-.]|$)/) break }
+        if (k > 4 || k > nf) continue
+        line = f[1]; for (i = 3; i <= nf && !(i > k && env(f[i])); i++) line = line " " f[i]
+        nxt = (k + 1 <= nf && !env(f[k + 1])) ? f[k + 1] : ""
+        if (nxt == "--version" && (k + 2 > nf || env(f[k + 2]))) continue
+        if (a[n] ~ /^claude/ && nxt == "install") continue
+        print line } }'
+}
+sample_agents() {
+  while :; do
+    echo tick
+    agent_procs
+    sleep 0.5
+  done > "$FRESH/agents.seen" 2>&1
+}
+# The instrument has to be seen to see: a process named codex under the
+# same HOME must show up in the samples.  An ad hoc signed copy of sleep,
+# because `ps` hides an Apple binary's environment.
+mkdir -p "$FRESH/probe"
+cp /bin/sleep "$FRESH/probe/codex"
+codesign -f -s - "$FRESH/probe/codex" 2>/dev/null
+sample_agents &
+SAMPLER_PID=$!
+# no "Terminated" notice when it is stopped below
+disown "$SAMPLER_PID"
+env -i HOME="$FRESH" "$FRESH/probe/codex" 2 &
+PROBE_PID=$!
+wait $PROBE_PID
 STARTED="$(date '+%Y-%m-%d %H:%M:%S')"
 env -i HOME="$FRESH" USER="$(id -un)" LOGNAME="$(id -un)" SHELL="$FRESH/pane-shell" \
   PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$FRESH/tmp" LANG=en_US.UTF-8 "$EXTRA" \
   "$APP/Contents/MacOS/marspot-shell" >"$FRESH/stdout.log" 2>&1 &
 SHELL_PID=$!
+echo "$SHELL_PID" > "$FRESH/roots"
 
 codex_bin() { [ -x "$FRESH/.local/bin/codex" ] || ls "$FRESH"/.codex/packages/standalone/current/bin/codex >/dev/null 2>&1; }
 clis() { [ -x "$FRESH/.local/bin/claude" ] && codex_bin && [ -x "$FRESH/.kimi-code/bin/kimi" ]; }
@@ -108,13 +177,11 @@ hooks() { grep -q 'cc-statusline' "$SETTINGS" 2>/dev/null && grep -q 'claude-hoo
 deadline=$(( $(date +%s) + WAIT ))
 until { clis && hooks; } || [ "$(date +%s)" -ge "$deadline" ] || ! kill -0 $SHELL_PID 2>/dev/null; do sleep 5; done
 
-runs() { env -i HOME="$FRESH" PATH="$FRESH/.local/bin:/usr/bin:/bin" "$1" --version >/dev/null 2>&1; }
-# by the registry: launchd starts a pane's shell, so it is not its session's child
-pane_shells() { sed -n 's/^shell_child_pid = \([0-9][0-9]*\)$/\1/p' "$STATE"/sessions/*/entry.toml 2>/dev/null; }
+runs() { env -i HOME="$FRESH" FRESH_CHECK=1 PATH="$FRESH/.local/bin:/usr/bin:/bin" "$1" --version >/dev/null 2>&1; }
 pane_path() { grep -q "^PATH=$FRESH/.local/bin:" "$FRESH/pane.env"; }
 pane_path_kimi() { grep -q "^PATH=.*:$FRESH/.kimi-code/bin:" "$FRESH/pane.env"; }
-kimi_runs() { env -i HOME="$FRESH" PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" --version >/dev/null 2>&1; }
-kimi_doctor() { env -i HOME="$FRESH" PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" doctor >/dev/null 2>&1; }
+kimi_runs() { env -i HOME="$FRESH" FRESH_CHECK=1 PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" --version >/dev/null 2>&1; }
+kimi_doctor() { env -i HOME="$FRESH" FRESH_CHECK=1 PATH=/usr/bin:/bin "$FRESH/.kimi-code/bin/kimi" doctor >/dev/null 2>&1; }
 # a gemini the machine already had is left alone, and that counts
 gemini_there() { runs gemini || /bin/zsh -ilc 'command -v gemini' >/dev/null 2>&1; }
 no_panic() { ! grep -qi 'panic' "$LOG" "$FRESH/stdout.log"; }
@@ -173,6 +240,20 @@ check "profiles skill in the claude config" test -x "$FRESH/.claude/skills/marsp
 check "codex has the peer server" grep -q 'mcp_servers.marspot' "$FRESH/.codex/config.toml"
 check "no panic" no_panic
 check "no ERROR lines" no_errors
+kill "$SAMPLER_PID" 2>/dev/null
+SAMPLER_PID=""
+samples="$(grep -c '^tick$' "$FRESH/agents.seen")"
+probe_seen() { grep -q "^$PROBE_PID .*/probe/codex 2$" "$FRESH/agents.seen"; }
+grep -v -e '^tick$' -e "^$PROBE_PID " "$FRESH/agents.seen" | sort -u > "$FRESH/agents.bad"
+no_agents() { [ "$samples" -gt 0 ] && [ ! -s "$FRESH/agents.bad" ]; }
+collector_stood_down() {
+  awk -F'\t' '$7=="usage.collector" && /provider=codex/ && /by=devops/' "$LOG" | grep -q . \
+    && test ! -e "$STATE/usage/codex-usage.json"
+}
+check "the sampler saw its own process named codex" probe_seen
+check "no agent CLI process under the app but --version and the claude installer ($samples samples)" no_agents
+sed 's/^/  agent process: /' "$FRESH/agents.bad"
+check "the usage collector left codex to the stand-in feed" collector_stood_down
 # A request the login user's TCC database already answers, allowed or
 # denied, is not asked again, and that database is the user's, not
 # HOME's: the empty HOME does not make it new.  So the count is a
