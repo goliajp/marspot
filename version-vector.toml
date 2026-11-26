@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.746"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
+shell   = "0.7.747"  # host::published: Arc snapshots behind a pointer-swap lock, poison taken back, equal content not republished
 core    = "0.12.711"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
 session = "0.11.460"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
