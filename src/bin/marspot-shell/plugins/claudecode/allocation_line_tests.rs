@@ -81,9 +81,9 @@ fn allocation_line_drops_detail_before_accounts_and_counts_any_account_left_out(
     let p = plan(&acc, 0.1, 0.1, Some(KAPPA_FABLE));
     let line = plan_line(&acc, &p, (0.1, 0.1), &[], false, &[]);
     assert!(line.len() <= PLAN_MAX, "{} bytes: {line}", line.len());
-    let named = line.matches("@150 ").count();
+    let named = line.matches("@150").count();
     assert!(named < 40 && line.ends_with(&format!(" +{}", 40 - named)), "{line}");
-    assert!(line.contains("| P1 90/40@150 0+0"), "least detail: {line}");
+    assert!(line.contains("| P1 90/40@150,P2 90/40@150,"), "least detail, then without the panes: {line}");
 }
 
 #[test]

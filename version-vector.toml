@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.780"  # each pane carries its two speeds: the Fable window is charged its Fable use only, rows gain a= b=
+shell   = "0.7.781"  # alloc.plan drops the pane counts before it drops an account, so 16 accounts and the move count fit
 core    = "0.12.718"  # the accounts panel lists each account's stored resets under its bars, end before start
 session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)

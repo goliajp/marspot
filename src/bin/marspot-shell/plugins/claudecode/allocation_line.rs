@@ -79,6 +79,8 @@ enum Detail {
     Full,
     Compact,
     Least,
+    /// The least without the panes on it.
+    Bare,
 }
 
 /// One open account: week left, Fable-usable, others-only, hours to
@@ -94,14 +96,15 @@ fn account_part(q: &Quant, p: &Plan, i: usize, table: &[(Option<u8>, Class, f64)
         }
         Detail::Compact => format!("P{} R{r:.0} Φ{phi:.0} N{n:.0} T{:.0} {panes}", q.id, q.t),
         Detail::Least => format!("P{} {r:.0}/{phi:.0}@{:.0} {panes}", q.id, q.t),
+        Detail::Bare => format!("P{} {r:.0}/{phi:.0}@{:.0}", q.id, q.t),
     }
 }
 
 /// One line under `PLAN_MAX`: the fleet's Fable and other demand
 /// against a week's supply, each open account, the accounts out with
 /// the hours until each renews, and where panes would go.  Detail is
-/// dropped before accounts, and accounts only when the least detail
-/// does not fit; the accounts out and the moves are listed while they
+/// dropped before accounts, the panes on each account last, and
+/// accounts only when the least detail does not fit; the accounts out and the moves are listed while they
 /// fit and the rest counted, so the count of moves is always there.
 pub(super) fn plan_line(accounts: &[Quant], p: &Plan, (b_f, b_n): (f64, f64), table: &[(Option<u8>, Class, f64)], short: bool, moves: &[Option<String>]) -> String {
     let supply: f64 = accounts.iter().map(Quant::rate_cap).sum();
@@ -127,10 +130,13 @@ pub(super) fn plan_line(accounts: &[Quant], p: &Plan, (b_f, b_n): (f64, f64), ta
     let tail_full = tail(OUT, &out) + moves_least;
     let tail_least = least(OUT, out.len()) + moves_least;
     // at the least detail the accounts share one ` | `, comma separated
-    let sep = |d, k: usize| if k > 0 && matches!(d, Detail::Least) { "," } else { " | " };
+    let sep = |d, k: usize| if k > 0 && matches!(d, Detail::Least | Detail::Bare) { "," } else { " | " };
     let parts = |d| open.iter().enumerate().map(|(k, &i)| format!("{}{}", sep(d, k), account_part(&accounts[i], p, i, table, d))).collect::<Vec<_>>();
     let fits = |ps: &[String], extra: usize| line.len() + ps.iter().map(String::len).sum::<usize>() + extra <= PLAN_MAX;
-    let mut ps = [Detail::Full, Detail::Compact].into_iter().map(parts).find(|ps| fits(ps, tail_full)).unwrap_or_else(|| parts(Detail::Least));
+    let mut ps = [Detail::Full, Detail::Compact].into_iter().map(parts).find(|ps| fits(ps, tail_full)).unwrap_or_else(|| {
+        let least = parts(Detail::Least);
+        if fits(&least, tail_least) { least } else { parts(Detail::Bare) }
+    });
     let mut cut = 0;
     while !ps.is_empty() && !fits(&ps, tail_least + if cut == 0 { 0 } else { MORE.len() }) {
         ps.pop();
