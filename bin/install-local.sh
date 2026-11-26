@@ -678,58 +678,8 @@ fi
 # said "SIGTERM'd 13 L3 pids" while every pane went on serving the
 # image it already had (2026-09-06).  A signal is a request; the
 # only honest report is what is running afterwards.
-# The pids that were running before the fanout, recorded so the check
-# afterwards can tell "adopted" from "gone".
-BEFORE_L3_PIDS=""
-# Every L3, by process name. `-a` because pgrep leaves out its own
-# ancestors by default, and the L3 of the pane this script runs in is
-# one: that pane was never signalled, and never counted, so it stayed
-# on an old image through every install run from it while the check
-# reported every pane up to date. `-x` rather than `-f`: with ancestors
-# included, a shell whose command line merely mentions marspot-session
-# would match too.
-l3_pids() { pgrep -a -x marspot-session 2>/dev/null; }
-snapshot_l3_pids() { BEFORE_L3_PIDS="$(l3_pids | sort | tr '\n' ' ')"; }
-
-verify_l3_adoption() {
-  local want stale=0 total=0 gone=0 ino p
-  want=$(stat -f %i "$TREE/current/marspot-session" 2>/dev/null) || return 0
-  sleep 3
-  local now
-  now="$(l3_pids | sort | tr '\n' ' ')"
-  # A pane that DIED is not in `now` at all, so counting only what is
-  # still running answers "are the survivors up to date" and calls that
-  # success.  On 2026-09-07 that printed "all 8 panes are on this
-  # image" directly after five of them had been killed mid-execv.  The
-  # set that was there before the signal is the only honest denominator.
-  for p in $BEFORE_L3_PIDS; do
-    case " $now " in
-      *" $p "*) ;;
-      *) gone=$((gone+1)); echo "    LOST: pid $p did not come back" >&2 ;;
-    esac
-  done
-  for p in $(l3_pids); do
-    total=$((total+1))
-    ino=$(lsof -p "$p" -a -d txt -Fi 2>/dev/null | grep '^i' | tr -d 'i' | head -1)
-    [ "$ino" = "$want" ] || stale=$((stale+1))
-  done
-  if (( gone > 0 )); then
-    echo "    FAILED: $gone pane(s) died across the update; $total still running" >&2
-    echo "            (their content is in sessions/<id>/bytelog — see" >&2
-    echo "             examples/rebuild_scrollback_from_bytelog)" >&2
-    return 1
-  fi
-  if (( stale > 0 )); then
-    # Not asked again from here: an older core, after a rollback, would
-    # answer with SIGTERM to every L3, and one already on the new build
-    # takes that as "end".  Every core boot asks the L3s not on the
-    # build, so these move at the next one.
-    echo "    WARN: $stale/$total panes are still on the previous image" >&2
-    echo "          (see l3.execv.probe_* in the log; the next core boot asks again)" >&2
-  else
-    echo "    all $total panes are on this image, none lost"
-  fi
-}
+# l3_pids, snapshot_l3_pids and verify_l3_adoption
+source "$(dirname "$0")/_l3-adoption.sh"
 
 # The core is the one sender of update requests to L3s: it knows which
 # of them already run the staged build, and asks each of the rest once
