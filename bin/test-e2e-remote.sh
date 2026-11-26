@@ -85,6 +85,7 @@ DEFAULT_SUITES=(
   test-real-update.sh
   test-negative-update.sh
   test-adversarial-update.sh
+  test-state-map.sh
   test-idle-wakeups.sh
   test-idle-exit-codes.sh
   test-awake-cost.sh
