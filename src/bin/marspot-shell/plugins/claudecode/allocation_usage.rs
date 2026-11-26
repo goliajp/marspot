@@ -164,6 +164,14 @@ impl Readers {
         });
     }
 
+    /// The context of the last reply read from the session at
+    /// `transcript`: what it sent and what it said.  `None` until a
+    /// reply has been read since the shell started.
+    pub(super) fn context(&self, transcript: &Path) -> Option<u64> {
+        let (_, t) = self.main.get(transcript)?.ids.back()?;
+        Some(t.input + t.cache_5m + t.cache_1h + t.cache_read + t.output)
+    }
+
     /// Forget every session not in `keep`.
     pub(super) fn retain(&mut self, keep: &HashSet<PathBuf>) {
         self.main.retain(|p, _| keep.contains(p));

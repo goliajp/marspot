@@ -112,7 +112,7 @@ fn helpers_a_new_helper_avoids_a_busy_account_and_is_counted_once() {
     let (accounts, usage) = claude_accounts(&[1, 2], now);
     let bare = claude_scene(&[1, 2], &accounts.rooms, usage.as_ref(), now);
     assert_eq!(bare.shown, None, "no view yet: no helper pane is known either way");
-    let Placement::To(first, _) = place(&bare, Mover { class: Class::Plain, rate: RHO0 }, None, &[]) else { panic!("{bare:?}") };
+    let Placement::To(first, _) = place(&bare, Mover { class: Class::Plain, rate: RHO0, tokens: None }, None, &[]) else { panic!("{bare:?}") };
     assert_eq!(first, 1, "with no other pane known the account that renews first");
 
     let busy = (pane(5, 1, Class::Plain), (0.0, 0.01));

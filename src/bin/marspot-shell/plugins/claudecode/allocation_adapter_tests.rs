@@ -242,13 +242,13 @@ fn allocation_restart_counts_the_week_s_resting_would_moves() {
 
 #[test]
 fn allocation_same_target_after_busy_is_one_would_move() {
-    // P1 runs out within the hour; pane 3 would leave for P2 each time
-    // it rests, once past the cooldown after it was first seen; pane 1
-    // is busy throughout
+    // P1 runs out within the hour; pane 3, not the slowest plain pane
+    // there, would leave for P2 each time it rests, once past the
+    // cooldown after it was first seen; pane 1 stays to use up the rest
     let d = dir("again");
     let mut a = Allocation::new(d.clone());
     let at = |now: i64, rest3: bool| {
-        let mut s = snap(now, vec![pane(1, 1, false), pane(3, 1, rest3)], vec![1, 3]);
+        let mut s = snap(now, vec![pane(1, 1, true), pane(3, 1, rest3)], vec![1, 3]);
         s.accounts[0].week_used = 0.995;
         for acc in &mut s.accounts {
             acc.fable_used = Some(1.0);

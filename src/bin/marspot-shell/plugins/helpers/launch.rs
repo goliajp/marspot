@@ -61,12 +61,13 @@ pub(super) fn pick_account(agent: AgentKind, asked: Option<u8>, model: Option<&s
 }
 
 /// The call with a model filled in, when it asked for none and the
-/// allocation would rather the helper ran Fable: a Claude helper on an
-/// account it lets marspot choose, outside a container.
+/// allocation would rather the helper ran Fable: a new Claude helper on
+/// an account it lets marspot choose, outside a container.  One that
+/// resumes a conversation keeps that conversation's model.
 pub(super) fn with_default_model(a: &HelperStartArgs) -> Option<HelperStartArgs> {
-    let ours = matches!(a.agent, AgentKind::Claude) && a.model.is_none() && a.profile.is_none() && a.isolation == Isolation::Host;
+    let ours = matches!(a.agent, AgentKind::Claude) && a.model.is_none() && a.profile.is_none() && a.isolation == Isolation::Host && !a.resume_last;
     let model = ours.then(for_helpers::claude_helper_model).flatten()?;
-    Some(HelperStartArgs { model: Some(model.to_string()), ..a.clone() })
+    Some(HelperStartArgs { model: Some(model), ..a.clone() })
 }
 
 /// A Claude helper started on account `n` because the call asked for
@@ -251,5 +252,7 @@ mod default_model_tests {
         assert_eq!(with_default_model(&args(AgentKind::Claude, None, Some(3), Isolation::Host)), None);
         assert_eq!(with_default_model(&args(AgentKind::Claude, None, None, Isolation::Container)), None);
         assert_eq!(with_default_model(&args(AgentKind::Codex, None, None, Isolation::Host)), None);
+        let resumed = HelperStartArgs { resume_last: true, ..args(AgentKind::Claude, None, None, Isolation::Host) };
+        assert_eq!(with_default_model(&resumed), None);
     }
 }

@@ -54,6 +54,11 @@ pub(crate) fn place_by(scene: &Scene, mover: Mover, from: Option<u8>, placed: &[
     if let Some((to, _)) = inputs.decide_by(&plan, rule) {
         return Placement::To(to, inputs);
     }
+    // the one objective holds nothing back: where it finds no account,
+    // no account takes the helper
+    if matches!(rule, Rule::Waste { .. }) {
+        return Placement::Nowhere;
+    }
     match held_back(&inputs.accounts, &plan, &inputs.loads, mover, from, HELPER_LAST_H) {
         Some(would) => Placement::HeldBack(would, inputs),
         None => Placement::Nowhere,

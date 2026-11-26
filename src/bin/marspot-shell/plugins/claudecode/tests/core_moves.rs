@@ -9,9 +9,14 @@ use crate::plugins::claudecode::allocation_inputs::snapshot;
 /// 2026-11-05 00:00 UTC, when the feed below was written.
 const FED: i64 = 1_793_836_800;
 
+/// The busy pane on P2.
+const BESIDE: u64 = 80;
+
 /// P1 renews in 150 hours with 90% of its week left and nobody on it;
-/// P2, where the pane is, renews in 30 with 10% left, which the pane
-/// uses up in half that.  More of what it uses on P1 would lapse.
+/// P2, where the pane is, renews in 30 with 10% left, which the pane and
+/// a busy one beside it use up in under eight hours.  The busy one, the
+/// lower numbered of the two, stays to use up P2; on P1 all the resting
+/// one uses would lapse.
 fn feed(home: &Path) {
     let renews = FED + 150 * 3600;
     let renews2 = FED + 30 * 3600;
@@ -37,6 +42,10 @@ fn feed(home: &Path) {
 /// it is past the cooldown that follows a binding.
 fn scan(plugin: &ClaudecodePlugin, sid: u64, alloc: &mut Allocation) -> ScanResult {
     let mut result = scan_of(sid, CcActivity::AwaitingUser);
+    result.sessions_seen.push(BESIDE);
+    result.new_activity.insert(BESIDE, CcActivity::Working);
+    result.new_vetoes.insert(BESIDE, (true, false));
+    result.new_models.insert(BESIDE, "opus-5-5".into());
     for (s, m) in &plugin.last_meta {
         result.new_meta.insert(*s, m.clone());
     }
@@ -57,7 +66,10 @@ fn rebalance_dryrun_writes_the_plan_move_with_its_inputs_and_live_moves() {
     let mut on_p2 = pane_on_p1(&home, "u-81");
     on_p2.profile_num = 2;
     on_p2.config_dir = Some(home.join(".claude-profile-2").to_string_lossy().into_owned());
-    let mut plugin = stranded_plugin(on_p2, sid);
+    let mut plugin = stranded_plugin(on_p2.clone(), sid);
+    let mut beside = on_p2;
+    beside.uuid = "u-80".into();
+    plugin.last_meta.insert(BESIDE, beside);
     // the machine's load holds a resting move; this one is not about it
     plugin.host_load = || None;
     host.status.lock().unwrap().insert(

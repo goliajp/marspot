@@ -4,9 +4,8 @@
 use super::*;
 use super::super::with_helpers::{drain_account_changes, AccountChanged, HelperRoles};
 
-/// P1 refuses; P2 renews first and is half used, P3 has the most left;
-/// both renew so far ahead that the demand is shared by what is left,
-/// and the ordinary pane, which moves first, takes P2's share.
+/// P1 refuses; P2 is half used, P3 has the most left; both renew so far
+/// ahead that they read as a week away, P2 first.
 fn three_accounts(tag: &str) -> TestHome {
     let home = quota_home(tag);
     fs::create_dir_all(home.join(".claude-profile-3/sessions")).unwrap();
@@ -61,17 +60,20 @@ fn helpers_refused_on_their_account_go_where_the_allocation_has_a_gap() {
         let i = host.sent.lock().unwrap().iter().position(|(s, _)| *s == sid).unwrap();
         target(&host, i)
     };
-    // where each went is the one objective's; the three are spread, not
-    // all sent to one account to be refused there together
-    let on = |t: String| if t.contains(".claude-profile-2") { 2 } else if t.contains(".claude-profile-3") { 3 } else { panic!("{t}") };
-    let went = [on(to(77)), on(to(78)), on(to(79))];
-    assert!(went.contains(&2) && went.contains(&3), "{went:?}");
+    // both renewals read as a week away, P2's first.  The ordinary pane,
+    // first, to P2: all it uses there would lapse.  With it there P2's
+    // week is used up before the renewal, so the first helper saves
+    // nothing there and goes to P3, where all it uses would lapse; with
+    // that helper on P3 neither account lapses any more, and the second
+    // goes to the earlier renewal, P2
+    let on = |sid: u64| if to(sid).contains(".claude-profile-2") { 2 } else if to(sid).contains(".claude-profile-3") { 3 } else { 0 };
+    assert_eq!([on(79), on(77), on(78)], [2, 3, 2]);
 
     let mut changes = drain_account_changes();
     changes.sort_by_key(|c| c.sid);
     let got: Vec<(u64, &str, u8)> = changes.iter().map(|c: &AccountChanged| (c.sid, c.agent, c.from)).collect();
     assert_eq!(got, [(77, "claude", 1), (78, "claude", 1)], "only the helpers' moves are reported");
-    assert_eq!(changes.iter().map(|c| c.to).collect::<Vec<_>>(), went[..2]);
+    assert_eq!(changes.iter().map(|c| c.to).collect::<Vec<_>>(), [3, 2]);
 }
 
 /// The next scan after claude writes that its turn is over says so.

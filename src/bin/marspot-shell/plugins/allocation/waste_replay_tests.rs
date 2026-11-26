@@ -53,13 +53,20 @@ fn alloc_replay_waste_keeps_fable_room() {
     let p4 = actual.accounts.iter().find(|a| a.id == 4).unwrap();
     assert!(p4.stranded() > 0.3, "the old rules strand P4's Fable: {p4:?}");
     assert!(worst_stranded(&new) < 0.10, "{}", line("waste", &new));
+    let at_reset = |o: &Outcome| o.accounts.iter().map(|a| a.stranded_at_reset()).sum::<f64>();
+    println!("stranded at the renewals: actual {} dryrun {} waste {}", pts(at_reset(&actual)), pts(at_reset(&dry)), pts(at_reset(&new)));
     assert!(new.switches <= actual.switches, "{} switches against {}", new.switches, actual.switches);
+    assert!(new.refusals <= actual.refusals && new.unmet <= actual.unmet, "{}", line("waste", &new));
     assert!(new.w7() + new.wf() < actual.w7() + actual.wf(), "waste {} against {}", new.w7() + new.wf(), actual.w7() + actual.wf());
 }
 
-/// The sweep the weights were chosen by: every combination that keeps
-/// to today's switches and strands no Fable, by total waste.
+/// The sweep the weights were chosen by: of the combinations that keep
+/// to today's switches and strand no Fable, the least unmet use, then
+/// the fewest refusals, then the fewest switches.  The waste at the end
+/// hangs on where the last few panes happen to sit, so it only breaks
+/// ties.  Slow, so run on demand.
 #[test]
+#[ignore]
 fn alloc_replay_waste_sweep() {
     let fx = fixture();
     let actual = run(&fx, Policy::Actual);
@@ -72,7 +79,7 @@ fn alloc_replay_waste_sweep() {
                     let o = run(&fx, Policy::Waste(p));
                     let fits = o.switches <= actual.switches && worst_stranded(&o) < 0.10;
                     println!(
-                        "lambda {lambda} margin {margin} per_day {per_day} stay {stay_h}: switches {} resting {} refusals {} unmet {} w7 {} wf {} stranded {} {}",
+                        "lambda {lambda} margin {margin} per_day {per_day} stay {stay_h}: switches {} resting {} refusals {} unmet {} w7 {} wf {} stranded {} at reset {} {}",
                         o.switches,
                         o.resting_moves,
                         o.refusals,
@@ -80,6 +87,7 @@ fn alloc_replay_waste_sweep() {
                         pts(o.w7()),
                         pts(o.wf()),
                         pts(worst_stranded(&o)),
+                        pts(o.accounts.iter().map(|a| a.stranded_at_reset()).sum::<f64>()),
                         if fits { "fits" } else { "-" }
                     );
                     if fits {

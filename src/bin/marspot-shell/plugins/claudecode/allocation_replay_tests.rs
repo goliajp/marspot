@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::plugins::allocation::Class;
+use crate::plugins::allocation::{Class, waste};
 use crate::plugins::allocation::replay::replay;
 use crate::plugins::claudecode::allocation_inputs::{AccountIn, PaneIn, Snapshot};
 use crate::plugins::claudecode::allocation_view::View;
@@ -69,9 +69,13 @@ fn allocation_replay_of_every_would_move_is_the_same_decision() {
     let scenes = [
         // refused on a spent P1: rule (a)
         ("out", vec![account(1, 1.0, 1.0, 40), account(2, 0.3, 0.0, 60)], vec![pane(1, 1, plain, false, true)]),
-        // more quota than use: the pane goes where more of its use is
-        // what would lapse
-        ("plan", vec![account(1, 0.1, 0.0, 50), account(2, 0.1, 0.0, 300)], vec![pane(1, 1, plain, true, false)]),
+        // P1's week will lapse; on P2 the plain pane eats the week its
+        // two Fable panes need, whose window lapses: it leaves for P1
+        (
+            "plan",
+            vec![account(1, 0.1, 1.0, 50), account(2, 0.8, 0.0, 100)],
+            vec![pane(1, 2, plain, true, false), pane(2, 2, fable, false, false), pane(3, 2, fable, false, false)],
+        ),
         // P1 runs out within the hour: the faster of its two panes leaves
         ("leave", vec![account(1, 0.995, 1.0, 60), account(2, 0.3, 1.0, 90)], vec![pane(1, 1, plain, true, false), pane(2, 1, plain, true, false)]),
         // what Fable will not take on P1 is gone: the plain pane leaves it
@@ -101,25 +105,55 @@ fn allocation_replay_of_every_would_move_is_the_same_decision() {
     assert_eq!(whys.into_iter().collect::<Vec<_>>(), ["out", "waste"]);
 }
 
+/// P1's week will lapse; on P2 the resting plain panes `plain` eat the
+/// week P2's two busy Fable panes need.
+fn leaving(now: i64, plain: &[(u64, bool)]) -> Snapshot {
+    let mut panes: Vec<PaneIn> = plain.iter().map(|(sid, resting)| pane(*sid, 2, Class::Plain, *resting, false)).collect();
+    panes.extend([pane(90, 2, Class::Restricted, false, false), pane(91, 2, Class::Restricted, false, false)]);
+    Snapshot {
+        now,
+        feed_at: Some(now),
+        accounts: vec![account(1, 0.1, 1.0, 50), account(2, 0.8, 0.0, 100)].into_iter().map(|mut ac| { ac.measured_at = now; ac }).collect(),
+        live: panes.iter().map(|p| p.sid).collect(),
+        panes,
+    }
+}
+
 /// The view's resting moves are this scan's only: what it decided and
 /// nothing older, so it does not grow with the session.
 #[test]
 fn allocation_view_holds_this_scans_resting_moves_only() {
     let d = dir("bounded");
     let mut a = Allocation::new(d.clone());
-    let panes = vec![pane(1, 1, Class::Plain, true, false)];
-    let at = |now: i64, panes: Vec<PaneIn>| Snapshot {
-        now,
-        feed_at: Some(now),
-        accounts: vec![account(1, 0.1, 0.0, 50), account(2, 0.1, 0.0, 300)].into_iter().map(|mut ac| { ac.measured_at = now; ac }).collect(),
-        live: panes.iter().map(|p| p.sid).collect(),
-        panes,
-    };
-    a.observe(&at(NOW - 9000, panes.clone()));
-    a.observe(&at(NOW, panes.clone()));
+    a.observe(&leaving(NOW - 9000, &[(1, true)]));
+    a.observe(&leaving(NOW, &[(1, true)]));
     assert_eq!(a.view.take().map(|v| v.rest.len()), Some(1));
-    let busy = vec![pane(1, 1, Class::Plain, false, false)];
-    a.observe(&at(NOW + 60, busy));
+    a.observe(&leaving(NOW + 60, &[(1, false)]));
     assert_eq!(a.view.take().map(|v| v.rest.len()), Some(0), "busy now: nothing to act on");
+    fs::remove_dir_all(&d).unwrap();
+}
+
+/// Live, a resting move decided counts against the daily budget in the
+/// scan that decides it, before the main thread's `moved` line is read:
+/// with one move left, only one of two panes that would leave is sent,
+/// and the second pane, judged after it, sees the first gone.
+#[test]
+fn allocation_live_counts_a_move_against_the_day_when_decided() {
+    let d = dir("daycap");
+    let mut a = Allocation::new(d.clone());
+    a.live = true;
+    let both = [(1, true), (2, true)];
+    a.observe(&leaving(NOW - 9000, &both));
+    a.day_moves.extend(std::iter::repeat_n(NOW - 600, waste::PARAMS.per_day - 1));
+    a.observe(&leaving(NOW, &both));
+    let view = a.view.take().expect("a view");
+    assert_eq!(view.rest.len(), 1, "{:?}", view.rest);
+    assert_eq!(a.day_pending.len(), 1);
+    // the main thread made it: its line takes the place of the pending one
+    let sid = *view.rest.keys().next().unwrap();
+    let moved = crate::plugins::claudecode::allocation_events::Event { at: NOW + 1, sid, kind: "moved".into(), profile: Some(1), class: "plain".into(), detail: "from=P2 why=waste".into() };
+    a.events.append(&moved).unwrap();
+    a.count_made(NOW + 2);
+    assert_eq!((a.day_moves.len(), a.day_pending.len()), (waste::PARAMS.per_day, 0));
     fs::remove_dir_all(&d).unwrap();
 }

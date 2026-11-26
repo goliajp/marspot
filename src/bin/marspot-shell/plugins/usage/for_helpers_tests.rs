@@ -54,15 +54,13 @@ fn number(p: &Pick) -> u8 {
 
 #[test]
 fn helpers_go_where_the_allocation_has_a_gap_and_get_its_config_dir() {
-    // P2 has the most left; P3 renews first and has room for the helper.
-    // A Claude helper goes by the one objective: on P2 all it uses would
-    // lapse, on P3 only its first thirty hours
+    // P2 has the most left; P3 renews first and has room for the helper
     let a = accounts(vec![(1, renewing(0.7, 140.0)), (2, renewing(0.1, 150.0)), (3, renewing(0.5, 30.0))], NOW);
     let got = pick(Agent::Claude, &homes(3), &a, None, &mut Placed::default(), NOW);
     let want = HelperAccount {
-        number: 2,
-        dir: PathBuf::from("/h/.claude-profile-2"),
-        env: vec![("CLAUDE_CONFIG_DIR", "/h/.claude-profile-2".to_string())],
+        number: 3,
+        dir: PathBuf::from("/h/.claude-profile-3"),
+        env: vec![("CLAUDE_CONFIG_DIR", "/h/.claude-profile-3".to_string())],
     };
     assert_eq!(got, Pick::Account(want));
 }

@@ -135,9 +135,14 @@ pub(in crate::plugins) fn choose(
     };
     // Claude's helpers are placed by the one objective; the other
     // agents' accounts know no restricted window to weigh
-    let rule = if agent == Agent::Claude { Rule::Waste { moves_day: 0 } } else { Rule::Bands };
-    let to = match place_by(scene, Mover { class, rate: RHO0 }, None, &placed.counts(), rule) {
+    let rule = if agent == Agent::Claude { Rule::waste(0) } else { Rule::Bands };
+    let rate = match (agent, class) {
+        (Agent::Claude, Class::Restricted) => RHO0 * helper_pick::fable_model().map_or(1.0, |(_, k)| k),
+        _ => RHO0,
+    };
+    let to = match place_by(scene, Mover { class, rate, tokens: None }, None, &placed.counts(), rule) {
         Placement::To(n, inputs) => chosen("placed", n, &inputs),
+        // only the bands, which no Claude helper is placed by, hold one back
         Placement::HeldBack(n, inputs) => chosen("held_back_start", n, &inputs),
         Placement::Nowhere => helper_pick::unread_pick(&accounts.rooms, None, model, placed),
     };
@@ -158,28 +163,32 @@ pub(in crate::plugins) fn choose(
     }
 }
 
-/// The model a Claude helper started with none asked for runs: Fable
-/// where the expected waste says some Fable window would otherwise
-/// lapse, else none (the account's own default).  Only for helpers: a
+/// The model a Claude helper started with none asked for runs: the
+/// Fable model this machine's Fable panes run, where a Fable helper on
+/// the account it would be placed on costs less than a plain one on
+/// its own, else none (the account's own default).  Only for helpers: a
 /// pane the person started keeps the model it was started with.
-pub(in crate::plugins) fn claude_helper_model() -> Option<&'static str> {
+pub(in crate::plugins) fn claude_helper_model() -> Option<String> {
     let numbers: Vec<u8> = handoff::profiles(Agent::Claude).iter().map(|(n, _)| *n).collect();
     if numbers.is_empty() {
         return None;
     }
+    let (model, week_cost) = helper_pick::fable_model()?;
     let now = unix_now();
     let (accounts, usage) = helper_pick::claude_accounts(&numbers, now);
     let scene = helper_pick::claude_scene(&numbers, &accounts.rooms, usage.as_ref(), now);
-    fable_saves(&scene).then_some(HELPER_FABLE)
+    fable_saves(&scene, week_cost).then_some(model)
 }
 
-/// The model named for a helper that runs Fable: the one the Fable
-/// panes on this machine run.
-pub(in crate::plugins) const HELPER_FABLE: &str = "claude-fable-5-2";
+/// How long a helper is expected to run, hours: its work is a task, not
+/// a pane people keep for days.
+const HELPER_STAY_H: f64 = 2.0;
 
-/// A Fable helper lowers the expected waste more than any other would.
-pub(in crate::plugins) fn fable_saves(scene: &Scene) -> bool {
-    waste::restricted_helper(&scene.accounts, &scene.loads, RHO0, scene.kappa, HELPER_LAST_H, &waste::PARAMS)
+/// A Fable helper, whose work costs `week_cost` times the week a plain
+/// helper's does, takes no more from the other panes than a plain one.
+pub(in crate::plugins) fn fable_saves(scene: &Scene, week_cost: f64) -> bool {
+    let p = waste::Params { stay_h: HELPER_STAY_H, ..waste::PARAMS };
+    waste::restricted_helper(&scene.accounts, &scene.loads, RHO0, RHO0 * week_cost, scene.kappa, HELPER_LAST_H, &p)
 }
 
 /// The class a helper of `agent` on `model` is placed as.

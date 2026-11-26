@@ -68,12 +68,12 @@ fn allocation_view_refused_pane_never_goes_to_an_account_that_is_out() {
 fn allocation_view_lays_the_main_threads_refusals_over_the_feed() {
     let feed = vec![row(1, "allowed", 0.30, NOW + 50 * 3600, 0.0), row(2, "allowed", 0.30, NOW + 60 * 3600, 0.0), row(3, "allowed", 0.30, NOW + 90 * 3600, 0.0)];
     let (view, mut rooms) = scene(feed, vec![pane(1, 1, Class::Plain)]);
-    assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::To(3), "the latest renewal: more of what it uses would lapse");
-    if let Room::Known { status, .. } = &mut rooms[2].1 {
+    assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::To(2), "the earliest renewal short of its target");
+    if let Room::Known { status, .. } = &mut rooms[1].1 {
         *status = "rejected".into();
     }
-    assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::To(2));
-    rooms[1].1 = Room::Unknown;
+    assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::To(3));
+    rooms[2].1 = Room::Unknown;
     assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::Hold(ALL_OUT), "an unknown account is no target");
     assert_eq!(view.must_move(&rooms[..1], 1, 1, Class::Plain).0, Move::Hold(NOWHERE), "one account");
 }
@@ -99,14 +99,15 @@ fn allocation_view_refused_plain_pane_and_badge_click_go_where_there_is_room() {
     assert_eq!(view.by_hand(&rooms, 1, 1, Class::Plain).map(|(t, _)| t), Some(2));
 }
 
-/// Leaving early ranks by the one objective among the accounts it is handed,
+/// Leaving early ranks by the one objective among the accounts it is
+/// handed, near ties to the earlier renewal,
 /// and the panes sent this pass count where they went.
 #[test]
 fn allocation_view_leaving_early_ranks_among_the_lasting_and_counts_placed_panes() {
     let feed = vec![row(1, "allowed", 0.99, NOW + 50 * 3600, 1.0), row(2, "allowed", 0.30, NOW + 60 * 3600, 1.0), row(3, "allowed", 0.30, NOW + 90 * 3600, 1.0)];
     let (mut view, rooms) = scene(feed, vec![pane(1, 1, Class::Plain), pane(2, 1, Class::Plain)]);
-    assert_eq!(view.rank_among(&rooms, 1, 1, Class::Plain, &[2, 3]).map(|(t, _)| t), Some(3));
-    assert_eq!(view.rank_among(&rooms, 1, 1, Class::Plain, &[2]).map(|(t, _)| t), Some(2), "only what it is handed");
+    assert_eq!(view.rank_among(&rooms, 1, 1, Class::Plain, &[2, 3]).map(|(t, _)| t), Some(2));
+    assert_eq!(view.rank_among(&rooms, 1, 1, Class::Plain, &[3]).map(|(t, _)| t), Some(3), "only what it is handed");
     assert_eq!(view.rank_among(&rooms, 1, 1, Class::Plain, &[]).map(|(t, _)| t), None);
     view.placed(1, 2);
     assert_eq!(view.panes.iter().find(|p| p.0 == 1).map(|p| p.1), Some(2));

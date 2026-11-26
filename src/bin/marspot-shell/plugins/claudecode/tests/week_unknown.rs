@@ -171,8 +171,6 @@ fn a_cap_with_no_reading_is_neither_full_nor_room_for_its_model() {
     let rows = [("rejected", "1", &soon() as &str, "0"), ("allowed", "0.2", &soon(), "null"), ("allowed", "0.5", &late(), "0.5")];
     let (v, r) = view_of(&rows, Class::Restricted);
     assert_eq!(v.must_move(&r, 1, 1, Class::Restricted).0, Move::To(3), "no move for a guess");
-    // a plain pane: P3 renews later, so more of what the pane uses there
-    // is what would lapse
     let (v, r) = view_of(&rows, Class::Plain);
-    assert_eq!(v.must_move(&r, 1, 1, Class::Plain).0, Move::To(3));
+    assert_eq!(v.must_move(&r, 1, 1, Class::Plain).0, Move::To(2));
 }

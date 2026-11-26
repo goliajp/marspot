@@ -63,6 +63,7 @@ impl Allocation {
         }
         self.band_moves.clear();
         self.day_moves.clear();
+        self.day_pending.clear();
         for l in self.last.values_mut() {
             l.rest_moves.clear();
         }
@@ -78,6 +79,9 @@ impl Allocation {
         let fresh = self.events.read_new(&mut self.tail, now);
         if self.live {
             let made: Vec<Event> = fresh.into_iter().filter(|e| e.kind == "moved").collect();
+            for e in &made {
+                self.day_pending.remove(&e.sid);
+            }
             self.count_from(&made, now);
         }
     }

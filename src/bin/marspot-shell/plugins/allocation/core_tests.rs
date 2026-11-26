@@ -76,7 +76,7 @@ fn allocation_all_fable_out_keeps_the_model() {
     let p = plan(&a, 0.01, 0.0, Some(KAPPA_FABLE));
     let loads = loads_of(&a, &[], None);
     // no target for the Fable pane: it is not sent to run another model
-    assert_eq!(pick(&a, &p, &loads, Mover { class: Class::Restricted, rate: 0.01 }, Some(1), 6.0), None);
+    assert_eq!(pick(&a, &p, &loads, Mover { class: Class::Restricted, rate: 0.01, tokens: None }, Some(1), 6.0), None);
     assert_eq!(stranded(&a, Class::Restricted), Some(Stranded::RestrictedOut { back_in_h: 1.5 }));
     assert_eq!(stranded(&a, Class::Plain), None);
 }
@@ -91,7 +91,7 @@ fn allocation_codex_two_accounts() {
     for _ in 0..4 {
         let p = plan(&a, 0.0, RHO0 * (placed.len() + 1) as f64, None);
         let loads = loads_of(&a, &placed, None);
-        let to = pick(&a, &p, &loads, Mover { class: Class::Plain, rate: RHO0 }, None, HELPER_LAST_H).unwrap();
+        let to = pick(&a, &p, &loads, Mover { class: Class::Plain, rate: RHO0, tokens: None }, None, HELPER_LAST_H).unwrap();
         placed.push((Some(to), Class::Plain, RHO0));
     }
     let on: Vec<u8> = placed.iter().map(|(o, _, _)| o.unwrap()).collect();
@@ -99,7 +99,7 @@ fn allocation_codex_two_accounts() {
     assert_eq!(old_helper_pick(&a, Class::Plain, &[]), Some(2), "today: the most left");
     // a refused pane on Codex 2 would go to Codex 1 (logged only)
     let p = plan(&a, 0.0, RHO0, None);
-    assert_eq!(pick(&a, &p, &loads_of(&a, &[], None), Mover { class: Class::Plain, rate: RHO0 }, Some(2), 6.0), Some(1));
+    assert_eq!(pick(&a, &p, &loads_of(&a, &[], None), Mover { class: Class::Plain, rate: RHO0, tokens: None }, Some(2), 6.0), Some(1));
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn resting_inputs(accounts: Vec<Quant>, keeps_restricted: bool) -> Inputs {
         keeps_restricted,
         moves_week: 2,
     };
-    Inputs { accounts, b_f: 0.0, b_n: 0.03, kappa: Some(KAPPA_FABLE), loads, mover: Mover { class: Class::Plain, rate: 0.02 }, here: 1, kind }
+    Inputs { accounts, b_f: 0.0, b_n: 0.03, kappa: Some(KAPPA_FABLE), loads, mover: Mover { class: Class::Plain, rate: 0.02, tokens: None }, here: 1, kind }
 }
 
 #[test]

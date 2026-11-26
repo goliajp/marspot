@@ -7,7 +7,7 @@ use super::rescue::lapses;
 use super::rest_tests::{acct, acct_f, go, resting, with};
 use super::{Class, KAPPA_FABLE, Quant};
 
-const FABLE: Mover = Mover { class: Class::Restricted, rate: 0.02 };
+const FABLE: Mover = Mover { class: Class::Restricted, rate: 0.02, tokens: None };
 
 #[test]
 fn allocation_rescue_sends_fable_where_it_would_lapse() {

@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use super::choose::{HELPER_LAST_H, MUST_LAST_H, Mover};
 use super::replay::{Inputs, Kind, Rule};
-use super::rest::RESTRICTED_USER;
+use super::rest::{RESTRICTED_USER, is_keeper};
 use super::speed::PaneUse;
 use super::waste::{self, Params};
 use super::{Class, EPS, KAPPA_FABLE, Load, Quant};
@@ -197,7 +197,7 @@ impl World {
             },
             Ev::New(sid, to, class) => {
                 let to = match self.policy {
-                    Policy::Waste(p) => self.place(at, Mover { class, rate: super::RHO0 }, None, Kind::New { horizon_h: HELPER_LAST_H }, &p).unwrap_or(to),
+                    Policy::Waste(p) => self.place(at, Mover { class, rate: super::RHO0, tokens: None }, None, Kind::New { horizon_h: HELPER_LAST_H }, &p).unwrap_or(to),
                     _ => to,
                 };
                 self.add(at, sid, to, class);
@@ -263,9 +263,9 @@ impl World {
             if Some(sid) == skip {
                 continue;
             }
+            // by the pane's class, as the shell counts it
             if let Some(i) = accounts.iter().position(|q| q.id == p.on) {
-                loads[i].restricted += f;
-                loads[i].plain += n;
+                loads[i].add(p.class, f + n);
             }
         }
         (loads, bf, bn)
@@ -284,7 +284,7 @@ impl World {
 
     fn mover(&self, now: i64, sid: u64) -> Mover {
         let (f, n, _) = self.rates(now, sid);
-        Mover { class: self.panes[&sid].class, rate: f + n }
+        Mover { class: self.panes[&sid].class, rate: f + n, tokens: None }
     }
 
     /// The first resting pane the objective would move, moved.
@@ -295,8 +295,10 @@ impl World {
         for sid in sids {
             let x = &self.panes[&sid];
             let (f, _, known) = self.rates(now, sid);
+            let me = (sid, self.mover(now, sid).rate);
+            let same = self.panes.iter().filter(|(s, y)| **s != sid && y.on == x.on && y.class == x.class).map(|(s, _)| (*s, self.mover(now, *s).rate));
             let kind = Kind::Rest {
-                keeper: false,
+                keeper: is_keeper(me, same),
                 since_move_h: x.moved_at.map(|at| (now - at) as f64 / 3600.0),
                 left: x.left.map(|(id, at)| (id, (now - at) as f64 / 3600.0)).into_iter().collect(),
                 band_last_hour: band,
@@ -380,7 +382,7 @@ impl World {
             .iter()
             .zip(&loads)
             .map(|(q, l)| {
-                let o = waste::forecast(q, l, None, Some(KAPPA_FABLE), Class::Plain);
+                let o = waste::forecast(q, l, None, Some(KAPPA_FABLE), q.t.max(q.tf));
                 AccEnd { id: q.id, week: 1.0 - q.r, fable: 1.0 - q.f / KAPPA_FABLE, w7: o.w7, wf: o.wf }
             })
             .collect();

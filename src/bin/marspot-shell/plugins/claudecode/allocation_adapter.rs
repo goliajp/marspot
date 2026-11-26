@@ -74,6 +74,9 @@ pub(super) struct Allocation {
     pub(super) band_moves: VecDeque<i64>,
     /// Resting moves of the last day, which the daily budget counts.
     pub(super) day_moves: VecDeque<i64>,
+    /// Live: resting moves the scans decided that no `moved` line has
+    /// answered yet, by pane, with when; the daily budget counts them.
+    pub(super) day_pending: HashMap<u64, i64>,
     pub(super) said: HashMap<&'static str, String>,
     rebuilt: bool,
     /// `claudecode.rebalance` is `live`: moves made count, not would-moves.
@@ -107,6 +110,7 @@ impl Allocation {
             told: Told::default(),
             band_moves: VecDeque::new(),
             day_moves: VecDeque::new(),
+            day_pending: HashMap::new(),
             said: HashMap::new(),
             rebuilt: false,
             live: false,
@@ -140,6 +144,11 @@ impl Allocation {
         self.count_made(snap.now);
         self.view = super::allocation_decide::decide(self, snap, &mut log);
         log
+    }
+
+    /// The context pane `p`'s last reply read had, if one was read.
+    pub(super) fn context_of(&self, p: &PaneIn) -> Option<u64> {
+        self.readers.context(p.transcript.as_deref()?)
     }
 
     fn write(&mut self, ev: Event, log: &mut Vec<(&'static str, String)>) {
