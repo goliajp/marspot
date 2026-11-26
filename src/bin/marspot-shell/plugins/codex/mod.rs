@@ -30,6 +30,7 @@ mod declare;
 mod pane;
 pub(in crate::plugins) mod context;
 mod hand_off;
+pub(in crate::plugins) mod last_model;
 mod refresh;
 mod rollout;
 mod switch;

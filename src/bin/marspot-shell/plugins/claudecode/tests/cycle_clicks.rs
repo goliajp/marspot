@@ -55,7 +55,7 @@ fn badge_after_click_on_bg_held_session(tag: &str, status: &str) -> String {
         has_transcript: true,
     };
 
-    plugin.start_profile_cycle_to(&host, 7, meta, 2, None, CliChoice::default());
+    plugin.start_profile_cycle_to(&host, 7, meta, 2, None, known());
     host.pump_ops();
 
     // The badge rides the PaneSession, so it takes a tick to
@@ -154,7 +154,7 @@ fn a_click_on_an_unheld_session_still_cycles() {
         has_transcript: true,
     };
 
-    plugin.start_profile_cycle_to(&host, 7, meta, 2, None, CliChoice::default());
+    plugin.start_profile_cycle_to(&host, 7, meta, 2, None, known());
     host.pump_ops();
 
     struct Recording(std::sync::Mutex<Vec<String>>);

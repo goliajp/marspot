@@ -385,7 +385,7 @@ fn the_whole_idle_loop_runs_on_a_pty_this_test_owns() {
     // it at the park step — which is exactly what a re-arm after an
     // L1 restart does — and drive the wake directly.
     let client = Arc::new(ShelldClient::new(Some(inject.clone())));
-    let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), None, shell_pid, None, &CliChoice::default())
+    let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), None, shell_pid, None, &known())
         .expect("a quotable profile builds a script");
     // By name, exactly as the re-arm does -- a test that hard-codes
     // the position is a test that stops asking the question when a
@@ -454,7 +454,7 @@ fn the_whole_idle_loop_runs_on_a_pty_this_test_owns() {
         "the wake resumes under the profile it was running, behind a \
          screen wipe so the line itself never shows: {sent}"
     );
-    assert!(sent.ends_with(&format!(" --resume {uuid}\r")), "{sent}");
+    assert!(sent.ends_with(&format!(" --resume {uuid} --model 'claude-opus-5-5' --effort medium\r")), "{sent}");
     // It really reached the PTY: the shell echoes it back…
     let mut echoed = shown;
     poll_until("the pane to echo the resume line", || {

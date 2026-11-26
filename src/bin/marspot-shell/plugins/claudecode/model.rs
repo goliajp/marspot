@@ -79,37 +79,12 @@ pub(super) fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64)
     f.read_to_end(&mut raw).ok()?;
     buf.push_str(&String::from_utf8_lossy(&raw));
     for line in buf.lines().rev() {
-        // /model output records vary by claudecode version: some
-        // write `"type":"system","subtype":"local_command"`, some a
-        // `"type":"user"` record whose content is the
-        // `<local-command-stdout>` block.  Anchoring on the marker as
-        // the DIRECT value of a content field (`"content":"<local-…`,
-        // quotes unescaped) covers both — and is what makes the match
-        // collision-proof against conversation text that merely
-        // QUOTES these strings (a session where marspot itself is
-        // being developed does exactly that): inside a text field the
-        // quotes around `"content":` are JSON-escaped to `\"`, so the
-        // unescaped anchor cannot occur.  The display name may carry
-        // a trailing remark ("… and saved as your default for new
-        // sessions"), so the cut also stops at " and ".
-        for marker in [
-            "\"content\":\"<local-command-stdout>Set model to ",
-            "\"content\":\"<local-command-stdout>Kept model as ",
-        ] {
-            if let Some(i) = line.find(marker) {
-                let rest = &line[i + marker.len()..];
-                let mut end = rest.find(['<', '"']).unwrap_or(rest.len());
-                if let Some(a) = rest.find(" and ") {
-                    end = end.min(a);
-                }
-                let name = short_model(&rest[..end]);
-                if !name.is_empty() {
-                    // `/model` says nothing about effort.  Leaving it
-                    // off is the honest reading: the model just
-                    // changed, and what effort the new one runs at is
-                    // something only the next turn will say.
-                    return Some(ModelBadge::new(name, None));
-                }
+        if let Some(raw) = launch_model::model_command_name(line) {
+            let name = short_model(raw);
+            if !name.is_empty() {
+                // `/model` says nothing about effort: what the new
+                // model runs at only the next turn will say
+                return Some(ModelBadge::new(name, None));
             }
         }
         if line.contains("\"role\":\"assistant\"")

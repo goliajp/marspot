@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.770"  # each rest of a pane with a standing move gets one rebalance.boundary line; the waiting line follows the reason; alloc.plan fits the log line
+shell   = "0.7.774"  # every codex resume names the thread's model with -m
 core    = "0.12.714"  # a helper strip gives rows to a batch heard of with only idle helpers, as after a core restart
 session = "0.11.465"  # marspot-term gains the fact-line format of the state map (not used by session)

@@ -64,7 +64,7 @@ pub(super) struct ScanResult {
     /// The usage feed as this pass read it; None when there is none.
     pub(super) usage: Option<marspot::cc_usage::CcUsage>,
     /// Each bound pane's model and effort as its status-line hook last
-    /// pushed them (`pushed_choice`), by pane.
+    /// pushed them, else its transcript's model (`bound_choice`), by pane.
     pub(super) choices: HashMap<u64, CliChoice>,
     /// Per pane: the quota refusal its newest background-agent report
     /// ended on, when that agent was refused under this claude.
@@ -93,6 +93,6 @@ pub(super) struct ScanResult {
 pub(super) fn quota_inputs(
     meta: &HashMap<u64, BindMeta>,
 ) -> (Option<marspot::cc_usage::CcUsage>, HashMap<u64, CliChoice>) {
-    let choices = meta.iter().map(|(sid, m)| (*sid, pushed_choice(&m.uuid))).collect();
+    let choices = meta.iter().map(|(sid, m)| (*sid, super::launch_model::bound_choice(m))).collect();
     (marspot::cc_usage::read(), choices)
 }

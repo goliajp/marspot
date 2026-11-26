@@ -377,7 +377,7 @@ fn refuses_on_a_cpu_sample_that_spans_no_time() {
 #[test]
 fn the_reclamation_resumes_under_the_profile_it_was_running() {
     let line = |dir: Option<&str>| -> String {
-        let op = reclaim_op("abc-123", dir, Some(fid(1)), 2, None, &CliChoice::default()).expect("script builds");
+        let op = reclaim_op("abc-123", dir, Some(fid(1)), 2, None, &known()).expect("script builds");
         let bytes = op
             .steps
             .iter()
@@ -401,12 +401,12 @@ fn the_reclamation_resumes_under_the_profile_it_was_running() {
         ),
         "{with_dir}"
     );
-    assert!(with_dir.ends_with(" --resume abc-123\r"), "{with_dir}");
+    assert!(with_dir.ends_with(" --resume abc-123 --model 'claude-opus-5-5' --effort medium\r"), "{with_dir}");
 
     // No dir observed = the default profile's own entry point.
     let no_dir = line(None);
     assert!(no_dir.starts_with("printf '\\033[H\\033[2J'; claude "), "{no_dir}");
-    assert!(no_dir.ends_with(" --resume abc-123\r"), "{no_dir}");
+    assert!(no_dir.ends_with(" --resume abc-123 --model 'claude-opus-5-5' --effort medium\r"), "{no_dir}");
 }
 
 /// The dir lands inside single quotes on a real command line, so a
@@ -426,11 +426,11 @@ fn a_config_dir_that_could_break_out_of_quoting_blocks_the_whole_op() {
         "",
     ] {
         assert!(
-            reclaim_op("u", Some(bad), Some(fid(1)), 2, None, &CliChoice::default()).is_none(),
+            reclaim_op("u", Some(bad), Some(fid(1)), 2, None, &known()).is_none(),
             "{bad:?} should stop the reclamation"
         );
     }
-    assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), Some(fid(1)), 2, None, &CliChoice::default()).is_some());
+    assert!(reclaim_op("u", Some("/home/u/.claude-profile-1"), Some(fid(1)), 2, None, &known()).is_some());
 }
 
 /// A session whose profile could not be read must not be

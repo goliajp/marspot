@@ -212,13 +212,23 @@ fn a_thread_peerbus_does_not_know_is_not_handed_off_mid_turn() {
     assert_eq!(w.host.names(), Vec::<&str>::new(), "half a second is a spinner's pause");
 }
 
+/// The thread's rollout under the old home, last turn on `model`.
+fn rollout(w: &World, model: &str) {
+    let day = w.old_home().join("sessions/2026/11/27");
+    std::fs::create_dir_all(&day).unwrap();
+    let turn = format!("{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"/w\",\"model\":\"{model}\"}}}}\n");
+    std::fs::write(day.join(format!("rollout-2026-11-27T01-00-00-{THREAD}.jsonl")), turn).unwrap();
+}
+
 #[test]
 fn a_session_that_may_move_is_resumed_by_id_under_the_new_home() {
     let mut w = world(&["codex"], true);
+    rollout(&w, "gpt-5.5-codex");
     w.switched();
     let ops = w.host.submitted.lock().unwrap();
     let line = line_of(&ops[0].1);
     assert!(line.contains(&format!("codex resume {THREAD}")) && !line.contains("--last"), "{line}");
+    assert!(line.contains("-m gpt-5.5-codex"), "the thread's model, not the shared config's: {line}");
     assert!(line.contains(".codex-profile-2'"), "{line}");
     assert!(ops[0].1.steps.iter().any(|s| s.label == RELEASED), "waits for the old home");
     // the wait is counted from the TUI's end, which the op reports
@@ -286,6 +296,7 @@ fn a_switch_op_that_did_not_finish_unmarks_the_pane() {
 #[test]
 fn an_old_home_that_keeps_the_session_gets_the_tui_back() {
     let mut w = world(&["codex"], true);
+    rollout(&w, "gpt-5.5-codex");
     let on_end = w.switched();
     on_end(&pty_op::OpOutcome::Failed { step: 3, label: RELEASED, err: "still loaded".into() });
     assert_eq!(w.asks.next(), Some(Ask::End { sid: SID, codex: CODEX }));
@@ -294,6 +305,7 @@ fn an_old_home_that_keeps_the_session_gets_the_tui_back() {
     let ops = w.host.submitted.lock().unwrap();
     let line = line_of(&ops[1].1);
     assert!(line.contains(&format!("codex resume {THREAD}")) && line.contains(".codex-profile-1'"), "{line}");
+    assert!(line.contains("-m gpt-5.5-codex"), "{line}");
     assert!(!ops[1].1.steps.iter().any(|s| s.label == RELEASED), "the same home has nothing to let go of");
     // what was unsent in the TUI the switch ended comes back in this one
     assert!(job_of(&ops[1].1, true).is_none(), "a shell prompt has no composer to take");
@@ -301,4 +313,13 @@ fn an_old_home_that_keeps_the_session_gets_the_tui_back() {
     assert!(std::sync::Arc::ptr_eq(&took, &gives));
     drop(ops);
     assert_eq!(w.plugin.hint_for(SID), Some(Msg::BadgeCodexStillLoaded));
+}
+
+#[test]
+fn a_line_marspot_typed_with_a_model_can_be_switched() {
+    let v = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
+    assert!(super::switch::movable_argv(&v(&format!("codex resume {THREAD} -m gpt-5.5"))));
+    assert!(super::switch::movable_argv(&v("codex -m gpt-5.5")));
+    assert!(super::switch::movable_argv(&v("codex")));
+    assert!(!super::switch::movable_argv(&v("codex resume --last -m gpt-5.5")), "no thread id");
 }

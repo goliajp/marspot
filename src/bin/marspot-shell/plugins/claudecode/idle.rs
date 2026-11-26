@@ -350,9 +350,9 @@ pub(super) const WAKE_WATCHDOG: Duration = Duration::from_secs(30);
 /// counts as "claude is back" — with the sequencing, the deadlines, the
 /// escalation and the cleanup owned by [`pty_op`](crate::plugins::pty_op).
 ///
-/// `None` when the session's profile cannot be quoted: a session that
-/// comes back under a *different account* is worse than one left
-/// running, so there is no fallback line here.
+/// `None` when the session's profile cannot be quoted or its model is
+/// not known: a session that comes back under a *different account* or
+/// model is worse than one left running, so there is no fallback line.
 pub(super) fn reclaim_op(
     uuid: &str,
     config_dir: Option<&str>,
@@ -380,11 +380,10 @@ pub(super) fn reclaim_op(
     // `--resume` binds the session to the directory it is run from, and
     // the pane's shell may have wandered since it started.
     cmd = cmd.arg("--resume").arg(uuid).in_dir(project_dir);
-    // Woken on the model it was on, not the profile's default. Quoted:
-    // `[1m]` is a glob to a shell.
-    if let Some(model) = &choice.model {
-        cmd = cmd.arg("--model").quoted_arg(model.clone());
-    }
+    // Woken on the model it was on, never the shared settings file's
+    // default: without one there is no line. Quoted: `[1m]` is a glob
+    // to a shell.
+    cmd = cmd.arg("--model").quoted_arg(choice.model.clone()?);
     if let Some(effort) = &choice.effort {
         cmd = cmd.arg("--effort").arg(effort.clone());
     }
@@ -481,7 +480,8 @@ mod park_label_tests {
     /// than trusted.
     #[test]
     fn the_park_step_answers_to_its_name() {
-        let op = reclaim_op("aaaa-bbbb", None, None, 1234, None, &CliChoice::default()).expect("a script");
+        let known = CliChoice { model: Some("claude-opus-5-5".into()), effort: None };
+        let op = reclaim_op("aaaa-bbbb", None, None, 1234, None, &known).expect("a script");
         let at = op.index_of(RECLAIM_PARK_LABEL).expect("the park step is named");
         assert!(at > 0, "the park is not the first step; it follows the teardown");
         assert_eq!(op.index_of("no-such-step"), None, "and the lookup can fail");

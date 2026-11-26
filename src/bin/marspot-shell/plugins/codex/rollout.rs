@@ -109,7 +109,7 @@ fn history_line_at(path: &std::path::Path, at: u64, out: &mut String) -> std::io
 const DEEP_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The last line in `tail` that names the model.
-fn last_fact_line(tail: &str) -> Option<&str> {
+pub(super) fn last_fact_line(tail: &str) -> Option<&str> {
     tail.lines()
         .rev()
         .find(|l| l.contains("\"turn_context\"") || l.contains("\"thread_settings_applied\""))
@@ -153,7 +153,7 @@ fn facts_from_line(line: &str, want_cwd: &str) -> Option<SessionFacts> {
 }
 
 /// The value of `"<key>":"<value>"`, first occurrence, no escapes.
-fn json_str_field(line: &str, key: &str) -> Option<String> {
+pub(super) fn json_str_field(line: &str, key: &str) -> Option<String> {
     let pat = format!("\"{key}\":\"");
     let at = line.find(&pat)? + pat.len();
     let rest = &line[at..];
@@ -180,7 +180,7 @@ const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
 /// The cost is one `stat` per rollout, on the rescan cadence rather
 /// than the tick: 535 files here, measured at a few milliseconds.  The
 /// caller reads only the first handful of tails.
-fn recent_rollouts(codex_home: &std::path::Path) -> Vec<PathBuf> {
+pub(super) fn recent_rollouts(codex_home: &std::path::Path) -> Vec<PathBuf> {
     let mut out: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     let sessions = codex_home.join("sessions");
     // sessions/YYYY/MM/DD/rollout-*.jsonl
@@ -211,7 +211,7 @@ fn read_dirs(at: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// Read the last `ROLLOUT_TAIL_BYTES` of a file as text.
-fn tail_of(path: &std::path::Path) -> Option<String> {
+pub(super) fn tail_of(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();

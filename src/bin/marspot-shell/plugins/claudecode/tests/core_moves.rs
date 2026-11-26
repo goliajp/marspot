@@ -107,6 +107,7 @@ fn rebalance_dryrun_writes_the_plan_move_with_its_inputs_and_live_moves() {
     assert_eq!(host.submitted.lock().unwrap().len(), 1, "moved");
     let sent = host.sent.lock().unwrap().clone();
     assert!(sent[0].1.contains(".claude-profile-1"), "to P1: {:?}", sent[0].1);
+    assert!(sent[0].1.contains("--model 'claude-opus-5-5'"), "on the model it was on: {:?}", sent[0].1);
     assert!(!sent[0].1.contains(&resume_word()), "nothing to carry on with: {:?}", sent[0].1);
     assert_eq!(plugin.rebalanced.get(&sid).map(|(_, to)| *to), Some(1));
     // the move is a fact with what chose it

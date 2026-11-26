@@ -36,6 +36,7 @@ mod fable_need;
 pub(in crate::plugins) mod seen;
 mod profile_tag;
 mod model;
+pub(in crate::plugins) mod launch_model;
 mod statusline;
 mod settings_hook;
 mod worker;
@@ -388,6 +389,7 @@ mod tests {
     mod model_read;
     mod profile_list;
     mod cycle_script;
+    mod launch_models;
     mod moves;
     mod core_moves;
     mod held_back;
