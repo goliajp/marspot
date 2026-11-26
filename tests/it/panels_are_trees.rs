@@ -37,6 +37,7 @@ const CHROME: &[&str] = &[
     "button.rs",
     "sidebar.rs",
     "search_overlay.rs",
+    "pane_notice.rs",
     "grid_seams.rs",
     "grid_item.rs",
     "list_view.rs",

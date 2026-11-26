@@ -23,6 +23,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperStrip => "在窗格底部列出帮手",
         Msg::CircledDigitsWide => "带圈数字占两格",
         Msg::ClaudeCodeReportsModel => "让 Claude Code 报告所用模型",
+        Msg::ClaudeCodeGuardModel => "保护所有账号共用的默认模型",
         Msg::WheelSpeed => "滚轮速度",
 
         Msg::CostReclaimIdlePanes => "返回窗格时，重新载入会话约需 3 秒",
@@ -33,6 +34,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostHelperStrip => "有帮手时，窗格的内容区会少几行",
         Msg::CostCircledDigitsWide => "宽度与中日韩文字一致，但换行位置可能提前一列",
         Msg::CostClaudeCodeReportsModel => "在 Claude Code 的设置中添加状态行；原有的状态行继续生效，关闭此项后恢复原状",
+        Msg::CostClaudeCodeGuardModel => "发送 /model 前再确认一次；没有确认过的改动会被改回去",
         Msg::CostWheelSpeed => "越快越省滑动次数，但也越容易滚过头",
 
         Msg::MenuCopy => "拷贝",
@@ -155,6 +157,10 @@ fn text(m: Msg) -> &'static str {
         Msg::StatusLimit => "已用完",
         Msg::StatusNoKey => "未登录",
 
+        Msg::ModelGuardNotice => "/model 会改掉这台 Mac 上所有 Claude Code 账号的默认模型。按 y 发送，按 Esc 回去继续编辑",
+        Msg::ModelSendRefused => "有程序想给 Claude Code 发送 /model，没有发出去：所有账号的默认模型只能从键盘修改",
+        Msg::ClaudeSettingsChanged => "所有账号共用的 Claude Code 设置有改动",
+        Msg::ModelUnset => "它自己的默认值",
         Msg::PaneEmpty => "点按以启动 Shell",
 
         Msg::BannerRestartsPaused => "Marspot 的核心进程反复停止，将自动重试",
@@ -204,5 +210,7 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "帮手（{n}）…"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m} 分"),
         Arg::RanFor { minutes: m } => write!(out, "{} 小时 {} 分", m / 60, m % 60),
+        Arg::ModelPutBack { to, back } => write!(out, "所有账号共用的 Claude Code 默认模型未经确认被改成了 {to}，已改回 {back}"),
+        Arg::ModelNowIs(to) => write!(out, "所有账号共用的 Claude Code 默认模型现在是 {to}"),
     }
 }

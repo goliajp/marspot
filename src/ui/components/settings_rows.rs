@@ -2,7 +2,7 @@
 //! control it shows for the settings in force, and what a click on
 //! that control changes.
 
-use crate::settings::Settings;
+use crate::settings::{CcModel, Settings};
 use crate::ui::components::settings_choices::*;
 use crate::ui::strings::Msg;
 
@@ -20,6 +20,7 @@ pub enum Row {
     HelperStrip,
     ScrollFactor,
     CcStatuslineHook,
+    CcModelGuard,
 }
 
 /// A row's control shape.
@@ -89,15 +90,18 @@ pub const SECTIONS: &[Section] = &[
     },
     Section {
         heading: Msg::SettingsClaudeCode,
-        rows: &[RowSpec {
-            row: Row::CcStatuslineHook,
-            label: Msg::ClaudeCodeReportsModel,
-            // Says whose file it is, because that is the whole cost.
-            // Off, the badge still names the model — from the session
-            // transcript and the pane's own banner — it is just a turn
-            // behind where those go quiet.
-            cost: Msg::CostClaudeCodeReportsModel,
-        }],
+        rows: &[
+            RowSpec {
+                row: Row::CcStatuslineHook,
+                label: Msg::ClaudeCodeReportsModel,
+                // Says whose file it is, because that is the whole cost.
+                // Off, the badge still names the model — from the session
+                // transcript and the pane's own banner — it is just a turn
+                // behind where those go quiet.
+                cost: Msg::CostClaudeCodeReportsModel,
+            },
+            RowSpec { row: Row::CcModelGuard, label: Msg::ClaudeCodeGuardModel, cost: Msg::CostClaudeCodeGuardModel },
+        ],
     },
     Section {
         heading: Msg::SettingsScrolling,
@@ -141,6 +145,7 @@ impl Row {
             },
             Row::ReclaimPrefetch => Control::Toggle(s.reclaim_prefetch),
             Row::CcStatuslineHook => Control::Toggle(s.cc_statusline_hook),
+            Row::CcModelGuard => Control::Toggle(s.cc_model == CcModel::Managed),
             Row::CircledWide => Control::Toggle(s.appearance_circled_wide),
             Row::HelperStrip => Control::Toggle(s.helper_strip),
             Row::Theme => Control::Segmented {
@@ -178,7 +183,8 @@ impl Row {
             | Row::HelperStrip
             | Row::DimScale
             | Row::ScrollFactor
-            | Row::CcStatuslineHook => false,
+            | Row::CcStatuslineHook
+            | Row::CcModelGuard => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
     }
@@ -195,6 +201,9 @@ impl Row {
             Row::ReclaimEnabled => next.reclaim_enabled = !s.reclaim_enabled,
             Row::ReclaimPrefetch => next.reclaim_prefetch = !s.reclaim_prefetch,
             Row::CcStatuslineHook => next.cc_statusline_hook = !s.cc_statusline_hook,
+            Row::CcModelGuard => {
+                next.cc_model = if s.cc_model == CcModel::Managed { CcModel::Manual } else { CcModel::Managed }
+            }
             Row::CircledWide => next.appearance_circled_wide = !s.appearance_circled_wide,
             Row::HelperStrip => next.helper_strip = !s.helper_strip,
             Row::ReclaimIdleMinutes => {

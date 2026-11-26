@@ -22,6 +22,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperStrip => "List helpers under their pane",
         Msg::CircledDigitsWide => "Circled digits take two cells",
         Msg::ClaudeCodeReportsModel => "Let Claude Code report its model",
+        Msg::ClaudeCodeGuardModel => "Guard the default model all accounts share",
         Msg::WheelSpeed => "Wheel speed",
 
         Msg::CostReclaimIdlePanes => "coming back to one costs ~3s while its session reloads",
@@ -38,6 +39,9 @@ fn text(m: Msg) -> &'static str {
         Msg::CostClaudeCodeReportsModel => {
             "adds a status-line entry to Claude Code's settings; yours, if any, is chained \
              and restored"
+        }
+        Msg::CostClaudeCodeGuardModel => {
+            "/model asks again before it is sent; a change nobody confirmed is put back"
         }
         Msg::CostWheelSpeed => "faster gets there in fewer flicks and overshoots in one",
 
@@ -164,6 +168,16 @@ fn text(m: Msg) -> &'static str {
         Msg::StatusLimit => "limit",
         Msg::StatusNoKey => "no key",
 
+        Msg::ModelGuardNotice => {
+            "/model changes the default model of every Claude Code account on this Mac. \
+             Press y to send it, Esc to keep editing"
+        }
+        Msg::ModelSendRefused => {
+            "A program tried to send /model to Claude Code and it was not sent: only the \
+             keyboard can change the default model of every account"
+        }
+        Msg::ClaudeSettingsChanged => "Claude Code's settings, shared by every account, changed",
+        Msg::ModelUnset => "its own default",
         Msg::PaneEmpty => "empty — click to start a shell",
 
         Msg::BannerRestartsPaused => "Marspot's core keeps stopping — it will retry on its own",
@@ -221,5 +235,11 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "helpers ({n})…"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}m"),
         Arg::RanFor { minutes: m } => write!(out, "{}h {}m", m / 60, m % 60),
+        Arg::ModelPutBack { to, back } => write!(
+            out,
+            "Claude Code's default model for every account was changed to {to} without confirmation; \
+             it was put back to {back}"
+        ),
+        Arg::ModelNowIs(to) => write!(out, "Claude Code's default model for every account is now {to}"),
     }
 }

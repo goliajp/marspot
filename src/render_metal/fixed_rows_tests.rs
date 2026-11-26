@@ -47,7 +47,7 @@ fn build_glyphs_with_top_fixed(top_fixed: u16) -> Vec<GlyphInstance> {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     let mut cells: Vec<CellInstance> = Vec::new();
@@ -155,7 +155,7 @@ fn c4_highlight_two_row_span_emits_two_cells() {
         bot_fixed_h_cells: 0,
         highlight_spans: &spans,
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     // Baseline cell count (no highlight) for the same layout/grid.
@@ -176,7 +176,7 @@ fn c4_highlight_two_row_span_emits_two_cells() {
         bot_fixed_h_cells: view.bot_fixed_h_cells,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     let mut run = |v: &SessionView| -> Vec<CellInstance> {
@@ -288,7 +288,7 @@ fn c4_highlight_out_of_range_row_is_skipped() {
         bot_fixed_h_cells: 0,
         highlight_spans: &spans,
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     let mut cells: Vec<CellInstance> = Vec::new();
@@ -363,7 +363,7 @@ fn c1_bottom_fixed_tool_does_not_shift_grid_glyph_y() {
         right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     let view_bot = SessionView {
@@ -374,7 +374,7 @@ fn c1_bottom_fixed_tool_does_not_shift_grid_glyph_y() {
         right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     let mut run = |view: &SessionView| -> Vec<GlyphInstance> {

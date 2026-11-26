@@ -72,8 +72,8 @@ fn window_light() {
 }
 
 scenes_hold_at_both_scales! {
-    density_settings = panel::panel_snapshot_settings, 11;
-    density_settings_ja = settings_ja, 11;
+    density_settings = panel::panel_snapshot_settings, 12;
+    density_settings_ja = settings_ja, 12;
     density_shortcuts = panel::panel_snapshot_shortcuts, 21;
     density_layout = panel::panel_snapshot_layout, 7;
     density_layout_grid = panel::panel_snapshot_layout_grid, 13;
@@ -185,7 +185,7 @@ fn a_panel_moved_between_densities_draws_as_one_made_there() {
     let mut moved_to = |scale: f64| {
         capture(scale, || {
             renderer.rebuild_fonts_if_scale_changed();
-            panel::snapshot_on(&mut renderer, &mut wr, "settings", 1000, 1456, |renderer, layout| {
+            panel::snapshot_on(&mut renderer, &mut wr, "settings", 1000, 1552, |renderer, layout| {
                 panel::open_settings(renderer, layout, None);
             });
         })

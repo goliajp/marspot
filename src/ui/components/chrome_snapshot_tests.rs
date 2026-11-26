@@ -192,7 +192,7 @@ fn snapshot_on(
             bot_fixed_h_cells: 0,
             highlight_spans: p.hits,
             search_overlay: p.search.clone(),
-            history: p.history, session: 0,
+            history: p.history, session: 0, notice: None,
             strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_view_tests::strip_under(grid, strip)),
             seq: 1 + i as u64,
         })

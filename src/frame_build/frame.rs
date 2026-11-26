@@ -351,21 +351,22 @@ fn paint_overlays(
         use crate::ui::components::search_overlay::{
             paint_search_overlay, SearchOverlayParams,
         };
+        use crate::ui::components::pane_notice::{paint_pane_notice, PaneNoticeParams};
         for (i, view) in views.iter().enumerate() {
             let Some(rect) = layout.cells.get(i) else { continue };
-            let Some(overlay) = view.search_overlay.as_ref() else { continue };
             let inner_x = rect.x as f32 + layout.padding as f32;
             let inner_y = rect.y_top as f32
                 + layout.cell_title_h as f32
                 + layout.padding as f32;
-            let mut painter = overlay_painter!();
-            paint_search_overlay(&mut painter, SearchOverlayParams {
-                overlay,
-                inner_x,
-                inner_y,
-                grid_cols: view.grid.cols(),
-                grid_rows: view.grid.rows(),
-            });
+            let (grid_cols, grid_rows) = (view.grid.cols(), view.grid.rows());
+            if let Some(overlay) = view.search_overlay.as_ref() {
+                let mut painter = overlay_painter!();
+                paint_search_overlay(&mut painter, SearchOverlayParams { overlay, inner_x, inner_y, grid_cols, grid_rows });
+            }
+            if let Some(text) = view.notice {
+                let mut painter = overlay_painter!();
+                paint_pane_notice(&mut painter, PaneNoticeParams { text, inner_x, inner_y, grid_cols, grid_rows });
+            }
         }
     }
 

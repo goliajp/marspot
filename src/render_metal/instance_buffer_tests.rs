@@ -84,7 +84,7 @@ fn reused_instance_buffers_paint_the_same_pixels() {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
-            history: Default::default(), session: 0, strip: None,
+            history: Default::default(), session: 0, strip: None, notice: None,
             seq,
         }
     }
@@ -199,7 +199,7 @@ fn each_window_fills_its_own_instance_buffers() {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 1,
     };
 

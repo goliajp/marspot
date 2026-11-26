@@ -32,7 +32,7 @@ fn the_drag_source_reads_deeper_than_the_other_reasons() {
         grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
         title: "", selection: None, ime_preedit: "",
         right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
-        highlight_spans: &[], search_overlay: None, history: Default::default(), session: 0, strip: None, seq: 0,
+        highlight_spans: &[], search_overlay: None, history: Default::default(), session: 0, strip: None, notice: None, seq: 0,
         dormant: false, recede: 0, scrim: 0.0,
     };
     let mut overlay_rects = Vec::new();
@@ -131,7 +131,7 @@ fn scrims_do_not_stack_the_deepest_reason_wins() {
         grid: &grid, view_offset: 0, cursor_visible: false, focused,
         title: "", selection: None, ime_preedit: "",
         right_badge: "", agent_tui: false, cwd: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
-        highlight_spans: &[], search_overlay: None, history: Default::default(), session: 0, strip: None, seq: 0,
+        highlight_spans: &[], search_overlay: None, history: Default::default(), session: 0, strip: None, notice: None, seq: 0,
         dormant, recede, scrim: attention_scrim(focused, recede),
     };
     let mut scrim_alphas = |view: SessionView| -> Vec<u8> {
@@ -241,7 +241,7 @@ fn focus_ring_is_repainted_over_neighbour_scrims() {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 0,
     };
     // Pane 0 focused; its right / bottom / bottom-right neighbours

@@ -31,6 +31,7 @@ mod model;
 pub(in crate::plugins) mod launch_model;
 mod statusline;
 mod settings_hook;
+mod settings_write;
 mod worker;
 mod scan_result;
 mod binding;
@@ -71,6 +72,7 @@ mod alloc_moves;
 mod limit_reset_screen;
 mod reset_read;
 mod worker_loop;
+pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
@@ -83,7 +85,8 @@ use argv::argv_session_uuid;
 use argv::{flag_uuid, is_uuid};
 pub use statusline::statusline_ingest;
 // the settings-file plumbing the peerbus hooks share with the status line
-pub(crate) use settings_hook::{cc_settings_files, sh_quote, write_through_symlink};
+pub(crate) use settings_hook::{cc_settings_files, sh_quote};
+pub(crate) use settings_write::write_through_symlink;
 use idle::*;
 use idle_rule::*;
 use model::*;

@@ -71,6 +71,7 @@ pub enum Msg {
     CircledDigitsWide,
     HelperStrip,
     ClaudeCodeReportsModel,
+    ClaudeCodeGuardModel,
     WheelSpeed,
     // Settings — the cost line under each row
     CostReclaimIdlePanes,
@@ -81,6 +82,7 @@ pub enum Msg {
     CostCircledDigitsWide,
     CostHelperStrip,
     CostClaudeCodeReportsModel,
+    CostClaudeCodeGuardModel,
     CostWheelSpeed,
     // Pane context menu
     MenuCopy,
@@ -208,6 +210,13 @@ pub enum Msg {
     StatusNoKey,
     // What an empty pane says, in its grid
     PaneEmpty,
+    // Over a Claude Code pane: /model would change every account's default model
+    ModelGuardNotice,
+    ModelSendRefused,
+    // The settings file every Claude Code account shares, as the shell watches it
+    ClaudeSettingsChanged,
+    /// What a default model with no `model` key in the file is called.
+    ModelUnset,
     // The supervisor's banner over a window
     BannerRestartsPaused,
     BannerRecovering,
@@ -287,6 +296,10 @@ pub enum Arg<'a> {
     HelpersOf(u32),
     /// Helper panel: how long a pane has run.
     RanFor { minutes: u64 },
+    /// The shared default model changed without confirmation and was put back.
+    ModelPutBack { to: &'a str, back: &'a str },
+    /// The shared default model changed and was kept.
+    ModelNowIs(&'a str),
 }
 
 /// One language: the fixed sentences and the ones built around a value.

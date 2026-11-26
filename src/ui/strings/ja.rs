@@ -23,6 +23,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperStrip => "ヘルパーをペインの下に一覧表示",
         Msg::CircledDigitsWide => "丸数字を2セル幅で表示",
         Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
+        Msg::ClaudeCodeGuardModel => "全アカウント共通のデフォルトモデルを保護",
         Msg::WheelSpeed => "ホイールの速度",
 
         Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります",
@@ -35,6 +36,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostClaudeCodeReportsModel => {
             "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"
         }
+        Msg::CostClaudeCodeGuardModel => "/modelは送信前に確認します。確認されていない変更は元に戻します",
         Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります",
 
         Msg::MenuCopy => "コピー",
@@ -157,6 +159,16 @@ fn text(m: Msg) -> &'static str {
         Msg::StatusLimit => "上限到達",
         Msg::StatusNoKey => "未サインイン",
 
+        Msg::ModelGuardNotice => {
+            "/modelはこのMacのすべてのClaude Codeアカウントのデフォルトモデルを変更します。\
+             送信するにはy、編集に戻るにはEscを押してください"
+        }
+        Msg::ModelSendRefused => {
+            "プログラムがClaude Codeに/modelを送ろうとしたため、送信しませんでした。\
+             全アカウントのデフォルトモデルはキーボードからのみ変更できます"
+        }
+        Msg::ClaudeSettingsChanged => "全アカウント共通のClaude Codeの設定が変更されました",
+        Msg::ModelUnset => "既定値",
         Msg::PaneEmpty => "クリックしてシェルを開始",
 
         Msg::BannerRestartsPaused => "Marspotのコアが繰り返し停止しているため、自動的に再試行します",
@@ -213,5 +225,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "ヘルパー（{n}）…"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}分"),
         Arg::RanFor { minutes: m } => write!(out, "{}時間{}分", m / 60, m % 60),
+        Arg::ModelPutBack { to, back } => {
+            write!(out, "全アカウント共通のClaude Codeのデフォルトモデルが確認なしで{to}に変更されたため、{back}に戻しました")
+        }
+        Arg::ModelNowIs(to) => write!(out, "全アカウント共通のClaude Codeのデフォルトモデルは{to}になりました"),
     }
 }

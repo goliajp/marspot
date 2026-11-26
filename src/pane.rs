@@ -1622,7 +1622,7 @@ impl Pane {
                 .map(|h| h.spans.as_slice())
                 .unwrap_or(&[]),
             search_overlay,
-            history: self.history_view(focused), session: self.shelld_session_id().unwrap_or(0), strip: None,
+            history: self.history_view(focused), session: self.shelld_session_id().unwrap_or(0), strip: None, notice: None,
             seq,
         }
     }

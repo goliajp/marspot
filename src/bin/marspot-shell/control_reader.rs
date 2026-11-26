@@ -61,6 +61,8 @@ pub(crate) enum ShellInbox {
     WindowCloseRequest(u32),
     /// The core wants a toolbar icon drawn: `(symbol, point_px)`.
     IconMaskWanted(u16, u16),
+    /// The keyboard confirmed a `/model` in this pane, and it was sent.
+    ModelConfirmed(u64),
 }
 
 pub(crate) mod pane_wakes;
@@ -136,6 +138,9 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
                     MsgType::IconMaskWanted => marspot::shell_proto::decode_icon_mask_wanted(&frame.payload)
                         .ok()
                         .map(|(symbol, point_px)| ShellInbox::IconMaskWanted(symbol, point_px)),
+                    MsgType::ModelConfirmed => {
+                        marspot::shell_proto::decode_model_confirmed(&frame.payload).ok().map(ShellInbox::ModelConfirmed)
+                    }
                     // kept where the supervisor reads it, not queued:
                     // a pane that prints reports every second
                     MsgType::PaneAwake => {

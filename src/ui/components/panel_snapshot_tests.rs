@@ -145,7 +145,7 @@ pub(super) fn snapshot_on(
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq: 1,
     };
     open(renderer, &layout);
@@ -181,7 +181,7 @@ pub(super) fn snapshot_on(
 
 #[test]
 pub(super) fn panel_snapshot_settings() {
-    snapshot("settings", 1000, 1456, |renderer, layout| {
+    snapshot("settings", 1000, 1552, |renderer, layout| {
         open_settings(renderer, layout, None);
     });
 }

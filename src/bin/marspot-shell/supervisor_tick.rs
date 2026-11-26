@@ -51,6 +51,9 @@ impl ShellApp {
         }
         lap!(0);
         super::theme_follow::follow_settings();
+        for text in plugins::claudecode::model_guard::take_notices() {
+            self.send(MsgType::Notice, marspot::shell_proto::encode_notice(&text));
+        }
         self.follow_theme();
         lap!(1);
         self.sweep_pane_status();

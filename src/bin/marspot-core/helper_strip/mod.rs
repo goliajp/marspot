@@ -273,7 +273,7 @@ impl CoreApp {
 #[cfg(test)]
 mod alloc_tests;
 #[cfg(test)]
-mod host_tests;
+pub(super) mod host_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]

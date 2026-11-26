@@ -39,7 +39,7 @@ impl<'a> SessionView<'a> {
             search_overlay: None,
             history: HistoryView::default(),
             session: 0,
-            strip: None,
+            strip: None, notice: None,
             seq: 0,
         }
     }

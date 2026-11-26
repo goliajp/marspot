@@ -4,7 +4,7 @@
 //! and written.
 
 use super::values::parse_bool;
-use super::{Rebalance, Settings};
+use super::{CcModel, Rebalance, Settings};
 
 /// What an agent's plugin does with what the allocation decides for
 /// its panes, beyond the moves it made before the allocation existed.
@@ -50,6 +50,7 @@ pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
         "gemini.allocation" => s.gemini_allocation.as_str().to_string(),
         "sched.reset" => s.sched_reset.as_str().to_string(),
         "sched.reset_read" => s.sched_reset_read.as_str().to_string(),
+        "claude.model" => s.cc_model.as_str().to_string(),
         _ => return None,
     })
 }
@@ -64,6 +65,7 @@ pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
         "gemini.allocation" => s.gemini_allocation = AgentAllocation::parse(v),
         "sched.reset" => s.sched_reset = AgentAllocation::parse(v),
         "sched.reset_read" => s.sched_reset_read = AgentAllocation::parse(v),
+        "claude.model" => s.cc_model = CcModel::parse(v),
         _ => return false,
     }
     true

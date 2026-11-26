@@ -27,7 +27,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 154;
+    const EXPECTED: usize = 160;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -108,6 +108,12 @@ const SAMPLES: &[(Arg<'static>, &str, &[&str])] = &[
     (Arg::HelpersOf(3), "helpers (3)…", &["3"]),
     (Arg::RanFor { minutes: 4 }, "4m", &["4"]),
     (Arg::RanFor { minutes: 135 }, "2h 15m", &["2", "15"]),
+    (
+        Arg::ModelPutBack { to: "fable", back: "opus" },
+        "Claude Code's default model for every account was changed to fable without confirmation; it was put back to opus",
+        &["fable", "opus"],
+    ),
+    (Arg::ModelNowIs("sonnet"), "Claude Code's default model for every account is now sonnet", &["sonnet"]),
 ];
 
 /// The sentences built around a value read as they did when each call

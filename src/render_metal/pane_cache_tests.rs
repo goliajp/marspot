@@ -54,7 +54,7 @@ fn lay_titled(f: &mut Fixture, term: &Terminal, seq: u64, title: &str, caches: &
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
-        history: Default::default(), session: 0, strip: None,
+        history: Default::default(), session: 0, strip: None, notice: None,
         seq,
     };
     let (atlas_w, atlas_h) = f.atlas.dims();

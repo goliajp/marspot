@@ -27,6 +27,7 @@ pub mod scrollbar;
 pub mod process_panel;
 pub mod process_view;
 pub mod search_overlay;
+pub mod pane_notice;
 pub mod panel;
 pub mod text_input;
 pub mod list_view;
