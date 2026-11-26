@@ -122,7 +122,7 @@ HOOK
 # that has since been reused.
 run_job() {
   local host=$1 job=$2 env=$3 cmd=$4
-  ssh "$host" "echo \$\$ > $PIDF; cd ~/work/$NAME && $env && rustc -V && \
+  ssh "$host" "echo \$\$ > $PIDF; cd ~/work/$NAME && $env && export MARSPOT_GIT_SHA=$GIT_SHA && rustc -V && \
     $cmd bin/_bounded.sh $TIMEOUT bin/ci-remote.sh --job $job; rc=\$?; rm -f $PIDF; exit \$rc" </dev/null
 }
 
@@ -168,6 +168,8 @@ trap 'rm -rf "$LOCK_LOCAL"' EXIT
 clean=1
 [[ -z "$(git status --porcelain)" ]] || clean=0
 tree="$(git rev-parse 'HEAD^{tree}')"
+# the copies have no .git: the binaries built there name this commit
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 
 remote_sync "$MAC" --name "$NAME" >/dev/null
 remote_sync "$LINUX" --name "$NAME" >/dev/null

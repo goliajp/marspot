@@ -122,7 +122,8 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   # hold, so nothing else gets between the build and the reading.
   COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
   [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || COMMIT+="-dirty"
-  FWD="export MARSPOT_BENCH_COMMIT=$COMMIT; "
+  GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
+  FWD="export MARSPOT_BENCH_COMMIT=$COMMIT MARSPOT_GIT_SHA=$GIT_SHA; "
   [[ -z "${MEASURE_TERMS:-}" ]] || FWD+="export MEASURE_TERMS=$(printf '%q' "$MEASURE_TERMS"); "
   [[ -z "${MEASURE_ROUNDS:-}" ]] || FWD+="export MEASURE_ROUNDS=$(printf '%q' "$MEASURE_ROUNDS"); "
   [[ -z "${MEASURE_MARKER_TIMEOUT_S:-}" ]] || FWD+="export MEASURE_MARKER_TIMEOUT_S=$(printf '%q' "$MEASURE_MARKER_TIMEOUT_S"); "

@@ -197,6 +197,9 @@ trap interrupted INT TERM
 trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
 remote_sync "$HOST" --name "$REMOTE_NAME"
+# the remote copy has no .git; the binaries built there and a suite that
+# records readings name the commit by this
+commit="$("$ROOT/bin/_git-sha.sh")"
 
 # With E2E_LOCK=bench every suite builds inside its own exclusive hold
 # (bin/_build_then.sh): built under a shared hold first, it would wait
@@ -205,7 +208,7 @@ remote_sync "$HOST" --name "$REMOTE_NAME"
 # queues once for the exclusive hold it is read under.
 if [[ ${E2E_LOCK:-heavy} != bench ]]; then
   echo "==> building release on $HOST"
-  remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && \
+  remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && export MARSPOT_GIT_SHA=$commit && \
     /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $UNTIL bin/_bounded.sh $BUILD_TIMEOUT \
     sh -c 'cargo build --release ${E2E_FEATURES:+--features $E2E_FEATURES} --bin marspot-shell --bin marspot-core --bin marspot-session \
       && cargo build --release -p marspot-peer'" \
@@ -222,10 +225,7 @@ fi
 fwd=""
 while IFS= read -r kv; do fwd+=" $(printf '%q' "$kv")"; done < <(env | grep -E '^IDLE_[A-Z_]+=' || true)
 for kv in ${E2E_ENV:-}; do fwd+=" $(printf '%q' "$kv")"; done
-# the remote copy has no .git; a suite that records readings names the commit by this
-commit="$(git -C "$ROOT" rev-parse --short=8 HEAD)"
-[[ -n $(git -C "$ROOT" status --porcelain) ]] && commit+="-dirty"
-fwd+=" E2E_COMMIT=$commit"
+fwd+=" E2E_COMMIT=$commit MARSPOT_GIT_SHA=$commit"
 
 rc=0
 unmeasured=0
