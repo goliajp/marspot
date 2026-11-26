@@ -62,7 +62,7 @@ impl Plugin for ClaudecodePlugin {
         // 700ms-2s under disk contention — 3 such ticks tripped the
         // 100ms HOOK_BUDGET strike rule and the host permanently
         // disabled the plugin.
-        let (req_tx, req_rx) = mpsc::channel::<()>();
+        let (req_tx, req_rx) = mpsc::channel::<Option<u64>>();
         let (res_tx, res_rx) = mpsc::channel::<ScanResult>();
         let ctx = WorkerCtx {
             projects_root,
@@ -220,7 +220,8 @@ impl Plugin for ClaudecodePlugin {
         if !self.scan_inflight
             && !matches!(self.due(), crate::plugins::TickDue::At(t) if Instant::now() < t)
             && let Some(tx) = &self.scan_req_tx {
-                if tx.send(()).is_ok() {
+                // the pane the user is in, which the scan cannot see
+                if tx.send(self.focused_sid).is_ok() {
                     self.scan_inflight = true;
                     self.quiet.sent();
                 } else {

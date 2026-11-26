@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use super::allocation_events::{DAY, Event, EventLog, KEEP_DAYS, Tail};
-use super::allocation_inputs::{PaneIn, Snapshot};
+use super::allocation_inputs::{PaneIn, Snapshot, at_of};
 use super::allocation_prices::{Tokens, class_of, weeks};
 use super::allocation_usage::Readers;
 use crate::plugins::allocation::Class;
@@ -82,6 +82,7 @@ pub(super) struct Allocation {
     /// The last scan's view, for the main thread to choose by.
     pub(super) view: Option<super::allocation_view::View>,
     pub(super) sched: crate::agentsvc::sched::Shadow,
+    pub(super) more: super::allocation_more::More,
 }
 
 /// Events in `dir` under the claudecode plugin's state directory.
@@ -98,6 +99,7 @@ pub(super) fn class_word(c: Class) -> &'static str {
 
 impl Allocation {
     pub(super) fn new(dir: PathBuf) -> Self {
+        let dir_hours = dir.with_file_name("alloc_hours");
         Allocation {
             events: EventLog::new(dir),
             last: HashMap::new(),
@@ -115,6 +117,7 @@ impl Allocation {
             tail: Tail::default(),
             view: None,
             sched: Default::default(),
+            more: super::allocation_more::More::new(super::allocation_hours::Hours::new(dir_hours)),
         }
     }
 
@@ -282,10 +285,6 @@ impl Allocation {
             u.prune(now);
         }
     }
-}
-
-fn at_of(detail: &str) -> Option<i64> {
-    detail.strip_prefix("at=")?.parse().ok()
 }
 
 #[path = "allocation_caps.rs"]

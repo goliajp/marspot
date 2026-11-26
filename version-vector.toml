@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.778"  # a move closes its rest once; alloc.plan always counts the moves and caps the accounts out
+shell   = "0.7.779"  # alloc_events gains boundary, compacted and reading facts; alloc_hours keeps an hourly roll-up 60 days
 core    = "0.12.718"  # the accounts panel lists each account's stored resets under its bars, end before start
 session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)
