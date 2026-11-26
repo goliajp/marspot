@@ -5,7 +5,7 @@ use crate::plugins::allocation::Class;
 
 /// Helpers placed on each account that what the choice reads does not
 /// hold yet.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(in crate::plugins) struct Placed {
     /// The stamp of the feed these counts are on top of.
     stamp: i64,
@@ -34,10 +34,6 @@ const SHOWN_CAP: usize = 256;
 pub(super) const SHOWN_WITHIN_S: i64 = 15 * 60;
 
 impl Placed {
-    pub(super) const fn new() -> Self {
-        Self { stamp: 0, feed_at: 0, entries: Vec::new(), viewed: false, shown: Vec::new() }
-    }
-
     /// The feed being read at `now` was written at `at`.  A newer one
     /// already counts what was placed before it, so the tally starts
     /// again; an older one, read earlier and handed over late, says

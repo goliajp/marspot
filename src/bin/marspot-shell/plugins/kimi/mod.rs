@@ -28,7 +28,6 @@ mod session;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use marspot::pane_state::Activity;
@@ -40,6 +39,7 @@ use crate::observe::Proc;
 use crate::plugins::beside::{self, Beside};
 use crate::plugins::helpers::used;
 use crate::plugins::{handoff, pidtree, pty_op};
+use crate::host::published::Published;
 use marspot::ui::strings::{self, Arg};
 
 use badge::{badge_text, publish_badge};
@@ -85,7 +85,7 @@ fn activity_of(status: Option<Status>) -> Activity {
     }
 }
 
-static ACTIVITY: Mutex<Option<HashMap<u64, Activity>>> = Mutex::new(None);
+static ACTIVITY: Published<HashMap<u64, Activity>> = Published::new();
 
 /// What the kimi in pane `sid` is doing; None for a pane without one.
 ///
@@ -94,7 +94,7 @@ static ACTIVITY: Mutex<Option<HashMap<u64, Activity>>> = Mutex::new(None);
 /// reporter would take turns with it, so that plugin asks here before
 /// it says `Absent`.
 pub(crate) fn activity(sid: u64) -> Option<Activity> {
-    ACTIVITY.lock().unwrap().as_ref()?.get(&sid).copied()
+    ACTIVITY.get()?.get(&sid).copied()
 }
 
 /// The model and the effort a pane's badge shows.
@@ -387,7 +387,7 @@ impl Plugin for KimiPlugin {
         self.before.retain(|id, _| obs.has(*id));
         self.panes.retain(|sid, _| seen.contains(sid));
         let activity = self.panes.iter().map(|(sid, p)| (*sid, activity_of(p.facts.as_ref().map(|f| f.status)))).collect();
-        *ACTIVITY.lock().unwrap() = Some(activity);
+        ACTIVITY.publish(activity);
 
         let mut peers = Peers { bound: Vec::new(), all_known: true, unbound: Vec::new() };
         for (sid, p) in &self.panes {

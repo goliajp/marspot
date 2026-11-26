@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use marspot_peer::registry::Status;
 
 use super::refusal::TurnEnds;
+use crate::host::published::Published;
 use super::worker::Worker;
 
 /// A pane's codex thread as the worker knows it, for other plugins:
@@ -24,15 +25,15 @@ pub(crate) struct ThreadView {
     pub ends: TurnEnds,
 }
 
-static THREADS: Mutex<Option<HashMap<u64, ThreadView>>> = Mutex::new(None);
+static THREADS: Published<HashMap<u64, ThreadView>> = Published::new();
 
 /// Every bound codex pane's thread, by session id.
-pub(crate) fn threads() -> HashMap<u64, ThreadView> {
-    THREADS.lock().unwrap().clone().unwrap_or_default()
+pub(crate) fn threads() -> Arc<HashMap<u64, ThreadView>> {
+    THREADS.get().unwrap_or_default()
 }
 
 pub(crate) fn publish_threads(views: HashMap<u64, ThreadView>) {
-    *THREADS.lock().unwrap() = Some(views);
+    THREADS.publish(views);
 }
 
 impl Worker {

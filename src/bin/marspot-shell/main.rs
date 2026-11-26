@@ -13,8 +13,7 @@
 //! which is what makes "no window flicker on upgrade" reachable.
 
 use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::{net::UnixStream, process::CommandExt};
 use std::process::{Child, Command};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -42,6 +41,7 @@ mod cli_socket;
 mod control_reader;
 mod dev_window;
 mod frame_layer;
+mod host;
 mod identity;
 mod inherited;
 mod instance;

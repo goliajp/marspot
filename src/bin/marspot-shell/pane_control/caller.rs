@@ -132,5 +132,5 @@ pub(super) fn identify(peer: &Peer, thread: Option<&str>, threads: impl FnOnce()
 
 /// The peer bus's codex threads, as `(session, thread)`.
 pub(super) fn codex_threads() -> Vec<(u64, String)> {
-    crate::plugins::peerbus::threads().into_iter().map(|(sid, v)| (sid, v.thread)).collect()
+    crate::plugins::peerbus::threads().iter().map(|(sid, v)| (*sid, v.thread.clone())).collect()
 }

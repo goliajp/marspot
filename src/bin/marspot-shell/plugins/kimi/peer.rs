@@ -4,11 +4,12 @@
 //! when a session goes idle.  Published from this plugin's tick, which
 //! already works both out.
 
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use marspot_peer::envelope::Mode;
 use marspot_peer::registry::Status;
 
+use crate::host::published::Published;
 use crate::plugins::pidtree;
 
 /// One pane's kimi and the session it has open.
@@ -43,13 +44,13 @@ pub(crate) struct Peers {
 /// hook the line sets off.
 pub(super) const WAKE_LINE: &str = "Read the messages that just arrived from other agent sessions.";
 
-static PEERS: Mutex<Option<Peers>> = Mutex::new(None);
+static PEERS: Published<Peers> = Published::new();
 
 /// The kimi panes as of the last tick; None before the first.
-pub(crate) fn peers() -> Option<Peers> {
-    PEERS.lock().unwrap().clone()
+pub(crate) fn peers() -> Option<Arc<Peers>> {
+    PEERS.get()
 }
 
 pub(super) fn publish(peers: Peers) {
-    *PEERS.lock().unwrap() = Some(peers);
+    PEERS.publish(peers);
 }

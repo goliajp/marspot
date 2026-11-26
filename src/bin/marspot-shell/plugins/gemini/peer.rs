@@ -4,8 +4,9 @@
 //! pane, so the answer is published from its tick rather than worked
 //! out a second time.
 
-use std::sync::Mutex;
+use std::sync::Arc;
 
+use crate::host::published::Published;
 use crate::plugins::pidtree;
 
 /// One pane's gemini and the session it is writing.
@@ -31,13 +32,13 @@ pub(crate) struct Peers {
     pub unbound: Vec<(u64, pidtree::ProcId)>,
 }
 
-static PEERS: Mutex<Option<Peers>> = Mutex::new(None);
+static PEERS: Published<Peers> = Published::new();
 
 /// The gemini panes as of the last tick; None before the first.
-pub(crate) fn peers() -> Option<Peers> {
-    PEERS.lock().unwrap().clone()
+pub(crate) fn peers() -> Option<Arc<Peers>> {
+    PEERS.get()
 }
 
 pub(super) fn publish(peers: Peers) {
-    *PEERS.lock().unwrap() = Some(peers);
+    PEERS.publish(peers);
 }

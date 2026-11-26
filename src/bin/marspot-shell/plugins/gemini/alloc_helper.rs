@@ -10,12 +10,12 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use marspot::settings::AgentAllocation;
 
 use super::alloc::{Refused, events_dir, quants, shut};
 use super::quota::Scope;
+use crate::host::published::Published;
 use crate::plugins::allocation::choose::Mover;
 use crate::plugins::allocation::helper::{Placement, Scene, place};
 use crate::agentsvc::sched::Made;
@@ -30,7 +30,7 @@ use crate::plugins::usage::for_helpers::{Pick, Recovery, account, take_turns};
 const PLACED_S: i64 = 15 * 60;
 const PLACED_CAP: usize = 64;
 
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq)]
 struct Shared {
     refused: Vec<(u8, Scope, i64)>,
     /// The account of each gemini pane.
@@ -38,17 +38,14 @@ struct Shared {
     placed: VecDeque<(i64, u8)>,
 }
 
-static SHARED: Mutex<Shared> = Mutex::new(Shared { refused: Vec::new(), panes: Vec::new(), placed: VecDeque::new() });
-
-fn shared() -> std::sync::MutexGuard<'static, Shared> {
-    SHARED.lock().unwrap_or_else(|p| p.into_inner())
-}
+static SHARED: Published<Shared> = Published::new();
 
 /// What the plugin's pass knows, for the next helper.
 pub(super) fn publish(refused: Vec<(u8, Scope, i64)>, panes: Vec<u8>) {
-    let mut s = shared();
-    s.refused = refused;
-    s.panes = panes;
+    SHARED.update(|s| {
+        s.refused = refused;
+        s.panes = panes;
+    });
 }
 
 /// The account a gemini helper starts on, for the helper launcher.
@@ -82,7 +79,11 @@ pub(super) fn choose(mode: AgentAllocation, homes: &[u8], model: Option<&str>, n
     if mode == AgentAllocation::Off || homes.is_empty() {
         return HelperChoice::TakeTurns;
     }
-    let mut s = shared();
+    SHARED.update(|s| place_among(s, mode == AgentAllocation::Live, homes, model, now, dir))
+}
+
+/// [`choose`] with the plugin's last pass and the helpers placed since in `s`.
+fn place_among(s: &mut Shared, live: bool, homes: &[u8], model: Option<&str>, now: i64, dir: &std::path::Path) -> HelperChoice {
     s.placed.retain(|(at, _)| now - at < PLACED_S);
     let refused: std::collections::HashMap<(u8, Scope), Refused> = s.refused.iter().map(|(id, sc, r)| ((*id, sc.clone()), Refused { at: 0, resets_at: *r })).collect();
     let accounts = quants(&refused, homes, model, now);
@@ -100,7 +101,6 @@ pub(super) fn choose(mode: AgentAllocation, homes: &[u8], model: Option<&str>, n
         }
     }
     let scene = Scene { accounts, loads, b_f: 0.0, b_n: RHO0 * s.panes.len() as f64, kappa: None, shown: None };
-    let live = mode == AgentAllocation::Live;
     // a row lost to a full disk does not stop the helper
     let write = |kind: &str, profile: Option<u8>, detail: String| {
         let ev = Event { at: now, sid: 0, kind: kind.into(), profile, class: "plain".into(), detail };

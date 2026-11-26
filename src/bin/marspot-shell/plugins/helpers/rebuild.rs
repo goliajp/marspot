@@ -90,6 +90,8 @@ pub(super) fn reload(s: &Shared, look: &dyn Fn() -> Arc<Observation>) -> bool {
     };
     st.began_ms = super::records::now_ms();
     st.poked = super::turn::poked_at_start(&st.table, st.began_ms);
-    *s.published.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(st.table.clone());
+    if !s.published.publish(st.table.clone()) {
+        s.strip_changed();
+    }
     known
 }

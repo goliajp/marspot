@@ -65,8 +65,8 @@ pub(crate) struct Known {
 
 impl Known {
     pub fn current() -> Known {
-        let codex_threads = crate::plugins::peerbus::threads().into_iter().map(|(sid, v)| (v.thread, sid)).collect();
-        Known { codex_threads, claude: crate::plugins::claudecode::sessions(), helper_parents: HashMap::new() }
+        let codex_threads = crate::plugins::peerbus::threads().iter().map(|(sid, v)| (v.thread.clone(), *sid)).collect();
+        Known { codex_threads, claude: crate::plugins::claudecode::sessions().to_vec(), helper_parents: HashMap::new() }
     }
 }
 

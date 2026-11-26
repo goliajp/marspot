@@ -4,9 +4,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use super::bind_meta::BindMeta;
+use crate::host::published::Published;
 use super::argv::is_uuid;
 use super::{config_dir_or_default, continued, encode_project_dir};
 
@@ -19,11 +20,11 @@ pub(crate) struct ClaudePane {
     pub transcripts: Option<PathBuf>,
 }
 
-static PANES: Mutex<Vec<ClaudePane>> = Mutex::new(Vec::new());
+static PANES: Published<Vec<ClaudePane>> = Published::new();
 
 /// Every bound claude pane's conversation.
-pub(crate) fn sessions() -> Vec<ClaudePane> {
-    PANES.lock().unwrap().clone()
+pub(crate) fn sessions() -> Arc<Vec<ClaudePane>> {
+    PANES.get().unwrap_or_default()
 }
 
 pub(super) fn publish(meta: &HashMap<u64, BindMeta>) {
@@ -39,7 +40,7 @@ pub(super) fn publish(meta: &HashMap<u64, BindMeta>) {
         })
         .collect();
     panes.sort_by_key(|p| p.sid);
-    *PANES.lock().unwrap() = panes;
+    PANES.publish(panes);
 }
 
 /// The pane whose conversation is `session`, or the one `session`'s
