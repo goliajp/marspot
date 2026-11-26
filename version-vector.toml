@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.766"  # a record fold can start at a known line boundary, so the first appended record counts
+shell   = "0.7.767"  # StateStore debug checks refuse what the source scan refuses: left-behind rows and whole external trees
 core    = "0.12.713"  # marspot-term gains the fact-line format of the state map (not used by core)
 session = "0.11.465"  # marspot-term gains the fact-line format of the state map (not used by session)

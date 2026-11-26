@@ -272,3 +272,23 @@ pub(crate) fn has_dir(dir: &str) -> bool {
 pub(crate) fn is_registered(path: &str) -> bool {
     lookup(path).is_some_and(|e| !e.path.starts_with("**")) || has_dir(path)
 }
+
+/// The rows a path today's source builds may fall under.  Not the
+/// catch-alls, which would vouch for anything; not what only older
+/// builds left; not a whole tree that belongs to another program (a
+/// helper agent's home): a path marspot builds there is a file marspot
+/// uses and needs a row of its own.
+pub(crate) fn source_rows() -> impl Iterator<Item = &'static Entry> {
+    STATE_MAP.iter().filter(|e| !e.path.starts_with("**") && e.writer != LEFT_BEHIND && !(e.kind == External && e.path.ends_with("/**")))
+}
+
+/// Whether today's code may write the file `path`: some row of
+/// [`source_rows`] is its row.
+pub(crate) fn source_may_write(path: &str) -> bool {
+    source_rows().any(|e| pattern::matches(e.path, path))
+}
+
+/// Whether today's code may put files under the directory `dir`.
+pub(crate) fn source_may_write_under(dir: &str) -> bool {
+    source_rows().any(|e| pattern::is_dir_of(e.path, dir))
+}

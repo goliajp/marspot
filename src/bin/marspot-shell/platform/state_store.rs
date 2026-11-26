@@ -23,7 +23,7 @@ impl StateStore {
     /// The same under another root.
     pub(crate) fn open_in(root: &Path, name: &str) -> io::Result<StateStore> {
         super::assert_off_main("a state directory opened");
-        debug_assert!(state_map::has_dir(name), "{name}/ is not in host::state_map");
+        debug_assert!(state_map::source_may_write_under(name), "{name}/ is not in host::state_map");
         let dir = root.join(name);
         std::fs::create_dir_all(&dir)?;
         Ok(StateStore { name: name.to_string(), dir })
@@ -34,20 +34,17 @@ impl StateStore {
     }
 
     /// The path of the file `rel` in this directory, which the state map
-    /// must know.
+    /// must know as a file today's code writes: not only by a row of what
+    /// older builds left, nor by a whole tree another program owns.
     pub(crate) fn file(&self, rel: &str) -> PathBuf {
-        debug_assert!(
-            state_map::lookup(&format!("{}/{rel}", self.name)).is_some_and(|e| !e.path.starts_with("**")),
-            "{}/{rel} is not in host::state_map",
-            self.name
-        );
+        debug_assert!(state_map::source_may_write(&format!("{}/{rel}", self.name)), "{}/{rel} is not in host::state_map", self.name);
         self.dir.join(rel)
     }
 
     /// The fact log in the subdirectory `sub`: one file a day, at most
     /// `cap` bytes of facts a day, `keep_days` days kept.
     pub(crate) fn facts(&self, sub: &str, cap: u64, keep_days: u32) -> io::Result<FactLog> {
-        debug_assert!(state_map::has_dir(&format!("{}/{sub}", self.name)), "{}/{sub}/ is not in host::state_map", self.name);
+        debug_assert!(state_map::source_may_write_under(&format!("{}/{sub}", self.name)), "{}/{sub}/ is not in host::state_map", self.name);
         FactLog::at(self.dir.join(sub), cap, keep_days)
     }
 }
@@ -90,5 +87,19 @@ mod tests {
     fn an_unregistered_directory_is_refused_in_a_test_build() {
         let root = marspot_term::test_env::TempDir::new("state-store-undir");
         let _ = StateStore::open_in(root.path(), "nobody-registered-this");
+    }
+
+    #[test]
+    #[should_panic(expected = "not in host::state_map")]
+    fn a_directory_only_older_builds_left_is_refused_in_a_test_build() {
+        let root = marspot_term::test_env::TempDir::new("state-store-left-behind");
+        let _ = StateStore::open_in(root.path(), "previous");
+    }
+
+    #[test]
+    #[should_panic(expected = "not in host::state_map")]
+    fn a_file_in_a_tree_another_program_owns_is_refused_in_a_test_build() {
+        let root = marspot_term::test_env::TempDir::new("state-store-external");
+        let _ = StateStore::open_in(root.path(), "helpers/7").unwrap().file("state.json");
     }
 }
