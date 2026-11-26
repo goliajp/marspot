@@ -53,3 +53,27 @@ fn an_idle_helper_keeps_its_row_and_the_title_count_until_it_is_stopped() {
     assert_eq!(title_count(&none, 10), 0);
     dir_gone(&d);
 }
+
+#[test]
+fn an_idle_helper_whose_program_exits_says_exited_for_a_moment_with_its_figures_frozen() {
+    let d = temp("strip-idle-exit");
+    let (s, _rx) = shared_at(&d);
+    let mut m = Memory::default();
+    begin_at(&s, 1, 10, T);
+    s.used(1, "c", used::Used { tokens: Some(100), had_tool: Some(false), model: None });
+    let open = panes(&[(10, 0), (1, 10)]);
+    strips_at(&s, &mut m, &open, T + 10);
+    at(&s, 1, T + 100, vec![Event::IdleNoticed]);
+    assert_eq!(strips_at(&s, &mut m, &open, T + 100)[0].rows[0].state, StripState::Idle);
+    at(&s, 1, T + 600_000, vec![Event::ExitedNoticed, Event::Stopped { exited: true }]);
+    let left = panes(&[(10, 0)]);
+    for now in [T + 600_000, T + 602_999] {
+        let got = strips_at(&s, &mut m, &left, now);
+        let r = &got[0].rows[0];
+        assert_eq!((got[0].rows.len(), r.state, r.gone), (1, StripState::Exited, true), "at {now}");
+        assert_eq!((r.ended_ms, r.elapsed_ms(now), r.tokens, r.had_tool), (Some(T + 100), 100, Some(100), false));
+    }
+    assert_eq!(s.lock().batches.next_ms(&s.table()), Some(T + 603_000));
+    assert!(strips_at(&s, &mut m, &left, T + 603_000).is_empty());
+    dir_gone(&d);
+}

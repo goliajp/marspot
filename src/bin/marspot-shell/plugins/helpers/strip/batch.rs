@@ -17,7 +17,7 @@ use super::super::table::{Event, Helper, Table};
 const ENDED_MAX: usize = HELPER_STRIP_ROWS;
 /// A chain of parents that loops ends here.
 const WALK_MAX: usize = 16;
-/// How long one whose pane closed when it was not idle stays.
+/// How long one that exited stays after its pane closed.
 pub(super) const OVER_MS: u64 = 3_000;
 /// How long one closed while at work stays.
 pub(super) const STOPPED_MS: u64 = 30_000;
@@ -42,14 +42,16 @@ impl Ended {
     }
 
     /// When it is listed no more.  One that was idle and could still be
-    /// talked to goes with its pane, as it leaves the title's count.
+    /// talked to goes with its pane, as it leaves the title's count.  The
+    /// clock of one that exited while idle ended with its last turn, so
+    /// the moment it stays is counted from its pane's close.
     fn until_ms(&self) -> u64 {
         if self.was_stopped() {
             self.at_ms + STOPPED_MS
         } else if self.was_idle && !self.helper.exited {
             self.at_ms
         } else {
-            self.helper.clock.ended_ms + OVER_MS
+            self.at_ms + OVER_MS
         }
     }
 }
