@@ -59,6 +59,13 @@ fn the_status_line_hook_is_on() {
 }
 
 #[test]
+fn the_default_model_all_claude_accounts_share_is_guarded() {
+    // one account's /model changed the default of every account on
+    // the machine once (2026-11-27); the guard asks before it can
+    assert_eq!(Settings::default().cc_model, marspot_term::settings::CcModel::Managed);
+}
+
+#[test]
 fn resting_moves_by_the_plan_are_made() {
     // the placement objective moves resting panes for real unless the file says otherwise
     assert_eq!(Settings::default().cc_rebalance, marspot_term::settings::Rebalance::Live);

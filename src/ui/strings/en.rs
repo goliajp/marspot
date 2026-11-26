@@ -22,6 +22,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperStrip => "List helpers under their pane",
         Msg::CircledDigitsWide => "Circled digits take two cells",
         Msg::ClaudeCodeReportsModel => "Let Claude Code report its model",
+        Msg::ClaudeCodeGuardModel => "Guard the default model all accounts share",
         Msg::WheelSpeed => "Wheel speed",
 
         Msg::CostReclaimIdlePanes => "coming back to one costs ~3s while its session reloads",
@@ -38,6 +39,9 @@ fn text(m: Msg) -> &'static str {
         Msg::CostClaudeCodeReportsModel => {
             "adds a status-line entry to Claude Code's settings; yours, if any, is chained \
              and restored"
+        }
+        Msg::CostClaudeCodeGuardModel => {
+            "/model asks again before it is sent; a change nobody confirmed is put back"
         }
         Msg::CostWheelSpeed => "faster gets there in fewer flicks and overshoots in one",
 

@@ -23,6 +23,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperStrip => "ヘルパーをペインの下に一覧表示",
         Msg::CircledDigitsWide => "丸数字を2セル幅で表示",
         Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
+        Msg::ClaudeCodeGuardModel => "全アカウント共通のデフォルトモデルを保護",
         Msg::WheelSpeed => "ホイールの速度",
 
         Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります",
@@ -35,6 +36,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostClaudeCodeReportsModel => {
             "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"
         }
+        Msg::CostClaudeCodeGuardModel => "/modelは送信前に確認します。確認されていない変更は元に戻します",
         Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります",
 
         Msg::MenuCopy => "コピー",

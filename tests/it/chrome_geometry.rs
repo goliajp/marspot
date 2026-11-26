@@ -217,8 +217,8 @@ mod settings_modal {
     fn a_window_with_room_gets_the_panel_at_its_natural_size() {
         at_scale_1(|| {
             assert_eq!(
-                dump(1600.0, 1496.0, &Settings::default()),
-                "panel 320.0,76.0 960.0x1345.0\n\
+                dump(1600.0, 1592.0, &Settings::default()),
+                "panel 320.0,76.0 960.0x1440.0\n\
                  group \"Idle reclamation\" at 356.0,156.0 w 888.0\n\
                  card 356.0,183.0 888.0x287.7\n\
                  row ReclaimEnabled band 356.0,183.0 888.0x95.9 label 226.5 desc 260.0 ctl 1152.0,201.0 68.0x40.0\n\
@@ -238,12 +238,14 @@ mod settings_modal {
                  sep 380.0,921.3 840.0x1.0\n\
                  row HelperStrip band 356.0,921.3 888.0x95.9 label 964.8 desc 998.3 ctl 1152.0,939.3 68.0x40.0\n\
                  group \"Claude Code\" at 356.0,1057.2 w 888.0\n\
-                 card 356.0,1084.2 888.0x95.9\n\
+                 card 356.0,1084.2 888.0x191.8\n\
                  row CcStatuslineHook band 356.0,1084.2 888.0x95.9 label 1127.7 desc 1161.2 ctl 1152.0,1102.2 68.0x40.0\n\
-                 group \"Scrolling\" at 356.0,1220.1 w 888.0\n\
-                 card 356.0,1247.1 888.0x95.9\n\
-                 row ScrollFactor band 356.0,1247.1 888.0x95.9 label 1290.6 desc 1324.1 ctl 892.0,1263.1 328.0x44.0\n\
-                 footer base 1384.0\n",
+                 sep 380.0,1180.1 840.0x1.0\n\
+                 row CcModelGuard band 356.0,1180.1 888.0x95.9 label 1223.6 desc 1257.1 ctl 1152.0,1198.1 68.0x40.0\n\
+                 group \"Scrolling\" at 356.0,1316.0 w 888.0\n\
+                 card 356.0,1343.0 888.0x95.9\n\
+                 row ScrollFactor band 356.0,1343.0 888.0x95.9 label 1386.5 desc 1420.0 ctl 892.0,1359.0 328.0x44.0\n\
+                 footer base 1479.9\n",
             );
         });
     }
@@ -257,8 +259,8 @@ mod settings_modal {
     fn a_narrow_window_clamps_the_width_and_the_contents_follow() {
         at_scale_1(|| {
             assert_eq!(
-                dump(800.0, 1496.0, &Settings::default()),
-                "panel 16.0,76.0 768.0x1345.0\n\
+                dump(800.0, 1592.0, &Settings::default()),
+                "panel 16.0,76.0 768.0x1440.0\n\
                  group \"Idle reclamation\" at 52.0,156.0 w 696.0\n\
                  card 52.0,183.0 696.0x287.7\n\
                  row ReclaimEnabled band 52.0,183.0 696.0x95.9 label 226.5 desc 260.0 ctl 656.0,201.0 68.0x40.0\n\
@@ -278,12 +280,14 @@ mod settings_modal {
                  sep 76.0,921.3 648.0x1.0\n\
                  row HelperStrip band 52.0,921.3 696.0x95.9 label 964.8 desc 998.3 ctl 656.0,939.3 68.0x40.0\n\
                  group \"Claude Code\" at 52.0,1057.2 w 696.0\n\
-                 card 52.0,1084.2 696.0x95.9\n\
+                 card 52.0,1084.2 696.0x191.8\n\
                  row CcStatuslineHook band 52.0,1084.2 696.0x95.9 label 1127.7 desc 1161.2 ctl 656.0,1102.2 68.0x40.0\n\
-                 group \"Scrolling\" at 52.0,1220.1 w 696.0\n\
-                 card 52.0,1247.1 696.0x95.9\n\
-                 row ScrollFactor band 52.0,1247.1 696.0x95.9 label 1290.6 desc 1324.1 ctl 396.0,1263.1 328.0x44.0\n\
-                 footer base 1384.0\n"
+                 sep 76.0,1180.1 648.0x1.0\n\
+                 row CcModelGuard band 52.0,1180.1 696.0x95.9 label 1223.6 desc 1257.1 ctl 656.0,1198.1 68.0x40.0\n\
+                 group \"Scrolling\" at 52.0,1316.0 w 696.0\n\
+                 card 52.0,1343.0 696.0x95.9\n\
+                 row ScrollFactor band 52.0,1343.0 696.0x95.9 label 1386.5 desc 1420.0 ctl 396.0,1359.0 328.0x44.0\n\
+                 footer base 1479.9\n"
             );
         });
     }
@@ -334,7 +338,7 @@ mod settings_modal {
         at_scale_1(|| {
             let s = Settings::default();
             let mut m = measure();
-            let rect = panel_rect(1600.0, 1496.0, &s, &mut m, 30.0);
+            let rect = panel_rect(1600.0, 1592.0, &s, &mut m, 30.0);
             let mut all = 0usize;
             walk(rect, 0.0, &s, &mut measure(), |_| all += 1);
             let mut shown = 0usize;

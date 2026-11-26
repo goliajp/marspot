@@ -23,6 +23,7 @@ fn text(m: Msg) -> &'static str {
         Msg::HelperStrip => "在窗格底部列出帮手",
         Msg::CircledDigitsWide => "带圈数字占两格",
         Msg::ClaudeCodeReportsModel => "让 Claude Code 报告所用模型",
+        Msg::ClaudeCodeGuardModel => "保护所有账号共用的默认模型",
         Msg::WheelSpeed => "滚轮速度",
 
         Msg::CostReclaimIdlePanes => "返回窗格时，重新载入会话约需 3 秒",
@@ -33,6 +34,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostHelperStrip => "有帮手时，窗格的内容区会少几行",
         Msg::CostCircledDigitsWide => "宽度与中日韩文字一致，但换行位置可能提前一列",
         Msg::CostClaudeCodeReportsModel => "在 Claude Code 的设置中添加状态行；原有的状态行继续生效，关闭此项后恢复原状",
+        Msg::CostClaudeCodeGuardModel => "发送 /model 前再确认一次；没有确认过的改动会被改回去",
         Msg::CostWheelSpeed => "越快越省滑动次数，但也越容易滚过头",
 
         Msg::MenuCopy => "拷贝",

@@ -40,10 +40,11 @@ use crate::palette::ThemeId;
 use values::{fmt_f32, parse_bool, parse_f32};
 
 mod agent_allocation;
+mod cc_model;
 mod rebalance;
 mod values;
 
-pub use {agent_allocation::AgentAllocation, rebalance::Rebalance};
+pub use {agent_allocation::AgentAllocation, cc_model::CcModel, rebalance::Rebalance};
 
 /// Every user-owned decision, resolved.
 ///
@@ -163,6 +164,9 @@ pub struct Settings {
     /// this build opens one in any mode: `dryrun` and `live` only log
     /// when an account's reading would be due.
     pub sched_reset_read: AgentAllocation,
+    /// Whether marspot guards the default model all Claude Code accounts
+    /// share, see [`CcModel`].
+    pub cc_model: CcModel,
     /// List a pane's helpers in rows at its bottom, as the agent in it
     /// lists its own.  The program in the pane is made shorter while
     /// there are any; a pane without helpers is not touched.
@@ -193,6 +197,7 @@ impl Default for Settings {
             gemini_allocation: AgentAllocation::Off,
             sched_reset: AgentAllocation::Off,
             sched_reset_read: AgentAllocation::Off,
+            cc_model: CcModel::Managed,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
@@ -337,6 +342,7 @@ const KEYS: &[&str] = &[
     "appearance.helper_strip",
     "input.scroll_factor",
     "claudecode.statusline_hook",
+    "claude.model",
 ];
 
 fn value_of(s: &Settings, key: &str) -> String {

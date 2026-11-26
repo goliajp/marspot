@@ -71,6 +71,7 @@ pub enum Msg {
     CircledDigitsWide,
     HelperStrip,
     ClaudeCodeReportsModel,
+    ClaudeCodeGuardModel,
     WheelSpeed,
     // Settings — the cost line under each row
     CostReclaimIdlePanes,
@@ -81,6 +82,7 @@ pub enum Msg {
     CostCircledDigitsWide,
     CostHelperStrip,
     CostClaudeCodeReportsModel,
+    CostClaudeCodeGuardModel,
     CostWheelSpeed,
     // Pane context menu
     MenuCopy,

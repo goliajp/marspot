@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.787"  # marspot-term gains the Notice and ModelConfirmed messages
-core    = "0.12.719"  # marspot-term gains the Notice and ModelConfirmed messages
-session = "0.11.468"  # marspot-term gains the Notice and ModelConfirmed messages (not used by session)
+shell   = "0.7.788"  # marspot-term gains the claude.model setting
+core    = "0.12.720"  # the settings panel offers guarding the default model all Claude Code accounts share
+session = "0.11.469"  # marspot-term gains the claude.model setting (not used by session)

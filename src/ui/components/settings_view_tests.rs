@@ -48,7 +48,7 @@ fn the_surface_puts_rows_cards_and_controls_where_the_walk_does() {
         at_scale(scale, || {
             let mut font = FontCache::build().expect("font");
             let s = Settings::default();
-            let sp = laid_out(&mut font, (1000.0 * scale, 1496.0 * scale), false, s.clone());
+            let sp = laid_out(&mut font, (1000.0 * scale, 1592.0 * scale), false, s.clone());
             let surface = sp.surface.borrow();
             let (tree, layout) = (surface.kept.surface.tree(), surface.kept.surface.layout());
             let rect_of = |i: usize| layout.rect(NodeId(i as u32));
@@ -108,7 +108,7 @@ fn the_surface_puts_rows_cards_and_controls_where_the_walk_does() {
 fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
     let mut font = FontCache::build().expect("font");
     let s = Settings::default();
-    let sp = laid_out(&mut font, (1000.0, 1496.0), false, s.clone());
+    let sp = laid_out(&mut font, (1000.0, 1592.0), false, s.clone());
     let mut surface = sp.surface.borrow_mut();
     let surface = &mut surface.kept.surface;
     let press = |surface: &mut golia_ui_core::Surface<golia_ui_core::NoOut>, t: Target| {
@@ -180,7 +180,7 @@ fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
 fn a_row_that_is_greyed_out_is_skipped_and_swallows_the_press() {
     let mut font = FontCache::build().expect("font");
     let s = Settings { reclaim_enabled: false, ..Default::default() };
-    let sp = laid_out(&mut font, (1000.0, 1496.0), false, s.clone());
+    let sp = laid_out(&mut font, (1000.0, 1592.0), false, s.clone());
     let mut surface = sp.surface.borrow_mut();
     let surface = &mut surface.kept.surface;
     let mut stops = Vec::new();
