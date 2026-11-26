@@ -32,7 +32,7 @@ fn press((layout, kbd): (&str, u32), key_code: u16, mods: u8) -> (MarspotKeyEven
     let typed = chord_char(cmd_level, mods & SHIFT != 0, shifted);
     let event = MarspotKeyEvent {
         logical: installed::typed(layout, kbd, key_code, 0).map_or(LogicalKey::Other, LogicalKey::Char),
-        text: typed.map(String::from),
+        text: typed.map(Into::into),
         base_layout: us_layout_char(key_code),
         ..Default::default()
     };

@@ -5,44 +5,17 @@ use super::compose::{compose, Arrow, List, Pick, Row, State};
 use super::native_list::find;
 use super::strip::Strip;
 use super::theme::{Theme, THEMES};
+use marspot_term::alloc_count::Counting;
 use marspot_term::terminal::Terminal;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 
-thread_local! {
-    /// What this thread has allocated since it began to be counted.
-    static ALLOCS: Cell<Option<usize>> = const { Cell::new(None) };
-}
-
-struct Counting;
-
-fn note() {
-    let _ = ALLOCS.try_with(|a| a.set(a.get().map(|n| n + 1)));
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note();
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note();
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
+// the core's one counting allocator; the key path's test uses it too
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-pub(super) fn counted<T>(f: impl FnOnce() -> T) -> usize {
-    ALLOCS.with(|a| a.set(Some(0)));
-    let out = f();
-    let n = ALLOCS.with(|a| a.take()).unwrap();
+pub(crate) fn counted<T>(f: impl FnOnce() -> T) -> usize {
+    let (tally, out) = marspot_term::alloc_count::counted(f);
     drop(out);
-    n
+    tally.allocs
 }
 
 #[test]

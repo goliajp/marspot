@@ -3219,12 +3219,7 @@ fn main() {
                 // drops it rather than falling back to the key window
                 // — silently acting on the wrong window is worse than
                 // dropping one event.
-                CoreEvent::Key(event, mods, win) => {
-                    if let Some(wi) = app.window_index(win) {
-                        app.key(wi, event, mods)
-                    }
-                    trace::mark(Stage::CoreKeyHandled, 0);
-                }
+                CoreEvent::Key(event, mods, win) => app.key_from_shell(win, event, mods),
                 CoreEvent::MouseDown(x, y, mods, win) => {
                     if let Some(wi) = app.focus_window(win) {
                         app.drag_window = Some(win);

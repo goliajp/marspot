@@ -23,7 +23,7 @@ use marspot_term::grid_shm::{GridShmReader, SessionRegions, create_region};
 use marspot_term::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
 use marspot_term::shell_proto::{
     FIRST_WINDOW_ID, Frame, MsgType, PROTO_VERSION, decode_hello_ack, encode_hello,
-    encode_key_event, event_to_wire,
+    encode_event,
 };
 
 pub const COLS: u16 = 80;
@@ -160,12 +160,12 @@ impl Session {
         let ev = MarspotKeyEvent {
             state: KeyState::Pressed,
             logical: LogicalKey::Char(c),
-            text: Some(c.to_string()),
+            text: Some(c.into()),
             ..Default::default()
         };
         let frame = Frame::new(
             MsgType::KeyEvent,
-            encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
+            { let mut p = Vec::new(); encode_event(&ev, Modifiers::default(), FIRST_WINDOW_ID, &mut p); p },
         );
         let mut w = &self.control;
         frame
@@ -215,12 +215,12 @@ impl Session {
         let ev = MarspotKeyEvent {
             state: KeyState::Pressed,
             logical: LogicalKey::Named(NamedKey::Enter),
-            text: Some("\r".to_string()),
+            text: Some("\r".into()),
             ..Default::default()
         };
         let frame = Frame::new(
             MsgType::KeyEvent,
-            encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
+            { let mut p = Vec::new(); encode_event(&ev, Modifiers::default(), FIRST_WINDOW_ID, &mut p); p },
         );
         let mut w = &self.control;
         frame
@@ -343,12 +343,12 @@ pub fn key_frame(c: char) -> Frame {
     let ev = MarspotKeyEvent {
         state: KeyState::Pressed,
         logical: LogicalKey::Char(c),
-        text: Some(c.to_string()),
+        text: Some(c.into()),
         ..Default::default()
     };
     Frame::new(
         MsgType::KeyEvent,
-        encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
+        { let mut p = Vec::new(); encode_event(&ev, Modifiers::default(), FIRST_WINDOW_ID, &mut p); p },
     )
 }
 

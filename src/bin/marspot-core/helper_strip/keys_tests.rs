@@ -18,7 +18,7 @@ pub(super) fn ev(logical: LogicalKey, state: KeyState, repeat: bool) -> MarspotK
         LogicalKey::Char(c) => Some(c.to_string()),
         _ => None,
     };
-    MarspotKeyEvent { state, logical, text, repeat, ..Default::default() }
+    MarspotKeyEvent { state, logical, text: text.map(Into::into), repeat, ..Default::default() }
 }
 
 pub(super) fn press(app: &mut CoreApp, key: LogicalKey) {

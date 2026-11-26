@@ -13,6 +13,7 @@
 //! paths keep resolving.
 
 pub mod agent;
+pub mod alloc_count;
 pub mod async_writer;
 pub mod base64;
 pub mod binary_tree;
@@ -73,6 +74,7 @@ pub static MARSPOT_LAYER_VERS_TERM: &str = concat!(
 );
 pub mod grid_shm;
 pub mod input_core;
+pub mod key_text;
 pub mod language;
 pub mod layout;
 pub mod parser;

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.738"  # frames to the core are written from a borrowed payload; the core's messages land in an inbox reused by every wake
-core    = "0.12.705"  # frames from the shell are read into one reused buffer and reach the loop by a channel that reuses its storage; frames to a session queue as bytes
-session = "0.11.456"  # frames from the core are read into one reused buffer
+shell   = "0.7.739"  # a key reaches the core with nothing allocated: its text is held inline and its frame encoded into one reused buffer
+core    = "0.12.706"  # a key from the shell is decoded without a String and encoded for its session straight into the writer's queue
+session = "0.11.457"  # a key's text is decoded inline; a long IME commit still arrives whole

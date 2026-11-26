@@ -966,7 +966,7 @@ define_class!(
             let ev = MarspotKeyEvent {
                 state: KeyState::Pressed,
                 logical: LogicalKey::Other,
-                text: Some(s),
+                text: Some(s.into()),
                 // Committed IME text has no physical key behind it —
                 // it is the result of several, and reporting any one
                 // of them would be a guess.

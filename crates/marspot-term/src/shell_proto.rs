@@ -747,6 +747,13 @@ mod pane_control;
 pub use pane_control::*;
 mod search;
 pub use search::*;
+mod key_event;
+pub use key_event::{
+    WireKeyEvent, WireKeyState, WireLogicalKind, WireNamedKey, decode_key_event, encode_key_event,
+    mods_from_byte, mods_to_byte,
+};
+mod key_adapt;
+pub use key_adapt::*;
 
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -774,211 +781,6 @@ impl Frame {
 // Payload codecs — one encode/decode pair per MsgType.
 // All multibyte integers little-endian.
 // ───────────────────────────────────────────────────────────────────
-
-// ── KeyEvent ──
-//
-// Layout:
-//   state    : u8   (0 = Pressed, 1 = Released)
-//   mods     : u8   (bit 0 shift, 1 ctrl, 2 alt, 3 super)
-//   kind     : u8   (0 = Char, 1 = Named, 2 = Other)
-//   pad      : u8   (reserved, 0)
-//   key_data : u32  Char → codepoint;  Named → discriminant in low byte
-//   text_len : u16
-//   text     : text_len bytes UTF-8
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum WireKeyState {
-    #[default]
-    Pressed = 0,
-    Released = 1,
-}
-
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum WireLogicalKind {
-    Char = 0,
-    Named = 1,
-    #[default]
-    Other = 2,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum WireNamedKey {
-    Enter = 0,
-    Backspace = 1,
-    Tab = 2,
-    Escape = 3,
-    ArrowUp = 4,
-    ArrowDown = 5,
-    ArrowLeft = 6,
-    ArrowRight = 7,
-    PageUp = 8,
-    PageDown = 9,
-    Home = 10,
-    End = 11,
-    Insert = 12,
-    Delete = 13,
-    F1 = 14,
-    F2 = 15,
-    F3 = 16,
-    F4 = 17,
-    F5 = 18,
-    F6 = 19,
-    F7 = 20,
-    F8 = 21,
-    F9 = 22,
-    F10 = 23,
-    F11 = 24,
-    F12 = 25,
-}
-
-impl WireNamedKey {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        Some(match v {
-            0 => Self::Enter,
-            1 => Self::Backspace,
-            2 => Self::Tab,
-            3 => Self::Escape,
-            4 => Self::ArrowUp,
-            5 => Self::ArrowDown,
-            6 => Self::ArrowLeft,
-            7 => Self::ArrowRight,
-            8 => Self::PageUp,
-            9 => Self::PageDown,
-            10 => Self::Home,
-            11 => Self::End,
-            12 => Self::Insert,
-            13 => Self::Delete,
-            14 => Self::F1,
-            15 => Self::F2,
-            16 => Self::F3,
-            17 => Self::F4,
-            18 => Self::F5,
-            19 => Self::F6,
-            20 => Self::F7,
-            21 => Self::F8,
-            22 => Self::F9,
-            23 => Self::F10,
-            24 => Self::F11,
-            25 => Self::F12,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct WireKeyEvent {
-    pub state: WireKeyState,
-    pub mods: u8,
-    pub kind: WireLogicalKind,
-    pub key_data: u32,
-    pub text: String,
-    /// Auto-repeat.  Rides in a byte that was padding, so a reader
-    /// from before this field existed sees the padding it expected.
-    pub repeat: bool,
-    /// US-layout position of the key, 0 when unknown.  Appended after
-    /// the window id — the one place a field can be added without
-    /// moving anything an older reader looks at, since that reader
-    /// takes the window id from a fixed offset and stops.
-    pub base_layout: u32,
-}
-
-pub fn mods_to_byte(shift: bool, ctrl: bool, alt: bool, super_: bool) -> u8 {
-    (shift as u8) | ((ctrl as u8) << 1) | ((alt as u8) << 2) | ((super_ as u8) << 3)
-}
-
-pub fn mods_from_byte(b: u8) -> (bool, bool, bool, bool) {
-    (
-        b & 0b0001 != 0,
-        b & 0b0010 != 0,
-        b & 0b0100 != 0,
-        b & 0b1000 != 0,
-    )
-}
-
-/// Bit 0 of the byte at offset 3, which was padding until auto-repeat
-/// needed somewhere to live.  A reader from before this wrote a zero
-/// there and ignored it, so an old writer's frames decode as "not a
-/// repeat" — which is the truth, since it had no way to know.
-const KEY_FLAG_REPEAT: u8 = 0b0000_0001;
-
-pub fn encode_key_event(ev: &WireKeyEvent, window_id: u32) -> Vec<u8> {
-    let text_bytes = ev.text.as_bytes();
-    let mut out = Vec::with_capacity(14 + text_bytes.len() + 4);
-    out.push(ev.state as u8);
-    out.push(ev.mods);
-    out.push(ev.kind as u8);
-    out.push(if ev.repeat { KEY_FLAG_REPEAT } else { 0 });
-    out.extend_from_slice(&ev.key_data.to_le_bytes());
-    out.extend_from_slice(&(text_bytes.len() as u16).to_le_bytes());
-    out.extend_from_slice(text_bytes);
-    out.extend_from_slice(&window_id.to_le_bytes());
-    out.extend_from_slice(&ev.base_layout.to_le_bytes());
-    out
-}
-
-pub fn decode_key_event(payload: &[u8]) -> io::Result<(WireKeyEvent, u32)> {
-    if payload.len() < 10 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("KeyEvent payload < 10 bytes (got {})", payload.len()),
-        ));
-    }
-    let state = match payload[0] {
-        0 => WireKeyState::Pressed,
-        1 => WireKeyState::Released,
-        v => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("KeyEvent bad state {v}"),
-            ));
-        }
-    };
-    let mods = payload[1];
-    let kind = match payload[2] {
-        0 => WireLogicalKind::Char,
-        1 => WireLogicalKind::Named,
-        2 => WireLogicalKind::Other,
-        v => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("KeyEvent bad kind {v}"),
-            ));
-        }
-    };
-    let key_data = u32::from_le_bytes(payload[4..8].try_into().unwrap());
-    let text_len = u16::from_le_bytes(payload[8..10].try_into().unwrap()) as usize;
-    if payload.len() < 10 + text_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "KeyEvent payload truncated",
-        ));
-    }
-    let text = std::str::from_utf8(&payload[10..10 + text_len])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
-        .to_string();
-    let repeat = payload[3] & KEY_FLAG_REPEAT != 0;
-    // Absent from a writer that predates it, which is not an error:
-    // zero means "no idea where this key sits", and every reader of
-    // it already has to handle that.
-    let base_layout = payload
-        .get(10 + text_len + 4..10 + text_len + 8)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-        .unwrap_or(0);
-    Ok((
-        WireKeyEvent {
-            state,
-            mods,
-            kind,
-            key_data,
-            text,
-            repeat,
-            base_layout,
-        },
-        trailing_window_id(payload, 10 + text_len),
-    ))
-}
-
 // ── Mouse / Scroll ──
 
 pub fn encode_mouse(x: f64, y: f64, mods: u8, window_id: u32) -> Vec<u8> {
@@ -2027,10 +1829,8 @@ pub fn encode_pane_session_key(session_id: u64, ev: &WireKeyEvent) -> Vec<u8> {
     // — the plugin holding the pane does not care which window it is
     // drawn in — so the embedded key event carries a placeholder id
     // that the decoder drops.
-    let key_payload = encode_key_event(ev, FIRST_WINDOW_ID);
-    let mut v = Vec::with_capacity(8 + key_payload.len());
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.extend_from_slice(&key_payload);
+    let mut v = session_id.to_le_bytes().to_vec();
+    encode_key_event(ev, FIRST_WINDOW_ID, &mut v);
     v
 }
 
@@ -2323,141 +2123,6 @@ pub fn decode_file_drop(payload: &[u8]) -> io::Result<(f64, f64, Vec<String>, u3
 }
 
 // ───────────────────────────────────────────────────────────────────
-// Adapters between the wire types and the high-level `input` types.
-// Kept in this module so both bins (shell encodes, core decodes)
-// share the same translation, and a future bin can pick up either
-// half without redefining it.
-// ───────────────────────────────────────────────────────────────────
-
-use crate::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
-
-pub fn mods_to_struct(b: u8) -> Modifiers {
-    let (shift, ctrl, alt, super_) = mods_from_byte(b);
-    Modifiers {
-        shift,
-        control: ctrl,
-        alt,
-        super_,
-    }
-}
-
-pub fn struct_to_mods_byte(m: Modifiers) -> u8 {
-    mods_to_byte(m.shift, m.control, m.alt, m.super_)
-}
-
-pub fn event_to_wire(ev: &MarspotKeyEvent, mods: Modifiers) -> WireKeyEvent {
-    let state = match ev.state {
-        KeyState::Pressed => WireKeyState::Pressed,
-        KeyState::Released => WireKeyState::Released,
-    };
-    let (kind, key_data) = match ev.logical {
-        LogicalKey::Char(c) => (WireLogicalKind::Char, c as u32),
-        LogicalKey::Named(n) => (WireLogicalKind::Named, named_to_u8(n) as u32),
-        LogicalKey::Other => (WireLogicalKind::Other, 0),
-    };
-    WireKeyEvent {
-        state,
-        mods: struct_to_mods_byte(mods),
-        kind,
-        key_data,
-        text: ev.text.clone().unwrap_or_default(),
-        repeat: ev.repeat,
-        base_layout: ev.base_layout.map_or(0, |c| c as u32),
-    }
-}
-
-pub fn wire_to_event(w: WireKeyEvent) -> (MarspotKeyEvent, Modifiers) {
-    let state = match w.state {
-        WireKeyState::Pressed => KeyState::Pressed,
-        WireKeyState::Released => KeyState::Released,
-    };
-    let logical = match w.kind {
-        WireLogicalKind::Char => char::from_u32(w.key_data)
-            .map(LogicalKey::Char)
-            .unwrap_or(LogicalKey::Other),
-        WireLogicalKind::Named => WireNamedKey::from_u8(w.key_data as u8)
-            .map(|n| LogicalKey::Named(u8_to_named(n)))
-            .unwrap_or(LogicalKey::Other),
-        WireLogicalKind::Other => LogicalKey::Other,
-    };
-    let text = if w.text.is_empty() {
-        None
-    } else {
-        Some(w.text)
-    };
-    let ev = MarspotKeyEvent {
-        state,
-        logical,
-        text,
-        repeat: w.repeat,
-        base_layout: char::from_u32(w.base_layout).filter(|c| *c != '\0'),
-    };
-    (ev, mods_to_struct(w.mods))
-}
-
-fn named_to_u8(n: NamedKey) -> u8 {
-    match n {
-        NamedKey::Enter => 0,
-        NamedKey::Backspace => 1,
-        NamedKey::Tab => 2,
-        NamedKey::Escape => 3,
-        NamedKey::ArrowUp => 4,
-        NamedKey::ArrowDown => 5,
-        NamedKey::ArrowLeft => 6,
-        NamedKey::ArrowRight => 7,
-        NamedKey::PageUp => 8,
-        NamedKey::PageDown => 9,
-        NamedKey::Home => 10,
-        NamedKey::End => 11,
-        NamedKey::Insert => 12,
-        NamedKey::Delete => 13,
-        NamedKey::F1 => 14,
-        NamedKey::F2 => 15,
-        NamedKey::F3 => 16,
-        NamedKey::F4 => 17,
-        NamedKey::F5 => 18,
-        NamedKey::F6 => 19,
-        NamedKey::F7 => 20,
-        NamedKey::F8 => 21,
-        NamedKey::F9 => 22,
-        NamedKey::F10 => 23,
-        NamedKey::F11 => 24,
-        NamedKey::F12 => 25,
-    }
-}
-
-fn u8_to_named(w: WireNamedKey) -> NamedKey {
-    match w {
-        WireNamedKey::Enter => NamedKey::Enter,
-        WireNamedKey::Backspace => NamedKey::Backspace,
-        WireNamedKey::Tab => NamedKey::Tab,
-        WireNamedKey::Escape => NamedKey::Escape,
-        WireNamedKey::ArrowUp => NamedKey::ArrowUp,
-        WireNamedKey::ArrowDown => NamedKey::ArrowDown,
-        WireNamedKey::ArrowLeft => NamedKey::ArrowLeft,
-        WireNamedKey::ArrowRight => NamedKey::ArrowRight,
-        WireNamedKey::PageUp => NamedKey::PageUp,
-        WireNamedKey::PageDown => NamedKey::PageDown,
-        WireNamedKey::Home => NamedKey::Home,
-        WireNamedKey::End => NamedKey::End,
-        WireNamedKey::Insert => NamedKey::Insert,
-        WireNamedKey::Delete => NamedKey::Delete,
-        WireNamedKey::F1 => NamedKey::F1,
-        WireNamedKey::F2 => NamedKey::F2,
-        WireNamedKey::F3 => NamedKey::F3,
-        WireNamedKey::F4 => NamedKey::F4,
-        WireNamedKey::F5 => NamedKey::F5,
-        WireNamedKey::F6 => NamedKey::F6,
-        WireNamedKey::F7 => NamedKey::F7,
-        WireNamedKey::F8 => NamedKey::F8,
-        WireNamedKey::F9 => NamedKey::F9,
-        WireNamedKey::F10 => NamedKey::F10,
-        WireNamedKey::F11 => NamedKey::F11,
-        WireNamedKey::F12 => NamedKey::F12,
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────
 // Tests
 // ───────────────────────────────────────────────────────────────────
 
@@ -2657,53 +2322,6 @@ mod tests {
         assert_eq!(decode_pong(&encode_pong(42)).unwrap(), 42);
     }
 
-    #[test]
-    fn mods_roundtrip() {
-        for b in 0u8..16 {
-            let (s, c, a, u) = mods_from_byte(b);
-            assert_eq!(mods_to_byte(s, c, a, u), b);
-        }
-    }
-
-    #[test]
-    fn key_event_char_roundtrip() {
-        let ev = WireKeyEvent {
-            state: WireKeyState::Pressed,
-            mods: mods_to_byte(false, true, false, false),
-            kind: WireLogicalKind::Char,
-            key_data: 'a' as u32,
-            text: "a".to_string(),
-            ..Default::default()
-        };
-        let p = encode_key_event(&ev, 7);
-        let (back, win) = decode_key_event(&p).unwrap();
-        assert_eq!(win, 7);
-        assert_eq!(back.state, ev.state);
-        assert_eq!(back.mods, ev.mods);
-        assert_eq!(back.kind, ev.kind);
-        assert_eq!(back.key_data, ev.key_data);
-        assert_eq!(back.text, ev.text);
-    }
-
-    #[test]
-    fn key_event_named_arrow_roundtrip() {
-        let ev = WireKeyEvent {
-            state: WireKeyState::Pressed,
-            mods: 0,
-            kind: WireLogicalKind::Named,
-            key_data: WireNamedKey::ArrowUp as u32,
-            text: String::new(),
-            ..Default::default()
-        };
-        let p = encode_key_event(&ev, FIRST_WINDOW_ID);
-        let (back, _win) = decode_key_event(&p).unwrap();
-        assert_eq!(back.kind, WireLogicalKind::Named);
-        assert_eq!(
-            WireNamedKey::from_u8(back.key_data as u8),
-            Some(WireNamedKey::ArrowUp)
-        );
-        assert_eq!(back.text, "");
-    }
 
     #[test]
     fn mouse_roundtrip() {
@@ -2843,101 +2461,6 @@ mod tests {
     }
 
     #[test]
-    fn a_key_frame_carries_repeat_and_position_both_ways() {
-        let ev = WireKeyEvent {
-            state: WireKeyState::Pressed,
-            mods: mods_to_byte(true, false, false, false),
-            kind: WireLogicalKind::Char,
-            key_data: 'w' as u32,
-            text: "W".to_string(),
-            repeat: true,
-            base_layout: 'z' as u32,
-        };
-        let p = encode_key_event(&ev, 9);
-        let (got, win) = decode_key_event(&p).unwrap();
-        assert_eq!(win, 9);
-        assert!(got.repeat);
-        assert_eq!(got.base_layout, 'z' as u32);
-        assert_eq!(got.key_data, 'w' as u32);
-        assert_eq!(got.text, "W");
-    }
-
-    /// A frame from a writer that predates the two fields.
-    ///
-    /// This is the shape that has bitten this codebase before: a
-    /// reader that treats an older frame as malformed takes the whole
-    /// channel down mid-update.  Built here by hand rather than by
-    /// calling the encoder, because the encoder can only produce the
-    /// current shape and a test that asks it to is testing nothing.
-    fn old_style_key_frame(text: &str, window_id: u32) -> Vec<u8> {
-        let t = text.as_bytes();
-        let mut out = vec![
-            WireKeyState::Pressed as u8,
-            0,
-            WireLogicalKind::Char as u8,
-        ];
-        out.push(0); // padding, before it meant anything
-        out.extend_from_slice(&('a' as u32).to_le_bytes());
-        out.extend_from_slice(&(t.len() as u16).to_le_bytes());
-        out.extend_from_slice(t);
-        out.extend_from_slice(&window_id.to_le_bytes());
-        out
-    }
-
-    #[test]
-    fn a_frame_from_before_the_new_fields_still_decodes() {
-        let p = old_style_key_frame("a", 3);
-        let (got, win) = decode_key_event(&p).unwrap();
-        assert_eq!(win, 3, "the window id is still where it was");
-        assert!(!got.repeat, "old padding reads as 'not a repeat'");
-        assert_eq!(got.base_layout, 0, "and as 'position unknown'");
-        assert_eq!(got.text, "a");
-    }
-
-    #[test]
-    fn a_reader_from_before_the_new_fields_still_finds_the_window_id() {
-        // The other direction, which no current code path can check
-        // for itself: a peer running the older image reads the window
-        // id from a fixed offset and stops.  Appending after it has
-        // to leave that offset holding the same four bytes.
-        let ev = WireKeyEvent {
-            kind: WireLogicalKind::Char,
-            key_data: 'a' as u32,
-            text: "a".to_string(),
-            base_layout: 'z' as u32,
-            ..Default::default()
-        };
-        let new = encode_key_event(&ev, 11);
-        let old = old_style_key_frame("a", 11);
-        assert_eq!(
-            &new[..old.len()],
-            &old[..],
-            "everything an older reader looks at is byte-identical"
-        );
-        // And what an older reader would compute for the window id.
-        let text_len = u16::from_le_bytes(new[8..10].try_into().unwrap()) as usize;
-        let at = 10 + text_len;
-        assert_eq!(u32::from_le_bytes(new[at..at + 4].try_into().unwrap()), 11);
-    }
-
-    #[test]
-    fn the_event_conversion_keeps_both_fields() {
-        let ev = MarspotKeyEvent {
-            state: KeyState::Pressed,
-            logical: LogicalKey::Char('w'),
-            text: Some("W".into()),
-            repeat: true,
-            base_layout: Some('z'),
-        };
-        let mods = Modifiers { shift: true, ..Default::default() };
-        let (back, back_mods) = wire_to_event(event_to_wire(&ev, mods));
-        assert_eq!(back.repeat, ev.repeat);
-        assert_eq!(back.base_layout, ev.base_layout);
-        assert_eq!(back.logical, ev.logical);
-        assert_eq!(back_mods, mods);
-    }
-
-    #[test]
     fn pane_session_end_roundtrip() {
         let p = encode_pane_session_end(42);
         assert_eq!(decode_pane_session_end(&p).unwrap(), 42);
@@ -2951,7 +2474,7 @@ mod tests {
             mods: 0,
             kind: WireLogicalKind::Char,
             key_data: '\r' as u32,
-            text: "\r".to_string(),
+            text: "\r".into(),
             ..Default::default()
         };
         let p = encode_pane_session_key(7, &ev);

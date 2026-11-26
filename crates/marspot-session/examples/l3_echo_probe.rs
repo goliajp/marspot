@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use marspot_term::grid_shm::{create_region, GridShmReader};
 use marspot_term::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers};
 use marspot_term::shell_proto::{
-    encode_key_event, event_to_wire, Frame, MsgType, FIRST_WINDOW_ID,
+    encode_event, Frame, MsgType, FIRST_WINDOW_ID,
 };
 
 const COLS: u16 = 80;
@@ -115,12 +115,12 @@ fn main() {
     let ev = MarspotKeyEvent {
         state: KeyState::Pressed,
         logical: LogicalKey::Char(TYPED),
-        text: Some(TYPED.to_string()),
+        text: Some(TYPED.into()),
         ..Default::default()
     };
     let frame = Frame::new(
         MsgType::KeyEvent,
-        encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
+        { let mut p = Vec::new(); encode_event(&ev, Modifiers::default(), FIRST_WINDOW_ID, &mut p); p },
     );
     {
         let mut w = &parent;

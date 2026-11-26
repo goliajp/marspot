@@ -358,7 +358,7 @@ mod tests {
         MarspotKeyEvent {
             state: KeyState::Pressed,
             logical: LogicalKey::Char(c),
-            text: Some(c.to_string()),
+            text: Some(c.into()),
             ..Default::default()
         }
     }
@@ -486,7 +486,7 @@ mod tests {
         let ev = MarspotKeyEvent {
             state: KeyState::Pressed,
             logical: LogicalKey::Char('x'),
-            text: Some("\0\u{1b}x".to_string()),
+            text: Some("\0\u{1b}x".into()),
             ..Default::default()
         };
         b.handle_key(&ev, Modifiers::default(), t);
@@ -503,7 +503,7 @@ mod tests {
         let ev = MarspotKeyEvent {
             state: KeyState::Pressed,
             logical: LogicalKey::Char('a'),
-            text: Some(big),
+            text: Some(big.into()),
             ..Default::default()
         };
         b.handle_key(&ev, Modifiers::default(), t);

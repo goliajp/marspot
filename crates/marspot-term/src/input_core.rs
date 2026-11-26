@@ -18,6 +18,8 @@
 
 use std::borrow::Cow;
 
+pub use crate::key_text::KeyText;
+
 /// Marspot's portable key event.  Window backends (AppKit-direct)
 /// translate their native events into this.
 #[derive(Clone, Debug, Default)]
@@ -34,7 +36,7 @@ pub struct MarspotKeyEvent {
     /// What the keystroke would type with current modifiers applied
     /// (e.g. `"A"` for shift+a, `" "` for space).  `None` for
     /// navigation keys / pure modifier presses / dead keys.
-    pub text: Option<String>,
+    pub text: Option<KeyText>,
     /// Where this key sits on a US ANSI keyboard, when it is one of
     /// those positions.  Lets a program keep a binding on a key
     /// POSITION rather than on what that position types, so `ctrl+z`
@@ -257,10 +259,7 @@ pub fn key_event_to_bytes(
         }
     }
 
-    event
-        .text
-        .as_ref()
-        .map(|t| Cow::Owned(t.as_bytes().to_vec()))
+    event.text.as_ref().map(|t| Cow::Owned(t.as_bytes().to_vec()))
 }
 
 /// The kitty keyboard code and final byte for a named key.
@@ -307,7 +306,7 @@ fn kitty_entry(n: NamedKey) -> (u32, u8) {
 /// True when `text` is something the user meant to type, rather than
 /// the control byte a modifier produced.  `ctrl+a` arrives with a
 /// `text` of `0x01`, and that is not text.
-fn is_typed_text(text: Option<&String>) -> bool {
+fn is_typed_text(text: Option<&KeyText>) -> bool {
     text.is_some_and(|t| !t.is_empty() && !t.chars().any(|c| c.is_control()))
 }
 
@@ -387,11 +386,7 @@ fn kitty_key_bytes(
         // A key we have no identity for is only ever worth the text it
         // produced — dead keys and IME output arrive this way.
         LogicalKey::Other => {
-            return event
-                .text
-                .as_ref()
-                .filter(|t| !t.is_empty())
-                .map(|t| Cow::Owned(t.as_bytes().to_vec()))
+            return event.text.as_ref().filter(|t| !t.is_empty()).map(|t| Cow::Owned(t.as_bytes().to_vec()));
         }
     };
 
@@ -639,7 +634,7 @@ mod tests {
         MarspotKeyEvent {
             state: KeyState::Pressed,
             logical,
-            text: text.map(|s| s.to_string()),
+            text: text.map(KeyText::from),
             ..Default::default()
         }
     }

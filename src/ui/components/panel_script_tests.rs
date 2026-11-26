@@ -188,7 +188,7 @@ fn keys_come_pressed_then_released() {
             .unwrap()
             .into_iter()
             .map(|i| match i {
-                Input::Key(e, m) => (e.state, e.logical, e.text, m.super_),
+                Input::Key(e, m) => (e.state, e.logical, e.text.as_deref().map(str::to_string), m.super_),
                 other => panic!("{other:?}"),
             })
             .collect()

@@ -129,6 +129,7 @@ impl ShellApp {
             // first window's own save must not be allowed to shorten
             // the list past the windows this boot is about to restore.
             saved_window_frames: marspot::state::read_windows().unwrap_or_default(),
+            key_buf: Vec::new(),
             inbox: Vec::new(),
             pane_badge_rx,
             pane_wheel_keys_rx,
