@@ -489,6 +489,7 @@ pub(super) fn json_parses(text: &str) -> bool {
 pub(crate) fn write_through_symlink(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
     let tmp = dir.join(format!(".marspot-settings-{}.tmp", std::process::id()));
+    super::model_guard::note_own_write(path, text);
     fs::write(&tmp, text)?;
     if let Ok(md) = fs::metadata(path) {
         use std::os::unix::fs::PermissionsExt;

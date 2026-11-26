@@ -86,6 +86,7 @@ impl Plugin for ClaudecodePlugin {
         self.scan_res_rx = Some(std::sync::Mutex::new(res_rx));
         self.scan_inflight = false;
 
+        model_guard::start();
         self.initialised = true;
         Ok(())
     }
@@ -376,6 +377,7 @@ impl Plugin for ClaudecodePlugin {
         // down before the plugin slot is dropped (otherwise the
         // thread would outlive the plugin briefly and the next
         // start would race the previous one's last send).
+        model_guard::stop();
         self.scan_req_tx = None;
         if let Some(h) = self.worker.take() {
             let _ = h.join();

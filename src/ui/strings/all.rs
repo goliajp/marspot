@@ -143,6 +143,8 @@ pub const ALL: &[Msg] = &[
     Msg::PaneEmpty,
     Msg::ModelGuardNotice,
     Msg::ModelSendRefused,
+    Msg::ClaudeSettingsChanged,
+    Msg::ModelUnset,
     Msg::BannerRestartsPaused,
     Msg::BannerRecovering,
     Msg::BannerCrashLoop,

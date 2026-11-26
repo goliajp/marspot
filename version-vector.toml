@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.790"  # the lib learns to tell /model in Claude Code's box
-core    = "0.12.722"  # Enter on /model in a Claude Code box waits for y; programs cannot send /model
+shell   = "0.7.791"  # the shared Claude Code settings are watched; an unconfirmed model is put back under managed
+core    = "0.12.723"  # the lib gains the sentences of the shared settings watch (not shown by core itself)
 session = "0.11.469"  # marspot-term gains the claude.model setting (not used by session)

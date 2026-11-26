@@ -167,6 +167,8 @@ fn text(m: Msg) -> &'static str {
             "プログラムがClaude Codeに/modelを送ろうとしたため、送信しませんでした。\
              全アカウントのデフォルトモデルはキーボードからのみ変更できます"
         }
+        Msg::ClaudeSettingsChanged => "全アカウント共通のClaude Codeの設定が変更されました",
+        Msg::ModelUnset => "既定値",
         Msg::PaneEmpty => "クリックしてシェルを開始",
 
         Msg::BannerRestartsPaused => "Marspotのコアが繰り返し停止しているため、自動的に再試行します",
@@ -223,5 +225,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "ヘルパー（{n}）…"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}分"),
         Arg::RanFor { minutes: m } => write!(out, "{}時間{}分", m / 60, m % 60),
+        Arg::ModelPutBack { to, back } => {
+            write!(out, "全アカウント共通のClaude Codeのデフォルトモデルが確認なしで{to}に変更されたため、{back}に戻しました")
+        }
+        Arg::ModelNowIs(to) => write!(out, "全アカウント共通のClaude Codeのデフォルトモデルは{to}になりました"),
     }
 }

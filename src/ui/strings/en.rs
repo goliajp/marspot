@@ -176,6 +176,8 @@ fn text(m: Msg) -> &'static str {
             "A program tried to send /model to Claude Code and it was not sent: only the \
              keyboard can change the default model of every account"
         }
+        Msg::ClaudeSettingsChanged => "Claude Code's settings, shared by every account, changed",
+        Msg::ModelUnset => "its own default",
         Msg::PaneEmpty => "empty — click to start a shell",
 
         Msg::BannerRestartsPaused => "Marspot's core keeps stopping — it will retry on its own",
@@ -233,5 +235,11 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "helpers ({n})…"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}m"),
         Arg::RanFor { minutes: m } => write!(out, "{}h {}m", m / 60, m % 60),
+        Arg::ModelPutBack { to, back } => write!(
+            out,
+            "Claude Code's default model for every account was changed to {to} without confirmation; \
+             it was put back to {back}"
+        ),
+        Arg::ModelNowIs(to) => write!(out, "Claude Code's default model for every account is now {to}"),
     }
 }

@@ -71,6 +71,7 @@ mod alloc_moves;
 mod limit_reset_screen;
 mod reset_read;
 mod worker_loop;
+pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};

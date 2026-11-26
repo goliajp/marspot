@@ -166,6 +166,7 @@ impl ShellApp {
                 self.plugin_registry
                     .dispatch_pane_focused(&self.plugin_host, sid);
             }
+            ShellInbox::ModelConfirmed(sid) => plugins::claudecode::model_guard::confirmed(sid),
             ShellInbox::PaneSessionUserEscape(sid) => {
                 self.end_pane_session(sid, plugins::EndReason::UserEscape);
             }
