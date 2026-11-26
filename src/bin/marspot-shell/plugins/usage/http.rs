@@ -103,31 +103,30 @@ fn curl() -> PathBuf {
 /// marks only those it opens, and one opened through libc or handed
 /// over by a parent may lack the mark.
 fn close_ours_on_exec(cmd: &mut Command) {
-    // SAFETY: getdtablesize is called here, before the fork; the hook
-    // runs between fork and exec and only calls fcntl, which is
-    // async-signal-safe and allocates nothing
-    let top = unsafe { libc::getdtablesize() };
+    let limit = marspot_term::inherited_fds::close_limit();
+    // SAFETY: the limit is read before the fork; the hook only calls fcntl
     unsafe {
         cmd.pre_exec(move || {
-            for fd in 3..top {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags >= 0 {
-                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-                }
-            }
+            marspot_term::inherited_fds::close_inherited(limit, &[]);
             Ok(())
         });
     }
 }
+
+/// What curl may still read from the environment: where a proxy is and
+/// which CA bundle to trust, none of which is a secret.
+const PASSED_ENV: [&str; 8] =
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "CURL_CA_BUNDLE"];
 
 fn run(config: &str) -> Option<Response> {
     let mut cmd = Command::new(curl());
     close_ours_on_exec(&mut cmd);
     let mut child = cmd
         // -q first: the user's ~/.curlrc is not part of this request;
-        // an absolute path and a config on stdin need no variable at all
+        // an absolute path and a config on stdin need no other variable
         .args(["-q", "-sS", "-i", "--max-time", TIMEOUT_SECS, "-w", "\\n%{http_code}", "-K", "-"])
         .env_clear()
+        .envs(PASSED_ENV.iter().filter_map(|k| std::env::var_os(k).map(|v| (*k, v))))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

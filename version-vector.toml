@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.811"  # curl for a token GET starts with an empty environment and only stdio descriptors
+shell   = "0.7.812"  # curl closes descriptors through the shared helper and keeps proxy and CA variables
 core    = "0.12.734"  # the accounts panel's tests move to a file of their own
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)
