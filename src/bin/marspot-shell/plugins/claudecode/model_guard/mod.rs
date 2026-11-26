@@ -7,13 +7,25 @@
 //! memory.  When the `model` key appears or changes it is logged and
 //! the person at the window is told within a second.  Under
 //! `claude.model = managed`, a change no `/model` confirmed at the
-//! keyboard is undone by writing the previous text back through the
-//! link; a confirmed one is kept.  Any other change is only told.
+//! keyboard is undone by setting that one key back in the file's
+//! current text, through the link; a confirmed one is kept.  Any other
+//! change is only told.
+//!
+//! The file is never removed, and nothing is done from a reading that
+//! is not a whole JSON object (an unreadable file, a missing one, or a
+//! writer caught between truncating and writing): such a reading is
+//! read again for a moment, and if it does not become whole the last
+//! whole one stays the one to go back to.
+//!
+//! Only an installed app watches the person's files.  Tests and
+//! sandboxes watch only the file `MARSPOT_TEST_CC_SETTINGS` names (see
+//! `watch::files`), so starting the plugin in a test touches nothing.
 //!
 //! The watch runs on threads of its own and only when a write wakes it:
 //! with the file quiet it costs nothing.
 
 mod decide;
+mod model_key;
 mod watch;
 
 use std::collections::VecDeque;
@@ -22,9 +34,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long after a `/model` confirmed at the keyboard the next change
-/// of model counts as that one: picking from `/model`'s own list takes
-/// a while.
-pub(crate) const CONFIRMED_FOR: Duration = Duration::from_secs(60);
+/// of model counts as that one: long enough to pick from `/model`'s
+/// own list, short enough that a confirmation left unused does not let
+/// a later writer through.
+pub(crate) const CONFIRMED_FOR: Duration = Duration::from_secs(20);
 
 /// The most notices waiting for the main thread, and own writes
 /// remembered.
@@ -80,11 +93,14 @@ pub(crate) fn note_own_write(path: &Path, text: &str) {
     s.own.push_back((path.to_path_buf(), hash(text)));
 }
 
-/// Whether `text` in `path` is what marspot last wrote there.
-fn is_own(path: &Path, text: Option<&str>) -> bool {
-    let Some(text) = text else { return false };
+/// Whether `text` in `path` is one marspot wrote there; that write is
+/// then no longer remembered, so the same text from another writer
+/// later is not taken for it.
+fn take_own(path: &Path, text: &str) -> bool {
     let h = hash(text);
-    shared().own.iter().rev().find(|(p, _)| p == path).is_some_and(|(_, own)| *own == h)
+    let mut s = shared();
+    let at = s.own.iter().rposition(|(p, own)| p == path && *own == h);
+    at.and_then(|i| s.own.remove(i)).is_some()
 }
 
 fn tell(text: String) {

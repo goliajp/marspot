@@ -1,100 +1,92 @@
 //! What a change of the shared settings file calls for.  Pure: the
 //! watch reads the file and does what this says.
 
-use marspot_peer::json;
+use marspot_peer::json::{self, Value};
 
-/// The `model` key of a settings file's text: `Ok(None)` without one
-/// (or without a file), `Err` for text that is not a JSON object yet,
-/// as a write caught half way would be.
-pub(super) fn model_of(text: Option<&str>) -> Result<Option<String>, ()> {
-    let Some(text) = text else { return Ok(None) };
-    if text.trim().is_empty() {
-        return Ok(None);
+/// What one read of a watched file found.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Seen {
+    /// No file at that name.
+    Absent,
+    /// A file that could not be read, or not as UTF-8: nothing is known
+    /// about its model.
+    Unreadable,
+    /// Text that is not a whole JSON object: empty, or a write caught
+    /// half way.
+    Partial(String),
+    /// A whole JSON object and its top-level `model`.
+    Whole { text: String, model: Option<Value> },
+}
+
+impl Seen {
+    pub(super) fn of_text(text: String) -> Seen {
+        match json::parse(&text) {
+            Ok(v @ Value::Obj(_)) => Seen::Whole { model: v.get("model").cloned(), text },
+            _ => Seen::Partial(text),
+        }
     }
-    let v = json::parse(text).map_err(|_| ())?;
-    if !matches!(v, json::Value::Obj(_)) {
-        return Err(());
+
+    pub(super) fn is_whole(&self) -> bool {
+        matches!(self, Seen::Whole { .. })
     }
-    Ok(v.get("model").map(|m| m.str().map_or_else(|| m.to_json(), str::to_string)))
+
+    /// The model this says the file had, when that is known: an absent
+    /// or empty file has none, and an unreadable or half-written one is
+    /// not known.
+    fn model(&self) -> Option<Option<&Value>> {
+        match self {
+            Seen::Whole { model, .. } => Some(model.as_ref()),
+            Seen::Absent => Some(None),
+            Seen::Partial(t) if t.trim().is_empty() => Some(None),
+            Seen::Partial(_) | Seen::Unreadable => None,
+        }
+    }
 }
 
 /// What to do about one change.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(super) enum Act {
-    /// Nothing worth a word: no change, marspot's own write, or text
-    /// that is not whole yet.
+    /// The same as before.
     Nothing,
-    /// The model changed without confirmation: put the text before the
-    /// change back.
-    PutBack { to: Option<String>, back: Option<String> },
+    /// Not a whole text, after one whose model was known: a writer is
+    /// half way, or the file was taken away.  The earlier reading stays
+    /// the one to go back to, and nothing is done.
+    Wait,
+    /// Take the new text as the one to go back to, and say nothing:
+    /// nothing was known about the model before it, or it is marspot's
+    /// own write and leaves the model as it was.
+    Adopt,
+    /// The model changed: under managed, put the earlier one back
+    /// unless a `/model` was confirmed.
+    PutBack { to: Option<Value>, back: Option<Value> },
     /// The model changed and stays.
-    Keep { from: Option<String>, to: Option<String> },
+    Keep { from: Option<Value>, to: Option<Value> },
     /// Something other than the model changed.
     Tell,
 }
 
 /// What marspot does when the file goes from `before` to `now`.
-/// `managed` is the setting; `confirmed` says a `/model` was confirmed
-/// at the keyboard a short while ago; `own` that marspot wrote `now`.
-pub(super) fn act(before: Option<&str>, now: Option<&str>, managed: bool, confirmed: bool, own: bool) -> Act {
-    if before == now || own {
+/// `managed` is the setting; `own` says marspot itself wrote `now`.  An
+/// own write that changes the model is a change of model like any
+/// other: what marspot wrote may carry a model someone else had just put
+/// there.
+pub(super) fn act(before: &Seen, now: &Seen, managed: bool, own: bool) -> Act {
+    if before == now {
         return Act::Nothing;
     }
-    let (Ok(from), Ok(to)) = (model_of(before), model_of(now)) else {
-        return Act::Nothing;
+    let Seen::Whole { model: to, .. } = now else {
+        // what is known of the model stays known until a whole text
+        let known = before.model().is_some() && now.model().is_none();
+        return if before.is_whole() || known { Act::Wait } else { Act::Adopt };
     };
-    if from == to {
-        Act::Tell
-    } else if managed && !confirmed {
-        Act::PutBack { to, back: from }
-    } else {
-        Act::Keep { from, to }
+    let Some(from) = before.model() else { return Act::Adopt };
+    if from == to.as_ref() {
+        return if own { Act::Adopt } else { Act::Tell };
     }
+    let (from, to) = (from.cloned(), to.clone());
+    if managed { Act::PutBack { to, back: from } } else { Act::Keep { from, to } }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const OPUS: &str = "{\n  \"model\": \"opus\",\n  \"theme\": \"dark\"\n}\n";
-    const FABLE: &str = "{\n  \"model\": \"fable\",\n  \"theme\": \"dark\"\n}\n";
-    const BARE: &str = "{\n  \"theme\": \"dark\"\n}\n";
-    const LIGHT: &str = "{\n  \"theme\": \"light\"\n}\n";
-
-    fn some(s: &str) -> Option<String> {
-        Some(s.to_string())
-    }
-
-    #[test]
-    fn the_model_key_is_read_and_half_written_text_is_not_a_reading() {
-        assert_eq!(model_of(Some(OPUS)), Ok(some("opus")));
-        assert_eq!(model_of(Some(BARE)), Ok(None));
-        assert_eq!(model_of(None), Ok(None));
-        assert_eq!(model_of(Some("")), Ok(None));
-        assert_eq!(model_of(Some("{\"model\": \"op")), Err(()));
-        assert_eq!(model_of(Some("[1]")), Err(()));
-    }
-
-    #[test]
-    fn under_managed_an_unconfirmed_model_is_put_back_and_a_confirmed_one_kept() {
-        assert_eq!(act(Some(BARE), Some(FABLE), true, false, false), Act::PutBack { to: some("fable"), back: None });
-        assert_eq!(act(Some(OPUS), Some(FABLE), true, false, false), Act::PutBack { to: some("fable"), back: some("opus") });
-        assert_eq!(act(Some(OPUS), Some(BARE), true, false, false), Act::PutBack { to: None, back: some("opus") });
-        assert_eq!(act(None, Some(FABLE), true, false, false), Act::PutBack { to: some("fable"), back: None });
-        assert_eq!(act(Some(OPUS), Some(FABLE), true, true, false), Act::Keep { from: some("opus"), to: some("fable") });
-    }
-
-    #[test]
-    fn under_manual_a_model_is_kept_and_said() {
-        assert_eq!(act(Some(OPUS), Some(FABLE), false, false, false), Act::Keep { from: some("opus"), to: some("fable") });
-    }
-
-    #[test]
-    fn other_changes_are_only_said_and_marspots_own_writes_not_at_all() {
-        assert_eq!(act(Some(BARE), Some(LIGHT), true, false, false), Act::Tell);
-        assert_eq!(act(Some(BARE), Some(LIGHT), false, false, false), Act::Tell);
-        assert_eq!(act(Some(BARE), Some(FABLE), true, false, true), Act::Nothing);
-        assert_eq!(act(Some(OPUS), Some(OPUS), true, false, false), Act::Nothing);
-        assert_eq!(act(Some(OPUS), Some("{\"model\": "), true, false, false), Act::Nothing, "a write caught half way");
-    }
-}
+#[path = "decide_tests.rs"]
+mod tests;
