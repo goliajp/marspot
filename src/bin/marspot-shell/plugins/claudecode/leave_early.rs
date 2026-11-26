@@ -139,7 +139,8 @@ impl ClaudecodePlugin {
             self.say_once(host, sid, "leave|none", "quota.leave_nowhere", format!("sid={sid} on P{from}: no account lasts {TARGET_H}h with it"));
             return false;
         };
-        let pane = self.resting(host, sid, meta, result, move_in_flight, None);
+        let status = host.pane_status(sid).ok().flatten();
+        let pane = self.resting(status.as_ref(), sid, meta, result, move_in_flight, None);
         let held = rebalance::not_now(&pane).map(rebalance::Veto::phrase);
         let why = format!("P{from} lasts {}, P{to} {} with it", hours(part.hours), hours(Some(lasts)));
         if let Some(reason) = held {
@@ -172,10 +173,11 @@ impl ClaudecodePlugin {
         }
     }
 
-    /// What is known about a pane that a move away from rest checks.
+    /// What is known about a pane that a move away from rest checks;
+    /// `view` is its state machine as the caller read it.
     pub(super) fn resting(
         &self,
-        host: &dyn PluginHost,
+        view: Option<&crate::plugins::PaneStatusView>,
         sid: u64,
         meta: &BindMeta,
         result: &ScanResult,
@@ -183,9 +185,8 @@ impl ClaudecodePlugin {
         since_last: Option<Duration>,
     ) -> rebalance::Pane {
         let (work_in_flight, own_timer) = result.new_vetoes.get(&sid).copied().unwrap_or((true, true));
-        let view = host.pane_status(sid).ok().flatten();
         rebalance::Pane {
-            awaiting_user: view.as_ref().is_some_and(|v| v.quiescent && matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)),
+            awaiting_user: view.is_some_and(|v| v.quiescent && matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)),
             user_here: self.focused_sid == Some(sid),
             work_in_flight,
             own_timer,

@@ -92,7 +92,7 @@ impl ClaudecodePlugin {
         let decided = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue | Why::Waste)).cloned();
         let transcript_rests = matches!(result.new_activity.get(&sid), Some(CcActivity::AwaitingUser));
         let status = host.pane_status(sid).ok().flatten();
-        let rest = status.filter(|v| matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)).map(|v| v.held);
+        let rest = status.as_ref().filter(|v| matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)).map(|v| v.held);
         match &decided {
             Some((to, why, _)) => self.boundaries.stand(sid, Target { from, to: *to, word: why.word() }),
             None if transcript_rests => self.boundaries.drop_target(sid),
@@ -109,7 +109,7 @@ impl ClaudecodePlugin {
             self.boundary(host, sid, from, rest, Outcome::Held(Veto::RefusedThere));
             return false;
         }
-        let pane = self.resting(host, sid, p.meta, result, p.in_flight, self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()));
+        let pane = self.resting(status.as_ref(), sid, p.meta, result, p.in_flight, self.rebalanced.get(&sid).map(|(at, _)| at.elapsed()));
         let dry = p.mode == Rebalance::DryRun;
         // the account speeds the feed's readings show can see a target
         // running short that the panes' own speeds do not.  A u_out move
