@@ -94,6 +94,11 @@ pub(super) fn above(obs: &Observation, sid: u64) -> Option<u64> {
     obs.session(sid).filter(|x| x.live).map(|x| x.entry.shadow_of)
 }
 
+/// Each running helper and its parent pane, as `(helper, parent)`.
+pub(crate) fn parents() -> Vec<(u64, u64)> {
+    SHARED.get().map_or_else(Vec::new, |s| s.table().map.iter().map(|(sid, h)| (*sid, h.started.parent)).collect())
+}
+
 /// True once everything there is to say was declared.
 pub(crate) fn declare(decls: &mut PaneDecls<HelperStrip>) -> bool {
     let Some(s) = SHARED.get() else { return false };

@@ -13,7 +13,8 @@
 //! descendants of such a process go where it goes.  A process a codex
 //! app-server runs with no thread (an MCP server) serves every thread
 //! of the server, so the token it inherited from the server is not
-//! taken for it either.
+//! taken for it either.  A helper pane's processes, once the helper
+//! has closed, are its parent pane's while that pane runs.
 //!
 //! This decides whom to tell and who may end a process.  Any process of
 //! the user may signal any other, so it keeps a session from hitting
@@ -57,12 +58,15 @@ pub(crate) struct Known {
     /// Codex thread → pane.
     pub codex_threads: HashMap<String, u64>,
     pub claude: Vec<ClaudePane>,
+    /// Helper pane → its parent pane, for helpers seen lately, closed
+    /// ones included.
+    pub helper_parents: HashMap<u64, u64>,
 }
 
 impl Known {
     pub fn current() -> Known {
         let codex_threads = crate::plugins::peerbus::threads().into_iter().map(|(sid, v)| (v.thread, sid)).collect();
-        Known { codex_threads, claude: crate::plugins::claudecode::sessions() }
+        Known { codex_threads, claude: crate::plugins::claudecode::sessions(), helper_parents: HashMap::new() }
     }
 }
 
@@ -162,6 +166,13 @@ impl Attributor {
         self.placed
     }
 
+    /// Whether `row` is the process its placement follows, itself
+    /// started by launchd or a codex app-server rather than under one
+    /// that is.
+    pub fn is_root(&mut self, obs: &Observation, row: &ProcRow) -> bool {
+        self.outside_root(obs, row).is_some_and(|(root, _)| root.id() == row.id())
+    }
+
     fn pane_of(&self, row: &ProcRow) -> Option<u64> {
         self.in_pane.get(&row.pid).filter(|(start, _)| *start == row.start_us).map(|(_, sid)| *sid)
     }
@@ -209,9 +220,13 @@ impl Attributor {
             return Owner::Unknown;
         }
         let Some(token) = self.env.value(root, KEYS[2]) else { return Owner::Unknown };
+        let live = |sid: u64| obs.session(sid).is_some_and(|s| s.live);
         match token_sid(&token) {
-            Some(sid) if obs.session(sid).is_some_and(|s| s.live) => Owner::Pane(sid),
-            Some(sid) => Owner::Closed(sid),
+            Some(sid) if live(sid) => Owner::Pane(sid),
+            Some(sid) => match self.known.helper_parents.get(&sid) {
+                Some(&parent) if live(parent) => Owner::Pane(parent),
+                _ => Owner::Closed(sid),
+            },
             None => Owner::Unknown,
         }
     }
@@ -225,4 +240,4 @@ fn token_sid(token: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

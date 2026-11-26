@@ -13,7 +13,7 @@ const OLD: &str = "32f6eecf-5377-400d-958d-1ca24f1821d7";
 const STRAY: &str = "0a76d287-c435-4cc2-b9e7-a68ffca225db";
 
 /// A real process, killed and reaped when the test ends.
-struct Real(Child);
+pub(in crate::plugins::zombie) struct Real(Child);
 
 impl Drop for Real {
     fn drop(&mut self) {
@@ -23,7 +23,7 @@ impl Drop for Real {
 }
 
 /// A directory removed when the test ends.
-struct Scratch(PathBuf);
+pub(in crate::plugins::zombie) struct Scratch(PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -74,14 +74,14 @@ impl Real {
         real
     }
 
-    fn sleeping(env: &[(&str, &str)]) -> (Real, Scratch) {
+    pub(in crate::plugins::zombie) fn sleeping(env: &[(&str, &str)]) -> (Real, Scratch) {
         let (dir, bin) = linked("waiter");
         (Real::spawn(&bin, &[], env), dir)
     }
 
     /// Its row as the kernel has it, with the parent `ppid`: adopted by
     /// launchd when 1.
-    fn row(&self, ppid: i32) -> ProcRow {
+    pub(in crate::plugins::zombie) fn row(&self, ppid: i32) -> ProcRow {
         let mut r = pidtree::proc_row(self.0.id() as i32).expect("the process is running");
         r.ppid = ppid;
         r
@@ -90,17 +90,18 @@ impl Real {
 
 /// Pane 7 (claude) with shell pid 2, pane 9 (codex) with shell pid 3,
 /// both live, and `outside` beside them.
-fn observe(outside: Vec<ProcRow>) -> Observation {
+pub(in crate::plugins::zombie) fn observe(outside: Vec<ProcRow>) -> Observation {
     let mut rows = vec![row(1, 0, "launchd"), row(2, 1, "zsh"), row(4, 2, "claude"), row(3, 1, "zsh"), row(5, 3, "codex")];
     rows.extend(outside);
     let entries = vec![(entry(7, 0, 2), true), (entry(9, 0, 3), true), (entry(12, 0, 0), false)];
     Observation::from_parts(Instant::now(), ProcTable::from_rows(rows), entries, |_| None)
 }
 
-fn known(transcripts: Option<PathBuf>) -> Known {
+pub(in crate::plugins::zombie) fn known(transcripts: Option<PathBuf>) -> Known {
     Known {
         codex_threads: [("thread-of-pane-9".to_string(), 9)].into(),
         claude: vec![ClaudePane { sid: 7, uuid: U7.into(), transcripts }],
+        helper_parents: HashMap::new(),
     }
 }
 
@@ -160,6 +161,19 @@ fn a_token_of_a_pane_no_longer_running_names_a_closed_pane() {
     let (p, _) = Real::sleeping(&[("MARSPOT_SUBMIT_TOKEN", &token)]);
     let obs = observe(vec![p.row(1)]);
     assert_eq!(owner_of(&obs, &known(None), &p.row(1)), Owner::Closed(12));
+}
+
+#[test]
+fn a_closed_helpers_process_is_its_parent_panes_while_the_parent_runs() {
+    ensure_secret().expect("a secret");
+    let token = token_for(12).unwrap();
+    let (p, _) = Real::sleeping(&[("MARSPOT_SUBMIT_TOKEN", &token)]);
+    let obs = observe(vec![p.row(1)]);
+    let mut k = known(None);
+    k.helper_parents.insert(12, 7);
+    assert_eq!(owner_of(&obs, &k, &p.row(1)), Owner::Pane(7));
+    k.helper_parents.insert(12, 40);
+    assert_eq!(owner_of(&obs, &k, &p.row(1)), Owner::Closed(12), "a parent that is gone too leaves it the helper's");
 }
 
 #[test]

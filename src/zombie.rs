@@ -11,6 +11,7 @@ pub mod check;
 pub mod exclude;
 pub mod files;
 pub mod limits;
+pub mod orphans;
 mod outside;
 mod pane;
 pub mod probe;
