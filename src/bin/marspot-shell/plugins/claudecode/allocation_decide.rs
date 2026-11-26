@@ -98,7 +98,7 @@ pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'stati
         }
     }
     let key = plan_key(&s.accounts, &s.table, short, &moves);
-    let line = plan_line(&s.accounts, &s.plan, &s.table, short, &moves);
+    let line = plan_line(&s.accounts, &s.plan, (s.b_f, s.b_n), &s.table, short, &moves);
     say_keyed(a, log, "alloc.plan", key, line);
     Some(s.view)
 }

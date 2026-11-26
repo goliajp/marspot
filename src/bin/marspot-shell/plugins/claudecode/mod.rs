@@ -23,6 +23,7 @@ mod idle_rule;
 pub(in crate::plugins) mod quota;
 pub(in crate::plugins) mod rooms;
 mod rebalance;
+mod rebalance_boundary;
 mod switching;
 mod heads_up_due;
 mod burn;
@@ -156,6 +157,8 @@ pub struct ClaudecodePlugin {
     rebalanced: HashMap<u64, (Instant, u8)>,
     /// What was last logged about moving each resting pane.
     rebalance_said: HashMap<u64, String>,
+    /// Standing targets and the rests watched for `rebalance.boundary`.
+    boundaries: rebalance_boundary::Boundaries,
     /// Busy panes told their account was nearly out, so each is told once each time its account runs low.
     heads_up: heads_up::Ledger,
     /// Accounts' speeds, and who leaves one running short.
@@ -264,6 +267,7 @@ impl ClaudecodePlugin {
             moved_at: HashMap::new(),
             rebalanced: HashMap::new(),
             rebalance_said: HashMap::new(),
+            boundaries: Default::default(),
             heads_up: heads_up::Ledger::default(),
             leave: Default::default(),
             unjudged: std::collections::HashSet::new(),

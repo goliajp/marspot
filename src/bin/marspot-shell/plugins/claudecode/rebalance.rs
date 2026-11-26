@@ -48,33 +48,101 @@ pub(super) struct Pane {
     pub helper_bound: bool,
 }
 
+/// What holds a move of a pane that could otherwise go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Veto {
+    MoveOnItsWay,
+    Working,
+    HelperBound,
+    UserHere,
+    WorkInFlight,
+    OwnTimer,
+    Settling,
+    Cooldown,
+    Overloaded,
+    /// The readings' speeds say the target would not last the pane.
+    ShortThere,
+    AnotherMoved,
+    /// The target refused the pane since the feed was written.
+    RefusedThere,
+    /// The pane state machine has it resting, its transcript does not.
+    TranscriptBusy,
+    /// The state machine has it waiting for the user, its screen is not quiet.
+    ScreenBusy,
+    /// Resting, the core's last decision for it was to stay.
+    CoreStays,
+}
+
+impl Veto {
+    pub(super) fn phrase(self) -> &'static str {
+        match self {
+            Veto::MoveOnItsWay => "a move is on its way",
+            Veto::Working => "it is working",
+            Veto::HelperBound => "it is a helper or helpers work for it",
+            Veto::UserHere => "the user is in it",
+            Veto::WorkInFlight => "work is in flight",
+            Veto::OwnTimer => "it waits on its own timer",
+            Veto::Settling => "it wrote within the last minute",
+            Veto::Cooldown => "it was moved within the half hour",
+            Veto::Overloaded => "the machine is overloaded",
+            Veto::ShortThere => "it would run short there at the speed its readings show",
+            Veto::AnotherMoved => "another pane moved this pass",
+            Veto::RefusedThere => "the target refused it since the feed was written",
+            Veto::TranscriptBusy => "its transcript does not show it resting",
+            Veto::ScreenBusy => "its screen is not quiet",
+            Veto::CoreStays => "the core no longer moves it",
+        }
+    }
+
+    /// One word, for the line each turn boundary writes.
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Veto::MoveOnItsWay => "move_on_its_way",
+            Veto::Working => "working",
+            Veto::HelperBound => "helper_bound",
+            Veto::UserHere => "user_here",
+            Veto::WorkInFlight => "work_in_flight",
+            Veto::OwnTimer => "own_timer",
+            Veto::Settling => "settle",
+            Veto::Cooldown => "cooldown",
+            Veto::Overloaded => "overloaded",
+            Veto::ShortThere => "short_there",
+            Veto::AnotherMoved => "another_moved",
+            Veto::RefusedThere => "refused_there",
+            Veto::TranscriptBusy => "transcript_busy",
+            Veto::ScreenBusy => "screen_busy",
+            Veto::CoreStays => "core_stays",
+        }
+    }
+}
+
 /// Why the pane is not to be touched now, or `None` when it may be.
-pub(super) fn not_now(p: &Pane) -> Option<&'static str> {
+pub(super) fn not_now(p: &Pane) -> Option<Veto> {
     if p.move_in_flight {
-        return Some("a move is on its way");
+        return Some(Veto::MoveOnItsWay);
     }
     if !p.awaiting_user {
-        return Some("it is working");
+        return Some(Veto::Working);
     }
     if p.helper_bound {
-        return Some("it is a helper or helpers work for it");
+        return Some(Veto::HelperBound);
     }
     if p.user_here {
         // they may be typing; the restart would come up under them
-        return Some("the user is in it");
+        return Some(Veto::UserHere);
     }
     if p.work_in_flight {
-        return Some("work is in flight");
+        return Some(Veto::WorkInFlight);
     }
     if p.own_timer {
         // a /loop's next wakeup lives in the claude a move kills
-        return Some("it waits on its own timer");
+        return Some(Veto::OwnTimer);
     }
     if p.idle_for < SETTLE {
-        return Some("it wrote within the last minute");
+        return Some(Veto::Settling);
     }
     if p.since_last.is_some_and(|d| d < COOLDOWN) {
-        return Some("it was moved within the half hour");
+        return Some(Veto::Cooldown);
     }
     // On a saturated machine the restart outruns the checks that watch
     // it: on 2026-11-05, at load 22 to 48, four moves in a row waited
@@ -83,7 +151,7 @@ pub(super) fn not_now(p: &Pane) -> Option<&'static str> {
     // Ten days earlier the same stall hit three refused panes at once.
     // A move that is only an improvement can wait for a quieter minute.
     if p.host_load.is_some_and(|l| l > marspot::host_load::BUSY) {
-        return Some("the machine is overloaded");
+        return Some(Veto::Overloaded);
     }
     None
 }
@@ -121,7 +189,7 @@ mod tests {
             (Pane { helper_bound: true, ..resting() }, "it is a helper or helpers work for it"),
         ];
         for (pane, why) in cases {
-            assert_eq!(not_now(&pane), Some(why));
+            assert_eq!(not_now(&pane).map(Veto::phrase), Some(why));
         }
         assert_eq!(not_now(&Pane { since_last: Some(COOLDOWN), ..resting() }), None);
         assert_eq!(not_now(&Pane { host_load: None, ..resting() }), None, "no answer is not busy");
@@ -132,8 +200,8 @@ mod tests {
         let roles = super::super::with_helpers::HelperRoles::of([(1, 0), (2, 0), (3, 2)]);
         let pane = |sid| Pane { helper_bound: roles.sits_out(sid), ..resting() };
         assert_eq!(not_now(&pane(1)), None);
-        assert_eq!(not_now(&pane(2)), Some("it is a helper or helpers work for it"), "its helper is live");
-        assert_eq!(not_now(&pane(3)), Some("it is a helper or helpers work for it"), "it is a helper");
+        assert_eq!(not_now(&pane(2)), Some(Veto::HelperBound), "its helper is live");
+        assert_eq!(not_now(&pane(3)), Some(Veto::HelperBound), "it is a helper");
     }
 
 }
