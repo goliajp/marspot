@@ -31,6 +31,7 @@ use marspot::shell_proto::{
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 
+mod agentsvc;
 mod apple_events;
 mod banner;
 mod bounded;

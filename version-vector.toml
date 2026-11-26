@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.742"  # the counting allocator is built only for tests
+shell   = "0.7.743"  # every account decision is weighed again by the scheduler's selector and logged as svc.sched.decide; nothing acts on it
 core    = "0.12.710"  # the counting allocator is built only for tests
 session = "0.11.459"  # the counting allocator is built only for tests

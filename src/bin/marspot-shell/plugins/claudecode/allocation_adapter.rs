@@ -1,16 +1,13 @@
-//! The shared allocation, run over Claude's panes once per scan, for
-//! the record only: it moves nothing.
+//! The shared allocation over Claude's panes, once per scan; it moves nothing.
 //!
 //! Each scan it brings the per-pane facts up to date, writes a line to
-//! `alloc_events` for each that changed and none for the rest, and
-//! works out the plan and where each pane would go; the log gets
-//! `alloc.plan` when that answer changes.  When the shell starts, what
-//! it last knew of each pane is read back from every kept day of
+//! `alloc_events` for each that changed, and works out the plan and
+//! where each pane would go (`alloc.plan` when that changes).  At start
+//! what it knew of each pane is read back from every kept day of
 //! events, and the speeds from the last fifteen hours of them.
 //!
 //! A pane's use is written as the tokens each model used, never as
-//! weeks: the price of a token is a derivation, worked out again on
-//! every read.
+//! weeks: a token's price is derived again on every read.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -84,6 +81,7 @@ pub(super) struct Allocation {
     tail: Tail,
     /// The last scan's view, for the main thread to choose by.
     pub(super) view: Option<super::allocation_view::View>,
+    pub(super) sched: crate::agentsvc::sched::Shadow,
 }
 
 /// Events in `dir` under the claudecode plugin's state directory.
@@ -116,6 +114,7 @@ impl Allocation {
             live: false,
             tail: Tail::default(),
             view: None,
+            sched: Default::default(),
         }
     }
 

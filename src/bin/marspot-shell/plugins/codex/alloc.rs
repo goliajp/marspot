@@ -115,6 +115,7 @@ pub(super) struct CodexAlloc {
     /// What the last decision was made from; an unchanged one is not
     /// decided again.
     pub(super) decided: Option<u64>,
+    pub(super) sched: crate::agentsvc::sched::Shadow,
 }
 
 pub(super) type Log = Vec<(&'static str, String)>;
@@ -155,6 +156,7 @@ impl CodexAlloc {
             told: HashMap::new(),
             refusals: HashMap::new(),
             decided: None,
+            sched: Default::default(),
         }
     }
 

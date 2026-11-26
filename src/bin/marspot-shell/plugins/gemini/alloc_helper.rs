@@ -18,6 +18,7 @@ use super::alloc::{Refused, events_dir, quants, shut};
 use super::quota::Scope;
 use crate::plugins::allocation::choose::Mover;
 use crate::plugins::allocation::helper::{Placement, Scene, place};
+use crate::plugins::allocation::replay::{Rule, Why};
 use crate::plugins::allocation::{Class, Load, RHO0};
 use crate::plugins::claudecode::allocation_events::{Event, EventLog};
 use crate::plugins::handoff::Agent;
@@ -113,6 +114,7 @@ pub(super) fn choose(mode: AgentAllocation, homes: &[u8], model: Option<&str>, n
             return if live { HelperChoice::Nowhere(back) } else { HelperChoice::TakeTurns };
         }
     };
+    crate::agentsvc::sched::once("gemini", 0, &inputs, Rule::Bands, Some((to, Why::Out)), None);
     write(if live { "placed" } else { "would_move" }, Some(to), format!("to=P{to} why=out via=new {}", inputs.encode()));
     if !live {
         return HelperChoice::TakeTurns;

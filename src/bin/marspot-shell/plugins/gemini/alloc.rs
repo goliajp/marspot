@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use super::quota::{Refusal, Scope, pacific_midnight_after};
 use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of};
-use crate::plugins::allocation::replay::{Inputs, Kind};
+use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::{Class, Quant, RHO0};
 use crate::plugins::claudecode::allocation_events::{DAY, Event, EventLog};
 
@@ -86,6 +86,7 @@ pub(super) struct GeminiAlloc {
     pub(super) refused: HashMap<(u8, Scope), Refused>,
     would: HashMap<u64, u8>,
     stuck: HashSet<u64>,
+    sched: crate::agentsvc::sched::Shadow,
 }
 
 pub(super) fn events_dir(state_root: &Path) -> PathBuf {
@@ -114,7 +115,7 @@ pub(super) fn quants(refused: &HashMap<(u8, Scope), Refused>, ids: &[u8], model:
 
 impl GeminiAlloc {
     pub(super) fn new(dir: PathBuf) -> Self {
-        GeminiAlloc { events: EventLog::for_agent(dir.clone(), "gemini"), dir, rebuilt: false, refused: HashMap::new(), would: HashMap::new(), stuck: HashSet::new() }
+        GeminiAlloc { events: EventLog::for_agent(dir.clone(), "gemini"), dir, rebuilt: false, refused: HashMap::new(), would: HashMap::new(), stuck: HashSet::new(), sched: Default::default() }
     }
 
     /// The refusals kept in the last two days' rows, so a restart neither
@@ -188,7 +189,9 @@ impl GeminiAlloc {
                 continue;
             }
             let inputs = self.inputs(snap, i);
-            match inputs.decide(&inputs.plan()) {
+            let decided = inputs.decide(&inputs.plan());
+            self.sched.decide("gemini", p.sid, &inputs, Rule::Bands, decided, now);
+            match decided {
                 Some((to, why)) => {
                     self.stuck.remove(&p.sid);
                     let resume = holds(p, to);
@@ -228,6 +231,7 @@ impl GeminiAlloc {
     /// A move made: one line, with what chose it.
     pub(super) fn moved(&mut self, now: i64, m: &Move, log: &mut Log) {
         let via = if m.resume { "resume" } else { "handoff" };
+        crate::agentsvc::sched::once("gemini", m.sid, &m.inputs, Rule::Bands, Some((m.to, Why::Out)), None);
         self.event(now, m.sid, "moved", m.from, format!("to=P{} why=out via={via} {}", m.to, m.inputs.encode()), log);
     }
 

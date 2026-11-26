@@ -27,7 +27,7 @@ use super::super::allocation_view::View;
 use super::{Move, Room, FIVE_HOUR_SPENT, same_model};
 use crate::plugins::allocation::choose::Mover;
 use crate::plugins::allocation::helper::{Placement, Scene, place};
-use crate::plugins::allocation::replay::{Inputs, Rule};
+use crate::plugins::allocation::replay::{Inputs, Rule, Why};
 use crate::plugins::allocation::{Class, Quant, RHO0};
 
 #[path = "helper_placed.rs"]
@@ -174,7 +174,15 @@ pub(in crate::plugins) fn helper_move(pool: Pool, feed_at: i64, decision: Move, 
     placed(pool, |p| {
         p.feed(feed_at, now);
         let to = match place(&scene, Mover { class, rate: RHO0, tokens: None }, Some(current), &p.counts()) {
-            Placement::To(to, _) | Placement::HeldBack(to, _) => Some(to),
+            Placement::To(to, inputs) | Placement::HeldBack(to, inputs) => {
+                let agent = match pool {
+                    Pool::Claude => "claude",
+                    Pool::Codex => "codex",
+                    Pool::Kimi => "kimi",
+                };
+                crate::agentsvc::sched::once(agent, 0, &inputs, Rule::Bands, Some((to, Why::Out)), None);
+                Some(to)
+            }
             Placement::Nowhere => unread_pick(rooms, Some(current), model, p),
         };
         match to {

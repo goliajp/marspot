@@ -3,8 +3,7 @@
 //! Claude, Kimi and Codex by their usage feeds, with the allocation's
 //! rule for helpers (`quota::helper_pick`); Gemini writes no usage
 //! anywhere, so the gemini plugin places its helpers.  Every call reads
-//! the profiles and feeds from disk, so it belongs off the shell's main
-//! loop.
+//! the profiles and feeds from disk: off the shell's main loop.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,7 +12,7 @@ use marspot::cc_usage::CxAccount;
 
 use crate::plugins::allocation::choose::{HELPER_LAST_H, Mover};
 use crate::plugins::allocation::helper::{Placement, Scene, place_by};
-use crate::plugins::allocation::replay::{Inputs, Rule};
+use crate::plugins::allocation::replay::{Inputs, Rule, Why};
 use crate::plugins::allocation::{Class, RHO0, waste};
 use crate::plugins::claudecode::quota::helper_pick::{self, Accounts, Placed, Pool};
 use crate::plugins::claudecode::quota::Room;
@@ -127,15 +126,15 @@ pub(in crate::plugins) fn choose(
         (None, _) => placed.feed(accounts.feed_at, now),
     }
     let class = class_of(agent, &accounts.rooms, model);
+    // Claude's helpers go by the one objective; the others know no restricted window
+    let rule = if agent == Agent::Claude { Rule::waste(0) } else { Rule::Bands };
     let chosen = |kind: &str, n: u8, inputs: &Inputs| {
         if let Some(dir) = events {
             helper_pick::record_new(dir, now, kind, n, inputs);
         }
+        crate::agentsvc::sched::once(agent.key(), 0, inputs, rule, Some((n, Why::Out)), None);
         Some(n)
     };
-    // Claude's helpers are placed by the one objective; the other
-    // agents' accounts know no restricted window to weigh
-    let rule = if agent == Agent::Claude { Rule::waste(0) } else { Rule::Bands };
     let rate = match (agent, class) {
         (Agent::Claude, Class::Restricted) => RHO0 * helper_pick::fable_model().map_or(1.0, |(_, k)| k),
         _ => RHO0,

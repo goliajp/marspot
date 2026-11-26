@@ -10,7 +10,7 @@ use super::alloc::{AccountIn, CodexAlloc, HeadsUp, Log, PaneIn, Snapshot, WEEK_S
 use crate::plugins::allocation::choose::{HELPER_LAST_H, MUST_LAST_H, Mover, loads_of};
 use crate::plugins::allocation::notice::{Stranded, stranded};
 use crate::plugins::allocation::plan::{Plan, plan};
-use crate::plugins::allocation::replay::{Inputs, Kind, Why};
+use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::rest::{LEAVE_BELOW_H, RESTRICTED_USER, is_keeper};
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, Load, Quant, lasts};
@@ -93,6 +93,9 @@ pub(super) fn decide(a: &mut CodexAlloc, snap: &Snapshot, log: &mut Log) -> Vec<
     for i in 0..s.panes.len() {
         let inputs = inputs(a, &s, i);
         let to = inputs.as_ref().and_then(|x| x.decide(&s.plan));
+        if let Some(x) = &inputs {
+            a.sched.decide("codex", s.panes[i].p.sid, x, Rule::Bands, to, s.now);
+        }
         moves.push(to.map(|(t, why)| format!("{}→P{t}({})", s.panes[i].p.sid, why.word())));
         note_move(a, &s, i, to, inputs.as_ref(), log);
         tell.extend(heads_up(a, &s, i, log));

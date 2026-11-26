@@ -16,6 +16,7 @@ use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
 use crate::plugins::allocation::rest::{RESTRICTED_USER, is_keeper};
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, KAPPA_FABLE, Quant, shortage};
+use marspot::agent::AgentKind;
 
 /// A feed older than this stops plan-following moves.
 pub(super) const STALE_FEED_S: i64 = 15 * 60;
@@ -73,11 +74,15 @@ pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'stati
     a.band_moves.retain(|t| now - t < 3600);
     a.day_moves.retain(|t| now - t < 24 * 3600);
     a.day_pending.retain(|_, at| now - *at < PENDING_S);
+    a.sched.prices(AgentKind::Claude.as_str(), &s.accounts, &loads_of(&s.accounts, &s.table, None));
     let mut moves = Vec::new();
     for i in 0..s.panes.len() {
         let inputs = inputs(a, &s, i);
         s.view.rule = Rule::waste(a.day_moves.len() + a.day_pending.len());
         let to = inputs.as_ref().and_then(|x| x.decide_by(&s.plan, s.view.rule));
+        if let Some(x) = &inputs {
+            a.sched.decide(AgentKind::Claude.as_str(), s.panes[i].p.sid, x, s.view.rule, to, now);
+        }
         moves.push(to.map(|(t, why)| format!("{}→P{t}({})", s.panes[i].p.sid, why.word())));
         note_move(a, &s, i, to, inputs.as_ref(), log);
         if let (Some((t, why)), Some(inputs)) = (to, inputs)
