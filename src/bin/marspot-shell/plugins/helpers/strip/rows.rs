@@ -20,6 +20,8 @@ pub(super) struct Live<'a> {
     pub at_work: bool,
     /// A notice about it that could not be delivered.
     pub undelivered: Option<&'a Notice>,
+    /// The call it is at asks the user a question of its own.
+    pub question: bool,
 }
 
 fn stop_of(blocked: bool) -> StripState {
@@ -28,7 +30,7 @@ fn stop_of(blocked: bool) -> StripState {
 
 /// Whether one in this state is at work: one waiting for an answer is.
 pub(super) fn works(s: StripState) -> bool {
-    matches!(s, StripState::Preparing | StripState::Working | StripState::Waiting)
+    matches!(s, StripState::Preparing | StripState::Working | StripState::Waiting | StripState::Question)
 }
 
 /// With its clock ended, only a sign of work since makes one working:
@@ -43,6 +45,7 @@ pub(super) fn state(h: &Helper, live: Live) -> StripState {
     }
     if turn_reported(h) {
         return match live.turn {
+            Some(Turn::BlockedTold | Turn::BlockedBefore) if live.question => StripState::Question,
             Some(Turn::BlockedTold | Turn::BlockedBefore) => StripState::Waiting,
             Some(Turn::Working | Turn::Held) if live.at_work || !resting => StripState::Working,
             Some(Turn::Working | Turn::Held) => StripState::Idle,

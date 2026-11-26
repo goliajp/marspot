@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use marspot::shell_proto::{HELPER_STRIP_ROWS, HelperStrip, StripAgent, StripRow};
 
+use super::asking::Asked;
 use super::pending::Undelivered;
 use super::table::{Event, Helper, Table};
 use super::turn::{Turn, turn_reported};
@@ -157,7 +158,7 @@ fn bring_up(st: &mut State, obs: &Observation, m: &Memory, now_ms: u64) -> Vec<F
     let mut facts: Vec<Fact> = moved.into_iter().map(|(sid, root)| (sid, now_ms, Event::Rooted(root))).collect();
     for h in st.table.map.values_mut().filter(|h| batch::listed(h)) {
         let sid = h.sid;
-        let live = live_of(&st.turns, &st.turned, &st.at_work, &st.undelivered, sid);
+        let live = live_of(&st.turns, &st.turned, &st.at_work, &st.undelivered, &st.asking, sid);
         let works = rows::works(rows::state(h, live));
         if works && !h.clock.runs() {
             h.clock.begin(now_ms);
@@ -187,13 +188,14 @@ fn ended_at(h: &Helper, since: u64, first_look: bool, began_ms: u64) -> Option<u
     let told = h.notices.last().copied().filter(|t| first_look && h.noticed && *t >= since);
     let recorded = || match turn_reported(h).then(|| turns::look(h.sid))?? {
         Look::Over { at, .. } => Some(at).filter(|t| (since..began_ms).contains(t)),
-        Look::NotOver => None,
+        Look::NotOver | Look::Asking { .. } | Look::Running { .. } => None,
     };
     told.or_else(recorded)
 }
 
-fn live_of<'a>(turns: &HashMap<u64, Turn>, turned: &HashSet<u64>, at_work: &HashSet<u64>, undelivered: &'a Undelivered, sid: u64) -> Live<'a> {
-    Live { turn: turns.get(&sid).copied(), turned: turned.contains(&sid), at_work: at_work.contains(&sid), undelivered: undelivered.get(sid) }
+fn live_of<'a>(turns: &HashMap<u64, Turn>, turned: &HashSet<u64>, at_work: &HashSet<u64>, undelivered: &'a Undelivered, asking: &HashMap<u64, Asked>, sid: u64) -> Live<'a> {
+    let question = asking.get(&sid).is_some_and(Asked::question);
+    Live { turn: turns.get(&sid).copied(), turned: turned.contains(&sid), at_work: at_work.contains(&sid), undelivered: undelivered.get(sid), question }
 }
 
 /// The record of every pane with something to list, and the facts found
@@ -213,7 +215,7 @@ fn compose(st: &mut State, obs: &Observation, m: &mut Memory, now_ms: u64) -> (V
     for (root, batch) in st.batches.open().iter().filter(|(root, _)| obs.session(**root).is_some()) {
         let mut rows = Vec::new();
         for h in batch.open.iter().filter_map(|sid| st.table.map.get(sid)) {
-            let state = rows::state(h, live_of(&st.turns, &st.turned, &st.at_work, &st.undelivered, h.sid));
+            let state = rows::state(h, live_of(&st.turns, &st.turned, &st.at_work, &st.undelivered, &st.asking, h.sid));
             let (number, used) = of(h.sid);
             rows.push(rows::row(h, state, number, used));
         }

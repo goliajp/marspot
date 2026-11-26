@@ -37,6 +37,14 @@ pub(in crate::plugins) enum Look {
     Over { began: Option<u64>, at: u64, quiet_after: Option<u64> },
     /// Under way, or over in a way left to the pane's state.
     NotOver,
+    /// Under way, at a tool call recorded at `since` (ms after the
+    /// epoch) that no result follows and no process under claude runs:
+    /// at an approval prompt, or at a tool that runs in claude itself;
+    /// `question`: the tool asks the user a question of claude's own.
+    Asking { since: u64, question: bool },
+    /// At the call recorded at `since`, and a process under claude runs:
+    /// its tool, or a hook or status line command while claude waits.
+    Running { since: u64 },
 }
 
 /// What the last scan found in pane `sid`; None when no recent one could
@@ -77,7 +85,7 @@ fn look_of(tail: &str) -> Option<Look> {
     while let Some(line) = lines.next() {
         if !is_bookkeeping_record(line) {
             let by_choice = record_type(line) == Some("assistant") && line.contains(r#""stop_reason":"end_turn""#);
-            let Some(at) = at.filter(|_| by_choice) else { return Some(Look::NotOver) };
+            let Some(at) = at.filter(|_| by_choice) else { return Some(if at.is_none() { asking(line) } else { Look::NotOver }) };
             let before: Vec<&str> = lines.collect();
             let user = before.iter().find(|l| record_type(l) == Some("user"));
             let began = user.and_then(|l| top_level_str(l, "timestamp")).and_then(ms_of);
@@ -91,6 +99,25 @@ fn look_of(tail: &str) -> Option<Look> {
         }
     }
     None
+}
+
+/// What a last record that is no end of a turn says: a call of a tool
+/// not answered yet, or only that the turn is under way.
+fn asking(line: &str) -> Look {
+    let call = record_type(line) == Some("assistant") && line.contains(r#""type":"tool_use""#);
+    let since = call.then(|| top_level_str(line, "timestamp").and_then(ms_of)).flatten();
+    let question = line.contains(r#""name":"AskUserQuestion""#);
+    since.map_or(Look::NotOver, |since| Look::Asking { since, question })
+}
+
+/// `look` as the scan that found it knows the pane's claude: a tool call
+/// a process under claude runs is not asking.
+pub(in crate::plugins) fn unless_running(look: Look, activity: Option<&marspot::pane_state::Activity>) -> Look {
+    let parked = matches!(activity, Some(marspot::pane_state::Activity::ToolPending { executing: false }));
+    match look {
+        Look::Asking { since, .. } if !parked => Look::Running { since },
+        _ => look,
+    }
 }
 
 /// Whether the turn ended with background agents still at work: they
@@ -143,7 +170,7 @@ mod tests {
         assert_eq!(of(&[SAID, OVER]), Some(Look::Over { began: None, at: AT, quiet_after: None }), "its start is out of reach");
         assert_eq!(of(&[AFTER, OVER, AFTER]), None, "so is its end");
         // none of these is the end of a turn
-        assert_eq!(of(&[ASKED, TOOL]), NOT_OVER);
+        assert_eq!(of(&[ASKED, TOOL]), NOT_OVER, "a call with no time on it");
         assert_eq!(of(&[ASKED, SAID]), NOT_OVER, "its Stop hooks may send it back");
         assert_eq!(of(&[ASKED, SAID, FEEDBACK, HOOKS]), NOT_OVER, "sent back");
         assert_eq!(of(&[SAID, OVER, ASKED]), NOT_OVER, "the next turn began");
@@ -152,6 +179,26 @@ mod tests {
         let out = |n: u32| OVER.replace("\"messageCount\":9", &format!("\"messageCount\":9,\"pendingBackgroundAgentCount\":{n}"));
         assert_eq!(of(&[ASKED, SAID, &out(2)]), NOT_OVER);
         assert_eq!(of(&[ASKED, SAID, &out(0)]), ENDED);
+    }
+
+    #[test]
+    fn helpers_a_tool_call_with_no_result_is_asking_unless_a_process_runs_it() {
+        use marspot::pane_state::Activity;
+        let call = TOOL.replace(r#""type":"assistant"}"#, r#""type":"assistant","timestamp":"2026-11-23T15:14:57.635Z"}"#);
+        let asking = Some(Look::Asking { since: AT, question: false });
+        assert_eq!(of(&[ASKED, &call]), asking);
+        let question = call.replace(r#""name":"Bash""#, r#""name":"AskUserQuestion""#);
+        assert_ne!(question, call);
+        assert_eq!(of(&[ASKED, &question]), Some(Look::Asking { since: AT, question: true }));
+        assert_eq!(of(&[ASKED, &call, HOOKS]), asking, "past the bookkeeping");
+        assert_eq!(of(&[ASKED, &call, ASKED]), NOT_OVER, "answered");
+        assert_eq!(of(&[ASKED, &call, OVER]), NOT_OVER, "no call is open past the end of a turn");
+        let parked = Activity::ToolPending { executing: false };
+        assert_eq!(unless_running(Look::Asking { since: AT, question: false }, Some(&parked)), Look::Asking { since: AT, question: false });
+        for a in [Some(&Activity::ToolPending { executing: true }), Some(&Activity::Working), None] {
+            assert_eq!(unless_running(Look::Asking { since: AT, question: false }, a), Look::Running { since: AT }, "{a:?}");
+        }
+        assert_eq!(unless_running(Look::NotOver, Some(&parked)), Look::NotOver);
     }
 
     #[test]

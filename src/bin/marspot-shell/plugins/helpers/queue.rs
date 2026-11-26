@@ -45,6 +45,7 @@ impl Shared {
         }
         st.closing.extend(retrying);
         drop(st);
+        self.reads_lost();
         *self.jobs.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
         self.wake_queued.store(false, Ordering::Release);
         self.contexts_queued.store(false, Ordering::Release);

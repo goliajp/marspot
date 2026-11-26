@@ -41,6 +41,9 @@ pub(super) enum Job {
     Redeliver { sid: u64 },
     /// Tell the parent the result of a stop written before a restart.
     Retell { sid: u64 },
+    /// Read whether a claude helper's screen shows a prompt, at the tool
+    /// call recorded at `since`.
+    ReadPrompt { sid: u64, since: u64 },
 }
 
 impl Job {
@@ -48,7 +51,7 @@ impl Job {
     pub fn sid(&self) -> u64 {
         match self {
             Job::Wake | Job::Contexts => 0,
-            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Fact { sid, .. } | Job::Redeliver { sid } | Job::Retell { sid } => *sid,
+            Job::Stopped { sid, .. } | Job::StillBlocked { sid } | Job::Release { sid } | Job::Close { sid, .. } | Job::Gone { sid } | Job::Fact { sid, .. } | Job::Redeliver { sid } | Job::Retell { sid } | Job::ReadPrompt { sid, .. } => *sid,
         }
     }
 
@@ -64,6 +67,7 @@ impl Job {
             Job::Fact { .. } => "fact",
             Job::Redeliver { .. } => "redeliver",
             Job::Retell { .. } => "retell",
+            Job::ReadPrompt { .. } => "read_prompt",
         }
     }
 }
@@ -176,6 +180,7 @@ fn handle(s: &Arc<Shared>, job: Job) {
                 s.record_seen(sid, at_ms, *ev);
             }
         }
+        Job::ReadPrompt { sid, since } => s.read_prompt(sid, since),
         Job::Retell { sid } => super::tell::retell(s, sid, &crate::observe::shared().fresh(crate::observe::INTERVAL)),
         Job::Redeliver { sid } => {
             let n = s.lock().undelivered.take(sid);
@@ -254,7 +259,20 @@ pub(super) fn hold(s: &Shared, sid: u64, n: Notice) -> bool {
 }
 
 fn stopped(s: &Arc<Shared>, sid: u64, stop: Stop, by_screen: bool) {
+    stopped_at(s, sid, stop, by_screen, || super::tell::screen_of(sid));
+}
+
+/// [`stopped`], with `screen` reading the helper's screen.  A prompt it
+/// was told of and has had no input at since is not told again, however
+/// it was seen this time, while the tool call it was at is open: one
+/// like it at the next call (the same command tried again once answered)
+/// is another.
+pub(super) fn stopped_at(s: &Arc<Shared>, sid: u64, stop: Stop, by_screen: bool, screen: impl FnOnce() -> Option<String>) {
     let Some(h) = s.table().map.get(&sid).cloned() else { return };
+    let told = stop == Stop::Blocked && h.noticed && h.blocked_told && !h.result_new && !s.lock().answered.contains(&sid);
+    if told && screen().is_some_and(|t| notify::same_prompt(&h.blocked_prompt, &t)) {
+        return marspot::lx_info!("helpers.job", &format!("sid={sid} blocked at the prompt told of, not told again"));
+    }
     match notify::verdict(&h, stop, by_screen, records::now_ms()) {
         Verdict::Skip => return,
         Verdict::Hold => return s.record(sid, Event::NoticeSuppressed { blocked: stop == Stop::Blocked }),

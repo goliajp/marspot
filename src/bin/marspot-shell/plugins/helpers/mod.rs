@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION, TickDue};
 
+mod asking;
 mod caller_kind;
 mod close;
 mod container;
@@ -159,6 +160,12 @@ struct State {
     /// Helpers at a prompt whose screen could not be read: when it is
     /// read again (ms after the epoch).
     prompt_unread: HashMap<u64, u64>,
+    /// Claude helpers at a tool call no result follows: what their
+    /// screen showed (`Shared::at_prompt`).
+    asking: HashMap<u64, asking::Asked>,
+    /// Claude helpers whose tool call open when last told of a prompt
+    /// has ended since: a prompt like it now is another.
+    answered: HashSet<u64>,
     /// Parent panes handed to another agent, not yet written down.
     moves: pair::Moves,
     /// Parent panes whose helpers wait for the name of a conversation.
@@ -231,6 +238,9 @@ impl Shared {
         if st.table.map.get(&sid).is_some_and(|h| turn::pokes(h, &ev)) {
             st.poked.insert(sid, now);
         }
+        if matches!(ev, Event::BlockedNoticed { .. }) {
+            st.answered.remove(&sid);
+        }
         let contained = st.table.map.get(&sid).is_some_and(|h| h.contained());
         if apply {
             st.batches.apply(&mut st.table, sid, now, &ev, &|sid| strip::above(obs.as_deref()?, sid));
@@ -242,6 +252,8 @@ impl Shared {
             st.at_work.remove(&sid);
             st.poked.remove(&sid);
             st.prompt_unread.remove(&sid);
+            st.asking.remove(&sid);
+            st.answered.remove(&sid);
             st.closing.remove(&sid);
             st.close_retry.remove(&sid);
             st.turn_told.remove(&sid);
