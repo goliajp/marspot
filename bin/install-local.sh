@@ -232,9 +232,13 @@ if [[ -x "$PEER" ]]; then
     [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] || adhoc_bail "codesign failed for marspot-peer."
   fi
   peer_decision "$PEER" "$HOME/.local/bin/marspot-peer"
-  mkdir -p "$HOME/.local/bin"
-  install -m 0755 "$PEER" "$HOME/.local/bin/marspot-peer"
-  echo "==> installed ~/.local/bin/marspot-peer"
+  if peer_needs_install; then
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$PEER" "$HOME/.local/bin/marspot-peer"
+    echo "==> installed ~/.local/bin/marspot-peer"
+  else
+    echo "==> ~/.local/bin/marspot-peer kept ($WHY_peer)"
+  fi
 else
   peer_decision "$PEER" "$HOME/.local/bin/marspot-peer"
   echo "==> marspot-peer not built (--no-build): ~/.local/bin/marspot-peer left as it was"

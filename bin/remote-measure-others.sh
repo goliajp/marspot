@@ -108,7 +108,10 @@ if [[ "$HEALTH" == *"-1712"* ]] || [[ "$HEALTH" == *"timed out"* ]] || [[ "$HEAL
 fi
 
 # ---- sync ------------------------------------------------------------
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 remote_sync "$HOST" --name "$REMOTE_NAME"
+# read again after the sync: a checkout that moved in between is dirty
+GIT_SHA="$("$ROOT/bin/_git-sha.sh" "$GIT_SHA")"
 
 # ---- run + emit JSON to stdout, capture locally ----------------------
 mkdir -p "$OUT_DIR"
@@ -121,8 +124,7 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   # it is not a number.  The product's build runs inside the same lock
   # hold, so nothing else gets between the build and the reading.
   COMMIT="$(git -C "$ROOT" rev-parse --short HEAD)"
-  [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || COMMIT+="-dirty"
-  GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
+  [[ "$GIT_SHA" != *-dirty ]] || COMMIT+="-dirty"
   FWD="export MARSPOT_BENCH_COMMIT=$COMMIT MARSPOT_GIT_SHA=$GIT_SHA; "
   [[ -z "${MEASURE_TERMS:-}" ]] || FWD+="export MEASURE_TERMS=$(printf '%q' "$MEASURE_TERMS"); "
   [[ -z "${MEASURE_ROUNDS:-}" ]] || FWD+="export MEASURE_ROUNDS=$(printf '%q' "$MEASURE_ROUNDS"); "

@@ -46,3 +46,12 @@ leak-timeout = { period = "5s", result = "fail" }
 [[profile.default.overrides]]
 filter = 'test(b1_perf_1mb_first_64_hits_under_20ms) + test(b3_perf_1mb_first_64_hits_under_50ms) + test(the_blank_test_is_cheap_on_a_screen_with_content) + test(watch_pending_text_keeps_the_parse_within_five_percent) + binary(perf_gate) + (package(marspot-session) & test(/^local_session::direct::tests::/))'
 threads-required = "num-cpus"
+
+# The one test that runs cargo: it builds the session out of a copy
+# with no repository.  The copy is kept between runs, so a rebuild is
+# of what changed, but after a change to the engine that is the whole
+# engine, which can take longer than a minute while other tests share
+# the runner.
+[[profile.default.overrides]]
+filter = 'package(marspot-session) & test(=build_sha_without_repo::a_session_built_without_a_repository_names_the_passed_commit)'
+slow-timeout = { period = "60s", terminate-after = 5 }

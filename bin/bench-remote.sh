@@ -130,15 +130,17 @@ fi
 # excluded paths (target/, results/, generated scenarios) are *not*
 # deleted on the remote even though they are absent locally — rsync's
 # default behaviour without --delete-excluded.
+GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 remote_sync "$HOST" --name "$REMOTE_NAME"
 
 # The copy on the host is not a repository, so the tree it was made from
-# is named here and travels with the run into every record it writes.
+# is named here and travels with the run into every record it writes;
+# the binaries it builds name it in their fingerprint.  Read before and
+# after the sync: a checkout that moved in between is a dirty run.
+GIT_SHA="$("$ROOT/bin/_git-sha.sh" "$GIT_SHA")"
 BENCH_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
 BENCH_DIRTY=0
-[[ -z "$(git -C "$ROOT" status --porcelain)" ]] || BENCH_DIRTY=1
-# and the binaries it builds name it in their fingerprint
-GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
+[[ "$GIT_SHA" != *-dirty ]] || BENCH_DIRTY=1
 
 # ---- run -------------------------------------------------------------
 # Quote args once locally so the remote shell can re-tokenise them

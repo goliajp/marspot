@@ -6,11 +6,12 @@
 # Run directly, it explains an install between two sets of binaries
 # without installing anything:
 #
-#   bin/_install-layers.sh explain <running-dir> <target-dir>
+#   bin/_install-layers.sh explain <running-dir> <target-dir> [<source-tree>]
 #
 # Each dir holds marspot-shell / marspot-core / marspot-session (and
 # optionally marspot-peer); the printed INSTALL_LAYERS line is the one
-# an install from <running-dir> to <target-dir> would write.
+# an install from <running-dir> to <target-dir> would write when the
+# target binaries were built from <source-tree> (default: this checkout).
 
 running_equiv() {
   # What the running supervisor came from: current/ slot if a prior
@@ -34,6 +35,27 @@ binary_git_sha() {
     | sed -E 's/^MARSPOT_FP=//;s/\|$//'
 }
 
+# built_from_tree SHA: whether SHA, the commit a target binary names, is
+# what the source tree (SRC_TREE, default ROOT) holds: clean and at that
+# commit.  build.rs reruns only when git's HEAD, refs or index change,
+# and in a linked worktree on none of them, so a binary rebuilt after an
+# unstaged edit, or after a commit, can still name an older clean commit.
+# Only the tree says the name is true.  The binaries `--no-build`
+# installs were built on a runner from a copy of this tree, so the same
+# check holds for them.  The tree is read once per run.
+_TREE_AT=""  # the tree's commit when clean, "-" otherwise
+built_from_tree() {
+  if [[ -z "$_TREE_AT" ]]; then
+    local src="${SRC_TREE:-$ROOT}" head
+    _TREE_AT=-
+    if head="$(git -C "$src" rev-parse --short=8 HEAD 2>/dev/null)" \
+        && [[ -z "$(git -C "$src" status --porcelain)" ]]; then
+      _TREE_AT="$head"
+    fi
+  fi
+  [[ -n "$1" && "$1" == "$_TREE_AT" ]]
+}
+
 # Extract the per-layer version (e.g. `0.5.4`) from a binary's
 # `MARSPOT_LAYER_VERS=shell:X|core:Y|session:Z|END` rodata marker.
 # Empty when the marker isn't present (older binary).
@@ -53,7 +75,8 @@ binary_layer_ver() {
 # on the same git commit, so "is this install a no-op?" is decided by
 # L2's fingerprint alone:
 #
-#   running L2 sha == target L2 sha, no `-dirty` suffix on either side
+#   running L2 sha == target L2 sha, no `-dirty` suffix on either side,
+#   and the source tree is clean at that commit (built_from_tree)
 #   => same commit, nothing to do: skip stage for every binary so no
 #      SIGUSR1 fires, no shell self-update execv runs, no window flashes.
 #
@@ -69,7 +92,7 @@ _l2_decision() {
     if [[ -f "$ref" && -f "$tgt" ]]; then
       ref_sha="$(binary_git_sha "$ref")"
       tgt_sha="$(binary_git_sha "$tgt")"
-      if [[ -n "$ref_sha" && "$ref_sha" == "$tgt_sha" && "$ref_sha" != *-dirty ]]; then
+      if [[ -n "$ref_sha" && "$ref_sha" == "$tgt_sha" ]] && built_from_tree "$tgt_sha"; then
         _L2_NOOP=yes
       fi
     fi
@@ -107,11 +130,11 @@ changed() {
   # developer declared (in version-vector.toml) that the layer did not
   # change, so a pure-L2 install doesn't restage L1 just because the
   # rebuild bumped the sha and build time embedded in every binary.
-  # Not for a `-dirty` build: mid-iteration the vector may not reflect
-  # uncommitted source, so fall through to byte-compare.
+  # Not for a build the tree does not confirm: mid-iteration the vector
+  # may not reflect uncommitted source, so fall through to byte-compare.
   local tgt_sha
   tgt_sha="$(binary_git_sha "$TARGET/$bin")"
-  if [[ -n "$tgt_sha" && "$tgt_sha" != *-dirty ]]; then
+  if built_from_tree "$tgt_sha"; then
     local ref_ver tgt_ver
     ref_ver="$(binary_layer_ver "$ref" "$layer")"
     tgt_ver="$(binary_layer_ver "$TARGET/$bin" "$layer")"
@@ -129,15 +152,33 @@ changed() {
 }
 
 # peer_decision NEW INSTALLED: marspot-peer is not part of the swap; it
-# is replaced on PATH whenever it was built.  Call before installing it.
+# is replaced on PATH when it is from another commit or its bytes
+# differ.  Call before installing it; install only on bytes-differ or
+# not-installed.
+#
+# The same-commit step comes first because the bytes of two installs
+# of one build never match: install-local signs the binary every time,
+# and a Developer ID signature carries its signing time.  It is taken
+# only when the source tree confirms the commit the new binary names.
 peer_decision() {
-  local new="$1" old="$2"
+  local new="$1" old="$2" new_sha
   if [[ ! -x "$new" ]]; then _why peer not-built
   elif [[ ! -f "$old" ]]; then _why peer not-installed
   else
     _from peer "$old"
-    if cmp -s "$new" "$old"; then _why peer bytes-same; else _why peer bytes-differ; fi
+    new_sha="$(binary_git_sha "$new")"
+    if [[ "$new_sha" == "${FROM_peer:-}" ]] && built_from_tree "$new_sha"; then
+      _why peer same-commit
+    elif cmp -s "$new" "$old"; then _why peer bytes-same
+    else _why peer bytes-differ
+    fi
   fi
+}
+
+# peer_needs_install: after peer_decision, whether the binary on PATH
+# is to be replaced.
+peer_needs_install() {
+  case "${WHY_peer:-}" in bytes-differ|not-installed) return 0 ;; *) return 1 ;; esac
 }
 
 # Which binaries a repository path is built into, in LP.  `other` = none
@@ -239,15 +280,16 @@ swap_list() {
   (( $1 )) && s="shell"
   (( $2 )) && s="$s${s:+,}core"
   (( $3 )) && s="$s${s:+,}session"
-  case "${WHY_peer:-}" in bytes-differ|not-installed) s="$s${s:+,}peer" ;; esac
+  ! peer_needs_install || s="$s${s:+,}peer"
   echo "${s:-none}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   set -euo pipefail
-  [[ "${1:-}" == explain && $# -eq 3 ]] || { echo "usage: $0 explain <running-dir> <target-dir>" >&2; exit 2; }
+  [[ "${1:-}" == explain && ( $# -eq 3 || $# -eq 4 ) ]] \
+    || { echo "usage: $0 explain <running-dir> <target-dir> [<source-tree>]" >&2; exit 2; }
   ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-  MACOS="$2"; TREE="$2/.no-tree"; TARGET="$3"
+  MACOS="$2"; TREE="$2/.no-tree"; TARGET="$3"; SRC_TREE="${4:-$ROOT}"
   sh=0; co=0; se=0
   changed marspot-shell && sh=1
   changed marspot-core && co=1

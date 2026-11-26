@@ -196,10 +196,11 @@ interrupted() {
 trap interrupted INT TERM
 trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
-remote_sync "$HOST" --name "$REMOTE_NAME"
 # the remote copy has no .git; the binaries built there and a suite that
-# records readings name the commit by this
+# records readings name the commit by this, read before and after the sync
 commit="$("$ROOT/bin/_git-sha.sh")"
+remote_sync "$HOST" --name "$REMOTE_NAME"
+commit="$("$ROOT/bin/_git-sha.sh" "$commit")"
 
 # With E2E_LOCK=bench every suite builds inside its own exclusive hold
 # (bin/_build_then.sh): built under a shared hold first, it would wait

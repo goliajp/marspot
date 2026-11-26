@@ -30,4 +30,4 @@
 
 shell   = "0.7.751"  # the claude record fold is compared with the four readers it is to replace (tests only)
 core    = "0.12.711"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
-session = "0.11.460"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
+session = "0.11.461"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository, as the other build scripts do
