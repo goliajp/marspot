@@ -29,11 +29,14 @@ pub(super) struct Carried {
     /// Rates to take before a flood given back as slower is offered
     /// again.
     wait: u32,
+    /// The pty is back from a loop that found it dry: the next full
+    /// chunk may be offered on the rates taken before.
+    resume: bool,
 }
 
 impl Carried {
     pub(super) fn new() -> Self {
-        Self { since: None, bytes: 0, rates: 0, declined_for: 0, wait: DECLINED_FOR }
+        Self { since: None, bytes: 0, rates: 0, declined_for: 0, wait: DECLINED_FOR, resume: false }
     }
 
     /// The flood is over, or the pty was away: what was counted is not
@@ -42,6 +45,15 @@ impl Carried {
         self.since = None;
         self.bytes = 0;
         self.rates = 0;
+        self.resume = false;
+    }
+
+    /// The pty is back from a loop that found it dry: the flood goes on,
+    /// and its rates stand.
+    pub(super) fn resume(&mut self) {
+        self.since = None;
+        self.bytes = 0;
+        self.resume = true;
     }
 
     /// The flood has ended: the next one is offered afresh.
@@ -52,13 +64,22 @@ impl Carried {
         self.declined_for = 0;
         self.wait = DECLINED_FOR;
         lend.declined.store(false, Ordering::SeqCst);
+        lend.resumed.store(false, Ordering::SeqCst);
         lend.keep_for.store(KEPT_FOR, Ordering::Relaxed);
     }
 
     /// A chunk of `len` bytes of a flood that goes on has been queued.
     /// `true` when that completes a rate the pty may be offered on.
     pub(super) fn chunk(&mut self, len: usize, lend: &Lend) -> bool {
-        let now = Instant::now();
+        self.chunk_at(len, lend, Instant::now())
+    }
+
+    pub(super) fn chunk_at(&mut self, len: usize, lend: &Lend, now: Instant) -> bool {
+        if std::mem::take(&mut self.resume) && self.rates >= RATES_BEFORE_AN_OFFER && !lend.declined.load(Ordering::SeqCst) {
+            self.since = Some(now);
+            lend.resumed.store(true, Ordering::SeqCst);
+            return true;
+        }
         let Some(since) = self.since else {
             // from the end of the flood's first chunk: its beginning is
             // the program starting up
@@ -85,6 +106,7 @@ impl Carried {
             lend.declined.store(false, Ordering::SeqCst);
         }
         self.declined_for = 0;
+        lend.resumed.store(false, Ordering::SeqCst);
         true
     }
 }

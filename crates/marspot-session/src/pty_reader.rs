@@ -275,7 +275,11 @@ impl PtyReader {
                                 if !lending.wait_back(stop_rx.as_raw_fd(), &mut turn) {
                                     break;
                                 }
-                                carried.restart();
+                                if lending.came_back_paused() {
+                                    carried.resume();
+                                } else {
+                                    carried.restart();
+                                }
                             }
                         }
                         Gathered::Ended => {

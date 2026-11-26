@@ -103,8 +103,9 @@ impl LocalSession {
                 }
                 Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
                     let now = Instant::now();
-                    if dry_since.is_some_and(|since| now.duration_since(since) >= DRY_FOR) {
-                        lend.give_back();
+                    if let Some(since) = dry_since.filter(|since| now.duration_since(*since) >= DRY_FOR) {
+                        // up to when it ran dry: the wait after is not carrying
+                        lend.ran_dry(unlooked, since.duration_since(looked));
                         return (total, false);
                     }
                     dry_since.get_or_insert(now);
