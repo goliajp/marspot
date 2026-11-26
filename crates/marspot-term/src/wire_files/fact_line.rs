@@ -9,8 +9,13 @@
 use std::borrow::Cow;
 
 /// The kind of the line a writer adds once a day's byte cap made it
-/// drop lines: `<unix>\tdropped\tdropped=<count>`.
+/// drop lines: `<unix>\tdropped\tdropped=<count>`.  The count has
+/// [`DROPPED_WIDTH`] digits so the writer can raise it in place, the one
+/// change a fact file allows; a reader adds up every dropped line.
 pub const DROPPED: &str = "dropped";
+
+/// Digits of the count in a dropped line, zero-padded.
+pub const DROPPED_WIDTH: usize = 20;
 
 const SECS_PER_DAY: u64 = 86_400;
 
@@ -46,9 +51,18 @@ pub fn push(out: &mut String, unix: u64, kind: &str, fields: &[(&str, &str)]) {
     out.push('\n');
 }
 
-/// Append the line that says `n` lines were dropped.
+/// Append the line that says `n` lines were dropped; the count is its
+/// last [`DROPPED_WIDTH`] bytes before the newline.
 pub fn push_dropped(out: &mut String, unix: u64, n: u64) {
-    push(out, unix, DROPPED, &[(DROPPED, &n.to_string())]);
+    push(out, unix, DROPPED, &[(DROPPED, &format!("{n:0DROPPED_WIDTH$}"))]);
+}
+
+/// The count of a dropped line written by [`push_dropped`]; None for
+/// any other line.
+pub fn dropped_count(line: &str) -> Option<u64> {
+    let l = Line::parse(line).filter(|l| l.kind == DROPPED)?;
+    let v = l.get(DROPPED)?;
+    (v.len() == DROPPED_WIDTH).then(|| v.parse().ok()).flatten()
 }
 
 fn unescape(v: &str) -> Cow<'_, str> {
@@ -164,7 +178,10 @@ mod tests {
     fn the_dropped_line_names_its_count() {
         let mut s = String::new();
         push_dropped(&mut s, 9, 41);
-        assert_eq!(s, "9\tdropped\tdropped=41\n");
+        assert_eq!(s, "9\tdropped\tdropped=00000000000000000041\n");
+        assert_eq!(dropped_count(&s), Some(41));
+        assert_eq!(dropped_count("9\tdropped\tdropped=41"), None, "a count that cannot be raised in place");
+        assert_eq!(dropped_count("9\tmoved\tdropped=00000000000000000041"), None);
     }
 
     #[test]
