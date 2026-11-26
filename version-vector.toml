@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.756"  # state map of every file under the state root, StateStore and FactLog (unused in release)
+shell   = "0.7.757"  # PluginHost::state_dir documents the state root it actually uses
 core    = "0.12.713"  # marspot-term gains the fact-line format of the state map (not used by core)
 session = "0.11.465"  # marspot-term gains the fact-line format of the state map (not used by session)
