@@ -126,8 +126,16 @@ impl CoreApp {
             .get(4..12)
             .and_then(|b| b.first_chunk::<8>())
             .map_or(0, |b| u64::from_le_bytes(*b));
+        let typed = (f.msg_type == MsgType::PaneType).then(|| decode_pane_type(&f.payload)).transpose();
+        if let Ok(Some(t)) = &typed {
+            let text = String::from_utf8_lossy(&t.bytes);
+            let submits = t.enter || (!t.paste && super::model_guard::submits(&t.bytes));
+            if self.model_guard_refuses(sid, &text, submits, "pane_type") {
+                return self.answer(f.msg_type, req_id, sid, DoneCode::Other, super::model_guard::REFUSED);
+            }
+        }
         let decodes = match f.msg_type {
-            MsgType::PaneType => decode_pane_type(&f.payload).is_ok(),
+            MsgType::PaneType => typed.is_ok(),
             MsgType::PaneWatch => decode_pane_watch(&f.payload).is_ok(),
             _ => false,
         };

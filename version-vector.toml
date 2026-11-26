@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.789"  # the lib gains the notice card over a pane (not shown by shell itself)
-core    = "0.12.721"  # a notice from the shell is shown over the focused pane for twelve seconds
+shell   = "0.7.790"  # the lib learns to tell /model in Claude Code's box
+core    = "0.12.722"  # Enter on /model in a Claude Code box waits for y; programs cannot send /model
 session = "0.11.469"  # marspot-term gains the claude.model setting (not used by session)

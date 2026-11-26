@@ -38,7 +38,7 @@ pub(super) fn gone(sid: u64, works: bool) -> StripRow {
 }
 
 /// A session a core can be attached to, and its end of the connection.
-pub(super) struct Session {
+pub(crate) struct Session {
     pub sid: u64,
     writer: GridShmWriter,
     control: UnixStream,
@@ -70,6 +70,20 @@ impl Session {
         self.writer.publish(t.grid(), 0, flags);
     }
 
+    /// The keys the core sent the session since the last look.
+    pub(crate) fn keys(&mut self, pane: &Pane) -> usize {
+        pane.session().send_pane_control(Frame::new(MsgType::Ping, encode_ping(0)));
+        self.control.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut n = 0;
+        loop {
+            match Frame::read_next(&mut self.control).expect("a frame").expect("the core still there") {
+                Next::Frame(f) if f.msg_type == MsgType::Ping => return n,
+                Next::Frame(f) if f.msg_type == MsgType::KeyEvent => n += 1,
+                _ => {}
+            }
+        }
+    }
+
     /// The sizes the core asked for since the last look.
     pub(super) fn resizes(&mut self, pane: &Pane) -> Vec<(u16, u16)> {
         pane.session().send_pane_control(Frame::new(MsgType::Ping, encode_ping(0)));
@@ -92,7 +106,7 @@ pub(super) fn turned_on(on: bool) {
 }
 
 /// A window of one attached pane, its size that of the window's cell.
-pub(super) fn app(sb: &Sandbox) -> (CoreApp, Session) {
+pub(crate) fn app(sb: &Sandbox) -> (CoreApp, Session) {
     turned_on(true);
     let mut probe = app_in(sb.dir(), vec![win(1, vec![Pane::new_vacant(1, 60, 16)])]);
     probe.rebuild_layout(0);
@@ -120,7 +134,7 @@ pub(super) fn lines(app: &CoreApp, sid: u64) -> Vec<String> {
 }
 
 /// Draw as a frame would, the session having taken its new size.
-pub(super) fn frame(app: &mut CoreApp, s: &mut Session, bytes: &[u8]) {
+pub(crate) fn frame(app: &mut CoreApp, s: &mut Session, bytes: &[u8]) {
     let c = app.windows[0].layout.cells[0];
     s.shows(c.cols, c.rows, bytes);
     app.windows[0].panes[0].pump();

@@ -210,6 +210,9 @@ pub enum Msg {
     StatusNoKey,
     // What an empty pane says, in its grid
     PaneEmpty,
+    // Over a Claude Code pane: /model would change every account's default model
+    ModelGuardNotice,
+    ModelSendRefused,
     // The supervisor's banner over a window
     BannerRestartsPaused,
     BannerRecovering,

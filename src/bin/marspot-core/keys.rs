@@ -136,6 +136,9 @@ impl CoreApp {
         if pressed && self.search_consume_key(wi, &event, modifiers) {
             return;
         }
+        if self.model_guard_key(wi, &event, modifiers) {
+            return;
+        }
 
         if !self.strip_key(wi, &event, modifiers) {
             self.key_to_pane(wi, &event, modifiers);

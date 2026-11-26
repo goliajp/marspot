@@ -157,6 +157,8 @@ fn text(m: Msg) -> &'static str {
         Msg::StatusLimit => "已用完",
         Msg::StatusNoKey => "未登录",
 
+        Msg::ModelGuardNotice => "/model 会改掉这台 Mac 上所有 Claude Code 账号的默认模型。按 y 发送，按 Esc 回去继续编辑",
+        Msg::ModelSendRefused => "有程序想给 Claude Code 发送 /model，没有发出去：所有账号的默认模型只能从键盘修改",
         Msg::PaneEmpty => "点按以启动 Shell",
 
         Msg::BannerRestartsPaused => "Marspot 的核心进程反复停止，将自动重试",

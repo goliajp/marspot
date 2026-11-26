@@ -168,6 +168,14 @@ fn text(m: Msg) -> &'static str {
         Msg::StatusLimit => "limit",
         Msg::StatusNoKey => "no key",
 
+        Msg::ModelGuardNotice => {
+            "/model changes the default model of every Claude Code account on this Mac. \
+             Press y to send it, Esc to keep editing"
+        }
+        Msg::ModelSendRefused => {
+            "A program tried to send /model to Claude Code and it was not sent: only the \
+             keyboard can change the default model of every account"
+        }
         Msg::PaneEmpty => "empty — click to start a shell",
 
         Msg::BannerRestartsPaused => "Marspot's core keeps stopping — it will retry on its own",

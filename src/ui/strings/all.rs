@@ -141,6 +141,8 @@ pub const ALL: &[Msg] = &[
     Msg::StatusLimit,
     Msg::StatusNoKey,
     Msg::PaneEmpty,
+    Msg::ModelGuardNotice,
+    Msg::ModelSendRefused,
     Msg::BannerRestartsPaused,
     Msg::BannerRecovering,
     Msg::BannerCrashLoop,

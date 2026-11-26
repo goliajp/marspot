@@ -24,6 +24,7 @@
 //! is why it is not the first choice.
 
 pub mod input_box;
+pub mod slash_model;
 
 use input_box::{box_of, composer_of};
 use marspot_term::terminal::Terminal;

@@ -159,6 +159,14 @@ fn text(m: Msg) -> &'static str {
         Msg::StatusLimit => "上限到達",
         Msg::StatusNoKey => "未サインイン",
 
+        Msg::ModelGuardNotice => {
+            "/modelはこのMacのすべてのClaude Codeアカウントのデフォルトモデルを変更します。\
+             送信するにはy、編集に戻るにはEscを押してください"
+        }
+        Msg::ModelSendRefused => {
+            "プログラムがClaude Codeに/modelを送ろうとしたため、送信しませんでした。\
+             全アカウントのデフォルトモデルはキーボードからのみ変更できます"
+        }
         Msg::PaneEmpty => "クリックしてシェルを開始",
 
         Msg::BannerRestartsPaused => "Marspotのコアが繰り返し停止しているため、自動的に再試行します",

@@ -111,6 +111,10 @@ impl CoreApp {
 
     /// the pane may well be in one that is not focused.
     pub(super) fn inject_input(&mut self, shelld_session_id: u64, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        if self.model_guard_refuses(shelld_session_id, &text, super::model_guard::submits(bytes), "inject_input") {
+            return;
+        }
         if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
             pane.session_mut().forward_inject_input(bytes);
         }
@@ -118,6 +122,8 @@ impl CoreApp {
 
     /// Pass pasted text down to the pane's own L3.
     pub(super) fn forward_pane_paste(&mut self, shelld_session_id: u64, text: &str) {
+        // a paste does not send; it is remembered for the Enter that may follow
+        self.model_guard_refuses(shelld_session_id, text, false, "paste");
         if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
             pane.session_mut().forward_paste(text);
         }

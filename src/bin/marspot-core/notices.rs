@@ -1,6 +1,7 @@
 //! Sentences shown over a pane: the one the shell sends (`Notice`),
 //! over the focused pane of every window until it has been up long
-//! enough to read.
+//! enough to read, and the question a held `/model` asks over its own
+//! pane until it is answered (`model_guard`).
 //!
 //! Nothing ticks for it: the loop's wait includes the moment the
 //! notice comes down, and with none up there is nothing to wait for.
@@ -13,6 +14,10 @@ pub(super) const SHOWN_FOR: Duration = Duration::from_secs(12);
 #[derive(Default)]
 pub(super) struct Notices {
     shell: Option<(String, Instant)>,
+    pub(super) guard: Option<super::model_guard::Held>,
+    /// A paste that leaves `/model` in a Claude Code box, by session,
+    /// until the moment it no longer stands for what the box holds.
+    pub(super) pasted: Option<(u64, Instant)>,
 }
 
 impl Notices {
@@ -21,9 +26,12 @@ impl Notices {
         self.shell.as_ref().map(|(t, _)| t.as_str())
     }
 
-    /// What is shown over the pane holding session `_sid`, if anything.
-    pub(super) fn over(&self, _sid: Option<u64>, focused: bool) -> Option<&str> {
-        self.shell_text().filter(|_| focused)
+    /// What is shown over the pane showing session `sid`, if anything.
+    pub(super) fn over(&self, sid: Option<u64>, focused: bool) -> Option<&str> {
+        match &self.guard {
+            Some(held) if sid == Some(held.sid) => Some(marspot::ui::strings::t(marspot::ui::strings::Msg::ModelGuardNotice)),
+            _ => self.shell_text().filter(|_| focused),
+        }
     }
 
     /// How long until a notice comes down.

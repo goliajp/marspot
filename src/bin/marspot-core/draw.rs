@@ -258,7 +258,7 @@ impl CoreApp {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
                 v.strip = self.strips.view(host.shelld_session_id());
-                v.notice = self.notices.over(host.shelld_session_id(), i == focused);
+                v.notice = self.notices.over(p.shelld_session_id(), i == focused);
                 v.selection = win!(self, wi)
                     .selection
                     .as_ref()
