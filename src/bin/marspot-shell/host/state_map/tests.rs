@@ -84,7 +84,7 @@ fn env_dir(var: &str) -> PathBuf {
 #[test]
 #[ignore = "reads the state root a sandbox run left; bin/test-state-map.sh runs it"]
 fn state_map_covers_every_file() {
-    let (before, after) = (env_dir("MARSPOT_STATE_MAP_BEFORE"), env_dir("MARSPOT_STATE_MAP_ROOT"));
+    let (before, after) = (env_dir("MARSPOT_TEST_STATE_MAP_BEFORE"), env_dir("MARSPOT_TEST_STATE_MAP_ROOT"));
     let listed = files_under(&after);
     assert!(listed.iter().any(|f| f.starts_with("sessions/")), "the run left no session: it did not run the app");
     for f in &listed {

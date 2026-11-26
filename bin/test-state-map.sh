@@ -89,7 +89,7 @@ sleep 2
 dev_kill_shell_core || fail "the sandbox's processes did not stop"
 
 echo "==> checking the state root against the state map"
-MARSPOT_STATE_MAP_ROOT="$MARSPOT_STATE_DIR" MARSPOT_STATE_MAP_BEFORE="$BEFORE" \
+MARSPOT_TEST_STATE_MAP_ROOT="$MARSPOT_STATE_DIR" MARSPOT_TEST_STATE_MAP_BEFORE="$BEFORE" \
   "$ROOT/bin/_bounded.sh" 600 cargo test -q --bin marspot-shell -- --ignored --exact --nocapture \
   host::state_map::tests::state_map_covers_every_file \
   || fail "the state root has files the state map does not know, or a fact file was rewritten (above)"
