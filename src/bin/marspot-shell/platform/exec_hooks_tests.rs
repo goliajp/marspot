@@ -79,10 +79,13 @@ fn exec_hooks_every_image_replacement_goes_through_the_one_exit() {
     assert_eq!(exit.matches(".exec()").count(), 1);
 
     // the sites, each with how many times it replaces the image
-    // self_exec.rs: both of its replacements, through the one function there
-    for (file, n) in [("self_exec.rs", 1), ("identity.rs", 1), ("resident/claim.rs", 1), ("launch.rs", 1)] {
+    for (file, n) in [("self_exec.rs", 2), ("identity.rs", 1), ("resident/claim.rs", 1), ("launch.rs", 1)] {
         let text = &sources.iter().find(|(p, _)| p == file).unwrap_or_else(|| panic!("{file} moved")).1;
         assert_eq!(text.matches("exec_hooks::exec_prepared(").count(), n, "{file}");
+    }
+    let self_exec = &sources.iter().find(|(p, _)| p == "self_exec.rs").unwrap().1;
+    for owner in ["plugins::", "agentsvc::"] {
+        assert!(!self_exec.contains(owner), "self_exec.rs names {owner}");
     }
 }
 

@@ -6,10 +6,6 @@
 //! `before` runs right before the exec, `failed` when it returned.  The
 //! table knows hooks by name only, so the exec sites name no owner.
 
-// nothing registers yet outside the tests: self_exec still runs the
-// owners' cleanups by name until they register here
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::sync::Mutex;
 
 /// Hooks a binary may register; a handful exist.

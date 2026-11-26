@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.753"  # peerbus and zombie register their exec hooks when they start
+shell   = "0.7.754"  # self_exec names no cleanup: the exec hooks run once, from the table
 core    = "0.12.711"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository
 session = "0.11.461"  # build.rs takes the commit from MARSPOT_GIT_SHA when it finds no repository, as the other build scripts do
