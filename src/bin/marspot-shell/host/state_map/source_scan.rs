@@ -46,12 +46,14 @@ fn is_test_file(path: &str) -> bool {
     file == "tests.rs" || file.ends_with("_tests.rs") || file.starts_with("tests_") || file == "test_env.rs"
 }
 
-/// The text before a trailing `#[cfg(test)] mod ...`.
+/// The text before an inline `#[cfg(test)] mod name {`; a `mod name;`
+/// declared there is a file of its own, and the code after it stays.
 fn production(text: &str) -> &str {
     let mut at = 0;
     for line in text.split_inclusive('\n') {
         let rest = &text[at + line.len()..];
-        if line.trim_start().starts_with("#[cfg(test)]") && rest.trim_start().starts_with("mod ") {
+        let inline = rest.trim_start().strip_prefix("mod ").and_then(|r| r.lines().next()).is_some_and(|l| l.find('{').is_some_and(|b| l.find(';').is_none_or(|s| b < s)));
+        if line.trim_start().starts_with("#[cfg(test)]") && inline {
             return &text[..at];
         }
         at += line.len();
@@ -246,8 +248,9 @@ fn the_scan_reads_the_shapes_paths_are_built_in() {
         ),
         src("x/c.rs", "fn r() { let root = paths::state_root();\n root.join(\"a\").join(name).join(\"b\"); session_dir(7).join(\"guard\"); }"),
         src("x/d.rs", "fn s() { state_root().join(\"live\"); }\n#[cfg(test)]\nmod tests { fn t() { state_root().join(\"test-only\"); } }"),
+        src("x/e.rs", "#[cfg(test)]\nmod tests;\nfn u() { state_root().join(\"after-a-test-file\"); }"),
     ];
     let mut got: Vec<String> = paths(&srcs).into_iter().map(|f| f.path).collect();
     got.sort();
-    assert_eq!(got, ["a", "live", "plugins/kimi/refused.tsv", "sessions/1/guard", "zombie/f.tsv"]);
+    assert_eq!(got, ["a", "after-a-test-file", "live","plugins/kimi/refused.tsv", "sessions/1/guard", "zombie/f.tsv"]);
 }
