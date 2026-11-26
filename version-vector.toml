@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.809"  # the claude claim asks the shared claim-path rule; the claim facts directory comes from the library
-core    = "0.12.732"  # the library says which reset kinds have a claim path and reads each account's last claim
+core    = "0.12.733"  # a reset line is a button only where it can be claimed, and shows the account's last claim
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

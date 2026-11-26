@@ -1,7 +1,9 @@
 //! The accounts panel's reset buttons: a press on a line of an account's
 //! stored resets arms it, a second press on it confirms, and the claim
 //! goes to the shell as `ResetPanelAct`.  Only this pointer handling
-//! sends that frame.
+//! sends that frame.  A line is a button only where marspot has a way
+//! to claim that kind for that account, and the last claim of each
+//! account shows on its kind's line until a newer reading comes.
 
 use super::*;
 use marspot::agent_resets::{AccountResets, ResetLine, Resets};
@@ -37,17 +39,39 @@ fn when(t: i64) -> String {
     format!("{month}/{day} {hour:02}:{minute:02}")
 }
 
+/// The grant line `line` of `a` claims, where marspot can claim it.
+fn pressable(a: &AccountResets, line: usize) -> Option<(usize, &marspot::agent_resets::Grant)> {
+    marspot::agent_resets::claimable(&a.resets, line).filter(|(_, g)| marspot::agent_resets::claim_path_on(&a.agent, &g.kind))
+}
+
+/// The kind of each line, in the order the lines are drawn.
+fn line_kinds(r: &Resets) -> Vec<&str> {
+    let mut kinds: Vec<&str> = Vec::new();
+    for g in &r.grants {
+        if !kinds.contains(&g.kind.as_str()) {
+            kinds.push(&g.kind);
+        }
+    }
+    kinds
+}
+
 /// The reset lines of `account` on the open panel, the armed one saying
-/// what a second press does.
+/// what a second press does, and a line whose kind the account's last
+/// claim was for saying how it went, until a reading newer than it.
 pub(super) fn lines_for(modal: &CcUsageModalState, account: Option<&AccountResets>, windows: &[CcWindow], now: i64) -> Vec<ResetLine> {
     let Some(a) = account else { return Vec::new() };
     let armed = modal.buttons.armed_at(now).filter(|x| x.agent == a.agent && x.profile == a.profile).map(|x| x.line);
-    let claims = matches!(a.agent.as_str(), "claude" | "codex");
+    let claimed = modal.claims.iter().find(|c| c.agent == a.agent && c.profile == a.profile && c.at > a.resets.observed_at);
+    let kinds = line_kinds(&a.resets);
     marspot::agent_resets::lines(&a.resets, now, when)
         .into_iter()
         .enumerate()
         .map(|(i, text)| {
-            let grant = claims.then(|| marspot::agent_resets::claimable(&a.resets, i)).flatten();
+            let grant = pressable(a, i);
+            let text = match claimed.filter(|c| kinds.get(i) == Some(&c.kind.as_str())) {
+                Some(c) => marspot::agent_resets::claimed_text(c),
+                None => text,
+            };
             match (grant, armed == Some(i)) {
                 (Some((_, g)), true) => ResetLine { text: marspot::agent_resets::armed_text(g, renews(windows, &g.restores), when), pressable: true, armed: true },
                 (g, _) => ResetLine { text, pressable: g.is_some(), armed: false },
@@ -83,7 +107,7 @@ impl CoreApp {
         };
         let (card, line) = (action.arg as usize / marspot::agent_resets::MAX_LINES, action.arg as usize % marspot::agent_resets::MAX_LINES);
         let Some(a) = account_at(modal, card).cloned() else { return };
-        if marspot::agent_resets::claimable(&a.resets, line).is_none() || !matches!(a.agent.as_str(), "claude" | "codex") {
+        if pressable(&a, line).is_none() {
             return;
         }
         let Some(confirmed) = modal.buttons.press(&a.agent, a.profile, line, now) else { return };
@@ -99,3 +123,7 @@ impl CoreApp {
 fn unix_now_s() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
+
+#[cfg(test)]
+#[path = "reset_panel_tests.rs"]
+mod tests;

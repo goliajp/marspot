@@ -12,6 +12,8 @@ pub(super) struct CcUsageModalState {
     pub(super) data: Option<marspot::cc_usage::CcUsage>,
     pub(super) codex: Option<marspot::cc_usage::CodexUsage>,
     pub(super) resets: Vec<marspot::agent_resets::AccountResets>,
+    /// Each account's last reset claim, read with `resets`.
+    pub(super) claims: Vec<marspot::agent_resets::Claimed>,
     /// The reset line armed by a first press.
     pub(super) buttons: marspot::agent_resets::ResetButtons,
     pub(super) loaded_at: Instant,
@@ -71,6 +73,7 @@ impl CoreApp {
                     data: marspot::cc_usage::read(),
                     codex: marspot::kimi_usage::read_codex_and_kimi(),
                     resets: marspot::agent_resets::read(unix_now()),
+                    claims: marspot::agent_resets::last_claims(&marspot::agent_resets::claims_dir()),
                     buttons: Default::default(),
                     loaded_at: Instant::now(),
                     surface: Default::default(),
@@ -159,6 +162,7 @@ impl CoreApp {
             modal.data = marspot::cc_usage::read();
             modal.codex = marspot::kimi_usage::read_codex_and_kimi();
             modal.resets = marspot::agent_resets::read(unix_now());
+            modal.claims = marspot::agent_resets::last_claims(&marspot::agent_resets::claims_dir());
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }
