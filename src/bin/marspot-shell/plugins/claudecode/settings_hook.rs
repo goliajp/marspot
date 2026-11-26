@@ -26,6 +26,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use super::write_through_symlink;
+
 /// The shell binary version that first understood `--cc-statusline`.
 ///
 /// Anything older falls through its CLI to the GUI start and comes up
@@ -478,22 +480,4 @@ pub(super) fn json_parses(text: &str) -> bool {
         }
     }
     stack.is_empty() && !in_str
-}
-
-/// Replace the file's contents, keeping it the same file.
-///
-/// The profiles' `settings.json` are symlinks to one shared file;
-/// renaming onto the link path would replace the link itself, so the
-/// caller passes the canonical path and the temp file is made beside
-/// it.
-pub(crate) fn write_through_symlink(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let tmp = dir.join(format!(".marspot-settings-{}.tmp", std::process::id()));
-    super::model_guard::note_own_write(path, text);
-    fs::write(&tmp, text)?;
-    if let Ok(md) = fs::metadata(path) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(md.permissions().mode()));
-    }
-    fs::rename(&tmp, path)
 }

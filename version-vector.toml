@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.792"  # marspot-term moves the reading of a settings line to its values file
+shell   = "0.7.793"  # settings files are written one writer at a time, each through a temp file of its own synced before the rename
 core    = "0.12.724"  # marspot-term moves the reading of a settings line to its values file
 session = "0.11.470"  # marspot-term moves the reading of a settings line to its values file (not used by session)
