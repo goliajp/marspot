@@ -105,9 +105,9 @@ fn forecast_clean_rests_background_and_helpers() {
     g.seen(T0, 3);
     let fc = build(&g, now, &[3]);
     assert_eq!((fc.panes[0].clean_per_h, fc.panes[0].clean_from, fc.panes[0].background_s), (0.0, Source::Nothing, None));
-    g.set_helpers([("claude", 60), ("claude", 1200), ("claude", 3000), ("claude", 90), ("codex", 30)]);
+    g.set_helpers([("agent-a", 60), ("agent-a", 1200), ("agent-a", 3000), ("agent-a", 90), ("agent-b", 30)]);
     let lives = build(&g, now, &[]).helpers;
-    assert_eq!(lives[0], HelperLife { agent: "claude".into(), finished: 4, p75_s: 1650 });
+    assert_eq!(lives[0], HelperLife { agent: "agent-a".into(), finished: 4, p75_s: 1650 });
     assert_eq!(lives[1].p75_s, HELPER_FLOOR_S, "at least ten minutes");
 }
 
