@@ -3,7 +3,7 @@ use crate::control::ErrorCode;
 use crate::control::response::Reject;
 use crate::json::obj;
 
-fn p(args: &str) -> Result<Op, String> {
+fn p(args: &str) -> Result<Op, crate::control::cli_args::Stop> {
     parse(&args.split(' ').map(String::from).collect::<Vec<_>>())
 }
 

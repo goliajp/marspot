@@ -3,7 +3,8 @@
 //! its processes running (refused, not the caller's, not permitted)
 //! exits 1 as well.
 
-use super::cli::{ask, take_flag};
+use super::cli::ask;
+use super::cli_args::{self, Spec, Stop};
 use super::request::proc::ProcStopArgs;
 use super::{Op, Response};
 use crate::json::Value;
@@ -12,40 +13,33 @@ pub const USAGE: &str = "usage:
   marspot-peer procs stop <pid@start_us>... [--no-tree] [--force]
     ends each process and everything under it (--no-tree: only it); --force: SIGKILL
     what still runs 5 s after SIGTERM.  Only processes of your own pane.
-any of them takes --json for the answer as the app sent it";
+any of them takes --json for the answer as the app sent it, and -h / --help for this";
 
 pub fn main(args: &[String]) -> u8 {
-    let json = args.iter().any(|a| a == "--json");
-    let args: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
-    match parse(&args) {
-        Ok(op) => ask(op, json),
-        Err(e) => {
-            if !e.is_empty() {
-                eprintln!("marspot-peer procs: {e}");
-            }
-            eprintln!("{USAGE}");
-            2
-        }
+    match parse_cmd(args) {
+        Ok((op, json)) => ask(op, json),
+        Err(stop) => cli_args::report(stop, "marspot-peer procs", USAGE, 2),
     }
 }
 
-/// The op the arguments ask for; `Err("")` for a plain usage mistake.
-pub fn parse(args: &[String]) -> Result<Op, String> {
-    let Some((sub, rest)) = args.split_first() else { return Err(String::new()) };
-    let mut rest = rest.to_vec();
+/// The op the arguments ask for.
+pub fn parse(args: &[String]) -> Result<Op, Stop> {
+    parse_cmd(args).map(|(op, _)| op)
+}
+
+/// The op the arguments ask for, and whether `--json` was given.
+pub fn parse_cmd(args: &[String]) -> Result<(Op, bool), Stop> {
+    let Some((sub, rest)) = args.split_first() else { return Err(Stop::Usage(String::new())) };
     match sub.as_str() {
         "stop" => {
-            let tree = !take_flag(&mut rest, "--no-tree");
-            let force = take_flag(&mut rest, "--force");
-            if rest.is_empty() {
-                return Err(String::new());
+            let a = cli_args::split(rest, &Spec::flags(&["--json", "--no-tree", "--force"]))?;
+            let ids = a.words();
+            if ids.is_empty() {
+                return Err(Stop::Usage(String::new()));
             }
-            if let Some(f) = rest.iter().find(|a| a.starts_with("--")) {
-                return Err(format!("{f}: not an option of procs stop"));
-            }
-            Ok(Op::ProcStop(ProcStopArgs { ids: rest, tree, force }))
+            Ok((Op::ProcStop(ProcStopArgs { ids, tree: !a.flag("--no-tree"), force: a.flag("--force") }), a.flag("--json")))
         }
-        _ => Err(String::new()),
+        other => Err(cli_args::unknown(other, rest)),
     }
 }
 

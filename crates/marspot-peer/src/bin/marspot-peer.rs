@@ -4,7 +4,7 @@
 //! ```text
 //! marspot-peer list
 //! marspot-peer whoami
-//! marspot-peer send [--now] <name | uds:address> <text… | ->
+//! marspot-peer send [--now] <name | uds:address> <text… | - | -- TEXT…>
 //! marspot-peer mcp [--client-timeout-s N]
 //! marspot-peer relay <inbox> <upstream> <send>
 //! marspot-peer claude-hook
@@ -30,50 +30,43 @@ use std::io::Read;
 use std::process::ExitCode;
 
 use marspot_peer::bound;
+use marspot_peer::control::cli_args;
+use marspot_peer::control::cli_top::{self, Top};
 use marspot_peer::frame::Priority;
 use marspot_peer::peers;
 use marspot_peer::registry::Entry;
 
-const USAGE: &str = "usage:
-  marspot-peer list
-  marspot-peer whoami
-  marspot-peer send [--now] <name | uds:address> <text... | ->
-  marspot-peer mcp [--client-timeout-s N]
-  marspot-peer relay <inbox> <upstream> <send>
-  marspot-peer claude-hook
-  marspot-peer gemini-hook
-  marspot-peer kimi-hook
-  marspot-peer pane ...    (see `marspot-peer pane` for its own usage)
-  marspot-peer helper ...  (see `marspot-peer helper` for its own usage)
-  marspot-peer procs ...   (see `marspot-peer procs` for its own usage)";
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("pane") => return ExitCode::from(marspot_peer::control::cli::main(&args[1..])),
-        Some("helper") => return ExitCode::from(marspot_peer::control::cli_helper::main(&args[1..])),
-        Some("procs") => return ExitCode::from(marspot_peer::control::cli_proc::main(&args[1..])),
-        Some("list") => list(),
-        Some("whoami") => whoami(),
-        Some("send") => send(&args[1..]),
-        Some("mcp") => {
-            // `--client-timeout-s N`: the tool-call deadline marspot wrote
-            // into this client's own config, when it wrote one
-            let configured = match &args[1..] {
-                [flag, n] if flag == "--client-timeout-s" => match n.parse() {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        eprintln!("marspot-peer mcp: --client-timeout-s {n:?}: {e}; using the client's default deadline");
-                        None
-                    }
-                },
-                _ => None,
-            };
+    let top = match cli_top::parse(&args) {
+        Ok(top) => top,
+        Err(stop) => return ExitCode::from(cli_args::report(stop, "marspot-peer", cli_top::USAGE, cli_top::USAGE_CODE)),
+    };
+    let result = match top {
+        Top::Control("pane", rest) => return ExitCode::from(marspot_peer::control::cli::main(&rest)),
+        Top::Control("helper", rest) => return ExitCode::from(marspot_peer::control::cli_helper::main(&rest)),
+        Top::Control(_, rest) => return ExitCode::from(marspot_peer::control::cli_proc::main(&rest)),
+        Top::List => list(),
+        Top::Whoami => whoami(),
+        Top::Send { now, to, words, stdin } => send(now, &to, &words, stdin),
+        Top::Mcp { client_timeout_s, ignored } => {
+            if !ignored.is_empty() {
+                eprintln!("marspot-peer mcp: ignoring {ignored:?}; serving as usual");
+            }
+            // the tool-call deadline marspot wrote into this client's own
+            // config, when it wrote one
+            let configured = client_timeout_s.and_then(|n| match n.parse() {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("marspot-peer mcp: --client-timeout-s {n:?}: {e}; using the client's default deadline");
+                    None
+                }
+            });
             let server = marspot_peer::mcp::Server::new(configured);
             marspot_peer::mcp::serve(server, std::io::stdin().lock(), std::io::stdout());
             Ok(())
         }
-        Some("claude-hook") => {
+        Top::ClaudeHook => {
             // a hook that fails must not get in the session's way: no
             // answer leaves the call as it was
             let mut input = String::new();
@@ -84,7 +77,7 @@ fn main() -> ExitCode {
             }
             Ok(())
         }
-        Some("gemini-hook") => {
+        Top::GeminiHook => {
             // the same rule: whatever goes wrong here, the user's turn
             // goes on as if the hook were not installed
             let mut input = String::new();
@@ -95,7 +88,7 @@ fn main() -> ExitCode {
             }
             Ok(())
         }
-        Some("kimi-hook") => {
+        Top::KimiHook => {
             use marspot_peer::kimi_hook::Answer;
             let mut input = String::new();
             let answer = match std::io::stdin().read_to_string(&mut input) {
@@ -113,36 +106,26 @@ fn main() -> ExitCode {
             }
             Ok(())
         }
-        Some("relay") => match &args[1..] {
-            [public, upstream, send] => marspot_peer::relay::run(public.as_ref(), upstream.as_ref(), send.as_ref())
-                .map_err(|e| Fail::Msg(1, format!("relay: {e}"))),
-            _ => Err(Fail::Usage),
-        },
-        _ => Err(Fail::Usage),
+        Top::Relay { public, upstream, send } => {
+            marspot_peer::relay::run(public.as_ref(), upstream.as_ref(), send.as_ref()).map_err(|e| Fail(1, format!("relay: {e}")))
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(Fail::Usage) => {
-            eprintln!("{USAGE}");
-            ExitCode::from(1)
-        }
-        Err(Fail::Msg(code, m)) => {
+        Err(Fail(code, m)) => {
             eprintln!("marspot-peer: {m}");
             ExitCode::from(code)
         }
     }
 }
 
-enum Fail {
-    Usage,
-    Msg(u8, String),
-}
+struct Fail(u8, String);
 
 fn me(entries: &[Entry]) -> Result<&Entry, Fail> {
     let Ok(thread) = std::env::var("CODEX_THREAD_ID") else {
-        return Err(Fail::Msg(2, "not running inside a Codex session (CODEX_THREAD_ID is not set)".into()));
+        return Err(Fail(2, "not running inside a Codex session (CODEX_THREAD_ID is not set)".into()));
     };
-    peers::me_by_thread(entries, &thread).map_err(|m| Fail::Msg(2, m))
+    peers::me_by_thread(entries, &thread).map_err(|m| Fail(2, m))
 }
 
 fn list() -> Result<(), Fail> {
@@ -160,21 +143,12 @@ fn whoami() -> Result<(), Fail> {
     Ok(())
 }
 
-fn send(args: &[String]) -> Result<(), Fail> {
-    let mut priority = Priority::Next;
-    let mut rest = args;
-    if rest.first().map(String::as_str) == Some("--now") {
-        priority = Priority::Now;
-        rest = &rest[1..];
-    }
-    let [to, words @ ..] = rest else { return Err(Fail::Usage) };
-    if words.is_empty() {
-        return Err(Fail::Usage);
-    }
-    let body = if words == ["-"] {
+fn send(now: bool, to: &str, words: &[String], stdin: bool) -> Result<(), Fail> {
+    let priority = if now { Priority::Now } else { Priority::Next };
+    let body = if stdin {
         let mut s = String::new();
         if std::io::stdin().read_to_string(&mut s).is_err() {
-            return Err(Fail::Msg(1, "stdin is not UTF-8 text".into()));
+            return Err(Fail(1, "stdin is not UTF-8 text".into()));
         }
         s.trim_end_matches('\n').to_string()
     } else {
@@ -188,7 +162,7 @@ fn send(args: &[String]) -> Result<(), Fail> {
     let entries = peers::live_entries();
     let panes = marspot_peer::panes::live(&entries);
     let me = me(&entries)?;
-    let sent = peers::send(me, &entries, &panes, to, &body, priority, false).map_err(|m| Fail::Msg(3, m))?;
+    let sent = peers::send(me, &entries, &panes, to, &body, priority, false).map_err(|m| Fail(3, m))?;
     println!("sent {} to {}", sent.msg_id, sent.to);
     if let Some(note) = sent.note {
         println!("{note}");

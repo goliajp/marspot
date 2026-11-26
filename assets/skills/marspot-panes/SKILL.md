@@ -24,7 +24,7 @@ state (`detached`, `dormant`, `shadow`), place and the agent in front.
 ```
 marspot-peer pane list
 marspot-peer pane open [--visible] [--parent PANE] [--cwd DIR] [--size 120x40] [-- COMMAND...]
-marspot-peer pane send PANE [--no-enter] [--force] <text... | ->     # pasted, then Enter; - reads stdin
+marspot-peer pane send PANE [--no-enter] [--force] <text... | - | -- TEXT...> # then Enter; - is stdin
 marspot-peer pane keys PANE [--force] KEY...                         # ctrl-c enter esc tab up down f1 ...
 marspot-peer pane run PANE [--timeout S] [--force] COMMAND...
 marspot-peer pane read PANE [-n LINES] [--wait-text S | --wait-quiet MS | --wait-command-end
@@ -35,7 +35,8 @@ marspot-peer pane close PANE
 marspot-peer pane audit [-n N]
 ```
 
-Add `--json` to any of them for the app's answer as JSON.
+`--json` on any of them prints the app's answer as JSON. Options end where
+the text starts; text starting with `-` goes after `--`.
 
 - `pane run` types the command into the pane's shell, waits for it to end and
   prints the screen. Its exit code is the command's own exit code. If the

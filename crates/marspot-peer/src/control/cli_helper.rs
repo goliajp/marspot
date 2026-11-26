@@ -1,7 +1,8 @@
 //! `marspot-peer helper …`: start an agent in a shadow pane under a
 //! pane, list the helpers, stop them.  Exit codes as `pane`.
 
-use super::cli::{ask, number, take_flag, take_value, text_or_stdin};
+use super::cli::{ask, number, text_or_stdin};
+use super::cli_args::{self, Args, Spec, Stop};
 use super::request::helper::{AgentKind, DEFAULT_BUDGET_MIN, HelperStartArgs, HelperStop, Isolation};
 use super::Op;
 use crate::json::Value;
@@ -9,70 +10,76 @@ use crate::json::Value;
 pub const USAGE: &str = "usage:
   marspot-peer helper start --agent claude|codex|gemini|kimi [--parent PANE] [--model M] [--cwd DIR]
                             [--profile N] [--mode auto|ask|FLAGS] [--resume] [--budget MINUTES]
-                            [--name LABEL] [--title WORDS] [--container] <task... | ->
+                            [--name LABEL] [--title WORDS] [--container] <task... | - | -- TASK...>
   marspot-peer helper list [--all]
   marspot-peer helper stop <NAME | --all>
-any of them takes --json for the answer as the app sent it";
+any of them takes --json for the answer as the app sent it, and -h / --help for this;
+words after the first word of a text, task or command are taken as they are;
+a first word that starts with - goes after --";
 
 pub fn main(args: &[String]) -> u8 {
-    let json = args.iter().any(|a| a == "--json");
-    let args: Vec<String> = args.iter().filter(|a| *a != "--json").cloned().collect();
-    match parse(&args) {
-        Ok(op) => ask(op, json),
-        Err(e) => {
-            if !e.is_empty() {
-                eprintln!("marspot-peer helper: {e}");
-            }
-            eprintln!("{USAGE}");
-            2
-        }
+    match parse_cmd(args) {
+        Ok((op, json)) => ask(op, json),
+        Err(stop) => cli_args::report(stop, "marspot-peer helper", USAGE, 2),
     }
 }
 
-/// The op the arguments ask for; `Err("")` for a plain usage mistake.
-pub fn parse(args: &[String]) -> Result<Op, String> {
-    let Some((sub, rest)) = args.split_first() else { return Err(String::new()) };
-    let mut rest = rest.to_vec();
-    match sub.as_str() {
-        "list" => {
-            let all = take_flag(&mut rest, "--all");
-            if !rest.is_empty() {
-                return Err(String::new());
-            }
-            Ok(Op::HelperList { all })
-        }
-        "stop" => {
-            if take_flag(&mut rest, "--all") {
-                return if rest.is_empty() { Ok(Op::HelperStop(HelperStop::All)) } else { Err(String::new()) };
-            }
-            match &rest[..] {
-                [name] => Ok(Op::HelperStop(HelperStop::Name(name.clone()))),
-                _ => Err(String::new()),
-            }
-        }
-        "start" => start(&mut rest).map(Op::HelperStart),
-        _ => Err(String::new()),
-    }
+/// The op the arguments ask for.
+pub fn parse(args: &[String]) -> Result<Op, Stop> {
+    parse_cmd(args).map(|(op, _)| op)
 }
 
-fn start(rest: &mut Vec<String>) -> Result<HelperStartArgs, String> {
-    let agent = take_value(rest, "--agent")?.ok_or("--agent is required")?;
+/// The op the arguments ask for, and whether `--json` was given.
+pub fn parse_cmd(args: &[String]) -> Result<(Op, bool), Stop> {
+    let Some((sub, rest)) = args.split_first() else { return Err(Stop::Usage(String::new())) };
+    let spec = match sub.as_str() {
+        "list" | "stop" => Spec::flags(&["--json", "--all"]),
+        "start" => Spec {
+            flags: &["--json", "--container", "--resume"],
+            values: &["--agent", "--parent", "--model", "--cwd", "--mode", "--name", "--title", "--profile", "--budget"],
+            // options stop at the task's first word
+            whole_after: Some(1),
+            text_after: None,
+        },
+        other => return Err(cli_args::unknown(other, rest)),
+    };
+    let a = cli_args::split(rest, &spec)?;
+    let words = a.words();
+    let all = a.flag("--all");
+    let op = match (sub.as_str(), &words[..]) {
+        ("list", []) => Op::HelperList { all },
+        ("stop", []) if all => Op::HelperStop(HelperStop::All),
+        ("stop", [name]) if !all => Op::HelperStop(HelperStop::Name(name.clone())),
+        ("start", _) => Op::HelperStart(start(&a)?),
+        _ => return Err(Stop::Usage(String::new())),
+    };
+    Ok((op, a.flag("--json")))
+}
+
+fn start(a: &Args) -> Result<HelperStartArgs, Stop> {
+    let agent = a.value("--agent").ok_or("--agent is required")?;
     let agent = AgentKind::parse(&agent).ok_or_else(|| format!("{agent:?}: one of claude, codex, gemini, kimi"))?;
-    let parent = take_value(rest, "--parent")?;
-    let model = take_value(rest, "--model")?;
-    let cwd = take_value(rest, "--cwd")?;
-    let mode = take_value(rest, "--mode")?;
-    let name = take_value(rest, "--name")?;
-    let title = take_value(rest, "--title")?;
-    let profile = number(take_value(rest, "--profile")?, "--profile")?;
-    let budget_minutes = number(take_value(rest, "--budget")?, "--budget")?.unwrap_or(DEFAULT_BUDGET_MIN);
-    let isolation = if take_flag(rest, "--container") { Isolation::Container } else { Isolation::Host };
-    let resume_last = take_flag(rest, "--resume");
-    if rest.is_empty() {
+    let profile = number(a.value("--profile"), "--profile")?;
+    let budget_minutes = number(a.value("--budget"), "--budget")?.unwrap_or(DEFAULT_BUDGET_MIN);
+    let isolation = if a.flag("--container") { Isolation::Container } else { Isolation::Host };
+    if a.words().is_empty() {
         return Err("the task is missing".into());
     }
-    let task = text_or_stdin(rest)?;
-    Ok(HelperStartArgs { agent, task, cwd, parent, model, profile, isolation, mode, resume_last, budget_minutes, name, title })
+    let task = text_or_stdin(a)?;
+    Ok(HelperStartArgs {
+        agent,
+        task,
+        cwd: a.value("--cwd"),
+        parent: a.value("--parent"),
+        model: a.value("--model"),
+        profile,
+        isolation,
+        mode: a.value("--mode"),
+        resume_last: a.flag("--resume"),
+        budget_minutes,
+        name: a.value("--name"),
+        title: a.value("--title"),
+    })
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
