@@ -15,15 +15,15 @@ use super::{Class, Load, Quant};
 
 /// No rescue this soon after any move of the same pane: a rescue is
 /// worth one move, not a pane bouncing between accounts.
-pub(crate) const RESCUE_COOLDOWN_H: f64 = 12.0;
+pub const RESCUE_COOLDOWN_H: f64 = 12.0;
 
 /// A pane may leave its own account's restricted window to others for
 /// a while when it renews this far ahead.
-pub(crate) const RESCUE_HOME_H: f64 = 24.0;
+pub const RESCUE_HOME_H: f64 = 24.0;
 
 /// A rescue must save at least this many hours of the pane's use, or
 /// all that is left before that window renews.
-pub(crate) const RESCUE_WORTH_H: f64 = 2.0;
+pub const RESCUE_WORTH_H: f64 = 2.0;
 
 /// What of `q`'s restricted window lapses at its renewal with restricted
 /// panes using `rate` an hour there.
@@ -31,7 +31,7 @@ pub(crate) const RESCUE_WORTH_H: f64 = 2.0;
 /// It lapses at `T_F` only.  When the week renews first, the week left
 /// limits the restricted model until then and the new week does not
 /// after; when the restricted window renews first, only `Φ` was usable.
-pub(crate) fn lapses(q: &Quant, rate: f64) -> f64 {
+pub fn lapses(q: &Quant, rate: f64) -> f64 {
     let rate = rate.max(0.0);
     if q.tf <= q.t {
         return q.phi() - rate * q.tf;
@@ -44,7 +44,7 @@ pub(crate) fn lapses(q: &Quant, rate: f64) -> f64 {
 /// would otherwise lapse, earliest restricted renewal first.
 ///
 /// `others` are the loads without this pane.
-pub(crate) fn rescue(accounts: &[Quant], p: &Resting, hi: usize, others: &[Load]) -> Option<u8> {
+pub fn rescue(accounts: &[Quant], p: &Resting, hi: usize, others: &[Load]) -> Option<u8> {
     if p.mover.class != Class::Restricted || p.stale_feed || p.band_last_hour >= BAND_PER_HOUR {
         return None;
     }

@@ -80,13 +80,7 @@ pub(in crate::plugins) fn room_of(a: &CcAccount, now: i64) -> Room {
     }
 }
 
-/// Unix seconds, for `rooms_for`.
-pub(in crate::plugins) fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default()
-}
+pub(in crate::plugins) use marspot_agent::quota::unix_now;
 
 /// The first renewal after `now`, counting whole weeks from one that
 /// has passed.

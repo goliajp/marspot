@@ -1,0 +1,15 @@
+[package]
+name = "marspot-json"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+# A small whole-value JSON reader and writer for agent records and
+# wire frames.  Zero dependencies beyond std.  Knows nothing about
+# agents or panes.
+
+[dependencies]
+
+[lints]
+workspace = true

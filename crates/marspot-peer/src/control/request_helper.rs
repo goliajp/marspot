@@ -11,30 +11,7 @@ pub const DEFAULT_BUDGET_MIN: u32 = 30;
 pub const MAX_BUDGET_MIN: u32 = 360;
 
 /// The agent command lines a helper can run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum AgentKind {
-    Claude,
-    Codex,
-    Gemini,
-    Kimi,
-}
-
-impl AgentKind {
-    pub const ALL: [AgentKind; 4] = [AgentKind::Claude, AgentKind::Codex, AgentKind::Gemini, AgentKind::Kimi];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AgentKind::Claude => "claude",
-            AgentKind::Codex => "codex",
-            AgentKind::Gemini => "gemini",
-            AgentKind::Kimi => "kimi",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|a| a.as_str() == s)
-    }
-}
+pub use marspot_term::agent::AgentKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Isolation {

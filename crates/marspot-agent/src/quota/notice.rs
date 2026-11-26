@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use super::{Class, Quant};
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Stranded {
+pub enum Stranded {
     /// Every account is out for any model; back in this many hours.
     AllOut { back_in_h: f64 },
     /// Only the restricted model is out everywhere; back in this many
@@ -20,7 +20,7 @@ pub(crate) enum Stranded {
 }
 
 /// Why a pane of `class` has nowhere to go, when it has not.
-pub(crate) fn stranded(accounts: &[Quant], class: Class) -> Option<Stranded> {
+pub fn stranded(accounts: &[Quant], class: Class) -> Option<Stranded> {
     if accounts.iter().any(|q| q.accepts(class)) {
         return None;
     }
@@ -35,19 +35,19 @@ pub(crate) fn stranded(accounts: &[Quant], class: Class) -> Option<Stranded> {
 
 /// Which panes have been told, so each hears it once per stretch.
 #[derive(Debug, Default)]
-pub(crate) struct Told {
+pub struct Told {
     told: HashMap<u64, bool>,
 }
 
 impl Told {
     /// `Some` the first time pane `sid` is found stranded since it last
     /// was not.
-    pub(crate) fn tell(&mut self, sid: u64, now: Option<Stranded>) -> Option<Stranded> {
+    pub fn tell(&mut self, sid: u64, now: Option<Stranded>) -> Option<Stranded> {
         let was = self.told.insert(sid, now.is_some()).unwrap_or(false);
         now.filter(|_| !was)
     }
 
-    pub(crate) fn retain(&mut self, live: impl Fn(u64) -> bool) {
+    pub fn retain(&mut self, live: impl Fn(u64) -> bool) {
         self.told.retain(|sid, _| live(*sid));
     }
 }

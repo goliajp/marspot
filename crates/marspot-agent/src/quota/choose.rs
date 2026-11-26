@@ -20,18 +20,18 @@ use super::plan::Plan;
 use super::{Class, EPS, Load, Quant, lasts, plain_lasts};
 
 /// How long a must-move target has to last with the pane on it.
-pub(crate) const MUST_LAST_H: f64 = 6.0;
+pub const MUST_LAST_H: f64 = 6.0;
 
 /// The same for a new helper.
-pub(crate) const HELPER_LAST_H: f64 = 2.0;
+pub const HELPER_LAST_H: f64 = 2.0;
 
 /// While the restricted model is short, a plain pane leaving early is
 /// placed only where `U` gives it at least this many hours.
-pub(crate) const RESERVED_H: f64 = 1.0;
+pub const RESERVED_H: f64 = 1.0;
 
 /// What a plain pane may not take while the restricted model is short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Reserve {
+pub enum Reserve {
     /// Nothing held back.
     None,
     /// An account where `U` lasts it under `RESERVED_H`.
@@ -58,7 +58,7 @@ impl Reserve {
 
 /// The pane being placed.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Mover {
+pub struct Mover {
     pub class: Class,
     /// What it is believed to use an hour.
     pub rate: f64,
@@ -72,13 +72,13 @@ pub(crate) struct Mover {
 ///
 /// `loads` are the other panes' speeds per account, in `accounts`'
 /// order, without this pane; `from` is the account it leaves.
-pub(crate) fn pick(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
+pub fn pick(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
     pick_where(accounts, plan, loads, m, from, horizon_h, Reserve::N, |_| true)
 }
 
 /// Where `pick` would have sent a plain pane it holds back for the
 /// restricted panes, when that is why it has nowhere to go.
-pub(crate) fn held_back(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
+pub fn held_back(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64) -> Option<u8> {
     if pick(accounts, plan, loads, m, from, horizon_h).is_some() {
         return None;
     }
@@ -88,7 +88,7 @@ pub(crate) fn held_back(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Move
 /// `pick` among the accounts that pass `allow` only, holding back what
 /// `reserve` says.
 #[allow(clippy::too_many_arguments)] // one decision's inputs, each a separate piece
-pub(crate) fn pick_where(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64, reserve: Reserve, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
+pub fn pick_where(accounts: &[Quant], plan: &Plan, loads: &[Load], m: Mover, from: Option<u8>, horizon_h: f64, reserve: Reserve, allow: impl Fn(&Quant) -> bool) -> Option<u8> {
     let mut best: Option<(Key, u8)> = None;
     for (i, q) in accounts.iter().enumerate() {
         if Some(q.id) == from || !q.accepts(m.class) || !allow(q) || reserve.holds(q, plan, i, &loads[i], m) {
@@ -150,7 +150,7 @@ fn key(q: &Quant, plan: &Plan, i: usize, load: &Load, m: Mover, horizon_h: f64) 
 
 /// Each account's load from `(account, class, rate)` per pane, in
 /// `accounts`' order, leaving out the pane at `skip`.
-pub(crate) fn loads_of(accounts: &[Quant], panes: &[(Option<u8>, Class, f64)], skip: Option<usize>) -> Vec<Load> {
+pub fn loads_of(accounts: &[Quant], panes: &[(Option<u8>, Class, f64)], skip: Option<usize>) -> Vec<Load> {
     let mut loads = vec![Load::default(); accounts.len()];
     for (j, (on, class, rate)) in panes.iter().enumerate() {
         if Some(j) == skip {

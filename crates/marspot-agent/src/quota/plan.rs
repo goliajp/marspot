@@ -16,7 +16,7 @@ use super::{EPS, HORIZON_H, Quant};
 
 /// Each account's targets for the coming hour, in the caller's order.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Plan {
+pub struct Plan {
     /// Restricted speed this account should carry now.
     pub t_f: Vec<f64>,
     /// Plain speed this account should carry now.
@@ -34,7 +34,7 @@ pub(crate) struct Plan {
 
 /// `b_f`, `b_n`: restricted and plain demand an hour.  `kappa`: the
 /// restricted window's share of a week; `None` reserves nothing.
-pub(crate) fn plan(accounts: &[Quant], b_f: f64, b_n: f64, kappa: Option<f64>) -> Plan {
+pub fn plan(accounts: &[Quant], b_f: f64, b_n: f64, kappa: Option<f64>) -> Plan {
     let (t_f, d_f, unassigned_f) = restricted_pass(accounts, b_f, kappa);
     let u: Vec<f64> = accounts
         .iter()

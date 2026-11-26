@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.732"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
-core    = "0.12.701"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
+shell   = "0.7.737"  # marspot-agent docs say which parts are still agent-specific
+core    = "0.12.704"  # marspot-peer takes AgentKind from marspot-term instead of defining its own
 session = "0.11.455"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live

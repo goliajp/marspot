@@ -28,7 +28,7 @@ pub mod envelope;
 pub mod frame;
 pub mod gemini_hook;
 pub mod inbox;
-pub mod json;
+pub use marspot_json as json;
 pub mod kimi_hook;
 pub mod mcp;
 pub mod mcp_panes;
