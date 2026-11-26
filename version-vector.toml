@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.811"  # curl for a token GET starts with an empty environment and only stdio descriptors
-core    = "0.12.733"  # a reset line is a button only where it can be claimed, and shows the account's last claim
+core    = "0.12.734"  # the accounts panel's tests move to a file of their own
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)
