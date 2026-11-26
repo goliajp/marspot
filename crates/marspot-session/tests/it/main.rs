@@ -12,6 +12,7 @@ mod focus_reporting;
 mod frame_cells;
 mod helper_container;
 mod history_upgrade;
+mod install_adoption_check;
 mod move_region;
 mod pane_awake;
 mod pane_link;
