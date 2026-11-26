@@ -17,7 +17,8 @@ Used by bin/bench.sh, bin/measure-l3.sh and bin/bench-remote.sh:
                                           exit 3 when it was not
   _bench_record.py append <gate-record.json> [history-dir]
                                           one line per metric into
-                                          <history-dir>/<metric>.jsonl
+                                          <history-dir>/<metric>.jsonl, and
+                                          the sizes into size-history.tsv
   _bench_record.py show [metric-substring] [-n N] [history-dir]
                                           the last N readings of each metric
 
@@ -29,6 +30,10 @@ import re
 import subprocess
 import sys
 import time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _size_budget  # noqa: E402
 
 # readings kept per metric; a gate run adds one line to each file
 KEEP = int(os.environ.get("MARSPOT_BENCH_HISTORY_KEEP", "500"))
@@ -222,6 +227,7 @@ def append(record_path, hist_dir):
         lines.append(json.dumps({**shared, **row}, sort_keys=True))
         with open(path, "w") as f:
             f.write("\n".join(lines[-KEEP:]) + "\n")
+    _size_budget.append_history(record, hist_dir)
     return len(record["rows"])
 
 

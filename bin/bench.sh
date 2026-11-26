@@ -12,19 +12,14 @@
 #   bin/bench.sh --full    also runs the live PTY pipeline through the
 #                          app and through L3, the key-to-frame latency
 #                          of one pane (a few minutes), AND the Phase 9
-#                          SSIM gate.  Use before merging to
-#                          develop or when chasing a perf fix.
-#
-#   bin/bench.sh --ssim    add Phase 9 visual-regression SSIM gate
-#                          (the font-rendering acceptance bound).
-#                          Implied by --full;  pass standalone to
-#                          run only the SSIM gate after a fast perf
-#                          run.
-#
-#   bin/bench.sh --update-baseline
-#       Re-write bench/baseline.json with the current measurements'
-#       MBps minus the configured tolerance.  Use after an
-#       intentional perf-affecting change.  Skips the SSIM chain.
+#                          SSIM gate.  Use before merging to develop.
+#   bin/bench.sh --ssim    add the Phase 9 SSIM gate (font rendering);
+#                          implied by --full.
+#   bin/bench.sh --update-baseline   rewrite the floors in
+#       bench/baseline.json from this run (never a size budget).
+#   bin/bench.sh --size-tables   link the four binaries with a map
+#       and write raw module tables to bench/results/size-tables/
+#       instead of measuring (bin/_size_budget.py says what for).
 #
 # Reads bench/baseline.json + bench/font-rendering/snapshots/*.png.
 # Exits non-zero on any regression (perf OR SSIM).  One row per metric
@@ -33,10 +28,8 @@
 # GATE PASSED, GATE FAILED or GATE INCONCLUSIVE for perf, plus SSIM GATE
 # PASSED / FAILED when --ssim is on.
 #
-# Every run leaves bench/results/gate-record.json (the whole table with
-# the commit, toolchain, runner and load it belongs to) and appends each
-# row to bench/results/history/<metric>.jsonl;
-# `bin/_bench_record.py show [metric]` reads that back.
+# Every run leaves bench/results/gate-record.json and appends each row to
+# bench/results/history/<metric>.jsonl (`bin/_bench_record.py show`).
 
 set -euo pipefail
 
@@ -55,6 +48,7 @@ SCENARIOS_DIR="$ROOT/bench/scenarios"
 
 MODE=fast
 UPDATE=0
+SIZE_TABLES=0
 WITH_SSIM=0
 # Build and measure are separable so the caller can hold a different
 # lock for each: a build is heavy work that belongs alongside other
@@ -66,11 +60,12 @@ for arg in "$@"; do
   case "$arg" in
     --full)              MODE=full ;;
     --update-baseline)   UPDATE=1 ;;
+    --size-tables)       SIZE_TABLES=1 ;;
     --ssim)              WITH_SSIM=1 ;;
     --build-only)        DO_MEASURE=0 ;;
     --no-build)          DO_BUILD=0 ;;
     --help|-h)
-      sed -n '2,20p' "$0"; exit 0 ;;
+      sed -n '2,22p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -86,6 +81,11 @@ fi
 if [[ ! -f "$BASELINE" ]]; then
   echo "missing $BASELINE" >&2
   exit 2
+fi
+if (( SIZE_TABLES )); then
+  (( ! DO_BUILD )) || "$ROOT/bin/_size_tables.sh" build
+  (( ! DO_MEASURE )) || "$ROOT/bin/_size_tables.sh" tables
+  exit 0
 fi
 
 
@@ -333,13 +333,12 @@ measure_scroll() {
 echo "==> headless scroll and scroll-cold (5 trials each, taking median p99)"
 run_block scroll measure_scroll
 
-# ---- binary size ------------------------------------------------------
-# Cheap (sub-second) so it is part of the fast gate.  Catches accidental
-# code-size jumps (a heavy dep sneaking in, a forgotten debug table) in
-# the binaries that ship; the keys of binary_size_bytes_max in the
-# baseline say which ones.
+# ---- binary size: sub-second, so part of the fast gate --------------
+# judged against bench/size-budget.json, see bin/_size_budget.py
+python3 "$ROOT/bin/_size_budget.py" --self-test | tail -1
+[[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "bin/_size_budget.py --self-test failed" >&2; exit 1; }
 echo "==> binary sizes"
-for bin in $(python3 -c "import json,sys; print(' '.join(k for k in json.load(open(sys.argv[1])).get('binary_size_bytes_max', {}) if not k.startswith('_')))" "$BASELINE"); do
+for bin in $(python3 "$ROOT/bin/_size_budget.py" binaries); do
   if [[ -x "$(marspot_bin "$bin")" ]]; then
     stat -f%z "$(marspot_bin "$bin")" > "$CUR_DIR/size-$bin.txt"
     printf "    %-16s %s bytes\n" "$bin" "$(cat "$CUR_DIR/size-$bin.txt")"

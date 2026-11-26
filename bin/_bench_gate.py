@@ -18,9 +18,9 @@ baseline, prints the table, writes bench/results/gate-record.json and
 appends one line per metric to the history (bin/_bench_record.py).
 
 What gates and what does not.  A count of the work (instructions per
-byte), a size or a tail latency gates.  A wall-clock throughput is
-printed next to its floor and its spread and never decides the exit
-code: one unchanged build read 101.7 to 139.8 MB/s across six runs of
+byte), a size against its budget or a tail latency gates.  A
+wall-clock throughput is printed next to its floor and its spread and
+never decides the exit code: one unchanged build read 101.7 to 139.8 MB/s across six runs of
 one day while its instructions per byte stayed within 209 to 213.
 
 Units: MB/s is 10^6 bytes per second in every column and every
@@ -39,6 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bench_record  # noqa: E402
 import _bench_latency  # noqa: E402
 import _bench_pane_control  # noqa: E402
+import _size_budget  # noqa: E402
 
 STALE_DAYS = 14
 
@@ -71,7 +72,7 @@ def self_test():
             bp = os.path.join(work, f"baseline-{label}.json")
             json.dump(b, open(bp, "w"))
             root = os.path.join(work, f"root-{label}")
-            os.makedirs(root)
+            _size_budget.copy_budgets(os.path.join(here, ".."), root)
             out = subprocess.run([sys.executable, os.path.abspath(__file__), bp, cur, "full", "0", root],
                                  env=env, capture_output=True, text=True).stdout
             vs = [l for l in out.splitlines() if l.startswith("vs-best ")]
@@ -313,13 +314,7 @@ for label, name, block, key in (
         row(label, median(xs), "µs", baseline[key]["p99_us_max"], True,
             trials=xs, host=block_host(block))
 
-for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
-    if bin_name.startswith("_"):
-        continue
-    xs = samples(f"size-{bin_name}.txt", int)
-    # a ceiling with no reading is a check that did not run, not a pass
-    row(f"size {bin_name}", xs[0] if xs else None, "bytes", ceiling, True, trials=xs,
-        stat="exact", host=None if xs else {"invalid": f"no size reading for {bin_name}: not built?"})
+_size_budget.add_rows(cur_dir, root, row, samples)
 
 _bench_latency.add_rows(baseline, cur_dir, mode, row, median, block_host)
 
@@ -426,7 +421,7 @@ record.update({
               "KiB": "resident memory, 1024 bytes", "ratio": "marspot / best other terminal",
               "ms": "milliseconds, median of trials"},
     "load_max": _bench_record.LOAD_MAX, "foreign_cores_max": _bench_record.FOREIGN_MAX,
-    "rows": rows,
+    "rows": rows, "shell_prod_lines": _size_budget.shell_prod_lines(root),
 })
 results_dir = os.path.join(root, "bench", "results")
 os.makedirs(results_dir, exist_ok=True)
@@ -445,7 +440,7 @@ if do_update:
     # Floors for the wall-clock and latency readings, from this one run
     # with a safety margin.  The instructions-per-byte ceilings are not
     # touched: they come from the spread over several runs, and one run
-    # cannot know it.
+    # cannot know it.  Nor are the size budgets: see bin/_size_budget.py.
     print("==> updating floors: 7% headless, 10% live; instruction ceilings left alone")
     by = {r["metric"]: r["value"] for r in rows if r["value"] is not None}
     for entry in baseline["scenarios"]:
@@ -463,9 +458,6 @@ if do_update:
                                ("scroll-cold p99", "scroll_cold_repaint", 1.30)):
         if label in by and key in baseline:
             baseline[key]["p99_us_max"] = math.ceil(by[label] * margin)
-    for bin_name in baseline.get("binary_size_bytes_max", {}):
-        if f"size {bin_name}" in by:
-            baseline["binary_size_bytes_max"][bin_name] = round(by[f"size {bin_name}"] * 1.10)
     with open(baseline_path, "w") as f:
         json.dump(baseline, f, indent=2)
         f.write("\n")

@@ -1,0 +1,132 @@
+# binary	marspot-shell
+# version	0.18.0
+# commit	f8d75686
+# file_bytes	6346592
+# budget	7340032
+# previous	-
+module	bytes	previous	delta
+(unmapped: headers, linkedit, signature, padding)	942073	0	+942073
+core	616279	0	+616279
+std	447172	0	+447172
+marspot_shell::plugins::claudecode	393064	0	+393064
+marspot_shell::plugins::helpers	371032	0	+371032
+(__TEXT,__eh_frame)	341656	0	+341656
+marspot_shell::plugins::peerbus	318300	0	+318300
+(__TEXT,__gcc_except_tab)	183896	0	+183896
+(__TEXT,__const)	156497	0	+156497
+core <- marspot_shell	148056	0	+148056
+marspot_shell::pane_control	148008	0	+148008
+marspot_shell::plugins::codex	126424	0	+126424
+marspot_shell::plugins::kimi	92336	0	+92336
+hashbrown	85216	0	+85216
+marspot_shell::plugins::usage	82508	0	+82508
+marspot_shell::plugins::gemini	78480	0	+78480
+alloc	77352	0	+77352
+marspot_shell::plugins::zombie	74652	0	+74652
+marspot_shell::supervisor_tick	74264	0	+74264
+marspot::zombie	73316	0	+73316
+std <- marspot_shell	73196	0	+73196
+(__DATA_CONST,__const)	71072	0	+71072
+hashbrown <- marspot_shell	65752	0	+65752
+marspot_term::terminal	59668	0	+59668
+marspot_shell::plugins::handoff	59252	0	+59252
+(__TEXT,__cstring)	59228	0	+59228
+(__TEXT,__unwind_info)	53360	0	+53360
+marspot_shell::main	50764	0	+50764
+marspot_shell::app_events	43988	0	+43988
+marspot_term::scrollback	35604	0	+35604
+marspot_shell::pane_upkeep	33760	0	+33760
+alloc <- marspot_shell	33736	0	+33736
+gimli	32904	0	+32904
+marspot_shell::plugins::pty_op	32484	0	+32484
+marspot_shell::plugins::host	31904	0	+31904
+marspot_shell::shell_new	31804	0	+31804
+marspot_term::grid	31388	0	+31388
+marspot_shell::plugins::allocation	28716	0	+28716
+marspot::app	21684	0	+21684
+marspot_peer::control	21284	0	+21284
+marspot_shell::resident	20996	0	+20996
+marspot_term::session_registry	20584	0	+20584
+marspot_shell::plugins::agents	18052	0	+18052
+rustc_demangle	16936	0	+16936
+crc32fast	16384	0	+16384
+miniz_oxide	15704	0	+15704
+marspot_shell::theme_follow	15144	0	+15144
+marspot::pane_read	14468	0	+14468
+(other small)	14296	0	+14296
+marspot_term::(small)	14235	0	+14235
+marspot::cc_usage	13844	0	+13844
+marspot_shell::control_reader	13628	0	+13628
+std <- marspot_term	13552	0	+13552
+core <- marspot_term	13392	0	+13392
+marspot_shell::observe	13000	0	+13000
+marspot_shell::ownership	11564	0	+11564
+marspot_term::shell_proto	11504	0	+11504
+core <- marspot	11428	0	+11428
+marspot_term::async_writer	11364	0	+11364
+core <- marspot_peer	10656	0	+10656
+addr2line	10200	0	+10200
+marspot_shell::(small)	10164	0	+10164
+marspot::app_menu	9844	0	+9844
+marspot_peer::json	9576	0	+9576
+marspot_shell::apple_events	9484	0	+9484
+marspot_peer::registry	9248	0	+9248
+marspot_shell::autorun_cli	9116	0	+9116
+marspot_peer::envelope	8892	0	+8892
+marspot_shell::identity	8888	0	+8888
+marspot_shell::core_update	8800	0	+8800
+marspot_shell::core_spawn	8764	0	+8764
+marspot::pidtree	8480	0	+8480
+marspot_term::updater	8304	0	+8304
+marspot::(small)	7960	0	+7960
+marspot_shell::surfaces	7168	0	+7168
+marspot_term::settings	7124	0	+7124
+marspot_shell::bounded	7084	0	+7084
+hashbrown <- marspot	6860	0	+6860
+marspot_term::logx	6784	0	+6784
+marspot_shell::launch	6720	0	+6720
+marspot_term::grid_shm	6644	0	+6644
+marspot_term::pane_code	6564	0	+6564
+marspot_shell::instance	6460	0	+6460
+marspot_peer::frame	6372	0	+6372
+marspot_peer::resolve	6304	0	+6304
+marspot_term::bytelog	6232	0	+6232
+marspot_term::binary_tree	6160	0	+6160
+marspot_term::segment	5868	0	+5868
+objc2	5688	0	+5688
+marspot_peer::panes	5616	0	+5616
+marspot_shell::lifecycle	5596	0	+5596
+marspot_shell::cli_socket	5552	0	+5552
+marspot_peer::rpc	5444	0	+5444
+marspot_term::owner	5384	0	+5384
+alloc <- marspot	5060	0	+5060
+marspot::ui	4888	0	+4888
+marspot_peer::(small)	4856	0	+4856
+marspot_shell::plugins::pty_command	4660	0	+4660
+marspot_shell::ls_records	4532	0	+4532
+marspot::state	4320	0	+4320
+marspot_shell::windows	3844	0	+3844
+object	3688	0	+3688
+marspot_shell::pane_decls	3520	0	+3520
+marspot_shell::frame_layer	3420	0	+3420
+(__TEXT,__text)	3288	0	+3288
+(__TEXT,__stub_helper)	3264	0	+3264
+(__TEXT,__stubs)	3240	0	+3240
+(__DATA,__data)	3184	0	+3184
+marspot::iosurface	3136	0	+3136
+marspot_shell::window_frames	3080	0	+3080
+hashbrown <- marspot_term	3052	0	+3052
+alloc <- marspot_peer	2976	0	+2976
+marspot_term::osc8	2948	0	+2948
+marspot_peer::ws	2936	0	+2936
+alloc <- marspot_term	2912	0	+2912
+marspot_shell::plugins::skills	2792	0	+2792
+marspot_shell::plugins	2684	0	+2684
+marspot_term::parser	2468	0	+2468
+marspot_peer::inbox	2388	0	+2388
+marspot_shell::pane_status	2336	0	+2336
+marspot_shell::present	2268	0	+2268
+marspot_shell::self_exec	2228	0	+2228
+(__DATA,__la_symbol_ptr)	2160	0	+2160
+marspot_peer::spool	2140	0	+2140
+marspot_shell::reclaim	2120	0	+2120

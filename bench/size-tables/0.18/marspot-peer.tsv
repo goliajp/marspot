@@ -1,0 +1,39 @@
+# binary	marspot-peer
+# version	0.18.0
+# commit	f8d75686
+# file_bytes	857200
+# budget	1048576
+# previous	-
+module	bytes	previous	delta
+(unmapped: headers, linkedit, signature, padding)	188912	0	+188912
+core	137265	0	+137265
+std	78240	0	+78240
+marspot_peer::control	64908	0	+64908
+(__TEXT,__eh_frame)	50208	0	+50208
+gimli	32904	0	+32904
+marspot_peer::main	32540	0	+32540
+alloc	27116	0	+27116
+(__TEXT,__const)	26614	0	+26614
+marspot_peer::mcp_panes	25200	0	+25200
+(__TEXT,__gcc_except_tab)	17980	0	+17980
+marspot_peer::peers	17500	0	+17500
+rustc_demangle	16876	0	+16876
+core <- marspot_peer	15164	0	+15164
+(__DATA_CONST,__const)	14624	0	+14624
+(__TEXT,__cstring)	12685	0	+12685
+addr2line	10200	0	+10200
+marspot_peer::(small)	10040	0	+10040
+marspot_peer::json	8716	0	+8716
+(__TEXT,__unwind_info)	8440	0	+8440
+marspot_peer::registry	8388	0	+8388
+std <- marspot_peer	7972	0	+7972
+(other small)	6760	0	+6760
+marspot_peer::panes	6408	0	+6408
+marspot_peer::resolve	6356	0	+6356
+marspot_peer::claude_hook	4908	0	+4908
+alloc <- marspot_peer	4432	0	+4432
+marspot_peer::mcp	4284	0	+4284
+object	3688	0	+3688
+(__TEXT,__text)	2912	0	+2912
+marspot_peer::inbox	2620	0	+2620
+marspot_peer::gemini_hook	2340	0	+2340

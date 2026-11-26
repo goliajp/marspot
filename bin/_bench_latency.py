@@ -81,6 +81,7 @@ def self_test():
     import shutil
     import subprocess
     import tempfile
+    import _size_budget
 
     here = os.path.dirname(os.path.abspath(__file__))
     src = json.load(open(os.path.join(here, "..", "bench", "baseline.json")))
@@ -104,7 +105,7 @@ def self_test():
             bp = os.path.join(work, f"baseline-{label}.json")
             json.dump(b, open(bp, "w"))
             root = os.path.join(work, f"root-{label}")
-            os.makedirs(root)
+            _size_budget.copy_budgets(os.path.join(here, ".."), root)
             out = subprocess.run([sys.executable, os.path.join(here, "_bench_gate.py"), bp, cur, "full", "0", root],
                                  env=env, capture_output=True, text=True).stdout
             line = [l for l in out.splitlines() if l.startswith(want[0])]

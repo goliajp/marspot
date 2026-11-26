@@ -8,6 +8,7 @@
 # Usage:
 #   bin/bench-remote.sh                # fast tier (default host=mini)
 #   bin/bench-remote.sh --full         # full tier
+#   bin/bench-remote.sh --size-tables  # module tables for a size budget
 #   HOST=other-mini bin/bench-remote.sh --full
 #
 # Contract:
