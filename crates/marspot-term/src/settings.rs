@@ -154,6 +154,15 @@ pub struct Settings {
     /// What the kimi and gemini plugins do with the shared allocation, see [`AgentAllocation`].
     pub kimi_allocation: AgentAllocation,
     pub gemini_allocation: AgentAllocation,
+    /// Whether marspot uses an account's stored rate-limit resets by
+    /// itself (`live`), only logs when it would (`dryrun`), or neither.
+    /// Off: nothing in this build uses one in any mode.
+    pub sched_reset: AgentAllocation,
+    /// Whether marspot reads a Claude account's stored resets through
+    /// the CLI's own screen in a background pane; off, and nothing in
+    /// this build opens one in any mode: `dryrun` and `live` only log
+    /// when an account's reading would be due.
+    pub sched_reset_read: AgentAllocation,
     /// List a pane's helpers in rows at its bottom, as the agent in it
     /// lists its own.  The program in the pane is made shorter while
     /// there are any; a pane without helpers is not touched.
@@ -182,6 +191,8 @@ impl Default for Settings {
             cc_rebalance: Rebalance::Live,
             kimi_allocation: AgentAllocation::Off,
             gemini_allocation: AgentAllocation::Off,
+            sched_reset: AgentAllocation::Off,
+            sched_reset_read: AgentAllocation::Off,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,

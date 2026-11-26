@@ -190,6 +190,9 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("usage/claude-waits.json", Derived, "usage claude", "one per account", true),
     e("usage/kimi-waits.json", Derived, "usage kimi", "one per account", true),
     e("usage/usage_samples/<date>.tsv", Fact, "usage samples", "15 days", true),
+    // the accounts panel (L2) reads it
+    e("usage/resets.json", Derived, "usage resets", "one per account", true),
+    e("usage/resets/<date>.tsv", Fact, "usage resets", "15 days", true),
     e("zombie/told.tsv", Derived, "zombie store", "2048 rows", true),
     e("zombie/clock.tsv", Derived, "zombie store", "one row per process", true),
     e("zombie/told-dryrun.tsv", Derived, "zombie store (dry run)", "2048 rows", true),

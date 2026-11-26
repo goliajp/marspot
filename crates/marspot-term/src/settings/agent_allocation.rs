@@ -31,7 +31,7 @@ impl AgentAllocation {
         }
     }
 
-    pub(super) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::DryRun => "dryrun",
@@ -48,6 +48,8 @@ pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
         "claudecode.rebalance" => s.cc_rebalance.as_str().to_string(),
         "kimi.allocation" => s.kimi_allocation.as_str().to_string(),
         "gemini.allocation" => s.gemini_allocation.as_str().to_string(),
+        "sched.reset" => s.sched_reset.as_str().to_string(),
+        "sched.reset_read" => s.sched_reset_read.as_str().to_string(),
         _ => return None,
     })
 }
@@ -60,6 +62,8 @@ pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
         "claudecode.rebalance" => s.cc_rebalance = Rebalance::parse(v),
         "kimi.allocation" => s.kimi_allocation = AgentAllocation::parse(v),
         "gemini.allocation" => s.gemini_allocation = AgentAllocation::parse(v),
+        "sched.reset" => s.sched_reset = AgentAllocation::parse(v),
+        "sched.reset_read" => s.sched_reset_read = AgentAllocation::parse(v),
         _ => return false,
     }
     true
@@ -86,5 +90,19 @@ mod tests {
             assert_eq!(parse(&render(&s, &body)).gemini_allocation, want, "{word} after a rewrite");
         }
         assert_eq!(value_of(&parse("gemini.allocation = live\n"), "gemini.allocation"), "live");
+    }
+
+    /// Both reset switches are off unless the file says otherwise, and
+    /// read back as written.
+    #[test]
+    fn the_reset_switches_are_off_unless_written() {
+        let s = Settings::default();
+        assert_eq!((s.sched_reset, s.sched_reset_read), (AgentAllocation::Off, AgentAllocation::Off));
+        let body = "sched.reset = dryrun\nsched.reset_read = live\n";
+        let s = parse(body);
+        assert_eq!((s.sched_reset, s.sched_reset_read), (AgentAllocation::DryRun, AgentAllocation::Live));
+        assert_eq!(parse(&render(&s, body)), s);
+        assert_eq!(value_of(&s, "sched.reset_read"), "live");
+        assert_eq!(parse("sched.reset = on\n").sched_reset, AgentAllocation::Off);
     }
 }
