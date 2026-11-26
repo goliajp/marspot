@@ -100,3 +100,53 @@ fn a_dormant_row_without_a_model_wakes_on_a_named_one() {
         .collect();
     assert!(line.contains("--model 'claude-opus-5-5'"), "{line}");
 }
+
+/// A `/model` pick is the model the session runs from then on, even
+/// before an answer says so; its display name stands for claude's id,
+/// and a name that is not a family and a version says nothing.
+#[test]
+fn launch_model_reads_a_model_pick_in_the_transcript() {
+    let dir = TempDir::new("launch-model-pick");
+    let t = dir.join("u.jsonl");
+    let answer = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5"}}"#;
+    let pick = |name: &str| {
+        format!(r#"{{"type":"user","message":{{"role":"user","content":"<local-command-stdout>Set model to \u001b[1m{name}\u001b[22m and saved as your default for new sessions</local-command-stdout>"}}}}"#)
+    };
+    fs::write(&t, [answer.to_string(), pick("Fable 5.1")].join("\n")).unwrap();
+    assert_eq!(launch_model::transcript_model(&t).as_deref(), Some("claude-fable-5-1"));
+    fs::write(&t, [answer.to_string(), pick("Opus 4.6 (1M context)")].join("\n")).unwrap();
+    assert_eq!(launch_model::transcript_model(&t).as_deref(), Some("claude-opus-4-6[1m]"));
+    fs::write(&t, [pick("Fable 5.1"), answer.to_string()].join("\n")).unwrap();
+    assert_eq!(launch_model::transcript_model(&t).as_deref(), Some("claude-opus-5-5"), "an answer after the pick");
+    fs::write(&t, [answer.to_string(), pick("Default")].join("\n")).unwrap();
+    assert_eq!(launch_model::transcript_model(&t), None, "no id to name");
+    // quoted inside a message, the marker's quotes are escaped
+    let quoted = r#"{"type":"user","message":{"role":"user","content":"see \"content\":\"<local-command-stdout>Set model to Fable 5.1"}}"#;
+    fs::write(&t, [answer, quoted].join("\n")).unwrap();
+    assert_eq!(launch_model::transcript_model(&t).as_deref(), Some("claude-opus-5-5"));
+}
+
+/// A pane whose status-line hook never wrote an `id=` line restarts on
+/// what its transcript last names, model and effort, so the scan's
+/// choice lets a switch or a reclaim go ahead.
+#[test]
+fn a_pane_without_a_hook_record_switches_on_its_transcript_model() {
+    let _sandbox = sandbox_state_dir();
+    let home = TempDir::new("launch-model-scan");
+    let uuid = "u-nohook";
+    let mut meta = pane_on_p1(home.path(), uuid);
+    let sid = 5;
+    let choices = |meta: &BindMeta| quota_inputs(&HashMap::from([(sid, meta.clone())])).1;
+    assert_eq!(choices(&meta)[&sid], CliChoice::default(), "nothing recorded, no transcript");
+
+    let t = home.join(".claude-profile-1/projects/-w").join(format!("{uuid}.jsonl"));
+    fs::create_dir_all(t.parent().unwrap()).unwrap();
+    let answer = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-5-5"},"effort":"high"}"#;
+    fs::write(&t, answer).unwrap();
+    let got = choices(&meta)[&sid].clone();
+    assert_eq!(got, CliChoice { model: Some("claude-opus-5-5".into()), effort: Some("high".into()) });
+    assert_eq!(confirm_choice(Some("opus-5-5"), &got), Ok(()), "a switch may go ahead");
+
+    meta.has_transcript = false;
+    assert_eq!(choices(&meta)[&sid].model, None, "no transcript written yet: nothing read");
+}

@@ -103,7 +103,7 @@ impl ClaudecodePlugin {
     pub(super) fn switch_by_hand(&mut self, host: &dyn PluginHost, sid: u64, meta: BindMeta, target: u8) -> bool {
         // Asked for or not, a switch starts a new claude, and it starts
         // on the model the pane is on or not at all.
-        let choice = pushed_choice(&meta.uuid);
+        let choice = launch_model::bound_choice(&meta);
         let model = self.needs_model_for(sid);
         if let Err(why) = confirm_choice(model.as_deref(), &choice) {
             host.log(
@@ -234,6 +234,11 @@ impl ClaudecodePlugin {
                 ),
             );
         }
+        let Some(model) = choice.model.clone() else {
+            let msg = format!("pane {shelld_sid}: no P{next_profile} resume line for {}: model unknown", meta.uuid);
+            host.log(LogLevel::Warn, "cycle.no_command", &msg);
+            return false;
+        };
         let Some(op) = profile_cycle_op(
             say.as_deref(),
             &meta.uuid,
@@ -248,7 +253,7 @@ impl ClaudecodePlugin {
             host.log(
                 LogLevel::Warn,
                 "cycle.no_command",
-                &format!("cannot build a P{next_profile} resume line for {}", meta.uuid),
+                &format!("pane {shelld_sid}: no P{next_profile} resume line for {}: no session id, or a part of it cannot be quoted", meta.uuid),
             );
             return false;
         };
@@ -266,7 +271,7 @@ impl ClaudecodePlugin {
                 "pane {shelld_sid} → P{next_profile} {} uuid={} model={} effort={}",
                 if meta.has_transcript { "resuming" } else { "starting fresh," },
                 meta.uuid,
-                choice.model.as_deref().unwrap_or("(profile default)"),
+                model,
                 choice.effort.as_deref().unwrap_or("(profile default)"),
             ),
         );

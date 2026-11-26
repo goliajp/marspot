@@ -214,6 +214,17 @@ fn a_pane_whose_model_is_not_known_is_not_reclaimed() {
     assert!(plugin.dormant.is_empty(), "not reclaimed: its model is not known");
     assert!(host.begun.lock().unwrap().is_empty());
 
+    // nothing at all to start the new claude on: said once, not every sweep
+    for _ in 0..3 {
+        let mut scan = scan_with(7, pid, uuid);
+        scan.choices.clear();
+        plugin.run_idle_policy_at(&host, &scan, TEST_THRESHOLD);
+    }
+    host.pump_ops();
+    assert!(plugin.dormant.is_empty());
+    let said = host.logged.lock().unwrap().iter().filter(|(e, l)| e == "hibernate.model_unknown" && l.contains(uuid)).count();
+    assert_eq!(said, 1, "model unknown is its own line, once per session");
+
     // Known, it is reclaimed as before: the guard is the only
     // difference.
     let scan = scan_with(7, pid, uuid);

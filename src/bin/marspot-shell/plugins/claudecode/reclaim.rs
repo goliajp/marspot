@@ -114,7 +114,8 @@ impl ClaudecodePlugin {
                 }
                 continue;
             }
-            self.blocked_reason.remove(sid);
+            // the reason is kept until a reclaim starts, so each check
+            // below says its refusal once rather than every sweep
             // This scan's binding, not the previous tick's: the pid
             // is about to be signalled, so it should be the freshest
             // one we have.  (`last_meta` is only updated after this
@@ -166,6 +167,15 @@ impl ClaudecodePlugin {
             // is told: without its model and effort it would wake on
             // the profile's default. Same rule as a switch.
             let choice = result.choices.get(sid).cloned().unwrap_or_default();
+            if choice.model.is_none() {
+                let said = format!("model_unknown:{}", meta.uuid);
+                if self.blocked_reason.get(sid) != Some(&said) {
+                    let msg = format!("shelld_session={sid} uuid={}: model unknown (no hook record, no model in its transcript); not reclaiming", meta.uuid);
+                    host.log(LogLevel::Info, "hibernate.model_unknown", &msg);
+                    self.blocked_reason.insert(*sid, said);
+                }
+                continue;
+            }
             if let Err(why) = confirm_choice(result.new_models.get(sid).map(String::as_str), &choice) {
                 if self.blocked_reason.get(sid).map(String::as_str) != Some("model_unconfirmed") {
                     host.log(
@@ -234,14 +244,12 @@ impl ClaudecodePlugin {
                 meta.project_dir.as_deref(),
                 &choice,
             ) else {
-                host.log(
-                    LogLevel::Warn,
-                    "hibernate.no_resume_line",
-                    &format!(
-                        "refusing to reclaim {}: its profile cannot be quoted",
-                        meta.uuid
-                    ),
-                );
+                let said = format!("no_resume_line:{}", meta.uuid);
+                if self.blocked_reason.get(sid) != Some(&said) {
+                    let msg = format!("refusing to reclaim {}: its profile cannot be quoted", meta.uuid);
+                    host.log(LogLevel::Warn, "hibernate.no_resume_line", &msg);
+                    self.blocked_reason.insert(*sid, said);
+                }
                 continue;
             };
             let op = op.on_end(self.wake_reporter(*sid));
@@ -274,6 +282,7 @@ impl ClaudecodePlugin {
             // same pane — which replaces the first mid-park, and leaves
             // two paths racing to type the same line.  Observed live.
             self.armed.insert(*sid);
+            self.blocked_reason.remove(sid);
             self.dormant.push(DormantRecord {
                 shelld_sid: *sid,
                 uuid: meta.uuid,

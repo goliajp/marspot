@@ -60,22 +60,99 @@ pub(in crate::plugins) fn session_model(uuid: &str, transcript: Option<&Path>) -
     pushed_choice(uuid).model.or_else(|| transcript.and_then(transcript_model))
 }
 
-/// The model id of the newest assistant record in the transcript's
-/// tail, as claude wrote it (`claude-opus-5-5`); an error record's
-/// `<synthetic>` is not a model and is passed over.
+/// The model the transcript's tail last names, as `--model` takes it:
+/// the newest of an assistant record's id (`claude-opus-5-5`) and a
+/// `/model` pick (`Opus 4.6 (1M context)` → `claude-opus-4-6[1m]`). An
+/// error record's `<synthetic>` is not a model and is passed over.
 pub(in crate::plugins) fn transcript_model(path: &Path) -> Option<String> {
+    transcript_choice(path).model
+}
+
+/// [`transcript_model`] with the effort the same record ran at; a
+/// `/model` pick says nothing about effort.
+fn transcript_choice(path: &Path) -> super::CliChoice {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(super::model::MODEL_TAIL_BYTES))).ok()?;
-    let mut raw = Vec::new();
-    f.read_to_end(&mut raw).ok()?;
-    let text = String::from_utf8_lossy(&raw);
-    text.lines().rev().filter(|l| l.contains("\"role\":\"assistant\"")).find_map(|l| {
-        let rest = &l[l.find("\"model\":\"")? + 9..];
-        let id = &rest[..rest.find('"')?];
-        cli_model_ok(id).then(|| id.to_string())
-    })
+    let tail = || -> Option<String> {
+        let mut f = std::fs::File::open(path).ok()?;
+        let len = f.metadata().ok()?.len();
+        f.seek(SeekFrom::Start(len.saturating_sub(super::model::MODEL_TAIL_BYTES))).ok()?;
+        let mut raw = Vec::new();
+        f.read_to_end(&mut raw).ok()?;
+        Some(String::from_utf8_lossy(&raw).into_owned())
+    };
+    let text = tail().unwrap_or_default();
+    text.lines().rev().find_map(line_choice).unwrap_or_default()
+}
+
+fn line_choice(l: &str) -> Option<super::CliChoice> {
+    if let Some(name) = model_command_name(l) {
+        // a pick with no id to name still ends the search: what came
+        // before it is no longer the model
+        return Some(super::CliChoice { model: picked_id(name), effort: None });
+    }
+    if !l.contains("\"role\":\"assistant\"") {
+        return None;
+    }
+    let field = |key: &str| {
+        let rest = &l[l.find(key)? + key.len()..];
+        Some(&rest[..rest.find('"')?])
+    };
+    let id = field("\"model\":\"").filter(|id| cli_model_ok(id))?;
+    let effort = field("\"effort\":\"").and_then(super::model::short_effort).filter(|e| super::model::cli_effort_ok(e));
+    Some(super::CliChoice { model: Some(id.to_string()), effort })
+}
+
+/// The display name a `/model` output record in `line` switched to, as
+/// claude printed it (escapes and remark included).
+///
+/// Records vary by claude version (`"subtype":"local_command"`, or a
+/// user record holding the `<local-command-stdout>` block); the marker
+/// is anchored as the direct value of a content field, quotes
+/// unescaped, so conversation text that merely quotes it (escaped
+/// quotes) cannot match. The name may carry a trailing remark ("… and
+/// saved as your default for new sessions"), so the cut stops at " and ".
+pub(super) fn model_command_name(line: &str) -> Option<&str> {
+    ["\"content\":\"<local-command-stdout>Set model to ", "\"content\":\"<local-command-stdout>Kept model as "]
+        .iter()
+        .find_map(|marker| {
+            let rest = &line[line.find(marker)? + marker.len()..];
+            let mut end = rest.find(['<', '"']).unwrap_or(rest.len());
+            if let Some(a) = rest.find(" and ") {
+                end = end.min(a);
+            }
+            Some(&rest[..end])
+        })
+}
+
+/// The id a `/model` display name stands for: `Fable 5.1` is
+/// `claude-fable-5-1`, a `(1M context)` remark is `[1m]`. A name that is
+/// not a family and a version (`Default`, `Opus 1M`) says nothing.
+fn picked_id(name: &str) -> Option<String> {
+    let short = super::model::short_model(name);
+    let (family, version) = short.split_once('-')?;
+    let numbered = !version.is_empty() && version.split('-').all(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()));
+    if !["opus", "sonnet", "haiku", "fable"].contains(&family) || !numbered {
+        return None;
+    }
+    let wide = if name.contains("(1M context)") { "[1m]" } else { "" };
+    Some(format!("claude-{short}{wide}"))
+}
+
+/// The model and effort a bound session restarts with: the hook's
+/// record, else (no `id=` line, as for a pane whose hook never ran)
+/// what its transcript last names, the record's effort when the
+/// transcript says none.
+pub(super) fn bound_choice(meta: &super::BindMeta) -> super::CliChoice {
+    let pushed = pushed_choice(&meta.uuid);
+    if pushed.model.is_some() || !meta.has_transcript {
+        return pushed;
+    }
+    let transcript = || {
+        let home = meta.config_dir.as_deref()?;
+        crate::plugins::handoff::history::claude_transcript(Path::new(home), &meta.uuid)
+    };
+    let read = transcript().map(|t| transcript_choice(&t)).unwrap_or_default();
+    super::CliChoice { effort: read.effort.or(pushed.effort), ..read }
 }
 
 /// The model the claude in pane `sid` runs on, by its hook record.
