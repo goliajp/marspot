@@ -121,10 +121,10 @@ fn drive(cli: &str, session: &SessionReset, deadline: Instant) -> Outcome {
     let ready = read(cli, Wait::Text(READY.into()), deadline);
     if !ready.contains(READY) {
         let last = ready.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
-        return Outcome::of(Res::Error, &format!("the CLI did not become ready: {last}"));
+        return Outcome::untried(Res::Error, &format!("the CLI did not become ready: {last}"));
     }
     if Instant::now() >= deadline {
-        return Outcome::of(Res::Error, "the claim's time ran out before the command was typed");
+        return Outcome::untried(Res::Error, "the claim's time ran out before the command was typed");
     }
     if let Err(e) = send(cli, Input::Text { text: "/limit-reset".into(), enter: true }) {
         return Outcome::of(Res::Error, &format!("could not type the command: {e}"));

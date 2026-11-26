@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.809"  # the claude claim asks the shared claim-path rule; the claim facts directory comes from the library
+shell   = "0.7.810"  # a retry that sent nothing keeps its confirmation for ten minutes; no claim path, no account hold
 core    = "0.12.733"  # a reset line is a button only where it can be claimed, and shows the account's last claim
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

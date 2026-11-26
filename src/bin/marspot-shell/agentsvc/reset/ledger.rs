@@ -10,7 +10,9 @@
 //! answer and nothing is claimed twice.  An attempt marked `again` is
 //! not an answer: its confirmed claim is kept in memory only, so the
 //! same request asked again before a restart tries again without a
-//! second confirmation; after a restart it must be confirmed anew.
+//! second confirmation, for [`AGAIN_FOR_S`] after it was confirmed;
+//! after that or a restart it must be confirmed anew.  A `busy` attempt
+//! never ran, so it leaves that confirmation as it was.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -30,6 +32,9 @@ const MAX_ANSWERS: usize = 512;
 /// Confirmed requests that may be tried again; one per account is all
 /// a working machine has.
 const MAX_AGAIN: usize = 32;
+/// How long a confirmed request may be tried again: the confirming side
+/// gives up on an answer long before.
+pub(super) const AGAIN_FOR_S: i64 = 600;
 
 /// One finished attempt, as the facts hold it.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,8 +54,8 @@ pub(super) struct Ledger {
     /// `(provider, profile, request id)` of each claim running.
     running: Vec<(String, u8, String)>,
     /// Each request whose last attempt may be tried again, as it was
-    /// confirmed.
-    again: VecDeque<Claim>,
+    /// confirmed, with when it first was.
+    again: VecDeque<(i64, Claim)>,
 }
 
 /// Holds an account for one claim; dropping it lets the next one in.
@@ -90,13 +95,14 @@ impl Ledger {
     }
 
     /// The grant `c`'s request was confirmed for, when its last attempt
-    /// may be tried again and `c` asks for the same account and grant.
-    pub(super) fn confirmed_before(&self, c: &Claim) -> Option<Grant> {
+    /// may be tried again and `c` asks for the same account and grant
+    /// within [`AGAIN_FOR_S`] of the confirmation.
+    pub(super) fn confirmed_before(&self, c: &Claim, now: i64) -> Option<Grant> {
         let same = |k: &&Claim| {
             (k.request_id.as_str(), k.provider, k.profile, k.grant.kind.as_str(), k.grant.grant_ref.as_str())
                 == (c.request_id.as_str(), c.provider, c.profile, c.grant.kind.as_str(), c.grant.grant_ref.as_str())
         };
-        self.again.iter().find(same).map(|k| k.grant.clone())
+        self.again.iter().filter(|(at, _)| now - at < AGAIN_FOR_S).map(|(_, k)| k).find(same).map(|k| k.grant.clone())
     }
 
     /// Every finished attempt kept, oldest first.
@@ -143,12 +149,15 @@ impl Ledger {
             clean(&c.reason),
             if o.again { "1" } else { "" },
         );
-        self.again.retain(|k| k.request_id != c.request_id);
-        if o.again {
-            if self.again.len() >= MAX_AGAIN {
-                self.again.pop_front();
+        if o.result != Res::Busy {
+            let first = self.again.iter().find(|(_, k)| k.request_id == c.request_id).map_or(now, |(at, _)| *at);
+            self.again.retain(|(at, k)| k.request_id != c.request_id && now - at < AGAIN_FOR_S);
+            if o.again && now - first < AGAIN_FOR_S {
+                if self.again.len() >= MAX_AGAIN {
+                    self.again.pop_front();
+                }
+                self.again.push_back((first, c.clone()));
             }
-            self.again.push_back(c.clone());
         }
         if o.is_final() {
             if self.answers.len() >= MAX_ANSWERS {
@@ -183,6 +192,7 @@ fn row_of(line: &str) -> Option<Row> {
         observed_after: json::parse(c[12]).ok(),
         detail: c[9].to_string(),
         again: c[11] == "1",
+        untried: false,
     };
     Some(Row { at: c[0].parse().ok()?, request_id: c[1].into(), provider: c[2].into(), profile: c[3].parse().ok()?, kind: c[4].into(), by: c[6].into(), outcome })
 }

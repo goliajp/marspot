@@ -158,22 +158,40 @@ fn run(ledger: &Arc<Mutex<ledger::Ledger>>, c: Claim, check: impl FnOnce(&Claim)
 /// given, or hold the account, `check` the confirmation (skipped for a
 /// request confirmed before whose last attempt may be tried again),
 /// wait for the account to rest, claim, and write the attempt down.
-fn run_within(ledger: &Arc<Mutex<ledger::Ledger>>, mut c: Claim, total: Duration, check: impl FnOnce(&Claim) -> Result<Grant, Outcome>) -> Outcome {
+fn run_within(ledger: &Arc<Mutex<ledger::Ledger>>, c: Claim, total: Duration, check: impl FnOnce(&Claim) -> Result<Grant, Outcome>) -> Outcome {
+    run_with(ledger, c, total, check, act)
+}
+
+/// [`run_within`] with the step that waits and claims given.
+fn run_with(
+    ledger: &Arc<Mutex<ledger::Ledger>>,
+    mut c: Claim,
+    total: Duration,
+    check: impl FnOnce(&Claim) -> Result<Grant, Outcome>,
+    act: impl FnOnce(&Claim, Instant) -> Outcome,
+) -> Outcome {
     let deadline = Instant::now() + total;
     if let Some(row) = ledger.lock().unwrap_or_else(|p| p.into_inner()).answered(&c.request_id) {
         return row.outcome.clone();
     }
+    if !marspot::agent_resets::claim_path_on(c.provider.as_str(), &c.grant.kind) {
+        return record(ledger, &c, Outcome::of(Res::Unavailable, "marspot has no way to claim a reset of this kind yet"));
+    }
     let Some(_hold) = ledger::Ledger::hold(ledger, &c) else {
         return record(ledger, &c, Outcome::of(Res::Busy, "a claim on this account or with this request id is running"));
     };
-    let before = ledger.lock().unwrap_or_else(|p| p.into_inner()).confirmed_before(&c);
-    let o = match before.map_or_else(|| check(&c), Ok) {
+    let before = ledger.lock().unwrap_or_else(|p| p.into_inner()).confirmed_before(&c, unix_now());
+    let retry = before.is_some();
+    let mut o = match before.map_or_else(|| check(&c), Ok) {
         Err(o) => o,
         Ok(grant) => {
             c.grant = grant;
             act(&c, deadline)
         }
     };
+    // the first attempt may have used the grant and the confirmation is
+    // single-use: a retry that sent nothing stays one that may be retried
+    o.again |= retry && o.untried;
     record(ledger, &c, o)
 }
 
@@ -182,11 +200,11 @@ fn run_within(ledger: &Arc<Mutex<ledger::Ledger>>, mut c: Claim, total: Duration
 fn act(c: &Claim, deadline: Instant) -> Outcome {
     let wait = deadline.saturating_duration_since(Instant::now()).saturating_sub(CLI_WITHIN).min(IDLE_WITHIN);
     if !idle::wait_idle(c.provider.as_str(), c.profile, wait) {
-        return Outcome::of(Res::AccountBusy, &format!("a pane on this account kept working for {} s", wait.as_secs()));
+        return Outcome::untried(Res::AccountBusy, &format!("a pane on this account kept working for {} s", wait.as_secs()));
     }
     let now = Instant::now();
     if now >= deadline {
-        return Outcome::of(Res::Error, "the claim's time ran out before anything was tried");
+        return Outcome::untried(Res::Error, "the claim's time ran out before anything was tried");
     }
     claim(c, deadline.min(now + CLI_WITHIN))
 }

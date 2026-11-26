@@ -113,9 +113,9 @@ impl Drop for Server {
 
 /// `who` is `codex:<profile>`, the name the readings give the account.
 pub(super) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_id: &str, deadline: Instant) -> Outcome {
-    let Some(mut server) = Server::start(bin, home) else { return Outcome::of(Res::Error, "the codex app-server could not be started") };
+    let Some(mut server) = Server::start(bin, home) else { return Outcome::untried(Res::Error, "the codex app-server could not be started") };
     let read = request("rl", "account/rateLimits/read", obj([]));
-    let Some(limits) = server.ask(&read, "rl", deadline) else { return Outcome::of(Res::Error, "the app-server did not answer the limits request") };
+    let Some(limits) = server.ask(&read, "rl", deadline) else { return Outcome::untried(Res::Error, "the app-server did not answer the limits request") };
     let credit = match pick(&limits, grant) {
         Ok(c) => c,
         Err(o) => return o,
@@ -124,7 +124,7 @@ pub(super) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_i
         return Outcome::of(Res::NotLimited, "every limit it brings back has 80% or more left");
     }
     if Instant::now() >= deadline {
-        return Outcome::of(Res::Error, "the claim's time ran out before the credit was consumed");
+        return Outcome::untried(Res::Error, "the claim's time ran out before the credit was consumed");
     }
     let params = obj([("creditId", credit.id.as_str().into()), ("idempotencyKey", request_id.into())]);
     let Some(answer) = server.ask(&request("consume", "account/rateLimitResetCredit/consume", params), "consume", deadline) else {

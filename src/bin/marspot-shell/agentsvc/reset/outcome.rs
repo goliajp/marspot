@@ -44,11 +44,19 @@ pub(crate) struct Outcome {
     /// Not known to have ended: asking again with the same request id
     /// tries again (the provider's own idempotency key makes that safe).
     pub again: bool,
+    /// Ended before anything that uses the grant was sent to the
+    /// provider; not written down, only read by the claim that got it.
+    pub untried: bool,
 }
 
 impl Outcome {
     pub(crate) fn of(result: Res, detail: &str) -> Outcome {
-        Outcome { result, left_after: None, observed_after: None, detail: detail.to_string(), again: false }
+        Outcome { result, left_after: None, observed_after: None, detail: detail.to_string(), again: false, untried: false }
+    }
+
+    /// An end before anything that uses the grant was sent.
+    pub(crate) fn untried(result: Res, detail: &str) -> Outcome {
+        Outcome { untried: true, ..Outcome::of(result, detail) }
     }
 
     /// An error after which the same request may be asked again.
