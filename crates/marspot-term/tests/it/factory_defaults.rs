@@ -59,9 +59,9 @@ fn the_status_line_hook_is_on() {
 }
 
 #[test]
-fn resting_moves_by_the_plan_start_as_a_dry_run() {
-    // the allocation's moves of resting panes are logged before any is made
-    assert_eq!(Settings::default().cc_rebalance, marspot_term::settings::Rebalance::DryRun);
+fn resting_moves_by_the_plan_are_made() {
+    // the placement objective moves resting panes for real unless the file says otherwise
+    assert_eq!(Settings::default().cc_rebalance, marspot_term::settings::Rebalance::Live);
 }
 
 /// Never is expressible two ways and they have to agree.

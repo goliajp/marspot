@@ -72,7 +72,7 @@ fn alloc_replay_waste_sweep() {
     let actual = run(&fx, Policy::Actual);
     let mut ok = Vec::new();
     for lambda in [0.5, 1.0, 2.0, 4.0] {
-        for margin in [0.0, 0.005, 0.01, 0.02] {
+        for margin in [0.0, 0.005, 0.01, 0.02, 0.05] {
             for per_day in [4, 8, 16] {
                 for stay_h in [12.0, 24.0, 48.0] {
                     let p = Params { lambda, margin, per_day, stay_h };
