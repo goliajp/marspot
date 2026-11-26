@@ -14,8 +14,8 @@ fn load(restricted: f64, plain: f64) -> Load {
     Load { restricted, plain }
 }
 
-const PLAIN: Mover = Mover { class: Class::Plain, rate: 0.0165, tokens: None };
-const FABLE: Mover = Mover { class: Class::Restricted, rate: 0.006, tokens: None };
+const PLAIN: Mover = Mover { class: Class::Plain, rate: 0.0165, tokens: None, fable: None };
+const FABLE: Mover = Mover { class: Class::Restricted, rate: 0.006, tokens: None, fable: None };
 
 fn out(accounts: &[Quant], loads: &[Load], m: Mover, from: u8) -> Option<u8> {
     pick(accounts, loads, m, Some(from), Some(KAPPA_FABLE), MUST_LAST_H, &PARAMS, |_| true)
@@ -50,7 +50,7 @@ fn alloc_waste_forecast_counts_the_week_and_fable_left() {
 /// same room that the pane cannot use up cost the same.
 #[test]
 fn alloc_waste_compares_accounts_over_one_span() {
-    let m = Mover { class: Class::Plain, rate: super::RHO0, tokens: None };
+    let m = Mover { class: Class::Plain, rate: super::RHO0, tokens: None, fable: None };
     let early = waste::added(&acct(1, 0.9, 0.0, 50.0), &Load::default(), m, Some(KAPPA_FABLE), MUST_LAST_H, &PARAMS);
     let late = waste::added(&acct(2, 0.9, 0.0, 168.0), &Load::default(), m, Some(KAPPA_FABLE), MUST_LAST_H, &PARAMS);
     assert!((early.cost - late.cost).abs() < 1e-9 && early.cost < 0.0, "{early:?} {late:?}");
@@ -84,7 +84,7 @@ fn alloc_waste_refused_plain_pane_spares_fable_room_when_there_is_room_elsewhere
     assert_eq!(out(&a, &l, PLAIN, 2), Some(4));
     // one twice as fast would eat into what the Fable panes need: P3,
     // whose week lapses and lasts it
-    let fast = Mover { class: Class::Plain, rate: 0.02, tokens: None };
+    let fast = Mover { class: Class::Plain, rate: 0.02, tokens: None, fable: None };
     assert_eq!(out(&a, &l, fast, 2), Some(3));
     // P4 against P7 alone: P7, whose week only the plain models can use
     let two = vec![a[0].clone(), a[2].clone(), a[4].clone()];
@@ -100,23 +100,23 @@ fn alloc_waste_refused_order_is_by_cost_then_renewal() {
     // the earlier renewal first, then the number
     let a = vec![acct(1, 0.0, 1.0, 10.0), acct(2, 0.9, 1.0, 150.0), acct(3, 0.9, 1.0, 100.0), acct(4, 0.9, 1.0, 100.0)];
     let l = vec![Load::default(); 4];
-    assert_eq!(out(&a, &l, Mover { class: Class::Plain, rate: 0.005, tokens: None }, 1), Some(3));
+    assert_eq!(out(&a, &l, Mover { class: Class::Plain, rate: 0.005, tokens: None, fable: None }, 1), Some(3));
     // one renewing much sooner saves the same over the span: the earlier
     let a = vec![acct(1, 0.0, 1.0, 10.0), acct(2, 0.9, 1.0, 150.0), acct(3, 0.9, 1.0, 30.0)];
-    assert_eq!(out(&a, &l[..3], Mover { class: Class::Plain, rate: 0.005, tokens: None }, 1), Some(3));
+    assert_eq!(out(&a, &l[..3], Mover { class: Class::Plain, rate: 0.005, tokens: None, fable: None }, 1), Some(3));
     // an account that would refuse it within six hours comes after any
     // that would not
     let a = vec![acct(1, 0.0, 1.0, 10.0), acct(2, 0.02, 1.0, 20.0), acct(3, 0.3, 1.0, 150.0)];
     let l = vec![Load::default(); 3];
-    assert_eq!(out(&a, &l, Mover { class: Class::Plain, rate: 0.01, tokens: None }, 1), Some(3), "P2 would refuse it in two hours");
+    assert_eq!(out(&a, &l, Mover { class: Class::Plain, rate: 0.01, tokens: None, fable: None }, 1), Some(3), "P2 would refuse it in two hours");
     // nor one where taking it leaves the Fable pane there refused within
     // six hours too: P2's
     // Fable pane lasts eight hours alone and four with the plain pane
     let a = vec![acct(1, 0.0, 1.0, 10.0), acct(2, 0.08, 0.0, 100.0), acct(3, 0.3, 1.0, 150.0)];
     let l = vec![Load::default(), load(0.01, 0.0), Load::default()];
-    assert_eq!(out(&a, &l, Mover { class: Class::Plain, rate: 0.01, tokens: None }, 1), Some(3));
+    assert_eq!(out(&a, &l, Mover { class: Class::Plain, rate: 0.01, tokens: None, fable: None }, 1), Some(3));
     // the only one left still takes it: nothing is held back
-    assert_eq!(out(&a[..2], &l[..2], Mover { class: Class::Plain, rate: 0.01, tokens: None }, 1), Some(2));
+    assert_eq!(out(&a[..2], &l[..2], Mover { class: Class::Plain, rate: 0.01, tokens: None, fable: None }, 1), Some(2));
 }
 
 /// A refused busy pane is not sent where a large restricted window on
@@ -126,7 +126,7 @@ fn alloc_waste_refused_pane_avoids_an_account_that_refuses_it_soon() {
     // P2: most of its Fable left but only five points of week
     let a = vec![acct(1, 0.0, 1.0, 10.0), acct(2, 0.05, 0.0, 100.0), acct(3, 0.5, 0.9, 150.0)];
     let l = vec![Load::default(); 3];
-    assert_eq!(out(&a, &l, Mover { class: Class::Restricted, rate: 0.01, tokens: None }, 1), Some(3));
+    assert_eq!(out(&a, &l, Mover { class: Class::Restricted, rate: 0.01, tokens: None, fable: None }, 1), Some(3));
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn alloc_waste_resting_plain_pane_leaves_the_fable_panes_week() {
     assert_eq!(rest_with(&i, 0, &Params { margin: 1.0, ..PARAMS }), None);
     // nothing to save: a pane alone on an account with more to lapse stays
     let calm = vec![acct(4, 0.9, 0.0, 120.0), acct(7, 0.44, 1.0, 40.0)];
-    assert_eq!(rest_with(&resting(calm, vec![load(0.0, 0.005), Load::default()], Mover { class: Class::Plain, rate: 0.005, tokens: None }, 4, 5.0, 0), 0, &PARAMS), None);
+    assert_eq!(rest_with(&resting(calm, vec![load(0.0, 0.005), Load::default()], Mover { class: Class::Plain, rate: 0.005, tokens: None, fable: None }, 4, 5.0, 0), 0, &PARAMS), None);
 }
 
 /// The same work on Fable costs about four times the week.

@@ -36,7 +36,7 @@ pub(super) fn go(i: &Inputs) -> Option<(u8, Why)> {
     i.decide(&i.plan())
 }
 
-pub(super) const PLAIN: Mover = Mover { class: Class::Plain, rate: 0.02, tokens: None };
+pub(super) const PLAIN: Mover = Mover { class: Class::Plain, rate: 0.02, tokens: None, fable: None };
 
 #[test]
 fn allocation_leave_early_only_when_it_runs_out_before_renewing() {
@@ -75,7 +75,7 @@ fn allocation_keeper_is_the_slowest_of_its_class() {
     // with a slower plain pane there
     let a = vec![acct(1, 0.04, 0.04, 50.0), acct(2, 0.9, 0.5, 60.0)];
     let tab = [(Some(1), Class::Restricted, 0.02), (Some(1), Class::Plain, 0.005)];
-    let fable = Mover { class: Class::Restricted, rate: 0.02, tokens: None };
+    let fable = Mover { class: Class::Restricted, rate: 0.02, tokens: None, fable: None };
     assert_eq!(go(&resting(a.clone(), &tab, fable, 1, true, 5.0, 0.02, 0.005)), None);
     assert_eq!(go(&resting(a, &tab, fable, 1, false, 5.0, 0.02, 0.005)), Some((2, Why::LeaveEarly)));
 }
@@ -114,7 +114,7 @@ pub(super) fn with(x: &Inputs, f: impl Fn(&mut (usize, usize))) -> Inputs {
 #[test]
 fn allocation_fable_pane_judges_each_window_against_its_own_renewal() {
     // a Fable pane at 0.02 an hour alone on P1; P2 lasts it a day
-    let fable = Mover { class: Class::Restricted, rate: 0.02, tokens: None };
+    let fable = Mover { class: Class::Restricted, rate: 0.02, tokens: None, fable: None };
     let tab = [(Some(1), Class::Restricted, 0.02)];
     let go_from = |p1: Quant| go(&resting(vec![p1, acct(2, 0.9, 0.5, 60.0)], &tab, fable, 1, false, 5.0, 0.02, 0.0));
     // Fable runs out in 1.5 h, long before it renews; the week renewing
@@ -189,7 +189,7 @@ fn allocation_u_reservation_counts_the_plain_panes_already_there() {
     // Fable is short and takes all of P2 but its N, 0.02: that lasts a
     // pane at 0.01 two hours alone, 40 minutes beside one at 0.02
     let a = vec![acct(2, 0.5, 0.48, 100.0), acct(3, 0.0, 0.0, 50.0)];
-    let mover = Mover { class: Class::Plain, rate: 0.01, tokens: None };
+    let mover = Mover { class: Class::Plain, rate: 0.01, tokens: None, fable: None };
     let x = resting(a.clone(), &[], mover, 3, false, 5.0, 0.05, 0.03);
     let p = x.plan();
     assert!(p.unassigned_f > 0.0 && (p.u[0] - 0.02).abs() < 1e-9, "{p:?}");

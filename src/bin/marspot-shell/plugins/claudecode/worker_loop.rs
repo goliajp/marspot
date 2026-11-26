@@ -4,20 +4,21 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use super::allocation_adapter::{Allocation, events_dir};
 use super::allocation_inputs::{MarksFile, snapshot};
+use super::allocation_more::Hold;
 use super::*;
 
 /// Worker thread entry.  Lives until the request channel is dropped
 /// (which `stop()` triggers by clearing `scan_req_tx`).
 pub(super) fn worker_main(
     mut ctx: WorkerCtx,
-    req_rx: Receiver<()>,
+    req_rx: Receiver<Option<u64>>,
     res_tx: Sender<ScanResult>,
 ) {
     ctx.caches.trends.load();
     let state = marspot::paths::state_root();
     let mut allocation = Allocation::new(events_dir(&state));
     let mut marks = MarksFile::new(state.join("plugins").join("claudecode"));
-    while req_rx.recv().is_ok() {
+    while let Ok(focus) = req_rx.recv() {
         // Deliberately outside `scan_once`: this one reaches out of
         // marspot and edits Claude Code's settings, and `scan_once`
         // is called directly by tests that have no business doing
@@ -28,7 +29,10 @@ pub(super) fn worker_main(
         let mut result = ctx.scan_once(&crate::observe::shared().latest());
         let now = rooms::unix_now();
         allocation.set_live(marspot::settings::get().cc_rebalance == marspot::settings::Rebalance::Live, now);
-        for (tag, line) in allocation.observe(&snapshot(&result, &ctx.seen, marks.read(now), now)) {
+        let snap = snapshot(&result, &ctx.seen, marks.read(now), now);
+        let mut lines = allocation.observe(&snap);
+        lines.extend(allocation.record_more(&snap, &holds(&result, focus)));
+        for (tag, line) in lines {
             marspot::lx_info!(&*format!("plugin.claudecode.{tag}"), &line);
         }
         result.alloc = allocation.view.take();
@@ -37,4 +41,13 @@ pub(super) fn worker_main(
             break;
         }
     }
+}
+
+/// What each bound pane has that would hold a move, besides its transcript.
+pub(super) fn holds(result: &ScanResult, focus: Option<u64>) -> HashMap<u64, Hold> {
+    let hold = |sid: u64, m: &BindMeta| {
+        let vetoes = result.new_vetoes.get(&sid).copied();
+        Hold { child: vetoes.map(|v| v.0), timer: vetoes.map(|v| v.1), helpers: result.helpers.sits_out(sid), focus: focus == Some(sid), claude_pid: m.claude.pid }
+    };
+    result.new_meta.iter().map(|(sid, m)| (*sid, hold(*sid, m))).collect()
 }

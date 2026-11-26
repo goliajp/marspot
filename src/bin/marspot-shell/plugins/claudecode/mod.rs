@@ -9,14 +9,6 @@
 //!   (idempotent — only re-logs when sessionId or mtime changes)
 //! - a `plugin.claudecode.session_done` line when an assistant
 //!   message appears at the tail (for OS notification later)
-//!
-//! ## Why not per-pane mapping yet (M3)
-//!
-//! Per-pane PTY → claude pid → cwd → project chain needs L4 shelld
-//! cooperation (PTY device path) or libc-heavy `proc_pidinfo`.  M2
-//! surfaces the global session list so the value is visible
-//! immediately; M3 wires per-pane mapping when there's signal that
-//! it's needed.
 
 mod idle;
 mod idle_rule;
@@ -65,9 +57,12 @@ mod bind_meta;
 mod allocation_adapter;
 mod allocation_decide;
 pub(in crate::plugins) mod allocation_events;
+mod allocation_hours;
 mod allocation_inputs;
 mod allocation_line;
+mod allocation_more;
 mod allocation_prices;
+mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;
 mod alloc_moves;
@@ -244,7 +239,7 @@ pub struct ClaudecodePlugin {
     worker: Option<JoinHandle<()>>,
     /// Send a unit to ask the worker to run another full scan pass.
     /// `None` after `stop()` so `tick` skips the send.
-    scan_req_tx: Option<Sender<()>>,
+    scan_req_tx: Option<Sender<Option<u64>>>,
     /// Newest `ScanResult` arrives here.  `tick` drains it eagerly
     /// (only the latest result matters; older ones are stale).
     /// `Mutex` purely to satisfy `Plugin: Sync` — only the L1 main
@@ -404,6 +399,7 @@ mod tests {
     mod cycle_clicks;
     mod fable_refused;
     mod reset_read;
+    mod boundary_holds;
     mod support;
     use support::*;
 

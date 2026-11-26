@@ -148,6 +148,11 @@ fn pane_in(sid: u64, m: &BindMeta, result: &ScanResult, seen: &HashMap<PathBuf, 
     })
 }
 
+/// The time in a fact's `at=<unix>` detail.
+pub(super) fn at_of(detail: &str) -> Option<i64> {
+    detail.strip_prefix("at=")?.parse().ok()
+}
+
 /// The main thread's `fable_need` file, read again when it changes.
 #[derive(Debug)]
 pub(super) struct MarksFile {

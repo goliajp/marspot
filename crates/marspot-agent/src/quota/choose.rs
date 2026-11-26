@@ -17,7 +17,7 @@
 //! it under an hour.
 
 use super::plan::Plan;
-use super::{Class, EPS, Load, Quant, lasts, plain_lasts};
+use super::{Class, EPS, Load, Quant, lasts_of, plain_lasts};
 
 /// How long a must-move target has to last with the pane on it.
 pub const MUST_LAST_H: f64 = 6.0;
@@ -50,21 +50,54 @@ impl Reserve {
         }
         match self {
             Reserve::None => false,
-            Reserve::U => plain_lasts(plan.u[i], load, m.rate) < RESERVED_H,
-            Reserve::N => plain_lasts(q.n(), load, m.rate) < MUST_LAST_H,
+            Reserve::U => plain_lasts(plan.u[i], load, m.b()) < RESERVED_H,
+            Reserve::N => plain_lasts(q.n(), load, m.b()) < MUST_LAST_H,
         }
     }
 }
 
 /// The pane being placed.
+///
+/// `class` is where it may sit: a pane that needs the restricted model
+/// only goes where that model has room.  What it draws from each window
+/// is its two speeds: `a` from the restricted window and the week, `b`
+/// from the week only.  A restricted session whose subagents run another
+/// model draws mostly `b`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Mover {
     pub class: Class,
-    /// What it is believed to use an hour.
+    /// What it is believed to use an hour, both speeds together.
     pub rate: f64,
     /// Its context, which a move rewrites into the new account's prompt
     /// cache; `None` where it is not known.
     pub tokens: Option<u64>,
+    /// Of `rate`, what it uses of the restricted model; `None` where the
+    /// two are not told apart, and then all of `rate` is its class's.
+    pub fable: Option<f64>,
+}
+
+impl Mover {
+    /// Its restricted speed, `a`.
+    pub fn a(&self) -> f64 {
+        match (self.fable, self.class) {
+            (Some(a), _) => a.clamp(0.0, self.rate.max(0.0)),
+            (None, Class::Restricted) => self.rate,
+            (None, Class::Plain) => 0.0,
+        }
+    }
+
+    /// Its speed on the other models, `b`.
+    pub fn b(&self) -> f64 {
+        self.rate - self.a()
+    }
+
+    /// Its speed of `class`.
+    pub fn of(&self, class: Class) -> f64 {
+        match class {
+            Class::Restricted => self.a(),
+            Class::Plain => self.b(),
+        }
+    }
 }
 
 /// Where a pane that has to move goes, or `None` when no account takes
@@ -127,10 +160,10 @@ fn key(q: &Quant, plan: &Plan, i: usize, load: &Load, m: Mover, horizon_h: f64) 
     let total = load.total() + m.rate;
     let tier = match m.class {
         Class::Restricted => {
-            if lasts(q, load, m.class, m.rate) >= horizon_h { 0 } else { 2 }
+            if lasts_of(q, load, m) >= horizon_h { 0 } else { 2 }
         }
         Class::Plain => {
-            if plain_lasts(plan.u[i], load, m.rate) >= horizon_h {
+            if plain_lasts(plan.u[i], load, m.b()) >= horizon_h {
                 0
             } else if q.r / total >= horizon_h {
                 1
@@ -143,8 +176,8 @@ fn key(q: &Quant, plan: &Plan, i: usize, load: &Load, m: Mover, horizon_h: f64) 
         Class::Restricted => plan.t_f[i],
         Class::Plain => plan.t_n[i],
     };
-    let short = target - load.of(m.class) >= m.rate / 2.0;
-    let order = if short { q.renews_in(m.class) } else { -lasts(q, load, m.class, m.rate) };
+    let short = target - load.of(m.class) >= m.of(m.class) / 2.0;
+    let order = if short { q.renews_in(m.class) } else { -lasts_of(q, load, m) };
     Key { stale: q.stale, tier, no_deficit: !short, order, id: q.id }
 }
 
@@ -158,6 +191,23 @@ pub fn loads_of(accounts: &[Quant], panes: &[(Option<u8>, Class, f64)], skip: Op
         }
         if let Some(i) = on.and_then(|id| accounts.iter().position(|q| q.id == id)) {
             loads[i].add(*class, *rate);
+        }
+    }
+    loads
+}
+
+/// The same from each pane's account and two speeds `(a, b)`: the
+/// restricted load is what the panes use of the restricted model, not
+/// the whole speed of the panes that need it.
+pub fn loads_split(accounts: &[Quant], panes: &[(Option<u8>, f64, f64)], skip: Option<usize>) -> Vec<Load> {
+    let mut loads = vec![Load::default(); accounts.len()];
+    for (j, (on, a, b)) in panes.iter().enumerate() {
+        if Some(j) == skip {
+            continue;
+        }
+        if let Some(i) = on.and_then(|id| accounts.iter().position(|q| q.id == id)) {
+            loads[i].restricted += a;
+            loads[i].plain += b;
         }
     }
     loads

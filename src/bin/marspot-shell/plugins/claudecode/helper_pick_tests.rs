@@ -150,14 +150,14 @@ fn helpers_refused_one_after_another_are_moved_to_different_accounts() {
     let mut placed = Placed::default();
     let mut got = Vec::new();
     for _ in 0..2 {
-        let Placement::To(to, inputs) = place(&scene, Mover { class: Class::Plain, rate: RHO0, tokens: None }, Some(1), &placed.counts()) else { panic!() };
+        let Placement::To(to, inputs) = place(&scene, Mover { class: Class::Plain, rate: RHO0, tokens: None, fable: None }, Some(1), &placed.counts()) else { panic!() };
         assert_eq!(inputs.decide(&inputs.plan()).map(|(t, _)| t), Some(to), "the logged inputs give the same answer");
         placed.note(to, Class::Plain, 1);
         got.push(to);
     }
     assert_eq!(got, [2, 3]);
     let all_out = vec![(1, renewing(1.0, 30.0)), (2, renewing(1.0, 10.0))];
-    assert_eq!(place(&rooms_scene(&all_out, &[], None, NOW), Mover { class: Class::Plain, rate: RHO0, tokens: None }, Some(1), &[]), Placement::Nowhere);
+    assert_eq!(place(&rooms_scene(&all_out, &[], None, NOW), Mover { class: Class::Plain, rate: RHO0, tokens: None, fable: None }, Some(1), &[]), Placement::Nowhere);
 }
 
 #[test]

@@ -17,7 +17,7 @@ use super::allocation_inputs::{AccountIn, Snapshot};
 use super::fable_need::FABLE;
 use super::quota::helper_pick::{Placed, unread_pick};
 use super::quota::{Move, Room};
-use crate::plugins::allocation::choose::{MUST_LAST_H, Mover, loads_of};
+use crate::plugins::allocation::choose::{MUST_LAST_H, Mover, loads_split};
 use crate::plugins::allocation::helper::{Placement, Scene, place_by};
 use crate::plugins::allocation::notice::stranded;
 use crate::plugins::allocation::replay::{Inputs, Kind, Rule, Why};
@@ -51,6 +51,9 @@ pub(super) struct View {
     pub rule: Rule,
     /// Each pane's context where the scan read one, tokens.
     pub tokens: HashMap<u64, u64>,
+    /// Each pane's restricted speed where the scan measured one; the
+    /// rest of its speed is the other models'.
+    pub fable: HashMap<u64, f64>,
 }
 
 impl View {
@@ -68,7 +71,8 @@ impl View {
         // readings also see what nothing here measured
         let b_f = rates.iter().map(|(f, _)| f).sum::<f64>().max(slope_f);
         let b_n = rates.iter().map(|(_, n)| n).sum();
-        View { accounts, b_f, b_n, panes, rest: HashMap::new(), rule: Rule::waste(0), tokens: HashMap::new() }
+        let fable = snap.panes.iter().zip(rates).map(|(p, (f, _))| (p.sid, *f)).collect();
+        View { accounts, b_f, b_n, panes, rest: HashMap::new(), rule: Rule::waste(0), tokens: HashMap::new(), fable }
     }
 
     /// The same with every pane at the default speed of its class.
@@ -89,6 +93,7 @@ impl View {
             v.b_f = last.b_f;
             v.b_n = last.b_n;
             v.tokens = last.tokens.clone();
+            v.fable = last.fable.clone();
         }
         v
     }
@@ -115,8 +120,7 @@ impl View {
     /// judges them and the speeds of every pane but `skip`.
     pub(super) fn helper_scene(&self, rooms: &[(u8, Room)], skip: Option<u64>) -> Scene {
         let accounts = self.judged(rooms);
-        let table: Vec<(Option<u8>, Class, f64)> = self.panes.iter().filter(|p| Some(p.0) != skip).map(|p| (Some(p.1), p.2, p.3)).collect();
-        let loads = loads_of(&accounts, &table, None);
+        let loads = self.loads(&accounts, skip);
         Scene { accounts, loads, b_f: self.b_f, b_n: self.b_n, kappa: Some(KAPPA_FABLE), shown: Some(self.helpers()) }
     }
 
@@ -129,7 +133,7 @@ impl View {
     /// whose panes these loads do not hold yet counted on their
     /// accounts; with the inputs that chose it when the core chose it.
     pub(super) fn helper_must_move(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class, placed: &Placed) -> (Move, Option<Inputs>) {
-        let mover = Mover { class, rate: self.rate_of(sid, class), tokens: self.tokens.get(&sid).copied() };
+        let mover = self.mover(sid, class);
         let scene = self.helper_scene(rooms, Some(sid));
         match place_by(&scene, mover, Some(from), &placed.counts(), self.rule) {
             Placement::To(to, inputs) => (Move::To(to), Some(inputs)),
@@ -172,6 +176,23 @@ impl View {
             .collect()
     }
 
+    /// Each account's load from every pane but `skip`, by its two speeds.
+    fn loads(&self, accounts: &[Quant], skip: Option<u64>) -> Vec<crate::plugins::allocation::Load> {
+        let split = |p: &PaneRow| {
+            let a = self.fable.get(&p.0).copied().unwrap_or(if p.2 == Class::Restricted { p.3 } else { 0.0 }).min(p.3);
+            (Some(p.1), a, p.3 - a)
+        };
+        let table: Vec<(Option<u8>, f64, f64)> = self.panes.iter().filter(|p| Some(p.0) != skip).map(split).collect();
+        loads_split(accounts, &table, None)
+    }
+
+    /// Pane `sid` judged as `class`, with its two speeds where measured.
+    fn mover(&self, sid: u64, class: Class) -> Mover {
+        let known = self.panes.iter().any(|p| p.0 == sid);
+        let fable = self.fable.get(&sid).copied().filter(|_| known);
+        Mover { class, rate: self.rate_of(sid, class), tokens: self.tokens.get(&sid).copied(), fable }
+    }
+
     fn rate_of(&self, sid: u64, class: Class) -> f64 {
         self.panes.iter().find(|p| p.0 == sid).map_or_else(
             || {
@@ -185,9 +206,8 @@ impl View {
     /// What a choice for pane `sid` of `class` on `from` reads.
     fn inputs(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class, horizon_h: f64) -> Inputs {
         let accounts = self.judged(rooms);
-        let table: Vec<(Option<u8>, Class, f64)> = self.panes.iter().filter(|p| p.0 != sid).map(|p| (Some(p.1), p.2, p.3)).collect();
-        let loads = loads_of(&accounts, &table, None);
-        let mover = Mover { class, rate: self.rate_of(sid, class), tokens: self.tokens.get(&sid).copied() };
+        let loads = self.loads(&accounts, Some(sid));
+        let mover = self.mover(sid, class);
         Inputs { accounts, b_f: self.b_f, b_n: self.b_n, kappa: Some(KAPPA_FABLE), loads, mover, here: from, kind: Kind::Out { horizon_h } }
     }
 

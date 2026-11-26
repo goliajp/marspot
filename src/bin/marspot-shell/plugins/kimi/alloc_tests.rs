@@ -124,7 +124,7 @@ fn kimi_an_account_paying_beyond_its_allowance_is_no_target() {
 }
 
 fn decision(to: u8, why: Why) -> Decision {
-    let inputs = Inputs { accounts: Vec::new(), b_f: 0.0, b_n: 0.0, kappa: None, loads: Vec::new(), mover: crate::plugins::allocation::choose::Mover { class: crate::plugins::allocation::Class::Plain, rate: 0.0, tokens: None }, here: 1, kind: crate::plugins::allocation::replay::Kind::Out { horizon_h: 6.0 } };
+    let inputs = Inputs { accounts: Vec::new(), b_f: 0.0, b_n: 0.0, kappa: None, loads: Vec::new(), mover: crate::plugins::allocation::choose::Mover { class: crate::plugins::allocation::Class::Plain, rate: 0.0, tokens: None, fable: None }, here: 1, kind: crate::plugins::allocation::replay::Kind::Out { horizon_h: 6.0 } };
     Decision { sid: 7, to, why, inputs }
 }
 

@@ -106,7 +106,7 @@ fn place_among(s: &mut Shared, live: bool, homes: &[u8], model: Option<&str>, no
         let ev = Event { at: now, sid: 0, kind: kind.into(), profile, class: "plain".into(), detail };
         let _ = EventLog::for_agent(dir.to_path_buf(), "gemini").append(&ev);
     };
-    let (to, inputs) = match place(&scene, Mover { class: Class::Plain, rate: RHO0, tokens: None }, None, &placed) {
+    let (to, inputs) = match place(&scene, Mover { class: Class::Plain, rate: RHO0, tokens: None, fable: None }, None, &placed) {
         Placement::To(to, inputs) | Placement::HeldBack(to, inputs) => (to, inputs),
         Placement::Nowhere => {
             let back: Vec<(u8, i64)> = homes.iter().filter_map(|&h| shut(&refused, h, model, now).map(|t| (h, t))).collect();

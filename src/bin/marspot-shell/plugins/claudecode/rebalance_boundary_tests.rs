@@ -33,6 +33,22 @@ fn a_move_ends_the_rest_with_its_line_at_once() {
 }
 
 #[test]
+fn a_rest_a_move_closed_is_not_reopened_by_the_sweeps_before_the_new_claude_binds() {
+    let mut b = Boundaries::default();
+    let t0 = Instant::now();
+    b.look(441, t0, Some(s(70)), Some(P7), Outcome::WouldMove);
+    assert_eq!(b.look(441, t0 + s(1), Some(s(71)), Some(P7), Outcome::Moved).len(), 1);
+    let again = b.look(441, t0 + s(3), Some(s(73)), Some(P7), Outcome::Held(Veto::MoveOnItsWay));
+    assert!(again.is_empty(), "{again:?}");
+    assert!(b.look(441, t0 + s(4), None, Some(P7), Outcome::Held(Veto::Working)).is_empty());
+    // the next rest is a rest of its own
+    b.look(441, t0 + s(400), Some(s(5)), Some(P7), Outcome::Held(Veto::Settling));
+    assert_eq!(b.look(441, t0 + s(500), None, Some(P7), Outcome::Held(Veto::Working)).len(), 1);
+    assert!(b.retain(|sid| sid != 441).is_empty());
+    assert!(b.closed.is_empty(), "a gone pane's closed rest is forgotten");
+}
+
+#[test]
 fn a_rest_the_sweep_did_not_see_end_is_closed_by_the_next_rest() {
     let mut b = Boundaries::default();
     let t0 = Instant::now();

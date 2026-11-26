@@ -173,6 +173,9 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     // the agent's own home; marspot reads no file in it
     e("helpers/<id>/**", External, "the helper agent, its container home", "removed with the helper", false),
     e("plugins/claudecode/alloc_events/<date>.tsv", Fact, "claudecode allocation_events (alloc, sched)", "15 days", true),
+    // summed from each hour's events once that hour ends, never rewritten,
+    // and kept past the events it was summed from
+    e("plugins/claudecode/alloc_hours/<n>.tsv", Fact, "claudecode allocation_hours (alloc)", "60 days, one file a month", true),
     e("plugins/codex/alloc_events/<date>.tsv", Fact, "codex alloc (claudecode allocation_events)", "15 days", true),
     e("plugins/gemini/alloc_events/<date>.tsv", Fact, "gemini alloc (claudecode allocation_events)", "15 days", true),
     e("plugins/kimi/alloc_events/<date>.tsv", Fact, "kimi alloc (claudecode allocation_events)", "15 days", true),

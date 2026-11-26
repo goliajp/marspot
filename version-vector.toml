@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.777"  # stored resets are read from the codex answers and the devops feed, kept as facts and counted as supply with a deadline
+shell   = "0.7.785"  # a pane busy across a shell restart counts busy on both sides of the gap
 core    = "0.12.718"  # the accounts panel lists each account's stored resets under its bars, end before start
 session = "0.11.467"  # marspot-term gains the two reset settings (not used by session)

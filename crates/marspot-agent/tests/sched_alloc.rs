@@ -84,3 +84,25 @@ fn sched_every_existing_decision_equals_choose() {
     }
     assert!(differ.is_empty(), "the selector decides otherwise:\n{}", differ.join("\n"));
 }
+
+/// The rows were written before a pane's two speeds were; read without
+/// `a=`/`b=`, each pane's whole speed is its class's, and spelling that
+/// split out decides every row the same.
+#[test]
+fn sched_rows_without_two_speeds_decide_as_their_split_spelled_out() {
+    let rows = rows();
+    let (mut would, mut moved) = (0, 0);
+    for (n, r) in rows.iter().enumerate() {
+        let i = Inputs::decode(r.detail).unwrap_or_else(|| panic!("row {n} does not decode"));
+        assert_eq!(i.mover.fable, None, "row {n}");
+        let mut spelled = i.clone();
+        spelled.mover.fable = Some(i.mover.a());
+        let again = Inputs::decode(&spelled.encode()).expect("the split row decodes");
+        let rule = in_force(r.detail);
+        assert_eq!(again.decide_by(&again.plan(), rule), i.decide_by(&i.plan(), rule), "row {n}");
+        assert_eq!(alloc::decide(&again, rule, &|_| true, 0.0, &POLICY).action, alloc::decide(&i, rule, &|_| true, 0.0, &POLICY).action, "row {n}");
+        would += usize::from(r.kind == "would_move");
+        moved += usize::from(r.kind == "moved");
+    }
+    assert_eq!((would, moved), (72, 18));
+}

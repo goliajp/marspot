@@ -92,6 +92,9 @@ impl Rest {
 pub(super) struct Boundaries {
     standing: HashMap<u64, Target>,
     open: HashMap<u64, Rest>,
+    /// The start of the rest a move closed: the sweeps until the scan
+    /// binds the new claude still see that rest, and it has its line.
+    closed: HashMap<u64, Instant>,
 }
 
 impl Boundaries {
@@ -127,6 +130,9 @@ impl Boundaries {
             lines.push(r.line(sid, false));
         }
         let Some(started) = started else { return lines };
+        if self.closed.get(&sid).is_some_and(|c| abs_diff(started, *c) <= SAME_REST) {
+            return lines;
+        }
         if !self.open.contains_key(&sid) {
             let Some(target) = target else { return lines };
             self.open.insert(sid, Rest { started, last_at: now, target, seen: Vec::new() });
@@ -143,6 +149,7 @@ impl Boundaries {
         if o == Outcome::Moved
             && let Some(r) = self.open.remove(&sid)
         {
+            self.closed.insert(sid, r.started);
             lines.push(r.line(sid, false));
         }
         lines
@@ -151,6 +158,7 @@ impl Boundaries {
     /// Forget panes that are gone; a rest they were in ends with them.
     pub(super) fn retain(&mut self, alive: impl Fn(u64) -> bool) -> Vec<String> {
         self.standing.retain(|sid, _| alive(*sid));
+        self.closed.retain(|sid, _| alive(*sid));
         let gone: Vec<u64> = self.open.keys().copied().filter(|sid| !alive(*sid)).collect();
         gone.into_iter().filter_map(|sid| self.open.remove(&sid).map(|r| r.line(sid, true))).collect()
     }

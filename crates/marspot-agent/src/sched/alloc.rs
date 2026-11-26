@@ -24,7 +24,7 @@ use crate::quota::choose::MUST_LAST_H;
 use crate::quota::replay::{Inputs, Kind, Rule};
 use crate::quota::rest::{BAND_COOLDOWN_H, BAND_PER_HOUR, MOVES_PER_WEEK, NO_RETURN_H};
 use crate::quota::waste::{Params, added, keeps_the_rest, switch_cost};
-use crate::quota::{Class, EPS, Load, Quant, lasts};
+use crate::quota::{Class, EPS, Load, Quant, lasts_of};
 
 /// Points in a week of quota.
 pub const POINTS: f64 = 100.0;
@@ -66,7 +66,7 @@ fn tie_order(accounts: &[Quant], loads: &[Load], i: &Inputs, to: &mut [(usize, T
     let m = i.mover;
     to.sort_by(|(a, _), (b, _)| {
         let (qa, qb) = (&accounts[*a], &accounts[*b]);
-        let last = |j: usize| lasts(&accounts[j], &loads[j], m.class, m.rate);
+        let last = |j: usize| lasts_of(&accounts[j], &loads[j], m);
         qa.renews_in(m.class).total_cmp(&qb.renews_in(m.class)).then(last(*b).total_cmp(&last(*a))).then(qa.id.cmp(&qb.id))
     });
 }
@@ -105,7 +105,7 @@ fn resting(i: &Inputs, rule: Rule, p: &Params, allow: &dyn Fn(&Quant) -> bool) -
     };
     let Some(hi) = i.accounts.iter().position(|q| q.id == i.here) else { return Cands::default() };
     let mut others = i.loads.to_vec();
-    others[hi].add(m.class, -m.rate);
+    others[hi].add_mover(m, -1.0);
     let stays = added(&i.accounts[hi], &others[hi], m, i.kappa, MUST_LAST_H, p).cost;
     let stay = Some(Terms { money: stays * POINTS, efficiency: 0.0, fairness: 0.0 });
     let limited = *stale_feed || *moves_week >= MOVES_PER_WEEK || moves_day >= p.per_day || *band_last_hour >= BAND_PER_HOUR;
