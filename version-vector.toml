@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.735"  # account choice, its simulator, Room, Seen and unix_now live in marspot-agent; the shell paths forward
-core    = "0.12.703"  # marspot-term defines AgentKind once, with the strip agent's wire values
+shell   = "0.7.736"  # marspot-peer takes AgentKind from marspot-term instead of defining its own
+core    = "0.12.704"  # marspot-peer takes AgentKind from marspot-term instead of defining its own
 session = "0.11.455"  # claudecode.rebalance is live unless the file says otherwise; on and true mean live
