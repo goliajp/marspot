@@ -129,8 +129,7 @@ impl CoreApp {
         let typed = (f.msg_type == MsgType::PaneType).then(|| decode_pane_type(&f.payload)).transpose();
         if let Ok(Some(t)) = &typed {
             let text = String::from_utf8_lossy(&t.bytes);
-            let submits = t.enter || (!t.paste && super::model_guard::submits(&t.bytes));
-            if self.model_guard_refuses(sid, &text, submits, "pane_type") {
+            if self.model_guard_refuses(sid, &text, t.paste, t.enter, "pane_type") {
                 return self.answer(f.msg_type, req_id, sid, DoneCode::Other, super::model_guard::REFUSED);
             }
         }

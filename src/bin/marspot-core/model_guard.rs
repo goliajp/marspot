@@ -11,7 +11,16 @@
 //!   confirm.
 //!
 //! The check runs only on Enter, and reads cells until it finds Claude
-//! Code's prompt; a key that is not Enter costs one comparison.
+//! Code's prompt; a key that is not Enter costs one comparison.  It
+//! reads the live screen, whatever the pane is scrolled to, and only
+//! while the pane itself has the keys: an Enter for a helper strip is
+//! the strip's.
+//!
+//! What it cannot see: an Enter that reaches the pane before the screen
+//! shows the `/model` typed just before it (keys typed faster than
+//! Claude Code redraws its box) is sent as it would be without the
+//! guard.  The shared-settings watch in the shell is what still stands
+//! between such a `/model` and the other accounts.
 
 use super::*;
 use marspot::input::{KeyState, LogicalKey, NamedKey};
@@ -46,7 +55,7 @@ fn plain(m: Modifiers) -> bool {
 /// What Claude Code's box in `pane` holds, when `pane` shows one live.
 fn box_in(pane: &Pane) -> Option<String> {
     let grid = pane.session().grid();
-    (pane.is_l3() && pane.view_offset() == 0 && claude_prompt_row(grid).is_some()).then(|| claude_box_text(grid))?
+    (pane.is_l3() && claude_prompt_row(grid).is_some()).then(|| claude_box_text(grid))?
 }
 
 impl CoreApp {
@@ -55,8 +64,9 @@ impl CoreApp {
         let window_id = self.windows[wi].window_id;
         let shown = self.focused_shown(wi).and_then(Pane::shelld_session_id);
         if let Some(held) = self.notices.guard.as_ref().filter(|h| h.window_id == window_id) {
-            if Some(held.sid) == shown {
-                return self.answer_guard(event, mods);
+            if Some(held.sid) == shown && !self.strip_has_keys(window_id) {
+                // the window's own shortcuts still work while it asks
+                return !mods.super_ && self.answer_guard(event, mods);
             }
             // focus moved away from the question: it is dropped, as Esc would
             self.drop_guard("focus_moved");
@@ -65,7 +75,7 @@ impl CoreApp {
             && !event.repeat
             && event.logical == LogicalKey::Named(NamedKey::Enter)
             && plain(mods);
-        if !enter || !managed() {
+        if !enter || !managed() || self.strip_has_keys(window_id) {
             return false;
         }
         let Some((sid, text)) = self.focused_shown(wi).and_then(|p| Some((p.shelld_session_id()?, box_in(p)?))) else {
@@ -115,18 +125,19 @@ impl CoreApp {
     }
 
     /// Whether a program's input to session `sid` would send `/model`
-    /// from Claude Code's box: `typed` is what goes in first, and
-    /// `submits` says whether an Enter follows it.  A refusal is logged
-    /// and said over the focused pane.
-    pub(super) fn model_guard_refuses(&mut self, sid: u64, typed: &str, submits: bool, from: &str) -> bool {
+    /// from Claude Code's box: `typed` goes in as a paste or as typed
+    /// text, then an Enter when `enter`.  A refusal is logged and said
+    /// over the focused pane.
+    pub(super) fn model_guard_refuses(&mut self, sid: u64, typed: &str, paste: bool, enter: bool, from: &str) -> bool {
         if !managed() {
             return false;
         }
         let Some(held) = self.pane_by_sid_mut(sid).and_then(|p| box_in(p)) else { return false };
         let now = Instant::now();
         let pasted = self.notices.pasted.is_some_and(|(s, until)| s == sid && now < until);
-        let refuse = submits && (sends_model(&held, typed) || (pasted && typed.split(['\r', '\n']).next() == Some("")));
-        if !submits && sends_model(&held, typed) {
+        let sends_first = typed.split(['\r', '\n']).next() == Some("") && (enter || (!paste && submits(typed.as_bytes())));
+        let refuse = sends_model(&held, typed, paste, enter) || (pasted && sends_first);
+        if paste && !enter && sends_model(&held, typed, true, true) {
             self.notices.pasted = Some((sid, now + PASTE_STANDS));
         }
         if refuse {
@@ -140,7 +151,7 @@ impl CoreApp {
 
 /// Whether `bytes`, written to a pane's terminal as they are, end a
 /// line.
-pub(super) fn submits(bytes: &[u8]) -> bool {
+fn submits(bytes: &[u8]) -> bool {
     bytes.iter().any(|b| matches!(b, b'\r' | b'\n'))
 }
 

@@ -1,7 +1,7 @@
 //! The keys of a strip, while the focus, the selection and the rows
 //! change under it.
 
-use super::host_tests::{gone, say, Session};
+use super::host_tests::{frame, gone, say, Session};
 use super::keys_tests::{after_probe, claude_screen, ev, has_keys, press, under_claude, DOWN, ENTER, UP};
 use super::*;
 use crate::boot_assembly_tests::Sandbox;
@@ -115,4 +115,20 @@ fn helper_strip_a_paste_while_the_agent_has_its_time_stops_the_probe() {
     assert!(app.strips.keys.due().is_none());
     after_probe(&mut app);
     assert!(!has_keys(&app));
+}
+
+#[test]
+fn helper_strip_an_enter_for_the_strip_is_not_held_for_model() {
+    let sb = Sandbox::new();
+    let (mut app, mut s, _h) = under_claude(&sb, 2, &claude_screen(60, "", ""));
+    marspot::settings::set_for_test(marspot::settings::Settings { cc_model: marspot::settings::CcModel::Managed, ..Default::default() });
+    take(&mut app);
+    // a key since the keys were taken: a new screen no longer gives them back
+    press(&mut app, DOWN);
+    frame(&mut app, &mut s, claude_screen(60, "/model", "").as_bytes());
+    app.strips_tick();
+    assert!(has_keys(&app));
+    press(&mut app, ENTER);
+    assert!(app.notices.guard.is_none(), "the Enter was the strip's");
+    assert!(app.windows[0].panes[0].peeked().is_some(), "and it viewed the selected row");
 }

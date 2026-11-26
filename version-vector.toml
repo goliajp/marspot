@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.794"  # the shared settings watch acts only on whole text, never removes the file and puts back only the model key
-core    = "0.12.724"  # marspot-term moves the reading of a settings line to its values file
+shell   = "0.7.795"  # the lib tells /model sent from any line of a program's input, or after editing the box (not used by shell)
+core    = "0.12.725"  # a program cannot send /model from a later line, after editing the box or by a raw paste; Enter is held when scrolled back, not when the strip has the keys
 session = "0.11.470"  # marspot-term moves the reading of a settings line to its values file (not used by session)

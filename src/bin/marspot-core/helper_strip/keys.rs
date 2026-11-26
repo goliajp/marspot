@@ -277,6 +277,11 @@ impl CoreApp {
         (rows > 0).then_some((rows, host.drawn.has_main() || at.shown != at.host))
     }
 
+    /// Whether a strip in window `window_id` has the keys, not its pane.
+    pub(in super::super) fn strip_has_keys(&self, window_id: u32) -> bool {
+        self.strips.keys.focus.as_ref().is_some_and(|f| f.at.window_id == window_id)
+    }
+
     /// Something other than a key happened in the strip's pane: what
     /// was waited for or taken goes.
     pub(in super::super) fn strip_keys_interrupted(&mut self) {

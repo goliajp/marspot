@@ -40,15 +40,45 @@ pub fn is_model_command(line: &str) -> bool {
     line.trim_start().strip_prefix("/model").is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
-/// Whether Claude Code would run `/model` if `typed` were typed into
-/// the box now holding `held` and then sent: `typed` up to its first
-/// line break, after what the box holds.
-pub fn sends_model(held: &str, typed: &str) -> bool {
-    let typed = typed.split(['\r', '\n']).next().unwrap_or("");
-    let mut line = String::with_capacity(held.len() + typed.len());
-    line.push_str(held);
-    line.push_str(typed);
-    is_model_command(&line)
+/// Whether Claude Code would run `/model` if a program's `typed` went
+/// into the box now holding `held`, followed by an Enter when `enter`.
+///
+/// A paste goes into the box whole, its line breaks with it, and only
+/// the Enter after it sends.  Typed text sends at every line break and
+/// leaves the box empty after each; backspace, Ctrl-U and Ctrl-W edit
+/// the line as they would.  Any other control byte or escape sequence
+/// (cursor keys, a bracketed paste of its own) cannot be followed, so
+/// text holding one, `/model` in the box or in the text, and a send
+/// counts as sending it.
+pub fn sends_model(held: &str, typed: &str, paste: bool, enter: bool) -> bool {
+    if paste {
+        return enter && is_model_command(&format!("{held}{typed}"));
+    }
+    let mut line = held.to_string();
+    let (mut sent, mut control) = (false, false);
+    for c in typed.chars() {
+        match c {
+            '\r' | '\n' => {
+                if is_model_command(&line) {
+                    return true;
+                }
+                (sent, line) = (true, String::new());
+            }
+            '\x7f' | '\x08' => {
+                line.pop();
+            }
+            '\x15' => line.clear(),
+            '\x17' => line.truncate(line.trim_end().trim_end_matches(|c: char| !c.is_whitespace()).len()),
+            c if c.is_control() => {}
+            c => line.push(c),
+        }
+        control |= c.is_control() && !matches!(c, '\r' | '\n');
+    }
+    if enter && is_model_command(&line) {
+        return true;
+    }
+    let shown: String = held.chars().chain(typed.chars()).filter(|c| !c.is_control()).collect();
+    (sent || enter) && control && shown.contains("/model")
 }
 
 #[cfg(test)]
@@ -75,10 +105,40 @@ mod tests {
         for line in ["/models", "/modelx", "model", "say /model", "", "/mode"] {
             assert!(!is_model_command(line), "{line:?}");
         }
-        assert!(sends_model("", "/model fable\r"));
-        assert!(sends_model("/mod", "el\n"));
-        assert!(!sends_model("hello ", "/model"));
-        assert!(!sends_model("", "ok\r/model\r"), "only the first line is sent from this box");
+    }
+
+    #[test]
+    fn typed_text_sends_model_from_any_line_with_the_box_empty_after_each_break() {
+        assert!(sends_model("", "/model fable\r", false, false));
+        assert!(sends_model("/mod", "el\n", false, false));
+        assert!(sends_model("", "/model", false, true), "an Enter after it");
+        assert!(!sends_model("", "/model", false, false), "typing it alone sends nothing");
+        assert!(!sends_model("hello ", "/model\r", false, false));
+        assert!(sends_model("", "hi\r/model\r", false, false), "the box is empty after the first line");
+        assert!(sends_model("draft", "\r/model opus", false, true));
+        assert!(!sends_model("", "hi\r/models\r", false, false));
+    }
+
+    #[test]
+    fn line_editing_bytes_are_followed_and_other_control_bytes_refuse_model() {
+        assert!(sends_model("hello ", "\x15/model\r", false, false), "Ctrl-U empties the box");
+        assert!(sends_model("abc", "\x7f\x7f\x7f/model\r", false, false), "backspaces empty it");
+        assert!(sends_model("/modelx", "\x08\r", false, false), "a backspace leaves /model");
+        assert!(sends_model("say /model", "\x17\x17\r", false, false), "an edit with /model shown and a send");
+        assert!(sends_model("say ", "\x17/model\r", false, false), "Ctrl-W takes the word");
+        assert!(sends_model("", "\x1b[200~/model\x1b[201~\r", false, false), "a bracketed paste of its own");
+        assert!(sends_model("", "/model\x1b[D\r", false, false), "a cursor key");
+        assert!(sends_model("", "/model\x1b[D", false, true), "an escape and the Enter after");
+        assert!(!sends_model("", "\x1b[200~say hi\x1b[201~\r", false, false), "no /model, nothing refused");
+        assert!(!sends_model("", "\x1b[200~/model\x1b[201~", false, false), "no send, nothing refused");
+    }
+
+    #[test]
+    fn a_paste_is_sent_whole_only_by_the_enter_after_it() {
+        assert!(sends_model("", "/model fable", true, true));
+        assert!(sends_model("", "/model\nmore", true, true), "a break inside a paste does not send it");
+        assert!(!sends_model("", "say\n/model", true, true), "the box starts with say");
+        assert!(!sends_model("", "/model fable", true, false));
     }
 
     #[test]
