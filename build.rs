@@ -1,7 +1,10 @@
 use std::process::Command;
 
+#[path = "crates/marspot-term/build_sha.rs"]
+mod build_sha;
+
 fn main() {
-    let sha = Command::new("git")
+    let head = Command::new("git")
         .args(["rev-parse", "--short=8", "HEAD"])
         .output()
         .ok()
@@ -12,8 +15,7 @@ fn main() {
                 None
             }
         })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map(|s| s.trim().to_string());
 
     let dirty = Command::new("git")
         .args(["status", "--porcelain"])
@@ -22,13 +24,11 @@ fn main() {
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let tag = if dirty {
-        format!("{}-dirty", sha)
-    } else {
-        sha
-    };
-
+    let env = std::env::var("MARSPOT_GIT_SHA").ok();
+    let tag = build_sha::choose(head.as_deref(), dirty, env.as_deref());
     println!("cargo:rustc-env=MARSPOT_GIT_SHA={}", tag);
+    println!("cargo:rerun-if-env-changed=MARSPOT_GIT_SHA");
+    println!("cargo:rerun-if-changed=crates/marspot-term/build_sha.rs");
 
     // Build timestamp — easy "is this really the latest binary?" check
     // when iterating fast. Emit as ISO-8601 in the local timezone.

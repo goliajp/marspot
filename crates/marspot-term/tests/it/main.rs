@@ -2,6 +2,9 @@
 
 mod alignment_and_column_mode;
 mod bell;
+// the build scripts' sha chooser, with its tests
+#[path = "../../build_sha.rs"]
+mod build_sha;
 mod cluster_cells;
 mod cluster_history;
 mod cluster_history_through_the_parser;
