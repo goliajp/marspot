@@ -100,12 +100,15 @@ impl Service {
 impl HelperService for Service {
     fn start(&self, port: &mut Port, a: &HelperStartArgs) -> Result<Value, Reject> {
         let defaulted = launch::with_default_model(a);
+        // the allocation said a plain model costs less: the parent's
+        // Fable or 1M context is not inherited past that
+        let plain = launch::decides_fable(a) && defaulted.is_none();
         let a = defaulted.as_ref().unwrap_or(a);
         let parent = match &a.parent {
             Some(p) => port.target(p)?,
             None => port.caller().ok_or_else(|| Reject::new(ErrorCode::BadRequest, "from outside the panes, name the helper's `parent` pane"))?,
         };
-        let early = model_pick::early(a, parent);
+        let early = model_pick::early(a, parent, plain);
         let a = early.as_ref().unwrap_or(a);
         let cwd = a.cwd.clone().or_else(|| port.cwd_of(parent)).ok_or_else(|| Reject::new(ErrorCode::BadRequest, "no `cwd`, and the parent pane's is not known"))?;
         if !Path::new(&cwd).is_dir() {
@@ -129,7 +132,7 @@ impl HelperService for Service {
                 }
                 _ => true,
             };
-        let late = model_pick::late(a, parent, &account.home, &cwd, resume);
+        let late = model_pick::late(a, parent, &account.home, &cwd, resume, plain);
         let a = late.as_ref().unwrap_or(a);
         let parent_name = port.full_name(parent);
         let caller = caller_kind::of(port);

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.772"  # a pane without a hook record restarts on its transcript's model; reclaim says model unknown once
+shell   = "0.7.773"  # a resumed helper keeps its 1M context; a plain pick inherits no Fable
 core    = "0.12.714"  # a helper strip gives rows to a batch heard of with only idle helpers, as after a core restart
 session = "0.11.465"  # marspot-term gains the fact-line format of the state map (not used by session)

@@ -65,9 +65,14 @@ pub(super) fn pick_account(agent: AgentKind, asked: Option<u8>, model: Option<&s
 /// an account it lets marspot choose, outside a container.  One that
 /// resumes a conversation keeps that conversation's model.
 pub(super) fn with_default_model(a: &HelperStartArgs) -> Option<HelperStartArgs> {
-    let ours = matches!(a.agent, AgentKind::Claude) && a.model.is_none() && a.profile.is_none() && a.isolation == Isolation::Host && !a.resume_last;
-    let model = ours.then(for_helpers::claude_helper_model).flatten()?;
+    let model = decides_fable(a).then(for_helpers::claude_helper_model).flatten()?;
     Some(HelperStartArgs { model: Some(model), ..a.clone() })
+}
+
+/// Whether the allocation decides between Fable and a plain model for
+/// this call (see [`with_default_model`]).
+pub(super) fn decides_fable(a: &HelperStartArgs) -> bool {
+    matches!(a.agent, AgentKind::Claude) && a.model.is_none() && a.profile.is_none() && a.isolation == Isolation::Host && !a.resume_last
 }
 
 /// A Claude helper started on account `n` because the call asked for
