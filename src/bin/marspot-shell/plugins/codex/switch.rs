@@ -17,7 +17,7 @@ use marspot::pidtree::ProcId;
 use marspot::ui::strings::{t, Msg};
 
 use super::pane::{is_thread_id, profile_switch_op, resume_op, Carry, PaneCodex, RELEASED};
-use super::{update, CodexPlugin};
+use super::{last_model, update, CodexPlugin};
 use crate::plugins::peerbus::moving::{self, Ask, Held, Verdict};
 use crate::plugins::{handoff, pidtree, pty_op, LogLevel, PluginHost};
 
@@ -73,10 +73,11 @@ impl Default for Switches {
     }
 }
 
-/// `codex` or `codex resume <id>`: a command line the resume line can
-/// stand in for.
+/// `codex` or `codex resume <id>`, either with `-m <model>`: a command
+/// line the resume line can stand in for.
 pub(super) fn movable_argv(argv: &[String]) -> bool {
-    update::plain_argv(argv) && argv.get(2).is_none_or(|id| is_thread_id(id))
+    let resumes = argv.get(1).is_some_and(|a| a == "resume");
+    update::plain_argv(argv) && (!resumes || argv.get(2).is_some_and(|id| is_thread_id(id)))
 }
 
 fn hint_of(h: Held) -> Msg {
@@ -193,7 +194,9 @@ impl CodexPlugin {
             moving::ask(Ask::Terminated { sid, codex });
             Ok(())
         });
-        let carry = Carry { held: Arc::clone(&held), taken: false, release: Some((gone, released)) };
+        let model = last_model::thread_model(home, thread);
+        log_model(host, sid, &model);
+        let carry = Carry { held: Arc::clone(&held), taken: false, release: Some((gone, released)), model };
         let Some(op) = profile_switch_op(&pane, m.profile, &m.dir, thread, cwd.clone(), carry) else {
             host.log(LogLevel::Warn, "switch.no_command", &format!("pane {sid}: cannot build the resume line"));
             self.switches.moves.remove(&sid);
@@ -229,7 +232,9 @@ impl CodexPlugin {
     fn switch_back(&mut self, host: &dyn PluginHost, sid: u64, m: Move) {
         self.hint(host, sid, Msg::BadgeCodexStillLoaded);
         let Some(Back { pane, home, thread, cwd, held }) = m.back else { return };
-        let carry = Carry { held, taken: true, release: None };
+        let model = last_model::thread_model(&home, &thread);
+        log_model(host, sid, &model);
+        let carry = Carry { held, taken: true, release: None, model };
         let Some(op) = resume_op("codex.switch_back", "↩".into(), &pane, &home, &thread, cwd, carry) else { return };
         host.log(LogLevel::Warn, "switch.back", &format!("pane {sid}: {} kept thread {thread}; resuming there", home.display()));
         if let Err(e) = host.submit_pty_op(sid, op) {
@@ -255,5 +260,13 @@ impl CodexPlugin {
     #[cfg(test)]
     pub(super) fn hint_for(&self, sid: u64) -> Option<Msg> {
         self.switches.hints.get(&sid).map(|(m, _)| *m)
+    }
+}
+
+/// Which model a resume names, or that it names none.
+fn log_model(host: &dyn PluginHost, sid: u64, model: &Option<String>) {
+    match model {
+        Some(m) => host.log(LogLevel::Info, "switch.model", &format!("pane {sid}: resuming on {m}, as its rollouts last recorded")),
+        None => host.log(LogLevel::Info, "switch.model", &format!("pane {sid}: no model observed for this thread or account; resuming on config.toml's")),
     }
 }

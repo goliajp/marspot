@@ -48,9 +48,7 @@ pub(crate) fn model_for(to: Agent, home: &Path, resume: Resume, gemini_model: Op
             marspot::lx_info!("handoff.model_from", &format!("{} {model} ({})", home.display(), from.as_str()));
             Some(model)
         }
-        (Agent::Codex, Resume::Id(id)) => {
-            history::codex_rollout(home, id).and_then(|p| last_model::rollout_model(&p)).or_else(|| last_model::account_model(home))
-        }
+        (Agent::Codex, Resume::Id(id)) => last_model::thread_model(home, id),
         (Agent::Codex, _) => last_model::account_model(home),
         (Agent::Gemini, _) => gemini_model.map(str::to_string),
         (Agent::Kimi, _) => None,

@@ -137,11 +137,14 @@ pub(super) struct Carry {
     /// A switch: called once the TUI is gone, then waited on until the
     /// old home has let go.
     pub release: Option<(pty_op::CallFn, Arc<pty_op::Job>)>,
+    /// The model the thread goes on with (`-m`); None when nothing was
+    /// ever observed, and the line then names none.
+    pub model: Option<String>,
 }
 
 impl Carry {
-    pub(super) fn fresh() -> Carry {
-        Carry { held: pty_op::Job::new(), taken: false, release: None }
+    pub(super) fn fresh(model: Option<String>) -> Carry {
+        Carry { held: pty_op::Job::new(), taken: false, release: None, model }
     }
 }
 
@@ -153,20 +156,19 @@ impl Carry {
 /// running while no TUI is attached, so nothing but the screen is
 /// redrawn.
 pub(super) fn refresh_op(pane: &PaneCodex, home: &Path, thread: &str, cwd: Option<String>, to: super::update::Release) -> Option<pty_op::PtyOp> {
-    resume_op("codex.refresh", format!("↻ {to}"), pane, home, thread, cwd, Carry::fresh())
+    let model = super::last_model::thread_model(home, thread);
+    resume_op("codex.refresh", format!("↻ {to}"), pane, home, thread, cwd, Carry::fresh(model))
 }
 
 /// End the TUI and start `codex resume <thread>` under `home`, with
 /// what was in the composer put back once the new one has drawn; in
 /// between, wait for the old home's release when there is one.
 pub(super) fn resume_op(name: &'static str, badge: String, pane: &PaneCodex, home: &Path, thread: &str, cwd: Option<String>, carry: Carry) -> Option<pty_op::PtyOp> {
-    let line = pty_op::PtyCommand::new("codex")
-        .env("CODEX_HOME", home.to_str()?)
-        .arg("resume")
-        .arg(thread)
-        .in_dir(cwd)
-        .clear_screen_first(true)
-        .to_bytes()?;
+    let mut cmd = pty_op::PtyCommand::new("codex").env("CODEX_HOME", home.to_str()?).arg("resume").arg(thread);
+    if let Some(m) = &carry.model {
+        cmd = cmd.arg("-m").arg(m.clone());
+    }
+    let line = cmd.in_dir(cwd).clear_screen_first(true).to_bytes()?;
     let mut op = pty_op::PtyOp::new(name).hold_screen(true).badge(badge);
     if !carry.taken {
         op = op.step(pty_op::Step::capture_composer(Arc::clone(&carry.held)));
@@ -204,7 +206,7 @@ mod profile_menu_tests {
     use std::sync::Arc;
 
     fn switching() -> Carry {
-        Carry { release: Some((Arc::new(|| Ok(())), super::pty_op::Job::new())), ..Carry::fresh() }
+        Carry { release: Some((Arc::new(|| Ok(())), super::pty_op::Job::new())), ..Carry::fresh(Some("gpt-5.5".into())) }
     }
 
     fn pane(profile: u8) -> PaneCodex {
@@ -238,7 +240,7 @@ mod profile_menu_tests {
             .expect("op builds");
         let line = line_of(&op);
         assert!(line.contains("CODEX_HOME='/Users/x/.codex-profile-2'"), "{line}");
-        assert!(line.contains(&format!("codex resume {THREAD}")), "{line}");
+        assert!(line.contains(&format!("codex resume {THREAD} -m gpt-5.5")), "the thread's model, not config.toml's: {line}");
         assert!(!line.contains("--last"), "a directory can hold two threads: {line}");
         assert!(line.contains("cd '/Users/x/work'"), "{line}");
         // The pane's own screen is cleared first so the new session

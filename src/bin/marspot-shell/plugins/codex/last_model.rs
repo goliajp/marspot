@@ -25,6 +25,24 @@ pub(crate) fn account_model(home: &Path) -> Option<String> {
     recent_rollouts(home).iter().take(NEWEST).find_map(|p| rollout_model(p))
 }
 
+/// The model a resume of `thread` under `home` names with `-m`: what
+/// the thread's rollout last recorded, else what the account last ran.
+///
+/// `codex resume` takes the model from `config.toml`, not from the
+/// thread (it says "recorded with model … but is resuming with …"), so
+/// a resume without `-m` runs whatever the shared file says. One
+/// listing of the home answers both: the thread is matched by file name
+/// among the rollouts newest first, and the account's model comes from
+/// the same list.
+pub(crate) fn thread_model(home: &Path, thread: &str) -> Option<String> {
+    let all = recent_rollouts(home);
+    let suffix = format!("-{thread}.jsonl");
+    let own = all.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)));
+    own.and_then(|p| rollout_model(p))
+        .or_else(|| all.iter().take(NEWEST).find_map(|p| rollout_model(p)))
+        .filter(|m| m.chars().all(|c| c.is_ascii_alphanumeric() || "-._:/".contains(c)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,7 +59,17 @@ mod tests {
         std::fs::write(&p, format!("{turn}\n{pick}\n")).unwrap();
         assert_eq!(rollout_model(&p).as_deref(), Some("gpt-5.5-mini"));
         assert_eq!(account_model(home.path()).as_deref(), Some("gpt-5.5-mini"));
+        // a thread's own rollout first, the account's newest after it
+        let thread = "01a133f4-8e7b-7331-9630-9c40ff4b467f";
+        let own = day.join(format!("rollout-2026-11-27T01-00-00-{thread}.jsonl"));
+        std::fs::write(&own, format!("{turn}\n")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, format!("{turn}\n{pick}\n")).unwrap();
+        assert_eq!(thread_model(home.path(), thread).as_deref(), Some("gpt-5.5"));
+        assert_eq!(thread_model(home.path(), "0000").as_deref(), Some("gpt-5.5-mini"), "no rollout: the account's");
+        std::fs::remove_file(&own).unwrap();
         std::fs::write(&p, "{\"type\":\"session_meta\"}\n").unwrap();
+        assert_eq!(thread_model(home.path(), thread), None);
         assert_eq!(account_model(home.path()), None, "nothing observed, nothing named");
     }
 }

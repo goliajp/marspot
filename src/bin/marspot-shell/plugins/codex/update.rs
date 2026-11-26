@@ -274,11 +274,17 @@ pub(crate) fn hold_reason(e: &Evidence) -> Option<&'static str> {
 }
 
 /// `codex`, `codex resume <id>` or `codex resume --last`, by any path
-/// to a binary called `codex`.
+/// to a binary called `codex`, with or without a trailing `-m <model>`:
+/// the restart names the model the thread last recorded itself.
 pub(crate) fn plain_argv(argv: &[String]) -> bool {
     let named_codex = argv.first().is_some_and(|a| a.rsplit('/').next() == Some("codex"));
+    let rest = argv.get(1..).unwrap_or_default();
+    let rest = match rest {
+        [head @ .., m, _] if m == "-m" || m == "--model" => head,
+        _ => rest,
+    };
     named_codex
-        && match &argv[1..] {
+        && match rest {
             [] => true,
             [r, _] => r == "resume",
             _ => false,
@@ -435,6 +441,11 @@ mod tests {
         assert!(plain_argv(&v("/Users/x/.local/bin/codex")));
         assert!(plain_argv(&v("codex resume 01a133f4-8e7b-7331-9630-9c40ff4b467f")));
         assert!(plain_argv(&v("codex resume --last")));
+        // marspot's own resume and handoff lines name the model
+        assert!(plain_argv(&v("codex resume 01a133f4-8e7b-7331-9630-9c40ff4b467f -m gpt-5.5")));
+        assert!(plain_argv(&v("codex -m gpt-5.5")));
+        assert!(plain_argv(&v("codex resume --last --model gpt-5.5")));
+        assert!(!plain_argv(&v("codex --yolo -m gpt-5.5")));
         assert!(!plain_argv(&v("codex --yolo")));
         assert!(!plain_argv(&v("codex -c model=o3 resume --last")));
         assert!(!plain_argv(&v("codex fix the build")));
