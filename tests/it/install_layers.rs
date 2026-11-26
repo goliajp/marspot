@@ -1,5 +1,6 @@
 //! A second install of the commit that is already running swaps
-//! nothing, `marspot-peer` included.
+//! nothing, `marspot-peer` included, and only when the source tree
+//! confirms the commit the new binaries name.
 //!
 //! The decision is install-local's own (`bin/_install-layers.sh
 //! explain`), run between two directories of the real binaries: the
@@ -10,16 +11,18 @@
 //! same-commit step the other three take and was replaced on every
 //! install for that reason alone.
 //!
-//! Each copy's fingerprint is set to a fixed clean commit, so the
-//! answer does not depend on whether the tree the suite was built from
-//! had uncommitted changes.
+//! Each copy's fingerprint is set to the commit of a small git
+//! repository made for the test, which stands for the tree the binaries
+//! were built from.  A build script that did not rerun leaves a clean
+//! commit in a binary built from a dirty tree, or from a later commit,
+//! so a fingerprint is taken as true only while that tree is clean and
+//! at the commit it names; otherwise the bytes decide.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use marspot_term::test_env::{TempDir, built_binary};
 
-const COMMIT: &str = "abcdef12";
 const BINS: [&str; 4] = ["marspot-shell", "marspot-core", "marspot-session", "marspot-peer"];
 
 fn built(name: &str) -> PathBuf {
@@ -77,10 +80,33 @@ fn resign(bin: &Path) {
     assert!(out.status.success(), "codesign: {}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// The `INSTALL_LAYERS` line an install from `running` to `target` writes.
-fn explain(running: &Path, target: &Path) -> String {
+fn git(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Commit `src/lib.rs` with `text` in `repo`; returns the commit as a
+/// build names it.
+fn commit(repo: &Path, text: &str) -> String {
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), text).unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", text]);
+    git(repo, &["rev-parse", "--short=8", "HEAD"])
+}
+
+/// The `INSTALL_LAYERS` line an install from `running` to `target`,
+/// built from `src`, writes.
+fn explain(running: &Path, target: &Path, src: &Path) -> String {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/_install-layers.sh");
-    let out = Command::new("bash").arg(script).arg("explain").arg(running).arg(target).output().unwrap();
+    let out = Command::new("bash").arg(script).arg("explain").arg(running).arg(target).arg(src).output().unwrap();
     assert!(out.status.success(), "explain: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -90,26 +116,46 @@ fn field<'a>(line: &'a str, key: &str) -> &'a str {
     line.split(' ').find_map(|f| f.strip_prefix(key.as_str())).unwrap_or_else(|| panic!("no {key} in {line}"))
 }
 
-/// The running set and a second build of the same commit.
-fn two_builds(tmp: &TempDir) -> (PathBuf, PathBuf) {
-    let (running, target) = (tmp.join("running"), tmp.join("target"));
-    std::fs::create_dir_all(&running).unwrap();
-    std::fs::create_dir_all(&target).unwrap();
-    for name in BINS {
-        let old = copy_with_commit(name, &running, COMMIT);
-        let new = copy_with_commit(name, &target, COMMIT);
-        resign(&new);
-        let differ = std::fs::read(&old).unwrap() != std::fs::read(&new).unwrap();
-        assert!(differ, "signing {name} again left its bytes as they were; the case is not built");
-    }
-    (running, target)
+/// A source tree clean at one commit, the running set and a second
+/// build of that commit.
+struct Case {
+    _tmp: TempDir,
+    src: PathBuf,
+    commit: String,
+    running: PathBuf,
+    target: PathBuf,
 }
+
+impl Case {
+    fn new() -> Self {
+        let tmp = TempDir::new("install-layers");
+        let (src, running, target) = (tmp.join("src"), tmp.join("running"), tmp.join("target"));
+        for d in [&src, &running, &target] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        git(&src, &["init", "-q"]);
+        let commit = commit(&src, "first");
+        for name in BINS {
+            let old = copy_with_commit(name, &running, &commit);
+            let new = copy_with_commit(name, &target, &commit);
+            resign(&new);
+            let differ = std::fs::read(&old).unwrap() != std::fs::read(&new).unwrap();
+            assert!(differ, "signing {name} again left its bytes as they were; the case is not built");
+        }
+        Case { _tmp: tmp, src, commit, running, target }
+    }
+
+    fn explain(&self) -> String {
+        explain(&self.running, &self.target, &self.src)
+    }
+}
+
+const ALL_BYTES_DIFFER: &str = "shell:bytes-differ,core:bytes-differ,session:bytes-differ,peer:bytes-differ";
 
 #[test]
 fn a_second_install_of_the_running_commit_swaps_nothing() {
-    let tmp = TempDir::new("install-layers");
-    let (running, target) = two_builds(&tmp);
-    let line = explain(&running, &target);
+    let case = Case::new();
+    let line = case.explain();
     assert_eq!(field(&line, "swap"), "none", "{line}");
     assert_eq!(
         field(&line, "why"),
@@ -118,12 +164,32 @@ fn a_second_install_of_the_running_commit_swaps_nothing() {
     );
 }
 
+/// An unstaged edit in the tree: the binaries may hold it under the
+/// clean name, so every layer is compared by its bytes.
+#[test]
+fn a_dirty_source_tree_compares_bytes() {
+    let case = Case::new();
+    std::fs::write(case.src.join("src/lib.rs"), "edited").unwrap();
+    let line = case.explain();
+    assert_eq!(field(&line, "why"), ALL_BYTES_DIFFER, "{line}");
+    assert_eq!(field(&line, "swap"), "shell,core,session,peer", "{line}");
+}
+
+/// The tree moved on to a later commit the binaries do not name.
+#[test]
+fn a_source_tree_at_another_commit_compares_bytes() {
+    let case = Case::new();
+    let later = commit(&case.src, "second");
+    assert_ne!(later, case.commit);
+    let line = case.explain();
+    assert_eq!(field(&line, "why"), ALL_BYTES_DIFFER, "{line}");
+}
+
 #[test]
 fn a_peer_from_another_commit_is_replaced() {
-    let tmp = TempDir::new("install-layers");
-    let (running, target) = two_builds(&tmp);
-    copy_with_commit("marspot-peer", &target, "0ddba11a");
-    let line = explain(&running, &target);
+    let case = Case::new();
+    copy_with_commit("marspot-peer", &case.target, "0ddba11a");
+    let line = case.explain();
     assert_eq!(field(&line, "swap"), "peer", "{line}");
     assert!(field(&line, "why").ends_with(",peer:bytes-differ"), "{line}");
 }
@@ -131,15 +197,14 @@ fn a_peer_from_another_commit_is_replaced() {
 /// A `-dirty` build names no commit: only identical bytes are kept.
 #[test]
 fn a_dirty_peer_is_compared_by_its_bytes() {
-    let tmp = TempDir::new("install-layers");
-    let (running, target) = two_builds(&tmp);
-    let dirty = format!("{COMMIT}-dirty");
-    let old = copy_with_commit("marspot-peer", &running, &dirty);
-    let new = copy_with_commit("marspot-peer", &target, &dirty);
-    assert!(field(&explain(&running, &target), "why").ends_with(",peer:bytes-same"));
+    let case = Case::new();
+    let dirty = format!("{}-dirty", case.commit);
+    let old = copy_with_commit("marspot-peer", &case.running, &dirty);
+    let new = copy_with_commit("marspot-peer", &case.target, &dirty);
+    assert!(field(&case.explain(), "why").ends_with(",peer:bytes-same"));
     resign(&new);
     assert_ne!(std::fs::read(&old).unwrap(), std::fs::read(&new).unwrap());
-    let line = explain(&running, &target);
+    let line = case.explain();
     assert!(field(&line, "why").ends_with(",peer:bytes-differ"), "{line}");
     assert!(field(&line, "swap").ends_with("peer"), "{line}");
 }
