@@ -11,6 +11,7 @@ use super::*;
 
 mod again_tests;
 mod codex_tests;
+mod curl_tests;
 mod screen_tests;
 mod status_tests;
 

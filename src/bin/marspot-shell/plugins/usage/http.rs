@@ -2,9 +2,13 @@
 //!
 //! The token goes to curl in a config read from its stdin and nowhere
 //! else: an argument is visible to every process on the machine through
-//! `ps`, and a file outlives the request.
+//! `ps`, and a file outlives the request.  curl starts with an empty
+//! environment and no descriptor of ours but its stdin, stdout and
+//! stderr, so nothing else of the process reaches it either.
 
 use std::io::Write as _;
+use std::os::unix::process::CommandExt as _;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const TIMEOUT_SECS: &str = "20";
@@ -73,10 +77,57 @@ pub(crate) fn get_bare(url: &str, token: &str) -> Option<Response> {
     run(&config(url, token, &[])?)
 }
 
+#[cfg(test)]
+thread_local! {
+    static CURL: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `curl` standing in for `/usr/bin/curl` on this thread.
+#[cfg(test)]
+pub(crate) fn with_curl<T>(curl: PathBuf, f: impl FnOnce() -> T) -> T {
+    CURL.with(|c| *c.borrow_mut() = Some(curl));
+    let out = f();
+    CURL.with(|c| *c.borrow_mut() = None);
+    out
+}
+
+fn curl() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = CURL.with(|c| c.borrow().clone()) {
+        return p;
+    }
+    PathBuf::from("/usr/bin/curl")
+}
+
+/// Mark every descriptor above stderr close-on-exec in the child: std
+/// marks only those it opens, and one opened through libc or handed
+/// over by a parent may lack the mark.
+fn close_ours_on_exec(cmd: &mut Command) {
+    // SAFETY: getdtablesize is called here, before the fork; the hook
+    // runs between fork and exec and only calls fcntl, which is
+    // async-signal-safe and allocates nothing
+    let top = unsafe { libc::getdtablesize() };
+    unsafe {
+        cmd.pre_exec(move || {
+            for fd in 3..top {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 fn run(config: &str) -> Option<Response> {
-    let mut child = Command::new("/usr/bin/curl")
-        // -q first: the user's ~/.curlrc is not part of this request
+    let mut cmd = Command::new(curl());
+    close_ours_on_exec(&mut cmd);
+    let mut child = cmd
+        // -q first: the user's ~/.curlrc is not part of this request;
+        // an absolute path and a config on stdin need no variable at all
         .args(["-q", "-sS", "-i", "--max-time", TIMEOUT_SECS, "-w", "\\n%{http_code}", "-K", "-"])
+        .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
