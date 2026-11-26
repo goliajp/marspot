@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.797"  # the shared settings watch leaves two model keys alone, gives a confirmation a minute and remembers only its own files' writes
-core    = "0.12.726"  # /mo, /mod, /mode and Tab on them are held; a program's /model in one call and Enter in the next is refused
+core    = "0.12.727"  # a sent line or Ctrl-U clears what program input could not follow
 session = "0.11.470"  # marspot-term moves the reading of a settings line to its values file (not used by session)

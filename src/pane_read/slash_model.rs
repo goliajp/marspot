@@ -88,13 +88,17 @@ pub fn typed_into(held: &str, lost: bool, typed: &str, paste: bool, enter: bool)
     for c in typed.chars() {
         match c {
             '\r' | '\n' if runs(&line, lost) => return Typed { sends: true, left: line, lost },
-            '\r' | '\n' => (sent, line) = (true, String::new()),
+            // a sent line takes what could not be followed with it
+            '\r' | '\n' => (sent, line, lost) = (true, String::new(), false),
             '\t' if is_model_command(&line) => return Typed { sends: true, left: line, lost },
-            '\x7f' | '\x08' => {
+            // deletes act at the cursor; with the cursor lost, keep the line
+            // and the mark so the guard never sees less than the box holds
+            '\x7f' | '\x08' if !lost => {
                 line.pop();
             }
-            '\x15' => line.clear(),
-            '\x17' => line.truncate(line.trim_end().trim_end_matches(|c: char| !c.is_whitespace()).len()),
+            '\x15' if !lost => line.clear(),
+            '\x17' if !lost => line.truncate(line.trim_end().trim_end_matches(|c: char| !c.is_whitespace()).len()),
+            '\x7f' | '\x08' | '\x15' | '\x17' => {}
             c if c.is_control() => lost = true,
             c => line.push(c),
         }
@@ -152,6 +156,10 @@ mod tests {
         assert!(!t.sends && t.lost, "{t:?}");
         assert!(typed_into(&t.left, t.lost, "\r", false, false).sends, "the next input carries what was lost");
         assert!(!typed_into("del/mo", false, "\r", false, false).sends);
+        assert!(!sends_model("", "x\x01\rread /tmp/a\r", false, false), "the first line took the lost byte with it");
+        assert!(sends_model("", "abc/mo\x02\x02\x02\x15\r", false, false), "Ctrl-U after the cursor moved keeps the slash");
+        assert!(!sends_model("", "abc\x15fix it\r", false, false), "Ctrl-U with the cursor known clears the line");
+        assert!(sends_model("", "modelx\x01/\x05\x7f\r", false, false), "a delete after the cursor moved keeps the line");
     }
 
     #[test]
