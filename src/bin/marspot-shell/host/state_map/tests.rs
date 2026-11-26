@@ -22,19 +22,28 @@ fn files_under(root: &Path) -> Vec<String> {
     out
 }
 
+/// The bytes of a fact file that must stay as they are: all of it but a
+/// trailing dropped line, whose count is raised in place.
+fn settled(bytes: &[u8]) -> &[u8] {
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let start = body.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let last = std::str::from_utf8(&bytes[start..]).unwrap_or("");
+    if marspot_term::wire_files::fact_line::dropped_count(last).is_some() { &bytes[..start] } else { bytes }
+}
+
 /// What a run left that the table does not know, and the fact files
 /// whose earlier bytes changed.
 fn audit(before: &Path, after: &Path) -> (Vec<String>, Vec<String>) {
     let unknown = files_under(after).into_iter().filter(|f| lookup(f).is_none()).collect();
     let mut rewritten = Vec::new();
     for f in files_under(before) {
-        if lookup(&f).is_none_or(|e| e.kind != Kind::Fact) {
+        if lookup(&f).is_none_or(|e| e.kind != Kind::Fact || NOT_APPEND_ONLY.contains(&e.path)) {
             continue;
         }
-        // gone is allowed: delivered mail, a pruned day, a rotation
+        // gone is allowed: a pruned day
         let Ok(now) = std::fs::read(after.join(&f)) else { continue };
         let then = std::fs::read(before.join(&f)).expect("the copy taken before");
-        if !now.starts_with(&then) {
+        if !now.starts_with(settled(&then)) {
             rewritten.push(format!("{f} ({} bytes then, {} now)", then.len(), now.len()));
         }
     }
@@ -72,19 +81,37 @@ fn the_audit_finds_an_unknown_file_and_a_rewritten_fact() {
     let tmp = marspot_term::test_env::TempDir::new("state-map-audit");
     let (before, after) = (tmp.join("before"), tmp.join("after"));
     for d in [&before, &after] {
-        std::fs::create_dir_all(d.join("helpers")).unwrap();
+        std::fs::create_dir_all(d.join("usage/usage_samples")).unwrap();
         std::fs::create_dir_all(d.join("zombie")).unwrap();
     }
-    std::fs::write(before.join("helpers/events.log"), "a\nb\n").unwrap();
-    std::fs::write(after.join("helpers/events.log"), "a\nB\nc\n").unwrap();
+    std::fs::write(before.join("usage/usage_samples/20261126.tsv"), "a\nb\n").unwrap();
+    std::fs::write(after.join("usage/usage_samples/20261126.tsv"), "a\nB\nc\n").unwrap();
     std::fs::write(before.join("zombie/told.tsv"), "1\n").unwrap();
     std::fs::write(after.join("zombie/told.tsv"), "2\n").unwrap();
     std::fs::write(after.join("surprise.bin"), "").unwrap();
     let (unknown, rewritten) = audit(&before, &after);
     assert_eq!(unknown, ["surprise.bin"]);
-    assert_eq!(rewritten, ["helpers/events.log (4 bytes then, 6 now)"], "a rewritten derived file is no finding");
-    std::fs::write(after.join("helpers/events.log"), "a\nb\nc\n").unwrap();
+    assert_eq!(rewritten, ["usage/usage_samples/20261126.tsv (4 bytes then, 6 now)"], "a rewritten derived file is no finding");
+    std::fs::write(after.join("usage/usage_samples/20261126.tsv"), "a\nb\nc\n").unwrap();
     assert!(audit(&before, &after).1.is_empty());
+}
+
+#[test]
+fn the_audit_lets_a_dropped_count_rise_and_a_rotated_file_restart() {
+    let tmp = marspot_term::test_env::TempDir::new("state-map-audit-allowed");
+    let (before, after) = (tmp.join("before"), tmp.join("after"));
+    let day = "usage/usage_samples/20261126.tsv";
+    for d in [&before, &after] {
+        std::fs::create_dir_all(d.join("usage/usage_samples")).unwrap();
+    }
+    let fact = "1764115200\tk\tv=1\n";
+    std::fs::write(before.join(day), format!("{fact}1764115201\tdropped\tdropped=00000000000000000001\n")).unwrap();
+    std::fs::write(after.join(day), format!("{fact}1764115201\tdropped\tdropped=00000000000000000005\n")).unwrap();
+    std::fs::write(before.join("shell_launches.tsv"), "1\n2\n").unwrap();
+    std::fs::write(after.join("shell_launches.tsv"), "2\n3\n").unwrap();
+    assert_eq!(audit(&before, &after), (vec![], vec![]));
+    std::fs::write(after.join(day), "1764115200\tk\tv=2\n").unwrap();
+    assert_eq!(audit(&before, &after).1.len(), 1, "the facts before the count still may not change");
 }
 
 #[test]
@@ -94,11 +121,14 @@ fn every_pattern_is_well_formed_and_listed_once() {
         let mut rest = e.path;
         while let Some(at) = rest.find('<') {
             let end = rest[at..].find('>').unwrap_or_else(|| panic!("unclosed placeholder in {}", e.path)) + at;
-            assert!(["id", "n", "date", "uuid"].contains(&&rest[at + 1..end]), "unknown placeholder in {}", e.path);
+            assert!(["id", "n", "date", "uuid", "sid"].contains(&&rest[at + 1..end]), "unknown placeholder in {}", e.path);
             rest = &rest[end + 1..];
         }
         assert!(!STATE_MAP[..i].iter().any(|o| o.path == e.path), "{} is listed twice", e.path);
         assert!(!e.writer.is_empty() && !e.cap.is_empty(), "{}", e.path);
+    }
+    for p in NOT_APPEND_ONLY {
+        assert!(STATE_MAP.iter().any(|e| e.path == *p && e.kind == Kind::Fact), "{p} is no fact row");
     }
 }
 
@@ -111,14 +141,23 @@ fn files_of_today_find_their_rows() {
         ("plugins/claudecode/alloc_events/20261126.tsv", Kind::Fact, true),
         ("plugins/claudecode/model/2fec8734-bf76-478b-8044-20261126b7e4", Kind::Derived, true),
         ("plugins/claudecode/model/.2fec8734-bf76-478b-8044-20261126b7e4.tmp", Kind::Runtime, false),
+        ("plugins/claudecode/model/session-7f", Kind::Derived, true),
+        ("sessions/41/scrollback.cold.bin", Kind::Derived, true),
+        ("sessions/41/scrollback.cold.bin.clustertext", Kind::Derived, true),
+        ("sessions/41/scrollback.bin.marks", Kind::Derived, true),
+        ("sessions/41/scrollback.idx.corrupt-1764115200", Kind::Draft, false),
+        ("sessions/41/sock", Kind::Runtime, true),
+        ("control.sock", Kind::Runtime, true),
+        ("logs/marspot.log.rotate-lock", Kind::Runtime, true),
+        ("download/marspot.tar.d/marspot-shell", Kind::Runtime, false),
         ("usage/usage_samples/20261126.tsv", Kind::Fact, true),
         ("peerbus/kimi/session_abc.jsonl", Kind::Fact, true),
-        ("peerbus/3-in.sock", Kind::Runtime, false),
+        ("peerbus/3-in.sock", Kind::Runtime, true),
         ("helpers/7/home/.claude.json", Kind::External, false),
         ("zombie/orphans.tsv", Kind::Derived, true),
         ("handoff/483.md", Kind::Draft, true),
         ("settings.toml", Kind::UserConfig, true),
-        ("logs/marspot.00000000001764115200.log.gz", Kind::Fact, false),
+        ("logs/marspot.00000000001764115200.log.gz", Kind::Fact, true),
         ("test-shell-core.run.log", Kind::Runtime, false),
     ];
     for (path, kind, across) in cases {

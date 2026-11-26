@@ -1,8 +1,9 @@
 //! The path patterns of the state map, matched one segment at a time.
 //!
 //! In a segment: `<id>` and `<n>` are one or more ASCII digits, `<date>`
-//! is eight digits, `<uuid>` is 36 hex digits and dashes, `*` is any run
-//! of characters (none included).  A segment `**` is any number of
+//! is eight digits, `<uuid>` is 36 hex digits and dashes, `<sid>` is
+//! one or more ASCII letters, digits and dashes, `*` is any run of
+//! characters (none included).  A segment `**` is any number of
 //! segments, none included.
 
 /// Whether `path` (relative, `/`-separated) matches `pattern`.
@@ -60,6 +61,7 @@ fn placeholder(name: &[u8], s: &[u8]) -> bool {
         b"id" | b"n" => s.iter().all(u8::is_ascii_digit),
         b"date" => s.len() == 8 && s.iter().all(u8::is_ascii_digit),
         b"uuid" => s.len() == 36 && s.iter().all(|b| b.is_ascii_hexdigit() || *b == b'-'),
+        b"sid" => s.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-'),
         _ => false,
     }
 }
@@ -76,6 +78,8 @@ mod tests {
         assert!(!matches("a/<date>.tsv", "a/2026112.tsv"));
         assert!(matches("m/<uuid>", "m/2fec8734-bf76-478b-8044-20261126b7e4"));
         assert!(!matches("m/<uuid>", "m/not-a-uuid"));
+        assert!(matches("m/<sid>", "m/not-a-uuid-7"));
+        assert!(!matches("m/<sid>", "m/.not-a-uuid-7.tmp"));
         assert!(matches("retired/<id>-<n>/**", "retired/7-1764000000/sock"));
         assert!(matches("retired/<id>.<n>-<n>/**", "retired/7.99-1764000000/x/y"));
     }

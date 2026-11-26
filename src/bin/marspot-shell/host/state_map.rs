@@ -1,8 +1,15 @@
 //! Every file under the state root (`marspot_term::paths::state_root`):
 //! where it is, what kind of state it holds, who writes it, how far it
-//! may grow, and whether a build other than the one that wrote it reads
+//! may grow, and whether a build other than the one that wrote it uses
 //! it -- after an update, or from another binary.  A file in that last
-//! column cannot change its format without a mixed-version test.
+//! column cannot change its format, name or locking without a
+//! mixed-version test.
+//!
+//! "Uses" is reads, connects to, locks, appends to, or acts on by its
+//! name (deletes by the age in it, renames).  A file only ever replaced
+//! without being read, or written and read back in one call, is not
+//! used across images; neither is a file no build writes and none
+//! reads.  When in doubt the answer is yes: a wrong no skips a test.
 //!
 //! Paths are relative to the state root, in the syntax of [`pattern`].
 //! The first row that matches a path is its row.  `logs/` is under the
@@ -22,7 +29,8 @@ mod tests;
 /// What a file holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    /// What happened: only ever appended to (rotation aside).
+    /// What happened: only ever appended to, unless its row is in
+    /// [`NOT_APPEND_ONLY`].
     Fact,
     /// Computed from facts or read from the outside world; deleting it
     /// loses nothing that cannot be had again.
@@ -67,29 +75,38 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("window-state.bin", Draft, "L2 marspot::state (geometry)", "one record per window", true),
     e("sessions/.next_id", Draft, "marspot_term::session_registry", "one number", true),
     e("sessions/<id>/entry.toml", Draft, "L3, L2 (session_registry::entry)", "one per pane", true),
-    e("sessions/<id>/sock", Runtime, "L3 uds_server", "one per pane", false),
-    e("sessions/<id>/.lock", Runtime, "L3 (session_registry::try_lock_session_dir)", "one per pane", false),
+    // L2 of any build connects to the L3 that bound it
+    e("sessions/<id>/sock", Runtime, "L3 uds_server", "one per pane", true),
+    // L2 tries it to tell whether an L3, maybe of another build, holds the pane
+    e("sessions/<id>/.lock", Runtime, "L3 (session_registry::try_lock_session_dir)", "one per pane", true),
     e("sessions/<id>/guard", Runtime, "L3 owner_watch", "one per pane", true),
     e("sessions/<id>/closed", Runtime, "session_registry::closed", "one per pane", true),
     e("sessions/<id>/state.bin", Derived, "L3 snapshot_writer", "one per pane", true),
     e("sessions/<id>/bytelog.seg.<n>", Draft, "L3 bytelog (segment ring)", "100 MiB per pane", true),
     e("sessions/<id>/bytelog", Draft, "older L3 (rotating pair, read and deleted)", "50 MiB", true),
     e("sessions/<id>/bytelog.1", Draft, "older L3 (rotating pair, read and deleted)", "50 MiB", true),
-    e("sessions/<id>/bytelog.1.old", Draft, "older L3 (deleted on open)", "50 MiB", false),
+    // an older build left it, today's L3 deletes it by name
+    e("sessions/<id>/bytelog.1.old", Draft, "older L3 (deleted on open)", "50 MiB", true),
     e("sessions/<id>/scrollback.seg.<n>", Derived, "L3 scrollback::file (segment ring)", "scrollback tiers", true),
     e("sessions/<id>/scrollback.bin", Derived, "older L3 (read, then replaced by segments)", "scrollback tiers", true),
     e("sessions/<id>/scrollback.idx", Derived, "older L3 (read, then replaced by segments)", "scrollback tiers", true),
     e("sessions/<id>/scrollback.cold.bin", Derived, "older L3 (read, then replaced by segments)", "scrollback tiers", true),
     e("sessions/<id>/scrollback.cold.idx", Derived, "older L3 (read, then replaced by segments)", "scrollback tiers", true),
+    e("sessions/<id>/scrollback*.bin.marks", Derived, "older L3 (sidecar, read with its pair)", "scrollback tiers", true),
+    e("sessions/<id>/scrollback*.bin.clusters", Derived, "older L3 (sidecar, read with its pair)", "scrollback tiers", true),
+    e("sessions/<id>/scrollback*.bin.clustertext", Derived, "older L3 (sidecar, read with its pair)", "scrollback tiers", true),
     // a pair the L3 could not open, set aside and read by nothing
     e("sessions/<id>/scrollback.bin.corrupt-<n>", Draft, "L3 Scrollback::file (quarantine)", "one per refused open", false),
     e("sessions/<id>/scrollback.idx.corrupt-<n>", Draft, "L3 Scrollback::file (quarantine)", "one per refused open", false),
     e("retired/<id>-<n>/**", Draft, "session_registry::removal (retired pane)", "14 days", true),
-    e("retired/<id>.<n>-<n>/**", Draft, "session_registry::removal (taken to delete)", "deleted by the taker", false),
+    // a taker that died leaves it; any later build purges it by the age in its name
+    e("retired/<id>.<n>-<n>/**", Draft, "session_registry::removal (taken to delete)", "deleted by the taker, else 14 days", true),
     e("binaries/current/*", Draft, "L1 supervisor, install-local.sh", "one per binary", true),
     e("binaries/prev/*", Draft, "L1 supervisor", "one per binary", true),
     e("binaries/pending/*", Draft, "updater, install-local.sh", "one per binary", true),
+    // only ever renamed over, never read
     e("binaries/quarantine/*", Draft, "L1 supervisor", "one per binary", false),
+    // the download files are written and read within one update check
     e("download/marspot.tar.gz", Runtime, "updater", "one release", false),
     e("download/marspot.tar.gz.sig", Runtime, "updater", "one signature", false),
     e("download/marspot-update.pub", Derived, "updater::verify (from the built-in keys)", "fixed", false),
@@ -98,33 +115,43 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("pending-bundle/**", Draft, "install-local.sh, its land.sh", "one bundle", true),
     e("shell_launches.tsv", Fact, "L1 launch (crash-loop journal)", "last rows, trimmed in place", true),
     e("shell.pid", Runtime, "L1 launch", "one number", true),
-    e("shell.lock", Runtime, "L1 instance", "empty", false),
-    e("front.sock", Runtime, "L1 instance", "socket", false),
-    e("l1-cmd.sock", Runtime, "L1 cli_socket", "socket", false),
-    e("control.sock", Runtime, "L1 pane_control", "socket", false),
+    // the next L1, of whatever build, takes the lock or hands over through the socket
+    e("shell.lock", Runtime, "L1 instance", "empty", true),
+    e("front.sock", Runtime, "L1 instance", "socket", true),
+    // `marspot-shell --send / --panes` may be another build than the running L1
+    e("l1-cmd.sock", Runtime, "L1 cli_socket", "socket", true),
+    // marspot-peer, installed on its own and kept across updates, connects
+    e("control.sock", Runtime, "L1 pane_control", "socket", true),
     e("control-audit.log", Fact, "L1 pane_control::audit_log", "8 MiB, rotated", true),
     e("control-audit.log.<n>", Fact, "L1 pane_control::audit_log (rotated)", "7 files", true),
     e("control-deny.tsv", UserConfig, "control_deny (the user's refusals)", "one row per rule", true),
-    e("submit-receipts.sock", Runtime, "L1 receipts", "socket", false),
+    // the receipts hook runs another binary
+    e("submit-receipts.sock", Runtime, "L1 receipts", "socket", true),
     e("submit-receipt.key", Runtime, "marspot_term::submit_receipt", "one key", true),
     e("owner", Runtime, "marspot_term::owner (L1)", "one record", true),
     e("owner.heir", Runtime, "marspot_term::owner, L1 identity", "one record", true),
-    e("owner.spawn", Runtime, "marspot_term::owner", "lock", false),
+    // every binary that may spawn the owner takes it
+    e("owner.spawn", Runtime, "marspot_term::owner", "lock", true),
     e("owner.reseats", Runtime, "L1 reclaim", "one record", true),
     e("bundle", Runtime, "L1 ownership", "one path", true),
     e("pane-codes", Draft, "marspot_term::pane_code", "one row per pane", true),
-    e("pane-codes.lock", Runtime, "marspot_term::pane_code", "lock", false),
+    // every binary that hands out pane codes takes it
+    e("pane-codes.lock", Runtime, "marspot_term::pane_code", "lock", true),
     e("pane-state-clock.tsv", Draft, "L1 pane_status", "one row per pane", true),
     e("autorun.tsv", UserConfig, "L1 cli_socket (autorun switch)", "one row per directory", true),
     e("system-theme", Derived, "marspot_term::system_theme (L1)", "one word", true),
     e("system-language", Derived, "marspot_term::system_language (L1)", "one word", true),
+    // the two markers are made by a person or a test, never by a build
     e("supervisor-profile", UserConfig, "a developer (marker read by L1 supervisor_profile)", "empty", false),
     e("dev-ae-drop", UserConfig, "a test (marker read by L1 apple_events::seam)", "one line", false),
-    e("logs/marspot.log", Fact, "logx, every binary", "size cap, rotated", false),
-    e("logs/marspot.<n>.log", Fact, "logx rotate", "logx gc by age", false),
-    e("logs/marspot.<n>.log.gz", Fact, "logx rotate", "logx gc by age", false),
-    e("logs/marspot.log.rotate-lock", Runtime, "logx rotate", "lock", false),
-    e("logs/supervisor.log", Fact, "none now; read by marspot-shell --status", "none written", false),
+    // every binary of every build appends, rotates and ages out the logs
+    e("logs/marspot.log", Fact, "logx, every binary", "size cap, rotated", true),
+    e("logs/marspot.<n>.log", Fact, "logx rotate", "logx gc by age", true),
+    e("logs/marspot.<n>.log.gz", Fact, "logx rotate", "logx gc by age", true),
+    e("logs/marspot.log.rotate-lock", Runtime, "logx rotate", "lock", true),
+    // older builds wrote it, today's `marspot-shell --status` reads it
+    e("logs/supervisor.log", Fact, "none now; read by marspot-shell --status", "none written", true),
+    // madcawl writes its own logs; no marspot build reads them
     e("logs/madcawl-host.log", External, "madcawl-shell (started by peerbus)", "madcawl's own", false),
     e("logs/madcawl-audit.log", External, "madcawl-shell (started by peerbus)", "madcawl's own", false),
     // services
@@ -140,6 +167,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("helpers/<id>/told-dialog", Runtime, "helpers::passing", "marker", true),
     e("helpers/<id>/entered-*", Runtime, "helpers::passing", "marker", true),
     e("helpers/<id>/result.md", External, "the helper agent", "the agent's", true),
+    // the agent's own home; marspot reads no file in it
     e("helpers/<id>/**", External, "the helper agent, its container home", "removed with the helper", false),
     e("plugins/claudecode/alloc_events/<date>.tsv", Fact, "claudecode allocation_events (alloc, sched)", "15 days", true),
     e("plugins/codex/alloc_events/<date>.tsv", Fact, "codex alloc (claudecode allocation_events)", "15 days", true),
@@ -150,7 +178,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("plugins/claudecode/dormant.tsv", Draft, "claudecode dormant", "one row per pane", true),
     e("plugins/claudecode/fable_need.tsv", Draft, "claudecode fable_need", "one row per session", true),
     e("plugins/claudecode/usage_trend.tsv", Derived, "claudecode burn", "one row per account", true),
-    e("plugins/claudecode/model/<uuid>", Derived, "marspot-shell --cc-statusline (claude's hook)", "3 days", true),
+    e("plugins/claudecode/model/<sid>", Derived, "marspot-shell --cc-statusline (claude's hook)", "3 days", true),
     e("plugins/kimi/refused.tsv", Derived, "kimi balance (accounts)", "one row per account", true),
     e("plugins/kimi/heads_up.tsv", Draft, "kimi balance", "one row per pane", true),
     e("usage/claude-usage.json", Derived, "usage", "one per account", true),
@@ -165,29 +193,36 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("zombie/clock-dryrun.tsv", Derived, "zombie store (dry run)", "one row per process", true),
     e("zombie/names.tsv", Derived, "zombie checker", "one row per process", true),
     e("zombie/orphans.tsv", Derived, "zombie checker", "bounded list", true),
-    e("zombie/dryrun.log", Fact, "zombie dryrun, teller", "1 MiB, rotated", false),
+    // the next build appends to it and rotates it by size
+    e("zombie/dryrun.log", Fact, "zombie dryrun, teller", "1 MiB, rotated", true),
+    // only ever renamed over
     e("zombie/dryrun.log.1", Fact, "zombie dryrun (rotated)", "1 MiB", false),
+    // written and renamed in one call
     e("zombie/*.tsv.new", Runtime, "zombie store (atomic replace)", "one per file", false),
     e("handoff/<id>.ledger", Draft, "handoff ledger (switch)", "one per pane", true),
     e("handoff/<id>.md", Draft, "handoff ledger (switch)", "one per pane", true),
     e("handoff/<id>.model", Draft, "handoff carried (switch)", "one per pane", true),
     e("peerbus/titles.tsv", Derived, "peerbus title (messaging)", "one row per pane", true),
-    e("peerbus/<n>-in.sock", Runtime, "peerbus inbox relay", "one per relay", false),
-    e("peerbus/<n>-send.sock", Runtime, "peerbus inbox relay", "one per relay", false),
+    // the relay is marspot-peer, another binary
+    e("peerbus/<n>-in.sock", Runtime, "peerbus inbox relay", "one per relay", true),
+    e("peerbus/<n>-send.sock", Runtime, "peerbus inbox relay", "one per relay", true),
     e("peerbus/gemini/*.jsonl", Fact, "peerbus gemini_bind (mail), marspot-peer hook", "removed once delivered", true),
     e("peerbus/kimi/*.jsonl", Fact, "peerbus gemini_bind (mail), marspot-peer hook", "removed once delivered", true),
     e("claude-mcp.json", Derived, "peerbus claude_mcp (config_apply)", "fixed", true),
-    e("madcawl.sock", Runtime, "peerbus madcawl_host_proc", "socket", false),
+    // madcawl-shell listens; the L1 of the next build reconnects to it
+    e("madcawl.sock", Runtime, "peerbus madcawl_host_proc", "socket", true),
     e("madcawl-host.pid", Runtime, "peerbus madcawl_host", "one number", true),
+    // bound and renamed in one call
     e(".madcawl-bind-<n>/s", Runtime, "peerbus madcawl_host_proc (bind, then rename)", "one socket", false),
     e("agents/gemini.tag", Draft, "agents (gemini install)", "one tag", true),
     e("sched/status.json", Derived, "sched (not written yet)", "fixed", true),
     // the temporary half of every atomic replace
     e("**/*.tmp", Runtime, "the writer of the file it replaces", "one per file", false),
     // the dev sandbox's own files
+    // the dev scripts' files are no build's
     e("dev.pids", Runtime, "bin/_dev-sandbox.sh", "one line per process", false),
     e("*.run.log", Runtime, "bin/_dev-sandbox.sh", "one per script run", false),
-    // left by older builds
+    // left by older builds, read by none
     e("dev-window-state.bin", Draft, LEFT_BEHIND, "none written", false),
     e("l1-fd-vault.sock", Runtime, LEFT_BEHIND, "none written", false),
     e("bootstrap.log", Fact, LEFT_BEHIND, "none written", false),
@@ -198,6 +233,19 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("retired-land-bundle/**", Draft, LEFT_BEHIND, "none written", false),
     e("retired-launchagent-backup/**", Draft, LEFT_BEHIND, "none written", false),
     e("**/.DS_Store", External, "Finder", "one per directory", false),
+];
+
+/// The fact rows whose files are not only appended to: trimmed in
+/// place, rotated by a rename that leaves a fresh file, or consumed.
+/// The run audit does not hold them to "only appended".
+pub(crate) const NOT_APPEND_ONLY: &[&str] = &[
+    "shell_launches.tsv",
+    "control-audit.log",
+    "helpers/events.log",
+    "zombie/dryrun.log",
+    "logs/marspot.log",
+    "peerbus/gemini/*.jsonl",
+    "peerbus/kimi/*.jsonl",
 ];
 
 /// The row of the file at `path`, relative to the state root.
