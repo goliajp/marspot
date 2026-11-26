@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.802"  # reset.claim, reset.status and the panel ResetPanelAct are routed to the reset claim service
+shell   = "0.7.803"  # the state map lists the reset claim facts
 core    = "0.12.728"  # marspot-term gains the ResetPanelAct frame; the file-drop payload moves to its own file
 session = "0.11.471"  # marspot-term gains the ResetPanelAct frame (not used by session)
