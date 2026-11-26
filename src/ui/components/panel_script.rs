@@ -220,7 +220,7 @@ fn key(logical: LogicalKey, text: Option<String>, modifiers: Modifiers) -> Vec<I
         .into_iter()
         .map(|state| {
             let event =
-                MarspotKeyEvent { state, logical: logical.clone(), text: text.clone(), ..Default::default() };
+                MarspotKeyEvent { state, logical: logical.clone(), text: text.as_deref().map(Into::into), ..Default::default() };
             Input::Key(event, modifiers)
         })
         .collect()

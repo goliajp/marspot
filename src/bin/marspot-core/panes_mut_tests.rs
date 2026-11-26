@@ -35,7 +35,7 @@ fn panes_mut_reaches_a_shadow_pane() {
     )
     .unwrap();
     sb.set("SHELL", &shell.to_string_lossy());
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let shadow = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");

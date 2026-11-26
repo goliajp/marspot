@@ -5,6 +5,22 @@ use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 
 use crate::SessionImpl;
 
+/// Failsafe: a real keystroke from the user reaches L3 only when
+/// nothing upstream is holding the keyboard.  If the pane is held and a
+/// key gets here, whatever asked for the hold is gone (an L1 that never
+/// came back), and a pane frozen with no one to unfreeze it is worse
+/// than a pane that shows what happened.
+pub(crate) fn release_hold(session: &mut SessionImpl) {
+    if session.is_holding() {
+        marspot_term::lx_warn!(
+            "l3.hold.released_by_key",
+            "a keystroke reached a held pane — releasing",
+            session_id = session.id()
+        );
+        session.hold_grid(false);
+    }
+}
+
 /// Encode one forwarded keystroke with L3's own terminal mode flags,
 /// write it to the PTY, and local-echo printable bytes ahead of the
 /// round trip. Returns whether the echo painted the grid (so the caller

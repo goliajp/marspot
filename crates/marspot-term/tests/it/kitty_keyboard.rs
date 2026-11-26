@@ -24,7 +24,7 @@ fn press(logical: LogicalKey, text: Option<&str>) -> MarspotKeyEvent {
     MarspotKeyEvent {
         state: KeyState::Pressed,
         logical,
-        text: text.map(str::to_owned),
+        text: text.map(Into::into),
         ..Default::default()
     }
 }

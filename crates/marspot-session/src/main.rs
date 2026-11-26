@@ -873,21 +873,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
                 SessionEvent::Key(e, m) => {
-                    // Failsafe: a real keystroke from the user reaches
-                    // L3 only when nothing upstream is holding the
-                    // keyboard.  If the pane is held and a key gets
-                    // here, whatever asked for the hold is gone (an L1
-                    // that never came back), and a pane frozen with no
-                    // one to unfreeze it is worse than a pane that
-                    // shows what happened.
-                    if session.is_holding() {
-                        lx_warn!(
-                            "l3.hold.released_by_key",
-                            "a keystroke reached a held pane — releasing",
-                            session_id = session.id()
-                        );
-                        session.hold_grid(false);
-                    }
+                    keys::release_hold(&mut session);
                     frames.typed(&mut session);
                     predicted |= handle_key(&mut session, e, m)
                 }

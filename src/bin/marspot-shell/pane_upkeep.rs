@@ -33,7 +33,7 @@ impl ShellApp {
         };
         conn.send(
             MsgType::PaneAgentTui,
-            marspot::shell_proto::encode_pane_agent_tui(sid, on),
+            &marspot::shell_proto::encode_pane_agent_tui(sid, on),
         );
     }
 
@@ -43,7 +43,7 @@ impl ShellApp {
         };
         conn.send(
             MsgType::PaneRenderMarkup,
-            marspot::shell_proto::encode_pane_render_markup(sid, on),
+            &marspot::shell_proto::encode_pane_render_markup(sid, on),
         );
     }
 
@@ -53,7 +53,7 @@ impl ShellApp {
         };
         conn.send(
             MsgType::PaneWheelKeys,
-            marspot::shell_proto::encode_pane_wheel_keys(
+            &marspot::shell_proto::encode_pane_wheel_keys(
                 upd.shelld_session_id,
                 &upd.enter,
                 &upd.up,
@@ -246,6 +246,6 @@ impl ShellApp {
             return;
         };
         let caps = crate::pane_control::hub().map_or(0, |h| h.caps());
-        self.pane_look.flush(caps, |t, payload| conn.send(t, payload));
+        self.pane_look.flush(caps, |t, payload| conn.send(t, &payload));
     }
 }

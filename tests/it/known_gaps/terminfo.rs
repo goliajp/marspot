@@ -27,7 +27,7 @@ fn smkx() -> TermModes {
 fn send(logical: LogicalKey, text: Option<&str>) -> Vec<u8> {
     let event = MarspotKeyEvent {
         logical,
-        text: text.map(String::from),
+        text: text.map(Into::into),
         ..Default::default()
     };
     key_event_to_bytes(&event, Modifiers::default(), smkx(), || None)

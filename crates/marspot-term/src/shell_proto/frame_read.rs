@@ -40,26 +40,7 @@ impl Frame {
     /// Read exactly one frame off `r`, known or not; `None` at a clean
     /// end between two frames.
     pub fn read_next<R: Read>(r: &mut R) -> io::Result<Option<Next>> {
-        let mut header = [0u8; HEADER_LEN];
-        match read_exact_or_eof(r, &mut header)? {
-            ReadEnd::Eof => return Ok(None),
-            ReadEnd::Full => {}
-        }
-        let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
-        if magic != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad magic 0x{:08x}, expected 0x{:08x}", magic, MAGIC),
-            ));
-        }
-        let type_raw = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-        if len > MAX_PAYLOAD_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("payload len {} exceeds cap {}", len, MAX_PAYLOAD_LEN),
-            ));
-        }
+        let Some((type_raw, len)) = read_header(r)? else { return Ok(None) };
         let mut payload = vec![0u8; len];
         if len > 0 {
             r.read_exact(&mut payload)?;
@@ -69,6 +50,89 @@ impl Frame {
             None => Next::Unknown(type_raw),
         }))
     }
+}
+
+/// One frame as [`FrameReader`] lends it out.
+#[derive(Debug)]
+pub enum Seen<'a> {
+    Frame(MsgType, &'a [u8]),
+    /// A frame of a type this build does not know, `u32` the type; its
+    /// payload has been read and dropped.
+    Unknown(u32),
+}
+
+/// Reads frames into one buffer it keeps, and lends each payload to the
+/// caller for as long as a closure runs.  A reader that sees a frame per
+/// keystroke stops allocating once the buffer has reached the size of
+/// the frames it carries; a caller that keeps a payload copies it.
+#[derive(Default)]
+pub struct FrameReader {
+    buf: Vec<u8>,
+}
+
+impl FrameReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read exactly one frame off `r`, known or not, and hand it to `f`;
+    /// `None` at a clean end between two frames.
+    pub fn read_next<R: Read, T>(&mut self, r: &mut R, f: impl FnOnce(Seen<'_>) -> T) -> io::Result<Option<T>> {
+        let Some((type_raw, len)) = read_header(r)? else { return Ok(None) };
+        self.buf.clear();
+        self.buf.resize(len, 0);
+        r.read_exact(&mut self.buf)?;
+        Ok(Some(f(match MsgType::from_u32(type_raw) {
+            Some(t) => Seen::Frame(t, &self.buf),
+            None => Seen::Unknown(type_raw),
+        })))
+    }
+
+    /// [`Self::read_next`], skipping frames of types this build does not
+    /// know, as [`Frame::read_from`] does.
+    pub fn read_known<R: Read, T>(
+        &mut self,
+        r: &mut R,
+        mut f: impl FnMut(MsgType, &[u8]) -> T,
+    ) -> io::Result<Option<T>> {
+        loop {
+            let got = self.read_next(r, |seen| match seen {
+                Seen::Frame(t, payload) => Some(f(t, payload)),
+                Seen::Unknown(_) => None,
+            })?;
+            match got {
+                None => return Ok(None),
+                Some(Some(out)) => return Ok(Some(out)),
+                Some(None) => continue,
+            }
+        }
+    }
+}
+
+/// The type and payload length of the next frame, checked; `None` at a
+/// clean end between two frames.
+fn read_header<R: Read>(r: &mut R) -> io::Result<Option<(u32, usize)>> {
+    let mut header = [0u8; HEADER_LEN];
+    match read_exact_or_eof(r, &mut header)? {
+        ReadEnd::Eof => return Ok(None),
+        ReadEnd::Full => {}
+    }
+    let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    if magic != MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad magic 0x{:08x}, expected 0x{:08x}", magic, MAGIC),
+        ));
+    }
+    let type_raw = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+    if len > MAX_PAYLOAD_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("payload len {} exceeds cap {}", len, MAX_PAYLOAD_LEN),
+        ));
+    }
+    Ok(Some((type_raw, len)))
 }
 
 enum ReadEnd {
@@ -133,5 +197,21 @@ mod tests {
             other => panic!("not the ping: {other:?}"),
         }
         assert!(Frame::read_next(&mut cur).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_frame_reader_lends_each_frame_and_skips_unknown_ones() {
+        let mut buf = unknown_then_ping();
+        Frame::new(MsgType::Ping, encode_ping(9)).write_to(&mut buf).unwrap();
+        let mut r = FrameReader::new();
+        let mut cur = Cursor::new(buf.clone());
+        let first = r.read_next(&mut cur, |s| matches!(s, Seen::Unknown(999))).unwrap();
+        assert_eq!(first, Some(true));
+        let mut cur = Cursor::new(buf);
+        let mut pings = Vec::new();
+        while let Some(n) = r.read_known(&mut cur, |t, p| (t, decode_ping(p).unwrap())).unwrap() {
+            pings.push(n);
+        }
+        assert_eq!(pings, [(MsgType::Ping, 7), (MsgType::Ping, 9)]);
     }
 }

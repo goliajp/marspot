@@ -44,6 +44,9 @@ compress = ["dep:flate2"]
 # build-release-tarball, the release workflow) never turn it on, and
 # `tests/it/update_key_gate.rs` fails if one of them starts to.
 test-update-key = []
+# The counting allocator the zero-allocation tests install.  Test code
+# only: the GUI crate turns it on for its own tests as a dev-dependency.
+alloc-count = []
 
 [lints]
 workspace = true

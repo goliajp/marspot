@@ -76,7 +76,7 @@ impl ShellApp {
             ShellInbox::StripKeys(m) => {
                 marspot::app_strip_keys::set_strip_keys_for(m.window_id, m.on);
                 if let Some(c) = self.active.as_ref() {
-                    c.send(MsgType::StripKeys, marspot::shell_proto::encode_strip_keys(&m));
+                    c.send(MsgType::StripKeys, &marspot::shell_proto::encode_strip_keys(&m));
                 }
             }
             ShellInbox::CaretRect(rect, window_id) => {
@@ -139,7 +139,7 @@ impl ShellApp {
                     && let Some(conn) = self.active.as_ref() {
                         conn.send(
                             MsgType::PaneBadgeMenu,
-                            marspot::shell_proto::encode_pane_badge_menu(
+                            &marspot::shell_proto::encode_pane_badge_menu(
                                 shelld_sid, x, y, &items,
                             ),
                         );

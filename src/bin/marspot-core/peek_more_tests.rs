@@ -1,7 +1,7 @@
 //! What is typed while a view waits, and the strip, the pointer, the
 //! wheel and what is being composed during one.
 
-use std::sync::mpsc::Receiver;
+use marspot_term::mailbox::Receiver;
 
 use super::super::shadows::tests::{app_with_parent, done_for, frame, sandbox, wait_for};
 use super::tests::{app_with_helper, place, press, size_of, text_of, turn, view};

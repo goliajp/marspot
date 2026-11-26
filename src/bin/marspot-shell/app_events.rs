@@ -90,15 +90,13 @@ impl MarspotApp for ShellApp {
         // Active and pending get separate routing: the active core
         // drives what's on screen (resize swap, caret, healthcheck);
         // the pending core only reports its probation progress.
-        let active_inbox: Vec<ShellInbox> = match self.active.as_ref() {
-            Some(conn) => conn.control_rx.try_iter().collect(),
-            None => Vec::new(),
-        };
+        let mut active_inbox = self.take_inbox();
         let owed = self.frame_owed();
         let knocked = self.knocked(&active_inbox);
-        for msg in active_inbox {
+        for msg in active_inbox.drain(..) {
             self.handle_active_msg(msg, ctx);
         }
+        self.keep_inbox(active_inbox);
         self.poll_supervisor(ctx);
         self.settle_pump(knocked, owed);
         self.dev_pass();
@@ -108,9 +106,8 @@ impl MarspotApp for ShellApp {
     fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, mods: Modifiers) {
         // Forensic anchor for "key X did the wrong thing" reports.
         // We log the LogicalKey and the modifier byte; the actual PTY
-        // bytes are encoded downstream in L3 (input_core::key_event_to_bytes)
-        // and the existing `~/.marspot-trace` hook keeps capturing them
-        // if it ever existed.  This line being at DEBUG means production
+        // bytes are encoded downstream in L3 (input_core::key_event_to_bytes).
+        // This line being at DEBUG means production
         // (default INFO) pays nothing; `MARSPOT_LOG_SHELL=debug` opens
         // the floodgate when investigating.  Mod byte format mirrors
         // shell_proto::struct_to_mods_byte: shift=1 ctrl=2 alt=4 super=8.
@@ -121,20 +118,18 @@ impl MarspotApp for ShellApp {
             mods_byte = struct_to_mods_byte(mods),
             state = format!("{:?}", event.state)
         );
-        // The shell owns the windows, so the one command that opens
-        // one runs here; every other key is the core's to dispatch.
-        if event.state == marspot::input::KeyState::Pressed
-            && let Some(row) = marspot::commands::for_key(&event, mods)
-            && row.command == marspot::commands::Command::NewWindow
-        {
+        let window = Self::event_window(ctx);
+        let sent = key_send::forward_key(
+            self.pump.as_ref(),
+            self.active.as_ref(),
+            &mut self.key_buf,
+            &event,
+            mods,
+            window,
+        );
+        if !sent {
             self.open_new_window();
-            return;
         }
-        pane_control::key_pressed();
-        let wire = event_to_wire(&event, mods);
-        let w = Self::event_window(ctx);
-        self.send(MsgType::KeyEvent, encode_key_event(&wire, w));
-        marspot::latency_trace::mark(marspot::latency_trace::Stage::KeySent, 0);
     }
 
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {

@@ -226,28 +226,28 @@ impl ShellApp {
                 match req.what {
                     plugins::host::InjectWhat::Input(bytes) => conn.send(
                         MsgType::InjectInput,
-                        marspot::shell_proto::encode_inject_input(
+                        &marspot::shell_proto::encode_inject_input(
                             req.session_id,
                             &bytes,
                         ),
                     ),
                     plugins::host::InjectWhat::HoldGrid(on) => conn.send(
                         MsgType::PaneHoldGrid,
-                        marspot::shell_proto::encode_pane_hold_grid(
+                        &marspot::shell_proto::encode_pane_hold_grid(
                             req.session_id,
                             on,
                         ),
                     ),
                     plugins::host::InjectWhat::Paste(text) => conn.send(
                         MsgType::PaneInjectPaste,
-                        marspot::shell_proto::encode_pane_inject_paste(
+                        &marspot::shell_proto::encode_pane_inject_paste(
                             req.session_id,
                             &text,
                         ),
                     ),
                     plugins::host::InjectWhat::ResetMouseReporting => conn.send(
                         MsgType::PaneResetMouseReporting,
-                        marspot::shell_proto::encode_pane_reset_mouse_reporting(
+                        &marspot::shell_proto::encode_pane_reset_mouse_reporting(
                             req.session_id,
                         ),
                     ),

@@ -15,7 +15,7 @@
 use marspot::commands::{Command, Runs, TABLE};
 
 const CORE: &str = "src/bin/marspot-core/keys.rs";
-const SHELL: &str = "src/bin/marspot-shell/app_events.rs";
+const SHELL: &str = "src/bin/marspot-shell/key_send.rs";
 
 /// `Command::Copy`, `Command::FocusPane` — the variant as source
 /// spells it, without what it carries.
@@ -79,7 +79,7 @@ fn the_check_would_notice_a_command_nothing_runs() {
 /// hear about.
 #[test]
 fn no_layer_matches_a_chord_by_hand() {
-    for path in [CORE, SHELL, "src/bin/marspot-core.rs", "src/main.rs"] {
+    for path in [CORE, SHELL, "src/bin/marspot-shell/app_events.rs", "src/bin/marspot-core.rs", "src/main.rs"] {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         let prod = src.split("#[cfg(test)]\nmod tests").next().expect("split yields one piece");
         assert!(

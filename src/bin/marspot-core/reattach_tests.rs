@@ -15,7 +15,7 @@ fn screen(pane: &Pane) -> String {
 
 /// Hand what the pane's session says about its region to the pane, as
 /// the core's loop does.
-fn pump(pane: &mut Pane, rx: &mpsc::Receiver<CoreEvent>) {
+fn pump(pane: &mut Pane, rx: &Receiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
         if let CoreEvent::L3Says(_, frame) = ev {
             pane.session_mut().l3_session_says(&frame);
@@ -24,7 +24,7 @@ fn pump(pane: &mut Pane, rx: &mpsc::Receiver<CoreEvent>) {
     pane.pump();
 }
 
-fn wait_for_mark(pane: &mut Pane, rx: &mpsc::Receiver<CoreEvent>, what: &str) {
+fn wait_for_mark(pane: &mut Pane, rx: &Receiver<CoreEvent>, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         pump(pane, rx);
@@ -39,7 +39,7 @@ fn wait_for_mark(pane: &mut Pane, rx: &mpsc::Receiver<CoreEvent>, what: &str) {
 /// A live session with `MARK` on its screen, left running with no
 /// core attached.  The mark is the output of the command, not the
 /// command as typed.
-fn session_showing_the_mark(tx: &mpsc::Sender<CoreEvent>, rx: &mpsc::Receiver<CoreEvent>) -> SessionEntry {
+fn session_showing_the_mark(tx: &Sender<CoreEvent>, rx: &Receiver<CoreEvent>) -> SessionEntry {
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", tx)
         .expect("real L3 spawn (is marspot-session built?)");
@@ -61,7 +61,7 @@ fn session_showing_the_mark(tx: &mpsc::Sender<CoreEvent>, rx: &mpsc::Receiver<Co
     entry
 }
 
-fn take_over(entry: &SessionEntry, tx: &mpsc::Sender<CoreEvent>) -> Pane {
+fn take_over(entry: &SessionEntry, tx: &Sender<CoreEvent>) -> Pane {
     let s = saved(&[(entry.id, "")]);
     let (mut panes, reattached) =
         assemble_panes_at_boot(Some(&s), 1, 60, 16, tx, Sweep::Full, &Default::default());
@@ -85,7 +85,7 @@ fn assert_same_processes(before: &SessionEntry) {
 #[test]
 fn a_session_whose_grid_region_lost_its_name_is_given_another() {
     let _sb = Sandbox::new();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = marspot_term::mailbox::channel();
     let before = session_showing_the_mark(&tx, &rx);
     let regions = SessionRegions::of_entry(&before).unwrap();
     marspot::grid_shm::delete_region(regions.grid_name());
@@ -107,7 +107,7 @@ fn a_session_whose_grid_region_lost_its_name_is_given_another() {
 #[test]
 fn a_region_of_another_session_under_the_name_is_not_shown() {
     let _sb = Sandbox::new();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = marspot_term::mailbox::channel();
     let before = session_showing_the_mark(&tx, &rx);
     let regions = SessionRegions::of_entry(&before).unwrap();
     let stranger = Identity { state: regions.owner().state ^ 1, ..regions.owner() };
@@ -136,7 +136,7 @@ fn a_region_of_another_session_under_the_name_is_not_shown() {
 #[test]
 fn a_session_that_cannot_move_and_cannot_update_is_started_again() {
     let _sb = Sandbox::new();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = marspot_term::mailbox::channel();
     let before = session_showing_the_mark(&tx, &rx);
     // as a session from before identities wrote its entry
     let mut old = before.clone();

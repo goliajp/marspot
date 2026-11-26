@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub(super) fn l3_reader_loop(
     mut stream: UnixStream,
     session_id: u64,
-    tx: Sender<CoreEvent>,
+    tx: marspot_term::mailbox::Sender<CoreEvent>,
     selection_tx: Sender<(u32, String)>,
 ) {
     // A bell goes to the loop, which knows the pane's window.  While one

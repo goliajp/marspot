@@ -1,7 +1,7 @@
 //! Viewing shadow panes in place, against real `marspot-session`
 //! processes.
 
-use std::sync::mpsc::Receiver;
+use marspot_term::mailbox::Receiver;
 
 use super::super::held_keys::Went;
 use super::super::shadows::tests::{app_with_parent, done_for, drive, frame, open_shadow, sandbox, wait_done, wait_for};
@@ -57,7 +57,7 @@ pub(super) fn ev(logical: LogicalKey, state: KeyState, repeat: bool) -> MarspotK
         LogicalKey::Char(c) => Some(c.to_string()),
         _ => None,
     };
-    MarspotKeyEvent { state, logical, text, repeat, ..Default::default() }
+    MarspotKeyEvent { state, logical, text: text.map(Into::into), repeat, ..Default::default() }
 }
 
 pub(super) fn press(app: &mut CoreApp, logical: LogicalKey) {

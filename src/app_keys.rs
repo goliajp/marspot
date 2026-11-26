@@ -100,7 +100,7 @@ pub(crate) fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<Ma
     Some(MarspotKeyEvent {
         state,
         logical,
-        text,
+        text: text.map(Into::into),
         repeat,
         base_layout: crate::keyboard_layout::us_layout_char(key_code),
     })

@@ -126,6 +126,11 @@ core-foundation = "0.10"
 foreign-types = "0.5"
 png = "0.18"
 
+[dev-dependencies]
+# The same engine, with the counting allocator the zero-allocation tests
+# of the shell and the core install.  Not in any shipped build.
+marspot-term = { path = "crates/marspot-term", features = ["alloc-count"] }
+
 [profile.release]
 # Fat LTO matters now that we split into a lib + multiple bins: the
 # render and parser hot paths cross the lib↔bin boundary

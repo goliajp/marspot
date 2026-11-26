@@ -13,6 +13,8 @@
 //! paths keep resolving.
 
 pub mod agent;
+#[cfg(any(test, feature = "alloc-count"))]
+pub mod alloc_count;
 pub mod async_writer;
 pub mod base64;
 pub mod binary_tree;
@@ -29,6 +31,7 @@ pub mod grid_links;
 pub mod osc8;
 pub mod idle_pages;
 pub mod logx;
+pub mod mailbox;
 pub mod loop_watch;
 pub mod scrollback_search;
 pub(crate) mod segment;
@@ -72,6 +75,7 @@ pub static MARSPOT_LAYER_VERS_TERM: &str = concat!(
 );
 pub mod grid_shm;
 pub mod input_core;
+pub mod key_text;
 pub mod language;
 pub mod layout;
 pub mod parser;

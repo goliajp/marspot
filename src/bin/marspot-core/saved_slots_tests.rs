@@ -7,7 +7,7 @@ use marspot::state::{PANE_FLAG_DORMANT, SavedState};
 /// What a starting core does with the saved layout: settle it, then
 /// assemble the boot window with the sweep.  Returns the windows past
 /// the boot one, as read.
-fn boot(tx: &mpsc::Sender<CoreEvent>) -> Vec<SavedWindowLayout> {
+fn boot(tx: &Sender<CoreEvent>) -> Vec<SavedWindowLayout> {
     let mut state = marspot::state::read();
     let sweep = crate::saved_slots::forget_closed_slots(&mut state);
     let mut windows = state.expect("a saved layout").windows;
@@ -23,7 +23,7 @@ fn boot(tx: &mpsc::Sender<CoreEvent>) -> Vec<SavedWindowLayout> {
 fn a_closed_session_is_not_restored_by_the_core_after_the_one_that_finished_its_close() {
     let mut sb = Sandbox::new();
     sb.break_session_bin();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let closed = reg::allocate_next_session_id().unwrap();
     let kept = reg::allocate_next_session_id().unwrap();
     for id in [closed, kept] {
@@ -48,7 +48,7 @@ fn a_closed_session_is_not_restored_by_the_core_after_the_one_that_finished_its_
 fn a_close_is_not_finished_by_a_core_that_could_not_write_the_layout_back() {
     let mut sb = Sandbox::new();
     sb.break_session_bin();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let closed = reg::allocate_next_session_id().unwrap();
     write_session_entry(&dead_entry(closed)).unwrap();
     reg::mark_closed(closed).unwrap();

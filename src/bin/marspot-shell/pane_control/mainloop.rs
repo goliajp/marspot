@@ -40,7 +40,7 @@ impl ShellApp {
                         refuse(reply, r);
                         continue;
                     }
-                    let sent = self.active.as_ref().filter(|c| c.hello_acked).is_some_and(|c| c.send(msg, payload));
+                    let sent = self.active.as_ref().filter(|c| c.hello_acked).is_some_and(|c| c.send(msg, &payload));
                     if !sent {
                         refuse(reply, Reject::new(ErrorCode::CoreRestarting, "the core is restarting").retry_after(1_000));
                     }
@@ -75,12 +75,12 @@ impl ShellApp {
         for s in obs.live() {
             let watch = PaneWatch { req_id: h.links.req_id(), sid: s.entry.id, watch: clear.clone() };
             if let Ok(p) = encode_pane_watch(&watch) {
-                conn.send(MsgType::PaneWatch, p);
+                conn.send(MsgType::PaneWatch, &p);
             }
         }
         for (sid, body) in h.links.watch_bodies() {
             if let Ok(p) = encode_pane_watch(&PaneWatch { req_id: h.links.req_id(), sid, watch: body }) {
-                conn.send(MsgType::PaneWatch, p);
+                conn.send(MsgType::PaneWatch, &p);
                 n += 1;
             }
         }

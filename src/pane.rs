@@ -45,9 +45,8 @@ use crate::render::SessionView;
 use crate::selection_tape;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
-    encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_key_event,
-    encode_paste, encode_search_cancel, encode_search_more, encode_search_scrollback,
-    event_to_wire, Frame, MsgType,
+    encode_event, encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_paste,
+    encode_search_cancel, encode_search_more, encode_search_scrollback, Frame, MsgType, FIRST_WINDOW_ID,
 };
 use crate::tools::{search_bar::SearchBar, search_list::SearchList};
 use crate::terminal::Terminal;
@@ -841,13 +840,9 @@ impl L3Conn {
     /// its own terminal modes and local-echoes.  Best-effort: a dead
     /// socket means L3 went away and the container will reap it.
     fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
-        let wire = event_to_wire(event, mods);
-        // Placeholder window id: L3 is window-blind and drops it.
-        let frame = Frame::new(
-            MsgType::KeyEvent,
-            encode_key_event(&wire, marspot_term::shell_proto::FIRST_WINDOW_ID),
-        );
-        let _ = self.control.send(frame);
+        // encoded straight into the writer's queue; the window id is a
+        // placeholder L3 drops, being window-blind
+        let _ = self.control.send_with(MsgType::KeyEvent, |out| encode_event(event, mods, FIRST_WINDOW_ID, out));
     }
 
     /// Forward pasted clipboard text; L3 bracketed-wraps it (per its own

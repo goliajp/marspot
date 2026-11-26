@@ -20,7 +20,7 @@ fn shell(sb: &Sandbox, name: &str, body: &str) -> String {
 /// A pane whose L3 runs `shell`.
 fn pane(sb: &mut Sandbox, shell: &str) -> (u64, Pane) {
     sb.set("SHELL", shell);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let p = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
     (sid, p)

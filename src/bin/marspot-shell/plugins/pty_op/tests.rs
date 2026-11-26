@@ -1752,7 +1752,7 @@ fn escape_ends_the_run_and_releases_the_pane() {
         mods: 0,
         kind: marspot::shell_proto::WireLogicalKind::Named,
         key_data: marspot::shell_proto::WireNamedKey::Escape as u32,
-        text: String::new(),
+        text: Default::default(),
         ..Default::default()
     };
     assert!(matches!(r.on_user_key(&host, &esc), KeyHandling::EndSession));

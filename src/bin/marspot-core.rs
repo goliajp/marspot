@@ -19,7 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use marspot_term::mailbox::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use objc2::runtime::ProtocolObject;
@@ -426,7 +426,7 @@ mod window_state_tests {
     /// `app_with` for a state root the test made some other way.
     pub(super) fn app_in(root: &std::path::Path, windows: Vec<WindowState>) -> CoreApp {
         assert!(marspot::state::state_file_path().starts_with(root), "state path is not in the test's root");
-        let (event_tx, _rx) = mpsc::channel();
+        let (event_tx, _rx) = marspot_term::mailbox::channel();
         CoreApp {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
             pane_badges: std::collections::HashMap::new(),
@@ -2746,7 +2746,7 @@ fn main() {
     // retired the shelld wake callback (used to push `PumpShelld`);
     // L3 reattach + dual-pump bytelog already drives the event loop
     // through the same channel.
-    let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = mpsc::channel();
+    let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = marspot_term::mailbox::channel();
 
     // Bootstrap the full 9-grid: reattach every surviving shelld
     // session (full bytelog history replays on attach), then fill the
@@ -3219,12 +3219,7 @@ fn main() {
                 // drops it rather than falling back to the key window
                 // — silently acting on the wrong window is worse than
                 // dropping one event.
-                CoreEvent::Key(event, mods, win) => {
-                    if let Some(wi) = app.window_index(win) {
-                        app.key(wi, event, mods)
-                    }
-                    trace::mark(Stage::CoreKeyHandled, 0);
-                }
+                CoreEvent::Key(event, mods, win) => app.key_from_shell(win, event, mods),
                 CoreEvent::MouseDown(x, y, mods, win) => {
                     if let Some(wi) = app.focus_window(win) {
                         app.drag_window = Some(win);

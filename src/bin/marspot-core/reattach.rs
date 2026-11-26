@@ -1,6 +1,6 @@
 //! Taking over a session that outlived the core that started it.
 
-use std::sync::mpsc::Sender;
+use marspot_term::mailbox::Sender;
 
 use marspot::grid_shm::{GridShmReader, SessionRegions};
 use marspot::pane::{L3Conn, Pane};

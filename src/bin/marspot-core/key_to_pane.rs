@@ -6,6 +6,14 @@ use super::held_keys::Went;
 use super::*;
 
 impl CoreApp {
+    /// A key L1 sent for window `win`, dropped when that window has gone.
+    pub(super) fn key_from_shell(&mut self, win: u32, event: MarspotKeyEvent, modifiers: Modifiers) {
+        if let Some(wi) = self.window_index(win) {
+            self.key(wi, event, modifiers)
+        }
+        trace::mark(Stage::CoreKeyHandled, 0);
+    }
+
     /// Whether the key being let go of was pressed for a program, which
     /// is told, or for nobody.
     pub(super) fn release_follows_press(&mut self, event: &MarspotKeyEvent, modifiers: Modifiers) -> bool {
@@ -182,3 +190,7 @@ impl CoreApp {
         // fact instead.
     }
 }
+
+#[cfg(test)]
+#[path = "key_alloc_tests.rs"]
+mod alloc_tests;

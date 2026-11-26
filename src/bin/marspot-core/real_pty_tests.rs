@@ -15,7 +15,7 @@ fn a_session_whose_registry_entry_is_deleted_exits_by_itself() {
     // The deadman's beat is five seconds in production; what this
     // asserts is that it fires at all, not how often.
     sb.set("MARSPOT_SESSION_ENTRY_CHECK_MS", "200");
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let live = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");
@@ -58,7 +58,7 @@ fn a_real_session_gives_up_mouse_reporting_when_told() {
     // `mouse-reset` overran it by a few bytes and the session died
     // at `uds_bind_failed` before it could register.
     let _sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");
@@ -137,7 +137,7 @@ fn a_real_session_gives_up_mouse_reporting_when_told() {
 #[test]
 fn a_pane_is_not_given_the_launchers_idea_of_the_terminal() {
     let mut sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
 
     sb.set("TERM", "screen-256color");
@@ -170,7 +170,7 @@ fn a_pane_is_not_given_the_launchers_idea_of_the_terminal() {
 #[test]
 fn a_new_pane_inherits_the_directory_the_shell_is_in_now() {
     let _sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");
@@ -209,7 +209,7 @@ fn the_two_motion_modes_are_told_apart_on_a_real_pty() {
         [("1000", false, false), ("1002", true, false), ("1003", true, true)]
     {
         let _sb = Sandbox::new();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = marspot_term::mailbox::channel();
         let sid = reg::allocate_next_session_id().unwrap();
         let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
             .expect("real L3 spawn (is marspot-session built?)");
@@ -279,7 +279,7 @@ impl Drop for OwnPasteboard {
 fn osc52_reaches_the_pasteboard_from_a_real_shell() {
     let mut sb = Sandbox::new();
     let _pb = OwnPasteboard::new(&mut sb);
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");
@@ -346,7 +346,7 @@ fn osc52_reaches_the_pasteboard_from_a_real_shell() {
 #[test]
 fn a_click_reaches_the_program_on_a_real_pty() {
     let _sb = Sandbox::new();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
         .expect("real L3 spawn (is marspot-session built?)");
@@ -420,7 +420,7 @@ fn a_report_sent_on_the_cores_stale_modes_never_reaches_the_program() {
     )
     .unwrap();
     std::fs::set_permissions(dir.join("prog"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = marspot_term::mailbox::channel();
     let sid = reg::allocate_next_session_id().unwrap();
     let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, dir.to_str().unwrap(), &tx)
         .expect("real L3 spawn (is marspot-session built?)");
