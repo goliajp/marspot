@@ -52,7 +52,7 @@ fn now() -> i64 {
 /// week renews first.
 fn feed(home: &std::path::Path, tag: &str, fable_p1: f64, fable_p2: f64) {
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(home),
         format!(
             r#"{{"generated_at": "2026-11-20T00:00:00+00:00", "accounts": [
                {{"name":"A","email":"{tag}1@example","status":"allowed","utilization_5h":null,
@@ -217,7 +217,7 @@ fn a_fable_move_that_ends_background_work_says_both() {
 fn an_agent_refusal_moves_a_marked_pane_off_an_account_the_feed_does_not_know() {
     let home = quota_home("fable-unknown");
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(&home),
         r#"{"generated_at": "2026-11-20T00:00:00+00:00", "accounts": [
            {"name":"B","email":"fable-unknown2@example","status":"allowed","utilization_5h":null,
             "utilization_7d":0.3,"reset_5h":null,"reset_7d":4102444900,"tier":"default_claude_max_20x",

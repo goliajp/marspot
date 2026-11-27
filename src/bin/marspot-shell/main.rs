@@ -86,6 +86,8 @@ mod shell_window;
 mod pane_upkeep;
 mod platform;
 mod supervisor_tick;
+#[cfg(test)]
+mod test_log;
 mod supervisor_deadlines;
 mod shell_app;
 use banner::BannerKind;

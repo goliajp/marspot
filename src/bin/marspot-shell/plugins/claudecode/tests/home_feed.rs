@@ -19,13 +19,15 @@ fn claude_json(email: &str) -> String {
 fn the_profiles_in_home_resolve_to_the_feeds_accounts() {
     let home = marspot_term::test_env::TempDir::new("quota-home");
     let mut env = marspot_term::test_env::EnvGuard::new();
-    env.set("HOME", home.path());
+    env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", home.join("state"));
     for (n, email) in [(1u8, "ada@example.jp"), (2, "ben@example.com"), (3, "nobody@example.org")] {
         let dir = home.join(format!(".claude-profile-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".claude.json"), claude_json(email)).unwrap();
     }
-    let feed = home.join(".local/state/devops/claude-usage.json");
+    // where marspot writes the feed it collects: no devops on this machine
+    let feed = marspot::cc_usage::own_feed_path();
+    assert_eq!(feed, home.join("state/usage/claude-usage.json"));
     std::fs::create_dir_all(feed.parent().unwrap()).unwrap();
     std::fs::write(
         &feed,
@@ -45,7 +47,7 @@ fn the_profiles_in_home_resolve_to_the_feeds_accounts() {
     )
     .unwrap();
 
-    let usage = marspot::cc_usage::read().expect("the feed under HOME parses");
+    let usage = marspot::cc_usage::read().expect("marspot's own feed parses");
     let profiles = super::super::discover_profiles();
     assert_eq!(profiles, vec![1, 2, 3]);
     let rooms = rooms_for(&profiles, &usage.accounts, |p| profile_email(home.path(), p), 0);

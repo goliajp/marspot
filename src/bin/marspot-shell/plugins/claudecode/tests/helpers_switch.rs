@@ -15,7 +15,7 @@ fn three_accounts(tag: &str) -> TestHome {
     )
     .unwrap();
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(&home),
         format!(
             r#"{{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
                    {{"name":"A","email":"{tag}1@example","status":"rejected","utilization_5h":0.0,

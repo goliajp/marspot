@@ -113,9 +113,18 @@ pub(crate) fn from_socket(a: &ResetClaimArgs) -> Value {
     };
     let grant = Grant { kind: a.kind.clone(), grant_ref: a.grant_ref.clone(), ..Grant::default() };
     let c = Claim { provider, profile: a.profile, grant, request_id: a.request_id.clone(), reason: a.reason.clone(), by: By::DevopsUi };
-    let confirm = a.confirm.clone();
-    run(ledger(), c, move |c| verify::verify(&verify::access()?, c, &confirm))
-    .reply(&a.request_id)
+    run(ledger(), c, socket_check(a.confirm.clone())).reply(&a.request_id)
+}
+
+/// A socket claim counts as confirmed only once devops says so; with
+/// no devops on the machine it is refused at once, asking nothing.
+fn socket_check(confirm: String) -> impl FnOnce(&Claim) -> Result<Grant, Outcome> {
+    move |c| verify::verify(&verify::access()?, c, &confirm)
+}
+
+/// A panel claim was confirmed by the user's own second press.
+fn panel_check(c: &Claim) -> Result<Grant, Outcome> {
+    Ok(c.grant.clone())
 }
 
 /// A claim the user confirmed on the accounts panel, from the core's
@@ -147,7 +156,7 @@ fn panel_claim(act: ResetPanelAct) -> Outcome {
     let Some(provider) = Provider::parse(&act.provider) else { return Outcome::of(Res::Error, "unknown provider") };
     let grant = Grant { kind: act.kind, grant_ref: act.grant_ref, starts_at: act.starts_at, ends_at: act.ends_at, left: act.left };
     let c = Claim { provider, profile: act.profile, grant, request_id: act.request_id, reason: "confirmed on the accounts panel".into(), by: By::MarspotUi };
-    run(ledger(), c, |c| Ok(c.grant.clone()))
+    run(ledger(), c, panel_check)
 }
 
 fn run(ledger: &Arc<Mutex<ledger::Ledger>>, c: Claim, check: impl FnOnce(&Claim) -> Result<Grant, Outcome>) -> Outcome {

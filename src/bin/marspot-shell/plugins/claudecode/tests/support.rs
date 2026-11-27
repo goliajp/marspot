@@ -21,8 +21,32 @@ impl TestHome {
         let mut env = EnvGuard::new();
         env.set("HOME", dir.path())
             .set("MARSPOT_STATE_DIR", dir.join("state"));
+        crate::test_log::open();
         Self { _env: env, dir }
     }
+}
+
+/// A home of a machine without devops: whatever a test did here,
+/// nothing in the log shows marspot leaning on it.
+impl Drop for TestHome {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let log = crate::test_log::text();
+        let lines = crate::test_log::devops_lines(&log);
+        assert!(lines.is_empty(), "{lines:#?}");
+        assert!(!self.dir.join(".local/state/devops").exists() && !self.dir.join(".config/devops").exists());
+    }
+}
+
+/// Where marspot writes the Claude usage feed it collects itself, under
+/// the state root of `home`: the one feed of a machine without devops.
+pub(super) fn usage_feed(home: &Path) -> PathBuf {
+    let feed = marspot::cc_usage::own_feed_path();
+    assert_eq!(feed, home.join("state/usage/claude-usage.json"), "the state root is the home's own");
+    fs::create_dir_all(feed.parent().unwrap()).unwrap();
+    feed
 }
 
 impl std::ops::Deref for TestHome {
@@ -366,9 +390,8 @@ pub(super) fn quota_home(tag: &str) -> TestHome {
         )
         .unwrap();
     }
-    fs::create_dir_all(home.join(".local/state/devops")).unwrap();
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(&home),
         format!(
             r#"{{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
                    {{"name":"A","email":"{tag}1@example","status":"rejected","utilization_5h":0.0,

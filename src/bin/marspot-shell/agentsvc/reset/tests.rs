@@ -12,6 +12,7 @@ use super::*;
 mod again_tests;
 mod codex_tests;
 mod curl_tests;
+mod no_devops_tests;
 mod screen_tests;
 mod status_tests;
 
@@ -137,10 +138,10 @@ fn reset_nothing_happens_without_devops_or_its_credential() {
     // a stand-in home: the user's own devops files are never read here
     let home = marspot_term::test_env::TempDir::new("reset-devops-home");
     let none = verify::access_in(home.path()).err().expect("no files");
-    assert_eq!((none.result, none.detail.as_str()), (Res::Error, "no devops credential"));
+    assert_eq!((none.result, none.detail.as_str()), (Res::Unavailable, verify::NO_DEVOPS));
     std::fs::create_dir_all(home.join(".config/devops")).unwrap();
     std::fs::write(home.join(".config/devops/api-key"), "dk_test_2\n").unwrap();
-    assert_eq!(verify::access_in(home.path()).err().map(|o| o.detail), Some("no devops credential".into()), "a key and no address");
+    assert_eq!(verify::access_in(home.path()).err().map(|o| o.detail), Some(verify::NO_DEVOPS.into()), "a key and no address");
 }
 
 #[test]

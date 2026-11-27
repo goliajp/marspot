@@ -80,7 +80,7 @@ fn a_new_reason_for_holding_is_said_again() {
     let host = FakeHost::new(home.join("state"));
     // both accounts spent
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(&home),
         r#"{"generated_at": "2026-09-29T00:00:00+00:00", "accounts": [
                {"name":"A","email":"hold1@example","status":"rejected","utilization_5h":0.0,
                 "utilization_7d":1.0,"reset_5h":1,"reset_7d":4102444800},

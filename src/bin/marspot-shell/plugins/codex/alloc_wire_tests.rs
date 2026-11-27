@@ -76,9 +76,12 @@ fn codex_alloc_pass_moves_nothing() {
     let state = home.join("state");
     let mut env = EnvGuard::new();
     env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", &state);
+    crate::test_log::open();
     let now = crate::plugins::claudecode::rooms::unix_now();
-    std::fs::create_dir_all(home.join(".local/state/devops")).unwrap();
-    std::fs::write(home.join(".local/state/devops/codex-usage.json"), feed(now)).unwrap();
+    // the feed marspot collects itself: no devops on this machine
+    let own = marspot::cc_usage::own_codex_feed_path();
+    std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+    std::fs::write(own, feed(now)).unwrap();
     let homes_before = homes(home.path());
     assert_eq!(homes_before.len(), 2, "{homes_before:?}");
     let rollout = home.join("rollout-x.jsonl");
@@ -118,4 +121,6 @@ fn codex_alloc_pass_moves_nothing() {
     assert!(host.submitted.lock().unwrap().is_empty(), "no pty op: {:?}", host.submitted.lock().unwrap());
     assert_eq!(homes_before, homes(home.path()), "no codex home is touched");
     assert!(host.logged.lock().unwrap().iter().any(|l| l.starts_with("codex.alloc.refused")), "{:?}", host.logged.lock().unwrap());
+    let log = crate::test_log::text();
+    assert!(crate::test_log::devops_lines(&log).is_empty(), "{log}");
 }

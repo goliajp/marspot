@@ -180,7 +180,8 @@ impl Collector {
         if self.kimi_only {
             return;
         }
-        if !devops_collects("claude", &self.sources.claude, &mut self.by_devops[0], now) {
+        let claude_by_devops = devops_collects("claude", &self.sources.claude, &mut self.by_devops[0], now);
+        if !claude_by_devops {
             let waits = self.own_claude.with_file_name("claude-waits.json");
             self.claude = claude::pass(home, &waits, std::mem::take(&mut self.claude), now);
             sample(&mut self.samples, "claude", &self.claude, now);
@@ -188,8 +189,11 @@ impl Collector {
         }
         let mut own_resets = Vec::new();
         let by_devops = devops_collects("codex", &self.sources.codex, &mut self.by_devops[1], now);
+        // only a fresh devops feed is read: a stale one is a collector that stopped
+        let fresh = |by: bool, path: &Path| by.then(|| std::fs::read_to_string(path).unwrap_or_default());
+        let (codex_feed, claude_feed) = (fresh(by_devops, &self.sources.codex), fresh(claude_by_devops, &self.sources.claude));
         // a feed that only counts credits gives them all one end; each has its own
-        let flat = by_devops && codex_resets::feed_lacks_grants(&std::fs::read_to_string(&self.sources.codex).unwrap_or_default());
+        let flat = codex_feed.as_deref().is_some_and(codex_resets::feed_lacks_grants);
         if !by_devops || flat {
             self.codex = codex::pass(home, std::mem::take(&mut self.codex), now, &mut own_resets);
         }
@@ -197,7 +201,7 @@ impl Collector {
             sample(&mut self.samples, "codex", &self.codex, now);
             write("codex", &self.own_codex, &self.codex, now);
         }
-        self.resets.pass(by_devops, &self.sources.codex, &self.sources.claude, own_resets, &self.kimi, now);
+        self.resets.pass(codex_feed.as_deref(), claude_feed.as_deref(), own_resets, &self.kimi, now);
     }
 }
 
@@ -231,6 +235,10 @@ fn sample(samples: &mut samples::Samples, agent: &'static str, accounts: &[Accou
 #[cfg(test)]
 #[path = "samples_tests.rs"]
 mod samples_tests;
+
+#[cfg(test)]
+#[path = "no_devops_tests.rs"]
+mod no_devops_tests;
 
 #[cfg(test)]
 mod tests {
