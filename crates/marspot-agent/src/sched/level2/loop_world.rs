@@ -12,7 +12,13 @@
 //!   refused pane goes where the objective says, as today.
 //!
 //! Money realised: every rewrite paid (switches and refusals), plus the
-//! week lapsing at a renewal while demand went unmet in that week.
+//! week lapsing at a renewal while demand went unmet in the week before
+//! it.  Each run is two weeks and only the second is counted: a single
+//! week from a cold start leaves the quota still on the accounts at its
+//! end uncounted, and a policy that lapses less at the renewals but
+//! leaves more at the end looked dearer than one that did the reverse.
+//! Level 1 reads the recorded restricted use in six-hour buckets and
+//! their highest as the prudent rate, as the shell hands it.
 
 use super::standing::Standing;
 use super::tests::KAPPA;
@@ -48,6 +54,14 @@ pub(super) struct Week {
     pub switches: usize,
     /// A pane switched twice by plan inside six hours.
     pub double: usize,
+    /// The money in parts: rewrites of switches, rewrites at refusals,
+    /// week lapsing at renewals.
+    pub switch_rw: f64,
+    pub refusal_rw: f64,
+    pub lapsed: f64,
+    /// Switches and refusals of the restricted panes.
+    pub switches_r: usize,
+    pub refusals_r: usize,
 }
 
 /// The fleet hours recorded, `[restricted, plain]` weeks an hour.
@@ -56,6 +70,13 @@ pub(super) fn hours() -> Vec<[f64; 2]> {
         let f: Vec<f64> = l.split('\t').filter_map(|x| x.parse().ok()).collect();
         (f.len() == 3).then(|| [f[1], f[2]])
     }).collect()
+}
+
+/// The recorded restricted use in six-hour buckets, weeks an hour: what
+/// the shell hands level 1 as the fleet's buckets, and their highest as
+/// the prudent rate.
+fn buckets() -> Vec<f64> {
+    hours().chunks_exact(6).map(|c| c.iter().map(|h| h[0]).sum::<f64>() / 6.0).collect()
 }
 
 struct P {
@@ -85,10 +106,15 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
     let mut w = Week::default();
     let mut st = Standing::default();
     let mut planned_once = false;
-    let mut unmet_week = false;
+    // the last moment demand went unmet; a renewal lapses as waste when
+    // demand went unmet in the week before it
+    let mut last_unmet: Option<i64> = None;
     let mut demand = [0.0; 2];
-    for step in 0..(WEEK / STEP) {
+    for step in 0..(2 * WEEK / STEP) {
         let now = step * STEP;
+        if now == WEEK {
+            w = Week { double: w.double, ..Week::default() };
+        }
         if now % 3600 == 0 {
             demand = hours[rng.below(hours.len())];
         }
@@ -96,8 +122,10 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
             q.t = (*renew - now) as f64 / 3600.0;
             q.tf = q.t;
             if now >= *renew {
+                let unmet_week = last_unmet.is_some_and(|t| t > now - WEEK);
                 if unmet_week {
                     w.money += q.r.max(0.0);
+                    w.lapsed += q.r.max(0.0);
                 }
                 q.r = 1.0;
                 q.f = KAPPA;
@@ -133,10 +161,11 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
             let short = (if class == 0 { a - served_a } else { 0.0 }) + b - served_b;
             if short > 1e-12 {
                 w.unmet += short;
-                unmet_week = true;
+                last_unmet = Some(now);
                 if !p.stalled {
                     p.stalled = true;
                     w.refusals += 1;
+                    w.refusals_r += usize::from(p.restricted);
                     refused = true;
                 }
             } else {
@@ -184,7 +213,10 @@ fn mover(p: &P, now: i64) -> Mover {
 fn switch(panes: &mut [P], k: usize, to: u8, now: i64, w: &mut Week) {
     let p = &mut panes[k];
     w.switches += 1;
-    w.money += switch_cost(if p.restricted { Class::Restricted } else { Class::Plain }, Some(400_000));
+    w.switches_r += usize::from(p.restricted);
+    let rw = switch_cost(if p.restricted { Class::Restricted } else { Class::Plain }, Some(400_000));
+    w.money += rw;
+    w.switch_rw += rw;
     p.left = Some((p.on, now));
     p.on = to;
     p.moved_at = Some(now);
@@ -197,6 +229,7 @@ fn refuse(acc: &[(Quant, i64)], panes: &mut [P], k: usize, now: i64, w: &mut Wee
     let m = mover(&panes[k], now);
     if let Some((to, _)) = waste::decide(&q, &l, m, panes[k].on, Some(KAPPA), &Decision::Out { horizon_h: MUST_LAST_H }, 0, &PARAMS) {
         w.money += switch_cost(m.class, m.tokens);
+        w.refusal_rw += switch_cost(m.class, m.tokens);
         let p = &mut panes[k];
         p.left = Some((p.on, now));
         p.on = to;
@@ -246,7 +279,9 @@ fn planned(st: &mut Standing, acc: &[(Quant, i64)], panes: &[P], now: i64, bias:
     let q = quants(acc);
     let sp: Vec<(f64, f64)> = panes.iter().map(|p| speeds(p, now)).map(|(f, n)| (f * bias, n * bias)).collect();
     let demand = [sp.iter().map(|x| x.0).sum(), sp.iter().map(|x| x.1).sum()];
-    let l1 = level1::plan(&World { accounts: &q, window_full: KAPPA, demand, prudent: demand[0] * 2.5, buckets: &[], offers: &[], closures: &[], last_pi: None });
+    let b = buckets();
+    let a_hi = b.iter().copied().fold(0.0, f64::max);
+    let l1 = level1::plan(&World { accounts: &q, window_full: KAPPA, demand, prudent: a_hi.max(demand[0]), buckets: &b, offers: &[], closures: &[], last_pi: None });
     let accounts: Vec<Account> = q.iter().enumerate().map(|(j, x)| Account { q: x.clone(), spare: l1.spare[j], price: l1.price[j].unwrap_or([0.0; 2]) }).collect();
     let ps: Vec<Pane> = panes
         .iter()
@@ -272,7 +307,6 @@ fn planned(st: &mut Standing, acc: &[(Quant, i64)], panes: &[P], now: i64, bias:
         })
         .collect();
     let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
-    let unserved = l1.unserved_until(0, H2) + l1.unserved_until(1, H2) > 1e-9;
-    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, short: unserved, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
+    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
     pass::full(st, &i, now as u64, now);
 }

@@ -1,12 +1,16 @@
 //! The pane horizon cut into segments, and what each pane may do.
 //!
 //! Cut points are the six-hour buckets, every renewal inside the
-//! horizon, and the moment each pane's earliest switch is allowed.  A
+//! horizon, the moment each pane's earliest switch is allowed, and one
+//! reading before each account empties at the high band if nobody
+//! moves.  A
 //! switch happens at a cut point.  Targets pass the hard filters at
 //! the moment they are proposed: open, fresh, taking the pane's class,
 //! not barred, not just left, not this pane's account, and lasting the
 //! pane six hours at the high band with the panes already there.
 
+use super::sim::Ctx;
+use super::window::READING_H;
 use super::{Account, H2, Input, LASTS_H, Pane};
 use crate::quota::EPS;
 
@@ -28,6 +32,10 @@ pub struct Grid {
     /// Each pane is a keeper: it uses up its account's rest and is not
     /// moved off it.
     pub keeper: Vec<bool>,
+    /// Each account's cut one reading before it empties at the high band
+    /// if nobody moves: the latest moment a switch off it averts the
+    /// refusal.
+    pub late: Vec<Option<usize>>,
 }
 
 fn index(accounts: &[Account], id: u8) -> Option<usize> {
@@ -39,13 +47,29 @@ fn cut_at(cuts: &[f64], h: f64) -> Option<usize> {
 }
 
 impl Grid {
+    /// The grid, with a cut one reading before each account empties at
+    /// the high band if nobody moves.
     pub fn new(input: &Input) -> Grid {
+        let base = Grid::build(input, &[]);
+        let deadline = Ctx::new(input, &base).deadline;
+        let late: Vec<Option<f64>> = deadline.iter().map(|d| (*d < H2).then_some(*d - READING_H).filter(|t| *t > 0.0)).collect();
+        if late.iter().all(Option::is_none) {
+            return base;
+        }
+        let extra: Vec<f64> = late.iter().flatten().copied().collect();
+        let mut g = Grid::build(input, &extra);
+        g.late = late.iter().map(|t| t.and_then(|t| cut_at(&g.cuts, t))).collect();
+        g
+    }
+
+    fn build(input: &Input, extra: &[f64]) -> Grid {
         let mut cuts: Vec<f64> = vec![0.0, H2];
         cuts.extend((1..(H2 / BUCKET_H) as usize).map(|k| k as f64 * BUCKET_H));
         for a in input.accounts {
             cuts.extend([a.q.t, a.q.tf].into_iter().filter(|t| *t > 0.0 && *t < H2));
         }
         cuts.extend(input.panes.iter().map(|p| p.earliest_h).filter(|t| *t > 0.0 && *t < H2));
+        cuts.extend_from_slice(extra);
         cuts.sort_by(f64::total_cmp);
         cuts.dedup_by(|b, a| *b - *a < SAME_H);
         let on: Vec<Option<usize>> = input.panes.iter().map(|p| index(input.accounts, p.on)).collect();
@@ -53,7 +77,8 @@ impl Grid {
         let renews = input.accounts.iter().map(|a| (a.q.t > 0.0).then(|| cut_at(&cuts, a.q.t)).flatten()).collect();
         let renews_f = input.accounts.iter().map(|a| (a.q.tf > 0.0 && a.q.tf < a.q.t - SAME_H).then(|| cut_at(&cuts, a.q.tf)).flatten()).collect();
         let keeper = keepers(input, &on);
-        Grid { cuts, on, first, renews, renews_f, keeper }
+        let late = vec![None; input.accounts.len()];
+        Grid { cuts, on, first, renews, renews_f, keeper, late }
     }
 
     pub fn segs(&self) -> usize {

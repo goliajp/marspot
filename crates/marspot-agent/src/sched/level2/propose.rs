@@ -1,5 +1,6 @@
 //! Proposals for one pane: every schedule of at most two switches
-//! whose switch times are its first allowed moment and the renewals
+//! whose switch times are its first allowed moment, the last moment
+//! before its account empties at the high band, and the renewals
 //! inside the horizon, scored by linear prices read off the last run.
 //! This is the shortest path over (segment, account, switches used)
 //! with the switch times restricted to those moments; a switch at any
@@ -47,6 +48,12 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
     let targets = g.targets(input, p);
     for &j in &targets {
         out.push(Sched::one(j, first));
+    }
+    // the same switch at the last moment it averts the refusal
+    if let Some(late) = g.on[p].and_then(|j| g.late[j]).filter(|&c| c > first) {
+        for &j in &targets {
+            out.push(Sched::one(j, late));
+        }
     }
     for (k, r) in g.renews.iter().enumerate() {
         let Some(r) = *r else { continue };

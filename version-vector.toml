@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.815"  # the nested sessions test waits for a shell between the two claudes (test only)
+shell   = "0.7.816"  # the pane plan pays every lapse near its horizon and opens refusal-averting switches late
 core    = "0.12.734"  # the accounts panel's tests move to a file of their own
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

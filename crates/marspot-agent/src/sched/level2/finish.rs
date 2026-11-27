@@ -4,7 +4,8 @@
 
 use super::search::Eval;
 use super::window::{dead_by_exhaustion, dead_by_gain, kind};
-use super::{H2, Mode, Plan, Sched, Switch, Totals};
+use super::window::{CLEAN_CHANCE, NOTICE_LEAD_H};
+use super::{H2, Mode, Pane, Plan, Sched, Switch, Totals};
 
 pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, charge: f64, idle: Totals) -> Plan {
     e.sim.run(&e.ctx, best, 1);
@@ -26,6 +27,8 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 _ => dead_by_gain(t_open, gain, pane.rewrite),
             }
             .max(t_open);
+            let averts = from.is_some_and(|j| e.ctx.deadline[j] < H2);
+            let t_open = if averts { t_open.max(t_dead - lead(pane)) } else { t_open };
             switches.push(Switch {
                 sid: pane.sid,
                 from: from.map_or(pane.on, |j| input.accounts[j].q.id),
@@ -54,4 +57,18 @@ fn gain(e: &mut Eval, best: &[Sched], p: usize, h: usize, money: f64) -> f64 {
 
 fn high_load(input: &super::Input, g: &super::Grid, j: usize) -> f64 {
     input.panes.iter().enumerate().filter(|(k, _)| g.on[*k] == Some(j)).map(|(_, p)| p.high[0] + p.high[1]).sum()
+}
+
+/// How long before its deadline a switch off an account that empties
+/// inside the horizon opens: enough for a clean rest at the stopping
+/// rule's chance, else the five-minute notice's lead; a drain notice
+/// opens at once.
+fn lead(p: &Pane) -> f64 {
+    if p.clean_per_h > 0.0 {
+        -(1.0 - CLEAN_CHANCE).ln() / p.clean_per_h
+    } else if p.long_background {
+        H2
+    } else {
+        NOTICE_LEAD_H
+    }
 }

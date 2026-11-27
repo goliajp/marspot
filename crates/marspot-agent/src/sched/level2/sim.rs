@@ -1,5 +1,12 @@
 //! A set of schedules run forward over the pane horizon.
 //!
+//! Week left at a renewal inside the horizon lapses and is paid for
+//! whether or not level 1 finds the fleet short there: level 1 can
+//! spread demand over the accounts at will, the panes cannot, and
+//! putting the quota that lapses first to use is never worse in the
+//! fluid plan.  Week the loads at the end of the horizon leave unused
+//! at a renewal within the next two days is paid for the same way.
+//!
 //! Inside a segment every rate is constant; where an account's week or
 //! restricted window empties the segment is split there.  A pane on an
 //! account that can no longer serve it is refused: it pays its rewrite
@@ -15,10 +22,17 @@ use super::window::kind;
 use super::{H2, Input, STALL_REFUSAL_H, Sched};
 use crate::quota::EPS;
 
+/// A renewal this soon after the horizon is near enough for the loads
+/// at its end to say what lapses there, hours.
+const LAPSE_AFTER_H: f64 = 3.0 * H2;
+
 /// What a set of schedules costs, weeks and stall hours.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Totals {
     pub lapsed: f64,
+    /// Week left at the end that the loads then do not use up before
+    /// the account's renewal after the horizon.
+    pub lapse_after: f64,
     /// Plain use beyond each account's spare, before `pi`.
     pub reserve_taken: f64,
     pub rewrites: f64,
@@ -167,9 +181,7 @@ impl Sim {
     fn renew(&mut self, c: &Ctx, s: usize, t: &mut Totals) {
         for j in 0..self.r.len() {
             if c.grid.renews[j] == Some(s) && !self.renewed[j] {
-                if c.input.short {
-                    t.lapsed += self.r[j].max(0.0);
-                }
+                t.lapsed += self.r[j].max(0.0);
                 self.r[j] = 1.0;
                 self.f[j] = c.input.window_full;
                 self.renewed[j] = true;
@@ -260,11 +272,16 @@ impl Sim {
     }
 
     fn finish(&mut self, c: &Ctx, t: &mut Totals) {
+        self.loads(c, 0);
         for (j, a) in c.input.accounts.iter().enumerate() {
+            if !self.renewed[j] && a.q.t > H2 && a.q.t <= LAPSE_AFTER_H && a.q.open {
+                let [x, y] = self.load[j];
+                t.lapse_after += (self.r[j] - (x + y) * (a.q.t - H2)).max(0.0);
+            }
             let phi = self.phi(j);
             t.left_value += phi * a.price[0] + (self.r[j] - phi).max(0.0) * a.price[1];
             t.reserve_taken += (self.plain[j] - a.spare).max(0.0);
         }
-        t.money = t.lapsed + c.input.pi * t.reserve_taken + t.rewrites + t.lost_work + t.refused - t.left_value;
+        t.money = t.lapsed + t.lapse_after + c.input.pi * t.reserve_taken + t.rewrites + t.lost_work + t.refused - t.left_value;
     }
 }

@@ -5,7 +5,7 @@
 //! set of schedules costs is found by running every account forward
 //! over the pane horizon at the loads the schedules put on it (`sim`):
 //! plain use taken out of the reserve at `pi`, week quota lapsing at a
-//! renewal while demand goes short, every switch's rewrite (and the
+//! renewal inside it or just after it, every switch's rewrite (and the
 //! background work a notice-switch throws away), every refusal, less
 //! what is left on each account at the end at level 1's prices.
 //!
@@ -119,9 +119,6 @@ pub struct Input<'a> {
     /// What a renewed restricted window holds, weeks.
     pub window_full: f64,
     pub pi: f64,
-    /// Level 1 leaves demand unserved inside the pane horizon: quota
-    /// lapsing at a renewal there is lost.
-    pub short: bool,
     /// Planned switches the fleet may still make today, and notices
     /// this hour.
     pub fleet_left: usize,

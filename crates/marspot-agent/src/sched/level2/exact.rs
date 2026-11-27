@@ -1,8 +1,10 @@
 //! Exact mode: with at most six active panes of at most four first
 //! targets each, every joint choice among staying and each pane's
-//! proposals (a switch at its first allowed moment, a return at a
-//! renewal, or both) is simulated and the cheapest kept, at most 512
-//! of them.  Panes outside the active set keep their
+//! proposals (a switch at its first allowed moment or at the last
+//! moment before its account empties, a return at a renewal, or both)
+//! is simulated and the cheapest kept, at most 1024 of them: twice the
+//! 512 one switch time per target would need, since each target can be
+//! taken at two times.  Panes outside the active set keep their
 //! schedules.  Two choices equal in money within `TIE` go by the order
 //! among equals, pane by pane: staying first, then the earlier renewal.
 
@@ -12,7 +14,7 @@ use super::{Sched, TIE};
 
 pub const PANES: usize = 6;
 pub const TARGETS: usize = 4;
-pub const COMBOS: usize = 512;
+pub const COMBOS: usize = 1024;
 
 /// The options of each active pane, staying first, when exact mode applies.
 pub(super) fn options(e: &Eval, active: &[usize]) -> Option<Vec<Vec<Sched>>> {

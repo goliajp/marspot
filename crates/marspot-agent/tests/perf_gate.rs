@@ -141,7 +141,7 @@ fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pa
 }
 
 fn plan_input<'a>(a: &'a [level2::Account], p: &'a [level2::Pane]) -> level2::Input<'a> {
-    level2::Input { accounts: a, panes: p, young: [0.001, 0.003], window_full: 0.528, pi: 0.5, short: true, fleet_left: 8, notices_left: 4, stale_feed: false }
+    level2::Input { accounts: a, panes: p, young: [0.001, 0.003], window_full: 0.528, pi: 0.5, fleet_left: 8, notices_left: 4, stale_feed: false }
 }
 
 #[test]
