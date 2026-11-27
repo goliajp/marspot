@@ -83,7 +83,12 @@ impl<'a, 'b> Eval<'a, 'b> {
 
     /// Switches that count toward the fleet's day.
     pub fn counted(&self, s: &[Sched]) -> usize {
-        s.iter().enumerate().map(|(p, sc)| (0..sc.n as usize).filter(|&h| !self.exempt(p, sc, h)).count()).sum()
+        s.iter().enumerate().map(|(p, sc)| self.counted_of(p, sc)).sum()
+    }
+
+    /// Switches of pane `p` following `s` that count toward the fleet's day.
+    fn counted_of(&self, p: usize, s: &Sched) -> usize {
+        (0..s.n as usize).filter(|&h| !self.exempt(p, s, h)).count()
     }
 
     /// Notice-switches inside the first hour.
@@ -147,7 +152,7 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     if !gains {
         best = idle;
     }
-    super::finish::plan(&mut e, &best, mode, active, charge, idle_cost.totals)
+    super::finish::plan(&mut e, &best, mode, active, charge, idle_cost.totals, &[])
 }
 
 /// The best schedules from `start` at the charge in force.
@@ -196,6 +201,9 @@ fn sweep(e: &mut Eval, cur: &mut [Sched], cost: &mut Cost, order: &[usize]) -> b
     let mut kept = false;
     // proposals are priced off the last run, which may be a trial
     // that differs from `cur` in one pane: close enough to rank by
+    // the screen is linear only: adding the charge to it either rules out
+    // proposals the simulated cost would keep or lets in ones it keeps
+    // greedily on the way to a dearer plan
     for &p in order {
         let here = score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]);
         let mut props = proposals(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, KEEP);
@@ -241,15 +249,16 @@ fn active(e: &mut Eval, cur: &[Sched]) -> Vec<usize> {
 
 /// The plan of exactly `scheds`, costed and timed, with no search.
 pub(super) fn evaluate(input: &Input, scheds: &[Sched]) -> Plan {
-    evaluate_on(input, &Grid::new(input), scheds)
+    evaluate_on(input, &Grid::new(input), scheds, &[])
 }
 
-/// As `evaluate`, on the grid `g` of `input` already worked out.
-pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched]) -> Plan {
+/// As `evaluate`, on the grid `g` of `input` already worked out; `kept`
+/// as `finish::plan` takes it.
+pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched], kept: &[(u64, u8, f64, f64)]) -> Plan {
     let ctx = Ctx::new(input, g);
     let sim = Sim::new(&ctx);
     let mut e = Eval { ctx, sim, charge: 0.0, tally: Tally::default() };
     let idle = e.cost(&vec![Sched::STAY; input.panes.len()]).totals;
-    super::finish::plan(&mut e, scheds, Mode::Search, 0, 0.0, idle)
+    super::finish::plan(&mut e, scheds, Mode::Search, 0, 0.0, idle, kept)
 }
 

@@ -4,12 +4,15 @@
 //!
 //! Two policies on the same draws:
 //! - `Today`: at a rest the objective in force (`waste::decide`) may
-//!   move the pane; a refused pane goes where it says.
+//!   move the pane; a refused pane goes where it says.  Its speeds may be
+//!   given wrong by the same factor as the planner's.
 //! - `Planner`: a full search on the hour and after a refusal over the
 //!   standing plan (inertia, commitments and pins as in the shell), from
 //!   each pane's measured speed (blind to the draws ahead) times `bias`;
-//!   at a rest a standing switch whose window is open is taken; a
-//!   refused pane goes where the objective says, as today.
+//!   or driven as the shell drives it: at every reading a full search
+//!   when one of the shell's triggers is due, else the standing plan
+//!   re-timed.  At a rest a standing switch whose window is open is
+//!   taken; a refused pane goes where the objective says, as today.
 //!
 //! Money realised: every rewrite paid (switches and refusals), plus the
 //! week lapsing at a renewal while demand went unmet in the week before
@@ -25,7 +28,7 @@
 //! reading from a stream of its own, so both see the same readings; an
 //! account with nothing left reads empty.
 
-use super::loop_plan::planned;
+use super::loop_plan::{Driver, Read};
 use super::oracle_tests::Rng;
 use super::standing::Standing;
 use super::tests::KAPPA;
@@ -47,8 +50,13 @@ const SHARE: [f64; 8] = [0.2, 0.17, 0.15, 0.13, 0.11, 0.1, 0.08, 0.06];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Policy {
-    Today,
-    Planner { bias: f64 },
+    /// Today's rule, its speeds times `bias` at a rest.
+    Today { bias: f64 },
+    /// The planner, its level times `bias` and its three-hour speed
+    /// times `short`: a full search on the hour and after a refusal, or
+    /// (`shell`) as the shell drives it, at every reading a full search
+    /// when a trigger is due and else a re-time.
+    Planner { bias: f64, short: f64, shell: bool },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -90,13 +98,6 @@ pub(super) struct P {
 /// One point of reading error either way at most.
 const READ_ERR: f64 = 0.01;
 
-/// What the policies read of the accounts: each one's week and
-/// restricted window, with this reading's error.
-pub(super) struct Read<'a> {
-    acc: &'a [(Quant, i64)],
-    err: &'a [[f64; 2]],
-}
-
 pub(super) fn run(seed: u64, policy: Policy) -> Week {
     let mut rng = Rng(seed);
     let mut noise = Rng(seed ^ 0x5DEE_CE66_D1CE_4E5B);
@@ -114,8 +115,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         p.used.watched(-6 * 3600);
     }
     let mut w = Week::default();
-    let mut st = Standing::default();
-    let mut planned_once = false;
+    let mut drv = Driver::default();
     // the last moment demand went unmet; a renewal lapses as waste when
     // demand went unmet in the week before it
     let mut last_unmet: Option<i64> = None;
@@ -145,15 +145,10 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         for e in &mut err {
             *e = [READ_ERR * (2.0 * noise.next() - 1.0), READ_ERR * (2.0 * noise.next() - 1.0)];
         }
-        if let Policy::Planner { bias } = policy
-            && (now % 3600 == 0 || !planned_once)
-        {
-            planned(&mut st, &Read { acc: &acc, err: &err }, &panes, now, bias);
-            planned_once = true;
-        }
+        drv.step(policy, &Read { acc: &acc, err: &err }, &panes, now, false);
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
             if rng.next() < 1.0 - (-rate / 12.0).exp() {
-                rest(&Read { acc: &acc, err: &err }, &mut panes, k, now, policy, &st, &mut w);
+                rest(&Read { acc: &acc, err: &err }, &mut panes, k, now, policy, &drv.st, &mut w);
             }
         }
         let mut refused = false;
@@ -190,26 +185,11 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
                 refuse(&Read { acc: &acc, err: &err }, &mut panes, k, now, &mut w);
             }
         }
-        if refused && let Policy::Planner { bias } = policy {
-            planned(&mut st, &Read { acc: &acc, err: &err }, &panes, now, bias);
+        if refused {
+            drv.step(policy, &Read { acc: &acc, err: &err }, &panes, now, true);
         }
     }
     w
-}
-
-impl Read<'_> {
-    pub(super) fn quants(&self) -> Vec<Quant> {
-        self.acc
-            .iter()
-            .zip(self.err)
-            .map(|((q, _), e)| {
-                // an account that refuses reads empty: the feed knows it
-                let read = |x: f64, e: f64, top: f64| if x <= 0.0 { 0.0 } else { (x + e).clamp(0.0, top) };
-                let r = read(q.r, e[0], 1.0);
-                Quant { r, f: read(q.f.min(q.r), e[1], r), ..q.clone() }
-            })
-            .collect()
-    }
 }
 
 pub(super) fn speeds(p: &P, now: i64) -> (f64, f64) {
@@ -217,10 +197,11 @@ pub(super) fn speeds(p: &P, now: i64) -> (f64, f64) {
     (f, n)
 }
 
-fn loads(q: &[Quant], panes: &[P], now: i64, skip: Option<usize>) -> Vec<Load> {
+fn loads(q: &[Quant], panes: &[P], now: i64, skip: Option<usize>, bias: f64) -> Vec<Load> {
     let mut l = vec![Load::default(); q.len()];
     for (_, p) in panes.iter().enumerate().filter(|(k, _)| Some(*k) != skip) {
         let (f, n) = speeds(p, now);
+        let (f, n) = (f * bias, n * bias);
         if let Some(j) = q.iter().position(|x| x.id == p.on) {
             l[j].restricted += f;
             l[j].plain += n;
@@ -229,8 +210,9 @@ fn loads(q: &[Quant], panes: &[P], now: i64, skip: Option<usize>) -> Vec<Load> {
     l
 }
 
-fn mover(p: &P, now: i64) -> Mover {
+fn mover(p: &P, now: i64, bias: f64) -> Mover {
     let (f, n) = speeds(p, now);
+    let (f, n) = (f * bias, n * bias);
     Mover { class: if p.restricted { Class::Restricted } else { Class::Plain }, rate: f + n, tokens: Some(400_000), fable: Some(f) }
 }
 
@@ -249,8 +231,8 @@ fn switch(panes: &mut [P], k: usize, to: u8, now: i64, w: &mut Week) {
 
 fn refuse(read: &Read, panes: &mut [P], k: usize, now: i64, w: &mut Week) {
     let q = read.quants();
-    let l = loads(&q, panes, now, Some(k));
-    let m = mover(&panes[k], now);
+    let l = loads(&q, panes, now, Some(k), 1.0);
+    let m = mover(&panes[k], now, 1.0);
     if let Some((to, _)) = waste::decide(&q, &l, m, panes[k].on, Some(KAPPA), &Decision::Out { horizon_h: MUST_LAST_H }, 0, &PARAMS) {
         w.money += switch_cost(m.class, m.tokens);
         w.refusal_rw += switch_cost(m.class, m.tokens);
@@ -264,12 +246,12 @@ fn refuse(read: &Read, panes: &mut [P], k: usize, now: i64, w: &mut Week) {
 
 fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &Standing, w: &mut Week) {
     match policy {
-        Policy::Today => {
+        Policy::Today { bias } => {
             let q = read.quants();
-            let l = loads(&q, panes, now, None);
+            let l = loads(&q, panes, now, None, bias);
             let p = &panes[k];
-            let me = (k as u64, mover(p, now).rate);
-            let same = panes.iter().enumerate().filter(|(j, y)| *j != k && y.on == p.on && y.restricted == p.restricted).map(|(j, y)| (j as u64, mover(y, now).rate));
+            let me = (k as u64, mover(p, now, bias).rate);
+            let same = panes.iter().enumerate().filter(|(j, y)| *j != k && y.on == p.on && y.restricted == p.restricted).map(|(j, y)| (j as u64, mover(y, now, bias).rate));
             let kind = Decision::Rest {
                 keeper: is_keeper(me, same),
                 since_move_h: p.moved_at.map(|at| (now - at) as f64 / 3600.0),
@@ -282,7 +264,7 @@ fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &S
                 moves_week: p.planned.iter().filter(|at| now - **at < WEEK).count(),
             };
             let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
-            if let Some((to, _)) = waste::decide(&q, &l, mover(p, now), p.on, Some(KAPPA), &kind, day, &PARAMS) {
+            if let Some((to, _)) = waste::decide(&q, &l, mover(p, now, bias), p.on, Some(KAPPA), &kind, day, &PARAMS) {
                 panes[k].planned.push(now);
                 switch(panes, k, to, now, w);
             }

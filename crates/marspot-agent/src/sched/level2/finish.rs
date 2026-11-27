@@ -4,11 +4,16 @@
 
 use super::search::Eval;
 use super::tally::Stage;
-use super::window::{dead_by_gain, kind};
+use super::window::{dead_by_gain, kind_of_window};
 use super::window::{CLEAN_CHANCE, NOTICE_LEAD_H};
 use super::{H2, Mode, Pane, Plan, Sched, Switch, Totals};
 
-pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, charge: f64, idle: Totals) -> Plan {
+/// `kept`: switches of the standing plan whose window is not open yet,
+/// `(sid, order, gain, gain_eff)`; one that averts a refusal keeps that
+/// gain, since its window does not depend on it and nothing reads it
+/// before it opens.  Such a switch is marked `carried`: its gain is the
+/// one stored, not this pass's.
+pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, charge: f64, idle: Totals, kept: &[(u64, u8, f64, f64)]) -> Plan {
     e.sim.run(&e.ctx, best, 1);
     let high: Vec<Option<f64>> = e.sim.empty.clone();
     let totals_level = e.sim.run(&e.ctx, best, 0);
@@ -21,9 +26,13 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
         let mut from = g.on[p];
         for (h, hop) in s.hops().iter().enumerate() {
             let t_open = g.cuts[hop.at as usize];
-            let gain = gain(e, best, p, h, totals_level.money);
-            let (input, g) = (e.input(), e.grid());
             let averts = from.is_some_and(|j| e.ctx.deadline[j] < H2);
+            let old = kept.iter().find(|k| (k.0, usize::from(k.1)) == (pane.sid, h)).filter(|_| averts);
+            let (gain, gain_eff) = match old {
+                Some(k) => (k.2, k.3),
+                None => gain(e, best, p, h, &totals_level),
+            };
+            let (input, g) = (e.input(), e.grid());
             // only a first switch at the pane's first allowed moment may
             // open after the latest moment it averts the refusal
             let first = h == 0 && hop.at as usize == g.first[p];
@@ -34,6 +43,11 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 Some(j) if averts => g.dead_for(p, j).max(t_open),
                 _ => dead_by_gain(t_open, gain, pane.rewrite),
             };
+            // the window's length is taken as worked out: `t_dead` less the
+            // opening moved up to it differs from the lead by rounding, and
+            // a clean rest's chance taken on that falls under the stopping
+            // rule's for about half of them
+            let w = if averts { (t_dead - t_open).min(lead(pane)) } else { t_dead - t_open };
             let t_open = if averts { t_open.max(t_dead - lead(pane)) } else { t_open };
             switches.push(Switch {
                 sid: pane.sid,
@@ -42,9 +56,11 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 order: h as u8,
                 t_open,
                 t_dead,
-                kind: kind(pane, t_open, t_dead),
+                kind: kind_of_window(pane, w),
                 exempt: e.exempt(p, s, h),
                 gain,
+                gain_eff,
+                carried: old.is_some(),
             });
             from = Some(hop.to as usize);
         }
@@ -54,12 +70,13 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
     Plan { mode, switches, scheds: best.to_vec(), deadline: e.ctx.deadline.clone(), totals: totals_level, idle, empty, refusals, active, sims: e.sim.runs, tally: e.tally, charge, cuts: e.grid().cuts.clone() }
 }
 
-/// What the plan saves by switch `h` of pane `p` and those after it.
-fn gain(e: &mut Eval, best: &[Sched], p: usize, h: usize, money: f64) -> f64 {
+/// What the plan saves by switch `h` of pane `p` and those after it:
+/// money and stall hours.
+fn gain(e: &mut Eval, best: &[Sched], p: usize, h: usize, with: &Totals) -> (f64, f64) {
     let mut without = best.to_vec();
     without[p].n = h as u8;
     let t = e.sim.run(&e.ctx, &without, 0);
-    t.money - money
+    (t.money - with.money, t.eff - with.eff)
 }
 
 /// How long before its deadline a switch off an account that empties

@@ -14,6 +14,13 @@
 //! today's rule, which drains every account to its renewal however far
 //! off that is, while the planner sees lapse only up to two days past
 //! its horizon.
+//!
+//! With the forecast wrong, today's rule is also run on the same wrong
+//! speeds, since it reads them as the planner does.  The same weeks are
+//! also run with the planner driven as the shell drives it, a pass at
+//! every reading, with its three-hour speed true (to be read against
+//! today's rule on the true speeds) or wrong by the forecast's factor
+//! (against today's rule on the same wrong speeds).
 
 use super::loop_world::{Policy, Week, hours, run};
 
@@ -26,14 +33,31 @@ fn sum(v: &[Week], f: impl Fn(&Week) -> f64) -> f64 {
 }
 
 fn compare(what: &str, seeds: std::ops::Range<u64>, bias: f64) {
-    let planner = print(what, seeds, bias);
+    compare_driven(what, seeds, bias, bias, false);
+}
+
+fn compare_driven(what: &str, seeds: std::ops::Range<u64>, bias: f64, short: f64, shell: bool) {
+    let planner = print(what, seeds, bias, short, shell);
     assert!(planner.iter().all(|w| w.double == 0), "{what}: a pane switched twice by plan inside six hours");
 }
 
-fn print(what: &str, seeds: std::ops::Range<u64>, bias: f64) -> Vec<Week> {
+fn print(what: &str, seeds: std::ops::Range<u64>, bias: f64, short: f64, shell: bool) -> Vec<Week> {
     assert_eq!(hours().len(), 49, "the recorded hours read wrong");
-    let today = weeks(seeds.clone(), Policy::Today);
-    let planner = weeks(seeds, Policy::Planner { bias });
+    let today = weeks(seeds.clone(), Policy::Today { bias: 1.0 });
+    let planner = weeks(seeds.clone(), Policy::Planner { bias, short, shell });
+    if bias != 1.0 {
+        // today's rule reads the same speeds: wrong by the same factor
+        let same = weeks(seeds, Policy::Today { bias });
+        println!(
+            "closed loop {what}: today with the same forecast money {:.2} (switches {:.2} refusals {:.2} lapsed {:.2}), refusals {}, switches {}",
+            100.0 * sum(&same, |w| w.money),
+            100.0 * sum(&same, |w| w.switch_rw),
+            100.0 * sum(&same, |w| w.refusal_rw),
+            100.0 * sum(&same, |w| w.lapsed),
+            same.iter().map(|w| w.refusals).sum::<usize>(),
+            same.iter().map(|w| w.switches).sum::<usize>(),
+        );
+    }
     for (k, (t, p)) in today.iter().zip(&planner).enumerate() {
         println!(
             "week {k}: today money {:.2} = switches {:.2} + refusals {:.2} + lapsed {:.2}, refusals {} ({}), switches {} ({}); planner money {:.2} = switches {:.2} + refusals {:.2} + lapsed {:.2}, refusals {} ({}), switches {} ({})",
@@ -106,20 +130,70 @@ fn sched_level2_closed_loop_with_the_forecast_three_times_low_5_to_8() {
 
 #[test]
 fn sched_level2_closed_loop_hold_out_weeks_1_to_5() {
-    print("hold-out weeks 1-5", 7000..7005, 1.0);
+    print("hold-out weeks 1-5", 7000..7005, 1.0, 1.0, false);
 }
 
 #[test]
 fn sched_level2_closed_loop_hold_out_weeks_6_to_10() {
-    print("hold-out weeks 6-10", 7005..7010, 1.0);
+    print("hold-out weeks 6-10", 7005..7010, 1.0, 1.0, false);
 }
 
 #[test]
 fn sched_level2_closed_loop_hold_out_weeks_11_to_15() {
-    print("hold-out weeks 11-15", 7010..7015, 1.0);
+    print("hold-out weeks 11-15", 7010..7015, 1.0, 1.0, false);
 }
 
 #[test]
 fn sched_level2_closed_loop_hold_out_weeks_16_to_20() {
-    print("hold-out weeks 16-20", 7015..7020, 1.0);
+    print("hold-out weeks 16-20", 7015..7020, 1.0, 1.0, false);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_1_to_4() {
+    compare_driven("as the shell drives it, weeks 1-4", 1000..1004, 1.0, 1.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_5_to_8() {
+    compare_driven("as the shell drives it, weeks 5-8", 1004..1008, 1.0, 1.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_1_to_4() {
+    compare_driven("as the shell drives it, forecast × 3, weeks 1-4, three-hour speed true", 1000..1004, 3.0, 1.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_1_to_4_three_hour_speed_as_wrong() {
+    compare_driven("as the shell drives it, forecast × 3, weeks 1-4, three-hour speed as wrong", 1000..1004, 3.0, 3.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_5_to_8() {
+    compare_driven("as the shell drives it, forecast × 3, weeks 5-8, three-hour speed true", 1004..1008, 3.0, 1.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_5_to_8_three_hour_speed_as_wrong() {
+    compare_driven("as the shell drives it, forecast × 3, weeks 5-8, three-hour speed as wrong", 1004..1008, 3.0, 3.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_1_to_4() {
+    compare_driven("as the shell drives it, forecast ÷ 3, weeks 1-4, three-hour speed true", 1000..1004, 1.0 / 3.0, 1.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_1_to_4_three_hour_speed_as_wrong() {
+    compare_driven("as the shell drives it, forecast ÷ 3, weeks 1-4, three-hour speed as wrong", 1000..1004, 1.0 / 3.0, 1.0 / 3.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_5_to_8() {
+    compare_driven("as the shell drives it, forecast ÷ 3, weeks 5-8, three-hour speed true", 1004..1008, 1.0 / 3.0, 1.0, true);
+}
+
+#[test]
+fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_5_to_8_three_hour_speed_as_wrong() {
+    compare_driven("as the shell drives it, forecast ÷ 3, weeks 5-8, three-hour speed as wrong", 1004..1008, 1.0 / 3.0, 1.0 / 3.0, true);
 }

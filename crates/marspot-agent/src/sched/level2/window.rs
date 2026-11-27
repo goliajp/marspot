@@ -71,7 +71,11 @@ pub fn clean_chance(p: &Pane, hours: f64) -> f64 {
 }
 
 pub fn kind(p: &Pane, t_open: f64, t_dead: f64) -> Kind {
-    let w = t_dead - t_open;
+    kind_of_window(p, t_dead - t_open)
+}
+
+/// The kind of a window `w` hours long.
+pub fn kind_of_window(p: &Pane, w: f64) -> Kind {
     if clean_chance(p, w) >= CLEAN_CHANCE {
         Kind::Clean
     } else if p.long_background {

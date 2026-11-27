@@ -166,8 +166,15 @@ pub struct Switch {
     pub kind: Kind,
     /// It averts a refusal within `EXEMPT_H`: not in the fleet's count.
     pub exempt: bool,
-    /// What the plan saves by it, weeks.
+    /// What the plan saves by it, weeks, and stall hours: a switch that
+    /// only averts a refusal may save no money (the refusal pays the same
+    /// rewrite) and still save the refusal's stall.
     pub gain: f64,
+    pub gain_eff: f64,
+    /// The gains are the ones stored with the standing plan, not worked
+    /// out on this pass (a re-time, a switch not yet open that averts a
+    /// refusal).
+    pub carried: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +221,26 @@ pub struct Plan {
     pub tally: Tally,
     pub charge: f64,
     pub cuts: Vec<f64>,
+}
+
+/// The speed a pane is planned at in one class: its 24-hour level, its
+/// short-window speed when that lies above the level's band (`hi` times
+/// the level), and the band's bottom (`lo` times the level) when the
+/// short-window speed lies below it.  A level that is off by more than
+/// its band is shown by the pane's own recent use, and planning on the
+/// level then times every switch off its account by a wrong exhaustion;
+/// a pane idle for the short window reads a speed of nothing there and
+/// is not planned as if it would stay idle.
+pub fn planned_speed(day: f64, short: f64, lo: f64, hi: f64) -> f64 {
+    if day <= 0.0 {
+        day
+    } else if short > day * hi {
+        short
+    } else if short < day * lo {
+        day * lo
+    } else {
+        day
+    }
 }
 
 /// The plan for `input`, starting from `start` (the standing plan's

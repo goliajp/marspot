@@ -3,9 +3,12 @@
 //! levels and bands, and the rest of the fleet's use as demand below
 //! pane level.
 //!
-//! A pane's level is the forecast's 24-hour mean per class, the scan's
-//! measured speed before it has one; its high band is the level times
-//! the pane band's high multiplier.  A switch rewrites the context the
+//! A pane's level is the forecast's 24-hour mean per class, its
+//! three-hour speed when that lies above the pane band around the mean,
+//! the band's bottom when the three-hour speed lies below it (a pane
+//! idle for three hours is not planned at nothing), and the scan's
+//! measured speed before it has a mean; its high band is
+//! the level times the pane band's high multiplier.  A switch rewrites the context the
 //! pane's last reply read (the typical one where none was read).  Lost
 //! background work is the pane's plain speed times its background-work
 //! length.  The dwell runs from the pane's last change of account,
@@ -16,7 +19,7 @@ use std::hash::{Hash, Hasher};
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level1::{H2, Level1};
 use marspot_agent::sched::level2::standing::Standing;
-use marspot_agent::sched::level2::{Account, DWELL_H, FLEET_PER_DAY, Pane};
+use marspot_agent::sched::level2::{Account, DWELL_H, FLEET_PER_DAY, Pane, planned_speed};
 
 use super::allocation_adapter::{Allocation, WEEK_S};
 use super::allocation_decide::STALE_FEED_S;
@@ -67,10 +70,10 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             young[1] += rate - scan_a;
             continue;
         }
-        let level = |c: usize, scan: f64| if fp.day[c] > 0.0 { fp.day[c] } else { scan };
-        let speed = [level(0, scan_a), level(1, rate - scan_a)];
         let band = forecast.map_or([2.5, 1.5], |f| [f.pane_band[0].hi, f.pane_band[1].hi]);
         let lo = forecast.map_or([0.3, 0.6], |f| [f.pane_band[0].lo, f.pane_band[1].lo]);
+        let level = |c: usize, scan: f64| if fp.day[c] > 0.0 { planned_speed(fp.day[c], fp.short[c], lo[c], band[c]) } else { scan };
+        let speed = [level(0, scan_a), level(1, rate - scan_a)];
         if (0..2).any(|c| fp.day[c] > 0.0 && (fp.short[c] > fp.day[c] * band[c] || fp.short[c] < fp.day[c] * lo[c])) {
             outside.push(sid);
         }

@@ -28,6 +28,8 @@ mod refuse;
 /// A renewal this soon after the horizon is near enough for the loads
 /// at its end to say what lapses there, hours.
 const LAPSE_AFTER_H: f64 = 3.0 * H2;
+/// An account's load is to be worked out afresh.
+const DIRTY: u8 = u8::MAX;
 
 /// Buffers for runs, reused.
 pub(super) struct Sim {
@@ -36,6 +38,9 @@ pub(super) struct Sim {
     pub plain: Vec<f64>,
     renewed: Vec<bool>,
     load: Vec<[f64; 2]>,
+    /// Per account, what its load was last worked out from besides the
+    /// panes on it (`key`), `DIRTY` once a pane moved on or off it.
+    known: Vec<u8>,
     at: Placed,
     /// Panes refused at one moment, and the accounts that take each
     /// class then, reused.
@@ -54,7 +59,7 @@ pub(super) struct Sim {
 impl Sim {
     pub fn new(c: &Ctx) -> Sim {
         let n = c.input.accounts.len();
-        Sim { r: vec![0.0; n], f: vec![0.0; n], plain: vec![0.0; n], renewed: vec![false; n], load: vec![[0.0; 2]; n], at: Placed::new(n), due: Vec::new(), open_to: [Vec::new(), Vec::new()], empty: vec![None; n], refused: Vec::new(), trace: Vec::new(), runs: 0 }
+        Sim { r: vec![0.0; n], f: vec![0.0; n], plain: vec![0.0; n], renewed: vec![false; n], load: vec![[0.0; 2]; n], known: vec![DIRTY; n], at: Placed::new(n), due: Vec::new(), open_to: [Vec::new(), Vec::new()], empty: vec![None; n], refused: Vec::new(), trace: Vec::new(), runs: 0 }
     }
 
     fn reset(&mut self, c: &Ctx, scheds: &[Sched], band: usize) {
@@ -66,23 +71,44 @@ impl Sim {
             self.empty[j] = None;
         }
         self.at.reset(c.input, &c.grid.on, scheds, band);
+        self.known.iter_mut().for_each(|k| *k = DIRTY);
         self.refused.clear();
         self.trace.clear();
     }
 
     fn phi(&self, j: usize) -> f64 {
-        self.f[j].min(self.r[j]).max(0.0)
+        phi_of(self.f[j], self.r[j])
     }
 
     fn serves(&self, c: &Ctx, j: usize, restricted: bool) -> bool {
         c.open[j] && self.r[j] > EPS && (!restricted || self.phi(j) > EPS)
     }
 
-    /// The loads at the run's band, from the sums kept as panes move.
+    /// What an account's load depends on besides the panes on it: its
+    /// restricted window and its week each still hold some.
+    fn key(&self, j: usize) -> u8 {
+        u8::from(self.phi(j) > EPS) | u8::from(self.r[j] > EPS) << 1
+    }
+
+    /// The loads at the run's band, from the sums kept as panes move;
+    /// an account is worked out again only when what it depends on changed.
     fn loads(&mut self, c: &Ctx) {
         for j in 0..self.load.len() {
-            self.load_of(c, j);
+            if self.known[j] != self.key(j) {
+                self.load_of(c, j);
+            }
         }
+    }
+
+    /// Pane `k` moves to `to`.
+    fn place(&mut self, c: &Ctx, k: usize, to: Option<usize>) {
+        if let Some(j) = self.at.on[k] {
+            self.known[j] = DIRTY;
+        }
+        if let Some(j) = to {
+            self.known[j] = DIRTY;
+        }
+        self.at.place(c.input, k, to);
     }
 
     /// The loads at `band`, every pane summed.
@@ -120,9 +146,9 @@ impl Sim {
         for s in 0..g.segs() {
             self.renew(c, s, &mut t);
             self.hops(c, s, &mut t);
-            for j in 0..self.r.len() {
-                let serving = if c.open[j] { self.r[j] } else { 0.0 };
-                self.trace.push([serving, self.phi(j).min(serving), self.plain[j]]);
+            for (((&r, &f), &plain), &open) in self.r.iter().zip(&self.f).zip(&self.plain).zip(&c.open) {
+                let serving = if open { r } else { 0.0 };
+                self.trace.push([serving, phi_of(f, r).min(serving), plain]);
             }
             let (mut at, end) = (g.cuts[s], g.cuts[s + 1]);
             loop {
@@ -132,13 +158,13 @@ impl Sim {
                 }
                 self.loads(c);
                 let mut dt = end - at;
-                for j in 0..self.r.len() {
-                    let [a, b] = self.load[j];
-                    if a > 0.0 && self.phi(j) > EPS {
-                        dt = dt.min(self.phi(j) / a);
+                for ((&[a, b], &r), &f) in self.load.iter().zip(&self.r).zip(&self.f) {
+                    let phi = phi_of(f, r);
+                    if a > 0.0 && phi > EPS {
+                        dt = least(dt, phi / a);
                     }
-                    if a + b > 0.0 && self.r[j] > EPS {
-                        dt = dt.min(self.r[j] / (a + b));
+                    if a + b > 0.0 && r > EPS {
+                        dt = least(dt, r / (a + b));
                     }
                 }
                 self.consume(dt);
@@ -177,20 +203,20 @@ impl Sim {
             }
             t.eff += kd.stall();
             t.switches += 1;
-            self.at.place(c.input, k, Some(to));
+            self.place(c, k, Some(to));
         }
     }
 
     fn consume(&mut self, dt: f64) {
-        for j in 0..self.r.len() {
-            let [a, b] = self.load[j];
-            self.r[j] -= (a + b) * dt;
-            self.f[j] -= a * dt;
-            if !self.renewed[j] {
-                self.plain[j] += b * dt;
+        let accounts = self.r.iter_mut().zip(&mut self.f).zip(&mut self.plain).zip(&self.load).zip(&self.renewed);
+        for ((((r, f), plain), &[a, b]), &renewed) in accounts {
+            *r -= (a + b) * dt;
+            *f -= a * dt;
+            if !renewed {
+                *plain += b * dt;
             }
-            if self.r[j] < EPS {
-                self.r[j] = 0.0;
+            if *r < EPS {
+                *r = 0.0;
             }
         }
     }
@@ -214,4 +240,17 @@ impl Sim {
         }
         t.money = t.lapsed + t.lapse_after + c.input.pi * t.reserve_taken + t.rewrites + t.lost_work + t.refused - t.left_value;
     }
+}
+
+/// What of the restricted window can still be used: the window, but no
+/// more than the week.  Plain comparisons: nothing here is ever NaN.
+#[inline]
+fn phi_of(f: f64, r: f64) -> f64 {
+    let m = if f < r { f } else { r };
+    if m > 0.0 { m } else { 0.0 }
+}
+
+#[inline]
+fn least(a: f64, b: f64) -> f64 {
+    if b < a { b } else { a }
 }
