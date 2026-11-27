@@ -27,11 +27,11 @@ TILE='Df Dock[726:1d82] [com.apple.dock:dock-tiles]'
 launch() { echo "2026-11-27 10:00:$1 $TILE Inserting tile: <private> at index: ${2:-37} for reason: -[DockBar _handleLaunchNotification:data:]"; }
 # app URL, seconds: loginwindow naming the app the Dock inserts a tile for next
 opened() { echo "2026-11-27 10:00:$2 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file://$1/"; }
-# the Dock's tiles as bin/_dock-tiles.py prints them, and as the snap keeps them
-dock_tiles() { local t; for t; do printf 'tile\tAXApplicationDockItem\t1\t%s\n' "$t"; done; }
-dock_json() { local o="" t; for t; do o+="${o:+, }[\"AXApplicationDockItem\", \"$t\"]"; done; echo "[$o]"; }
+# the Dock probe's answer as bin/_dock-probe.sh prints it: index [dock pid]
+probed() { printf 'dock_pid=%s\nindex=%s\n' "${2:-726}" "$1"; }
 APP_URL=/private/tmp/msp-e2e-1-1-x/MarspotOwnershipTest.app
 PROBE_URL=/private/tmp/msp-e2e-1-1-x/ownprobe
+DOCKPROBE_URL=/private/tmp/msp-e2e-1-dockprobe/marspot-dockprobe
 remove() { echo "2026-11-27 10:00:$1 $TILE Removing tiles identical to: <private> for reason: ${2:-_emptyDeleteList()}"; }
 TILE_REMOVED='-[DockBar handleDockEventTileRemoved:]'
 ndjson() { python3 -c 'import json,sys; [print(json.dumps({"eventMessage": m})) for m in sys.argv[1:]]' "$@"; }
@@ -74,8 +74,9 @@ base() {
   echo 'fg_set=["com.apple.finder"]' >>"$d/before"
   echo "persistent_entries=$(entries A B)" >>"$d/before"
   echo "recent_entries=$(entries C)" >>"$d/before"
-  echo "dock_tiles=$(dock_json Finder A B C)" >>"$d/before"
-  dock_tiles Finder A B C >"$d/in/dock-tiles.txt"
+  # the probe put its tile at 37 before the suite and puts it there after it
+  printf 'probe_dock_pid=726\nprobe_index=37\n' >>"$d/before"
+  probed 37 >"$d/in/probe-end.txt"
   printf '%s\n' "$DOCK" >"$d/in/lsappinfo.txt"
   tiles A B >"$d/in/persistent.txt"
   tiles C >"$d/in/recent.txt"

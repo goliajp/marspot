@@ -86,7 +86,7 @@ def state(d):
     else:
         c["fg"] = sum(r["type"] == "Foreground" for r in recs)
         # the regular apps running: a tile the Dock kept after its app went is not among
-        # them, and is read from the Dock itself (_e2e_dock.tiles_check)
+        # them, and is told by the Dock probe's index (_e2e_dock.probe_check)
         c["fg_set"] = sorted(r["bundle"] or (r["paths"] or [r["name"]])[0] for r in recs if r["type"] == "Foreground")
     for k, n in (("persistent", "persistent.txt"), ("recent", "recent.txt")):
         t = read(d, n)
@@ -169,7 +169,7 @@ def snap(d, me):
         if k in c:
             out += ["%s=%d" % (k, len(c[k])), "%s_entries=%s" % (k, json.dumps(c[k]))]
     out += ["unread=" + w for w in why]
-    out += dock.snap(d, read)
+    out += dock.probe_snap(d, read)
     out += ["known=" + key(r) for r in recs or [] if any(ours(p) for p in r["paths"] + [r["name"]])]
     st = read(d, "status.txt")
     if st is not None:
@@ -293,7 +293,7 @@ def quiet_preflight(r, under):
 
 
 def check(d, before, lrc, lout, me, prefixes):
-    left, unread, wide, wide_unread = [], [], [], []
+    left, unread, wide = [], [], []
     pairs = [l.split("=", 1) for l in open(before).read().splitlines() if "=" in l] if os.path.exists(before) else []
     b = dict(pairs)
     if not pairs:
@@ -315,9 +315,10 @@ def check(d, before, lrc, lout, me, prefixes):
                 sorted((now - was).elements()), sorted((was - now).elements())))
     under = lambda p: any(strip(p).startswith(x) for x in prefixes)
     tiles_check(b, c, left, unread)
-    named = lambda p: ours(p) or under(p)
-    dock.log_check(d, b, read, ours, under, left, wide, wide_unread)
-    dock.tiles_check(d, b, read, named, left, wide, unread)
+    kind, why = window(d, b, me)
+    fg_same = "fg_set" in b and "fg_set" in c and json.loads(b["fg_set"]) == c["fg_set"]
+    dock.probe_check(d, b, read, kind, fg_same, left, unread)
+    dock.log_check(d, b, read, ours, under, kind, left, unread)
     for r in recs or []:
         if key(r) in known:
             known.remove(key(r))
@@ -328,20 +329,19 @@ def check(d, before, lrc, lout, me, prefixes):
     elif lrc != 0:
         unread.append("leftovers: " + (lout.strip() or "exit %d" % lrc))
     tcc_check(d, b, under, left, wide, unread)
-    kind, why = window(d, b, me)
     if kind == "shared":
         print("window: shared-window (%s); only this run's paths are judged" % "; ".join(why))
-        print("".join("info: %s\n" % l for l in wide + wide_unread), end="")
+        print("".join("info: %s\n" % l for l in wide), end="")
     elif kind == "unknown":
         print("window: unknown (%s); the machine-wide findings cannot be judged" % "; ".join(why))
-        unread += wide + wide_unread
+        unread += wide
     else:
         print("window: alone")
-        left, unread = left + wide, unread + wide_unread
+        left = left + wide
     print("".join("left: %s\n" % l for l in left) + "".join("unread: %s\n" % u for u in unread), end="")
-    # a tile left in the Dock stays until the Dock restarts; restarting it is ours to do only alone
-    if kind == "alone" and any(l.startswith("dock") for l in left):
-        print("restore: dock")
+    # a tile left in the Dock stays until the Dock restarts, which is devops's to do
+    if any(l.startswith("dock") for l in left):
+        print("restore: the Dock keeps a tile this suite left; it is not restarted here (devops console restore <host>)")
     clean = 1 if left else 2 if unread else 0
     print("clean=%d" % clean)
     return clean

@@ -211,18 +211,19 @@ locked_cmd() {
   printf '%s' "cd ~/$REMOTE_DIR && sd=$sd && rm -rf \"\${sd:?}\" \"\${sd:?}\".before \"\${sd:?}\".clean && mkdir -p $sd && \
     env MARSPOT_STATE_DIR=$sd$env /usr/local/bin/bench-lock $lock \
     sh -c 'stopped=; trap \"stopped=1; exec >/dev/null 2>&1\" TERM INT HUP; \
-    bin/_bounded.sh 30 bin/_e2e-suite-clean.sh snap $sd.before --lock-pid \$PPID --live /tmp/msp-e2e-$RUN_ID-live; \
+    bin/_bounded.sh 60 bin/_e2e-suite-clean.sh snap $sd.before --lock-pid \$PPID --live /tmp/msp-e2e-$RUN_ID-live --probe /tmp/msp-e2e-$RUN_ID-dockprobe; \
     if [ -z \"\$stopped\" ]; then $run; rc=\$?; else rc=143; fi; $pre\
     bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $sd; \
     [ -n \"\$stopped\" ] && exit \$rc; \
-    bin/_bounded.sh 90 bin/_e2e-suite-clean.sh check $sd.before $sd.clean \
+    bin/_bounded.sh 150 bin/_e2e-suite-clean.sh check $sd.before $sd.clean --probe /tmp/msp-e2e-$RUN_ID-dockprobe \
       --suite-rc \$rc --lock-pid \$PPID$KNOWN_ARGS \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID- >/dev/null; \
     case \$? in 0) exit \$rc ;; 1) exit 4 ;; *) exit 5 ;; esac'"
 }
 
-# The run's cached answer of whether the log queries still match anything.
+# The run's cached answer of whether the log queries still match anything,
+# and its Dock probe.
 drop_run_files() {
-  ssh "${SSH_CLEANUP[@]}" "$HOST" "rm -f /tmp/msp-e2e-${RUN_ID:?}-live" </dev/null || true
+  ssh "${SSH_CLEANUP[@]}" "$HOST" "rm -rf /tmp/msp-e2e-${RUN_ID:?}-live /tmp/msp-e2e-${RUN_ID:?}-dockprobe" </dev/null || true
 }
 
 # One suite's verdict from suite_rc and left_rc (with left_why): appended
@@ -265,4 +266,30 @@ record_result() {
     results+=("FAIL  ${secs}s  $suite  ($why)")
     rc=1
   fi
+}
+
+# The suites whose app keeps its Dock tile.  Every other suite runs the
+# app with MARSPOT_TEST_NO_DOCK, as an accessory app: no tile, nothing
+# for the runner's Dock to keep.  These keep it because what they test
+# is the app as a regular one:
+#   - its LaunchServices record and the sessions' coalition (lsappinfo
+#     treats a program with no Dock tile differently: see
+#     test-reseat-bound.sh), and the record going from accessory back to
+#     regular when the resident is opened again;
+#   - activating it and making a window key before a close
+#     (test-multi-window.sh).
+# Their tiles are counted by the check in the hold (_e2e-suite-clean.sh),
+# and the walks among them quit only once the Dock dropped the app's
+# tile (_ownership-quit.sh).  test-reopen-after-quit.sh opens the app 0
+# to 3000 ms after a quit, before the Dock drops the tile on purpose: as
+# a regular app every such opening left a tile the Dock kept for good.
+# What it tests, the open being taken, does not depend on the tile.
+# test-quit-after-update.sh compares the shell's coalition as lsappinfo
+# lists it, which it lists for an accessory app as for a regular one.
+keeps_dock_tile() {
+  case $1 in
+    test-session-ownership.sh | test-one-app-record.sh | test-coalition-reclaim.sh | test-reseat-bound.sh \
+      | test-multi-window.sh) return 0 ;;
+    *) return 1 ;;
+  esac
 }

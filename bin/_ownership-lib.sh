@@ -18,8 +18,7 @@ SB="$(mktemp -d "$(dev_tmp "$OWN_SCRATCH").XXXXXX")"
 APP="$SB/Marspot.app"
 PROBE="$SB/ownprobe"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-FAILED=()
-STRANGERS=()
+FAILED=() STRANGERS=()
 
 die() {
   echo "FAIL: $*"
@@ -280,7 +279,7 @@ start_walk() {
   rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
   mkfifo "$SB/go" && [[ -p $SB/go ]] || die "could not make the launcher's fifo"
   # a second window, so a second pane, on this first launch only
-  open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
+  dock_baseline; open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
   wait_count L3_SPAWNED 1 90 || die "no pane session was ever spawned"
   two_panes
   FIRST="$L1"; C0="$(coalition "$L1")"

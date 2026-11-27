@@ -24,7 +24,7 @@ expect tile-removed 0 "dock: removals by reason: 1 $TILE_REMOVED"
 
 base insert
 launch 06.000 >>"$T/insert/in/dock.log"
-expect insert 0 "dock: inserts=2 removal_lines=1 removal_events=1" "dock: tiles at once=1 (most allowed 2, insert index 37..37)"
+expect insert 0 "dock: inserts=2 removal_lines=1 removal_events=1" "dock: tiles at once=1 (most allowed 2, insert index 37..37, 37 before the suite)"
 
 # one removal logged under both reasons is one removal
 base logged-twice
@@ -240,7 +240,8 @@ expect own-unknown 2 "1 lock take in the start second, not told apart from ours"
 d="$T/snap"
 mkdir -p "$d/in"
 printf '%s\n%s\n' "$DOCK" "$MARSPOT_PRIVATE" >"$d/in/lsappinfo.txt"
-cp "$T/clean/in/persistent.txt" "$T/clean/in/recent.txt" "$T/clean/in/dock-tiles.txt" "$d/in/"
+cp "$T/clean/in/persistent.txt" "$T/clean/in/recent.txt" "$d/in/"
+probed 37 >"$d/in/probe-start.txt"
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$d/in/status.txt"
 cp "$T/clean/in/dock.log" "$d/in/probe-dock.log"
 printf '%s\n' "$TCC_OTHER" >"$d/in/probe-tcc.ndjson"
@@ -250,13 +251,17 @@ E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before2" --loc
 E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before3" --lock-pid 4000
 ok=1
 for l in fg=1 persistent=2 recent=1 "known=4242:/tmp/msp-e2e-1-1-lander/Marspot.app" others_snap=5000 dock_live=1 tcc_live=1 \
-  "self_cmd=sh -c stopped=; ..." "dock_tiles=$(dock_json Finder A B C)" "recent_entries=[[\"/Applications/C.app/\", \"com.x.C\", \"C\"]]"; do
+  "self_cmd=sh -c stopped=; ..." probe_dock_pid=726 probe_index=37 "recent_entries=[[\"/Applications/C.app/\", \"com.x.C\", \"C\"]]"; do
   grep -qxF -- "$l" "$d/before" && grep -qxF -- "$l" "$d/before2" || ok=0
 done
 grep -qx 'dock_live=1' "$d/live" && grep -qx 'tcc_live=1' "$d/live" || ok=0
 ! grep -qx 'dock_live=1' "$d/before3" || ok=0
 grep -q '^start_epoch=[0-9]*$' "$d/before" || ok=0
-if ((ok)); then echo "  ok    snap (before state, live probes cached and reused)"; else
+# the Dock probe not run is said, never left out
+rm "${d:?}/in/probe-start.txt"
+E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before4" --lock-pid 4000
+grep -qx 'probe_unread=the Dock probe did not run' "$d/before4" && ! grep -q '^probe_index=' "$d/before4" || ok=0
+if ((ok)); then echo "  ok    snap (before state, live probes cached and reused, probe unread said)"; else
   echo "  FAIL  snap"; head -50 "$d"/before*; failed=1; fi
 
 ((failed)) && exit 1

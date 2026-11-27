@@ -102,25 +102,6 @@ is_measurement() {
     || $1 == measure-active.sh ]]
 }
 
-# The suites whose app keeps its Dock tile.  Every other suite runs the
-# app with MARSPOT_TEST_NO_DOCK, as an accessory app: no tile, nothing
-# for the runner's Dock to keep.  These keep it because what they test
-# is the app as a regular one:
-#   - its LaunchServices record and the sessions' coalition (lsappinfo
-#     treats a program with no Dock tile differently: see
-#     test-reseat-bound.sh), and the record going from accessory back to
-#     regular when the resident is opened again;
-#   - activating it and making a window key before a close
-#     (test-multi-window.sh).
-# Their tiles are counted by the check in the hold (_e2e-suite-clean.sh).
-keeps_dock_tile() {
-  case $1 in
-    test-session-ownership.sh | test-one-app-record.sh | test-coalition-reclaim.sh | test-reseat-bound.sh \
-      | test-reopen-after-quit.sh | test-multi-window.sh) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 # Exit 3 from these means a measurement in them was read on a busy host
 # and everything else passed.
 may_be_unmeasured() {
@@ -283,6 +264,9 @@ for suite in "${SUITES[@]}"; do
       4) left_why="left something on $HOST (Dock tile, app record or TCC request)" ;;
       *) left_why="what $HOST has left could not be read" ;;
     esac
+    # never restarted from here: the runner's console is devops's to restore
+    [[ $left_ls != *$'\n'restore:* ]] \
+      || echo "==> the Dock on $HOST keeps a tile $suite left; ask devops to run: devops console restore $HOST" >&2
   fi
   # a suite that records readings leaves them in the remote tree, which
   # nothing else copies back
