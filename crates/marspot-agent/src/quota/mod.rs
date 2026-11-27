@@ -54,6 +54,10 @@ mod waste_tests;
 #[cfg(test)]
 mod waste_world;
 #[cfg(test)]
+mod plan_world;
+#[cfg(test)]
+mod plan_replay_tests;
+#[cfg(test)]
 mod waste_replay_tests;
 #[cfg(test)]
 mod split_tests;

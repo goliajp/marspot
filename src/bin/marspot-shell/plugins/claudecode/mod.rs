@@ -62,6 +62,8 @@ mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
 mod allocation_level1;
+mod allocation_level2;
+mod allocation_level2_input;
 mod allocation_line;
 mod allocation_more;
 mod allocation_prices;
@@ -76,8 +78,7 @@ pub(in crate::plugins) mod with_helpers;
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
 #[cfg(test)]
 use transcript::{tail_activity, tail_window};
-pub(crate) use profiles::discover_profiles;
-pub(crate) use profiles::{discover_profiles_in, email_in};
+pub(crate) use profiles::{discover_profiles, discover_profiles_in, email_in};
 use argv::argv_session_uuid;
 #[cfg(test)]
 use argv::{flag_uuid, is_uuid};
@@ -85,9 +86,7 @@ pub use statusline::statusline_ingest;
 // the settings-file plumbing the peerbus hooks share with the status line
 pub(crate) use settings_hook::{cc_settings_files, sh_quote};
 pub(crate) use settings_write::write_through_symlink;
-use idle::*;
-use idle_rule::*;
-use model::*;
+use {idle::*, idle_rule::*, model::*};
 use statusline::*;
 use settings_hook::*;
 use worker::*;

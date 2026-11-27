@@ -23,7 +23,7 @@ impl Level1 {
         let m = &self.money;
         let _ = write!(
             s,
-            "served={}/{} unserved_h2={}/{} unserved={}/{} pi={:.2} bound={} lapsed={} reserve_taken={} offers_lost={} combos={} claims=",
+            "served={}/{} unserved_h2={}/{} unserved={}/{} pi={:.2} bound={} lapsed={} reserve_taken={} offers_lost={} combos={} tf_early={} claims=",
             pts(self.served[0]),
             pts(self.served[1]),
             un(0, H2),
@@ -36,6 +36,7 @@ impl Level1 {
             pts(m.reserve_taken),
             pts(m.offers_lost),
             self.combos,
+            self.tf_early,
         );
         let claims: Vec<String> = self.claims.iter().map(|c| format!("P{}#{}@{:.1}h:{}", c.account, c.offer, c.at_h, pts(c.value))).collect();
         s.push_str(if claims.is_empty() { "-" } else { "" });

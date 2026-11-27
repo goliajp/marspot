@@ -1,0 +1,86 @@
+use super::super::allocation_adapter::events_dir;
+use super::super::allocation_inputs::{AccountIn, PaneIn};
+use super::super::allocation_level1::ClassPlan;
+use super::*;
+use marspot_agent::sched::forecast::{self, Facts};
+use std::fs;
+
+const NOW: i64 = 1_795_716_000;
+
+fn account(profile: u8, week_used: f64) -> AccountIn {
+    AccountIn { profile, week_used, fable_used: Some(0.9), fable_known: true, week_renews: NOW + 60 * 3600, fable_renews: NOW + 60 * 3600, open: true, measured_at: NOW - 60, supply: Vec::new() }
+}
+
+fn pane(sid: u64, profile: u8) -> PaneIn {
+    PaneIn { sid, profile, class: Class::Plain, marked_at: None, refused_at: None, resting: true, helper: false, out: false, transcript: None }
+}
+
+fn root(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("marspot-level2-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    d
+}
+
+/// Three panes on P3, which empties in about three hours; P7 has room.
+fn scene() -> (Snapshot, View, Forecast) {
+    let accounts = vec![account(3, 0.95), account(7, 0.4)];
+    let panes = vec![pane(441, 3), pane(481, 3), pane(430, 3)];
+    let live: Vec<u64> = panes.iter().map(|p| p.sid).collect();
+    let snap = Snapshot { now: NOW, feed_at: Some(NOW - 60), accounts, panes, live: live.clone() };
+    let rates = [(0.0, 0.006), (0.0, 0.004), (0.0, 0.003)];
+    let view = View::from_rates(&snap, &rates, 0.0);
+    let mut facts = Facts::default();
+    for (sid, (_, b)) in live.iter().zip(rates) {
+        for k in 1..=10 {
+            facts.used(NOW - k * 3600, *sid, Class::Plain, b);
+        }
+    }
+    let fc = forecast::build(&facts, NOW, &live);
+    (snap, view, fc)
+}
+
+#[test]
+fn allocation_level2_with_no_pane_runs_no_plan() {
+    let r = root("none");
+    let mut a = Allocation::new(events_dir(&r));
+    let (mut snap, _, fc) = scene();
+    snap.panes.clear();
+    let view = View::from_rates(&snap, &[], 0.0);
+    let mut cp = ClassPlan::default();
+    cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
+    let mut pp = PanePlan::new(&r);
+    assert!(pp.scan(&mut a, &snap, &view, Some(&fc), cp.last()).is_empty());
+    // nor without a class plan
+    let (snap, view, fc) = scene();
+    assert!(pp.scan(&mut a, &snap, &view, Some(&fc), None).is_empty());
+    assert_eq!((pp.passes, pp.full), (0, 0), "the planner ran");
+    let _ = fs::remove_dir_all(&r);
+}
+
+#[test]
+fn allocation_level2_logs_a_plan_records_its_fact_and_writes_the_status() {
+    let r = root("plan");
+    let mut a = Allocation::new(events_dir(&r));
+    let (snap, view, fc) = scene();
+    let mut cp = ClassPlan::default();
+    cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
+    let mut pp = PanePlan::new(&r);
+    let log = pp.scan(&mut a, &snap, &view, Some(&fc), cp.last());
+    let line = log.iter().find(|l| l.0 == "sched.plan").map(|l| l.1.clone()).unwrap_or_else(|| panic!("no plan line: {log:?}"));
+    assert!(line.starts_with("trigger=first mode="), "{line}");
+    assert!(line.contains(">P7@"), "a pane leaves P3 for P7: {line}");
+    assert!(line.len() < 400, "{} bytes", line.len());
+    let facts = a.events.read_since(NOW - 10, NOW + 10);
+    let plan = facts.iter().find(|e| e.kind == "plan").expect("a plan fact");
+    assert_eq!(plan.sid, 0);
+    assert!(plan.detail.contains(" prev=0000000000000000 ") && plan.detail.contains(">P7#0"), "{}", plan.detail);
+    let status = fs::read_to_string(r.join("sched").join("status.json")).expect("the status file");
+    assert!(status.starts_with("{\"at\":") && status.contains("\"panes\":[") && status.ends_with("]}\n"), "{status}");
+    // the next scan a second later re-times only: no line, no fact
+    let mut later = snap.clone();
+    later.now = NOW + 2;
+    let log = pp.scan(&mut a, &later, &view, Some(&fc), cp.last());
+    assert!(log.iter().all(|l| l.0 != "sched.plan"), "{log:?}");
+    assert_eq!((pp.passes, pp.full), (2, 1));
+    let _ = fs::remove_dir_all(&r);
+}

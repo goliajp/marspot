@@ -31,7 +31,7 @@ pub(super) const FIXTURE: &str = include_str!("fixtures/replay_20261125.txt");
 const WEEK_S: i64 = 7 * 24 * 3600;
 
 #[derive(Clone, Debug)]
-enum Ev {
+pub(super) enum Ev {
     Bind(u64, u8, Class),
     New(u64, u8, Class),
     Gone(u64),
@@ -41,15 +41,15 @@ enum Ev {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Fixture {
-    t0: i64,
-    len: i64,
-    step: i64,
+    pub(super) t0: i64,
+    pub(super) len: i64,
+    pub(super) step: i64,
     /// `(account, week used, Fable used, week renews, Fable renews)`, unix.
-    start: Vec<(u8, f64, f64, i64, i64)>,
+    pub(super) start: Vec<(u8, f64, f64, i64, i64)>,
     /// What the polls read at the end: `(account, week used, Fable used)`.
     pub end: Vec<(u8, f64, f64)>,
-    events: Vec<(i64, Ev)>,
-    usage: BTreeMap<i64, Vec<(u64, Class, f64)>>,
+    pub(super) events: Vec<(i64, Ev)>,
+    pub(super) usage: BTreeMap<i64, Vec<(u64, Class, f64)>>,
 }
 
 fn class_of(w: &str) -> Class {
