@@ -180,7 +180,7 @@ printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_ACCESSING" >"$T/t
 expect tcc-accessing 1 "left: tcc: kTCCServiceListenEvent $OTHER ${LANDER#/private}"
 
 base listen-preflight
-printf '%s\n%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" "$TCC_LISTEN" >"$T/listen-preflight/in/tcc.ndjson"
+printf '%s\n%s\n{"count":5,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" >"$T/listen-preflight/in/tcc.ndjson"
 expect listen-preflight 0 "tcc: requests=2 ours=1 listen_event_preflights=1" "info: tcc: kTCCServiceListenEvent $OTHER $BUILD"
 
 base listen-prompt
@@ -190,6 +190,17 @@ expect listen-prompt 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
 base listen-ask
 printf '%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN_ASK" >"$T/listen-ask/in/tcc.ndjson"
 expect listen-ask 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+
+# a second request under the same msgID (pid.counter wraps) is never folded into a preflight
+base listen-collide
+printf '%s\n%s\n%s\n{"count":8,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" "${TCC_LISTEN_ASK//405.1/403.1}" \
+  >"$T/listen-collide/in/tcc.ndjson"
+expect listen-collide 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+
+base prompt-no-id
+printf '%s\n%s\n{"count":3,"finished":1}\n' "$TCC_OTHER" "$(ndjson "AUTHREQ_PROMPTING: service=kTCCServiceCamera")" \
+  >"$T/prompt-no-id/in/tcc.ndjson"
+expect prompt-no-id 1 "left: tcc: kTCCServiceCamera"
 
 base unread-log
 rm "${T:?}/unread-log/in/dock.log"

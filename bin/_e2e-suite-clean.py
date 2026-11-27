@@ -94,30 +94,32 @@ def tile_lines(text):
 
 
 def tcc_requests(text):
+    """per msgID: every service, CTX preflight value and desired_auth seen, so two requests that
+    share a msgID (pid.counter wraps) can never pass as one preflight; a prompt line without a
+    msgID is kept under its own key"""
     reqs = {}
-    for line in (text or "").splitlines():
+    for n, line in enumerate((text or "").splitlines()):
         try:
             msg = json.loads(line).get("eventMessage", "")
         except (ValueError, AttributeError):
             continue
         m = re.search(r"msgID=([^,]+)", msg)
-        if not m:
+        if not m and not msg.startswith("AUTHREQ_PROMPTING"):
             continue
-        r = reqs.setdefault(m.group(1), {"svc": "?", "paths": [], "preflight": False, "prompt": False, "desired": None})
-        s = re.search(r"service=(\w+)", msg)
-        if s:
-            r["svc"] = s.group(1)
-        if msg.startswith("AUTHREQ_CTX") and re.search(r"\bpreflight=yes\b", msg):
-            r["preflight"] = True
+        key = m.group(1) if m else "!prompt-%d" % n
+        r = reqs.setdefault(key, {"svcs": set(), "paths": [], "ctx": [], "prompt": False, "desired": set()})
+        r["svcs"].update(re.findall(r"\bservice=(\w+)", msg))
+        if msg.startswith("AUTHREQ_CTX"):
+            r["ctx"].append(re.findall(r", preflight=(\w+),", msg))
         if msg.startswith("AUTHREQ_PROMPTING"):
             r["prompt"] = True
-        a = re.search(r"\bdesired_auth=(\d+)", msg)
-        if a:
-            r["desired"] = int(a.group(1))
+        r["desired"].update(int(a) for a in re.findall(r"\bdesired_auth=(\d+)", msg))
         # responsible, accessing and requesting each name a binary_path
         for p in re.findall(r"(?:binary|responsible)_path=([^,}]+)", msg):
             if strip(p) not in r["paths"]:
                 r["paths"].append(strip(p))
+    for r in reqs.values():
+        r["svc"] = ",".join(sorted(r["svcs"])) or "?"
     return reqs
 
 
@@ -289,7 +291,7 @@ def tcc_check(d, b, under, left, wide, unread):
     if not reqs and b.get("tcc_live") != "1":
         unread.append("tcc log: no request in the suite nor in the 24 h probe (predicate or format dead)")
         return
-    mine = [r for r in reqs.values() if any(ours(p) for p in r["paths"])]
+    mine = [r for k, r in reqs.items() if k.startswith("!") or any(ours(p) for p in r["paths"])]
     quiet = [r for r in mine if listen_preflight(r)]
     print("tcc: requests=%d ours=%d listen_event_preflights=%d" % (len(reqs), len(mine), len(quiet)))
     for r in mine:
@@ -297,14 +299,14 @@ def tcc_check(d, b, under, left, wide, unread):
         if r in quiet:
             print("info: " + line + " (preflight, no prompt)")
             continue
-        (left if any(under(p) for p in r["paths"]) else wide).append(line)
+        (left if r["prompt"] or any(under(p) for p in r["paths"]) else wide).append(line)
 
 
 def listen_preflight(r):
     """the input-monitoring preflight AppKit and the window server make for every app with
     key windows: it asks, never prompts and records nothing; any other request is a finding"""
-    return (r["svc"] == "kTCCServiceListenEvent" and r["preflight"] and not r["prompt"]
-            and r["desired"] == 0)
+    return (r["svcs"] == {"kTCCServiceListenEvent"} and r["ctx"] == [["yes"]] and not r["prompt"]
+            and r["desired"] == {0})
 
 
 def check(d, before, lrc, lout, me, prefixes):
