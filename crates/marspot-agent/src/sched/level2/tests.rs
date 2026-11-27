@@ -228,11 +228,12 @@ fn sched_level2_a_retime_keeps_the_gain_of_a_refusal_averting_switch_not_yet_ope
     assert!(!st.switches.is_empty() && st.switches.iter().all(|s| s.open_at > now + 2), "{:?}", st.switches);
     st.switches.iter_mut().for_each(|s| s.gain = 0.123);
     let r = pass::retime(&mut st, &i, now + 2).expect("the structure holds");
-    assert!(r.plan.switches.iter().all(|s| s.gain == 0.123), "{:?}", r.plan.switches);
+    assert!(r.plan.switches.iter().all(|s| s.gain == 0.123 && s.carried), "{:?}", r.plan.switches);
+    assert!(r.plan.status(&i, now + 2, 1, &[], &[], &[]).contains("\"gain_carried\":true"));
     // a full search weighs the structure by gains worked out afresh
     st.switches.iter_mut().for_each(|s| s.gain = 0.123);
     let r = pass::full(&mut st, &i, 1, now + 4);
-    assert!(!r.plan.switches.is_empty() && r.plan.switches.iter().all(|s| s.gain != 0.123), "{:?}", r.plan.switches);
+    assert!(!r.plan.switches.is_empty() && r.plan.switches.iter().all(|s| s.gain != 0.123 && !s.carried), "{:?}", r.plan.switches);
 }
 
 #[test]

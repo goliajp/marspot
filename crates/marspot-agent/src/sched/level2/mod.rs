@@ -171,6 +171,10 @@ pub struct Switch {
     /// rewrite) and still save the refusal's stall.
     pub gain: f64,
     pub gain_eff: f64,
+    /// The gains are the ones stored with the standing plan, not worked
+    /// out on this pass (a re-time, a switch not yet open that averts a
+    /// refusal).
+    pub carried: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

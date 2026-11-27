@@ -134,7 +134,7 @@ impl Plan {
             .switches
             .iter()
             .filter(|w| w.sid == sid)
-            .map(|w| format!("{{\"to\":{},\"open_h\":{:.2},\"dead_h\":{:.2},\"kind\":\"{}\",\"gain\":{}}}", w.to, w.t_open, w.t_dead, w.kind.word(), pts(w.gain)))
+            .map(|w| format!("{{\"to\":{},\"open_h\":{:.2},\"dead_h\":{:.2},\"kind\":\"{}\",\"gain\":{},\"gain_carried\":{}}}", w.to, w.t_open, w.t_dead, w.kind.word(), pts(w.gain), w.carried))
             .collect();
         let pin = pins.iter().find(|p| p.0 == sid).map_or_else(|| "null".into(), |p| format!("{:.2}", p.1));
         format!("{{\"sid\":{sid},\"on\":{on},\"switches\":[{}],\"pin_h\":{pin}}}", sw.join(","))

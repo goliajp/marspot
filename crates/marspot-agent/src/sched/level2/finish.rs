@@ -9,8 +9,10 @@ use super::window::{CLEAN_CHANCE, NOTICE_LEAD_H};
 use super::{H2, Mode, Pane, Plan, Sched, Switch, Totals};
 
 /// `kept`: switches of the standing plan whose window is not open yet,
-/// `(sid, order, gain, gain_eff)`; one that averts a refusal keeps that gain, since
-/// its window does not depend on it and nothing reads it before it opens.
+/// `(sid, order, gain, gain_eff)`; one that averts a refusal keeps that
+/// gain, since its window does not depend on it and nothing reads it
+/// before it opens.  Such a switch is marked `carried`: its gain is the
+/// one stored, not this pass's.
 pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, charge: f64, idle: Totals, kept: &[(u64, u8, f64, f64)]) -> Plan {
     e.sim.run(&e.ctx, best, 1);
     let high: Vec<Option<f64>> = e.sim.empty.clone();
@@ -58,6 +60,7 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 exempt: e.exempt(p, s, h),
                 gain,
                 gain_eff,
+                carried: old.is_some(),
             });
             from = Some(hop.to as usize);
         }
