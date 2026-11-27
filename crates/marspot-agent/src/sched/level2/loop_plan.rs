@@ -5,6 +5,7 @@
 
 use super::loop_world::{P, RESTS, Read, WEEK, hours, speeds};
 use super::standing::Standing;
+use super::trigger::{Now, Triggers};
 use super::tests::KAPPA;
 use super::*;
 use crate::quota::Class;
@@ -19,6 +20,41 @@ fn buckets() -> Vec<f64> {
 }
 
 pub(super) fn planned(st: &mut Standing, read: &Read, panes: &[P], now: i64, bias: f64) {
+    with_input(read, panes, now, bias, |i| {
+        pass::full(st, i, now as u64, now);
+    });
+}
+
+/// The planner as the shell drives it: at every reading a full search
+/// when a trigger says one is due, else the standing plan re-timed.
+#[derive(Default)]
+pub(super) struct Driver {
+    pub st: Standing,
+    tr: Triggers,
+    ended: bool,
+}
+
+impl Driver {
+    pub(super) fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: f64, refused: bool) {
+        with_input(read, panes, now, bias, |i| {
+            let quants: Vec<_> = i.accounts.iter().map(|x| x.q.clone()).collect();
+            let high: Vec<f64> = i.accounts.iter().map(|x| i.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
+            let counted: Vec<u64> = i.panes.iter().map(|p| p.sid).collect();
+            let n = Now { at: now, accounts: &quants, high: &high, counted: &counted, offers: 0, refused, ended: self.ended, outside: &[] };
+            let done = match self.tr.due(&n) {
+                Some(_) => {
+                    let r = pass::full(&mut self.st, i, now as u64, now);
+                    self.tr.searched(&n, &r.plan.empty.iter().map(|e| e[1]).collect::<Vec<_>>(), r.plan.cuts.get(1).copied().unwrap_or(1.0));
+                    Some(r)
+                }
+                None => pass::retime(&mut self.st, i, now),
+            };
+            self.ended = done.is_some_and(|r| !r.ended.cancelled.is_empty() || !r.ended.missed.is_empty());
+        });
+    }
+}
+
+fn with_input(read: &Read, panes: &[P], now: i64, bias: f64, f: impl FnOnce(&Input)) {
     let q = read.quants();
     let sp: Vec<(f64, f64)> = panes.iter().map(|p| speeds(p, now)).map(|(f, n)| (f * bias, n * bias)).collect();
     let demand = [sp.iter().map(|x| x.0).sum(), sp.iter().map(|x| x.1).sum()];
@@ -51,5 +87,5 @@ pub(super) fn planned(st: &mut Standing, read: &Read, panes: &[P], now: i64, bia
         .collect();
     let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
     let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
-    pass::full(st, &i, now as u64, now);
+    f(&i);
 }
