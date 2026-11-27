@@ -40,9 +40,16 @@ impl ViewSync {
 impl L3Conn {
     /// Note what the frame just read says about the view; when it
     /// answers every ask, the session is at its offset, so a scroll
-    /// there is not sent.
+    /// there is not sent.  Before this core's first ask, the count goes
+    /// on from the number the session last applied: the session keeps
+    /// it from the core before this one, and counting again from 0
+    /// would let a later ask carry that same number, so a frame from
+    /// before that ask would be taken as its answer.
     pub(super) fn took_frame(&mut self, snap: &GridSnapshot) {
         self.view_sync.frame = (snap.view_offset, snap.view_seq);
+        if self.view_sync.asked.is_none() {
+            self.view_seq = snap.view_seq as u32;
+        }
         if let Some(off) = self.view_sync.settled() {
             self.req_view_offset = Some(off);
         }

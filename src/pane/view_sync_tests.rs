@@ -94,7 +94,7 @@ fn a_frame_from_before_the_scroll_was_applied_does_not_undo_it() {
     assert_eq!(pane.pump(), 1, "the frame was read");
     assert_eq!(pane.view_offset(), 5, "a frame from before the ask took the pane back");
 
-    w.set_view_seq(view_ask_seq(1));
+    w.set_view_seq(last_ask(&pane));
     prog.print(&mut w, 6);
     pane.pump();
     assert_eq!(pane.view_offset(), 6);
@@ -114,4 +114,46 @@ fn a_session_that_does_not_number_its_frames_is_not_followed() {
     prog.print(&mut w, 11);
     pane.pump();
     assert_eq!(pane.view_offset(), 10);
+}
+
+fn last_ask(pane: &Pane) -> u16 {
+    match pane.session() {
+        PaneBackend::L3(c) => c.view_sync.asked.expect("an ask was sent"),
+        _ => panic!("not an L3 pane"),
+    }
+}
+
+/// A core attaching to a session that a core before it scrolled: the
+/// session still publishes the number of that core's last ask.  The
+/// new core's asks never carry that number, so frames published
+/// before the session applies one of them do not pull the pane back,
+/// wherever the number is, wraparound included.
+#[test]
+fn after_reattach_a_stale_frame_does_not_pull_the_pane_back() {
+    for left in [view_ask_seq(0), view_ask_seq(1), view_ask_seq(2), 0xFFFE, 0xFFFF] {
+        let mut w = GridShmWriter::create(20, 4).unwrap();
+        let mut prog = Program::new();
+        w.set_view_seq(left);
+        w.publish(prog.0.grid(), 30, 0);
+        let mut pane = pane_on(&w);
+        pane.pump();
+        assert_eq!(pane.view_offset(), 30, "seq {left}: a core attaching takes where the session is");
+
+        let mut at: u16 = 30;
+        for step in 0..3u16 {
+            assert_eq!(pane.scroll_own_view(-3), -3);
+            at -= 3;
+            assert_ne!(last_ask(&pane), left, "seq {left}: ask {step} carries the old core's number");
+            // the session prints before it reads the ask
+            prog.print(&mut w, 31 + step);
+            assert_eq!(pane.pump(), 1);
+            assert_eq!(pane.view_offset(), at, "seq {left}: a stale frame pulled the pane back at ask {step}");
+            assert_eq!(asked_for(&pane), Some(at), "seq {left}: the asked offset was pulled back");
+        }
+
+        w.set_view_seq(last_ask(&pane));
+        prog.print(&mut w, at + 1);
+        pane.pump();
+        assert_eq!(pane.view_offset(), at + 1, "seq {left}: the frame that answers the ask is followed");
+    }
 }
