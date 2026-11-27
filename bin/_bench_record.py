@@ -256,7 +256,7 @@ def show(hist_dir, needle, last):
                 f" load1 {load.get('start')}/{load.get('max')}/{load.get('end')}"
                 f"  others {r.get('foreign_cores')} sysmond {r.get('sysmond_cores')}"
                 f" waiters {r.get('lock_waiters')}"
-                f"  n={r.get('trial_count')}  {r.get('runner')}"
+                f"  n={r.get('trial_count')}  {r.get('runner')}  {r.get('mode', '')}"
             )
 
 

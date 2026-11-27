@@ -13,6 +13,8 @@
 #                          app and through L3, the key-to-frame latency
 #                          of one pane (a few minutes), AND the Phase 9
 #                          SSIM gate.  Use before merging to develop.
+#   bin/bench.sh --lanes=startup,bps   only those --full lanes, judged
+#                          alone (bin/_bench-lanes.sh); never re-locks.
 #   bin/bench.sh --ssim    add the Phase 9 SSIM gate (font rendering);
 #                          implied by --full.
 #   bin/bench.sh --update-baseline   rewrite the floors in
@@ -53,6 +55,7 @@ BASELINE="${BASELINE:-$ROOT/bench/baseline.json}"
 SCENARIOS_DIR="$ROOT/bench/scenarios"
 
 MODE=fast
+LANES_ARG=""
 UPDATE=0
 SIZE_TABLES=0
 WITH_SSIM=0
@@ -65,18 +68,25 @@ DO_MEASURE=1
 for arg in "$@"; do
   case "$arg" in
     --full)              MODE=full ;;
+    --lanes=*)           MODE=lanes; LANES_ARG=${arg#--lanes=} ;;
     --update-baseline)   UPDATE=1 ;;
     --size-tables)       SIZE_TABLES=1 ;;
     --ssim)              WITH_SSIM=1 ;;
     --build-only)        DO_MEASURE=0 ;;
     --no-build)          DO_BUILD=0 ;;
     --help|-h)
-      sed -n '2,24p' "$0"; exit 0 ;;
+      sed -n '2,26p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
 
+# shellcheck source=bin/_bench-lanes.sh
+source "$ROOT/bin/_bench-lanes.sh"
+if [[ $MODE == lanes ]]; then
+  bench_lanes_check "$LANES_ARG"
+  (( ! UPDATE && ! SIZE_TABLES )) || { echo "--lanes measures; it neither re-locks nor writes size tables" >&2; exit 2; }
+fi
 # --full implies --ssim by default — pre-merge gates are the place
 # the SSIM check belongs.  Skip the implicit chain when the user
 # explicitly passes --update-baseline (which is a write-mode op).
@@ -239,6 +249,7 @@ measure_parse() {
     done
   done
 }
+if [[ $MODE != lanes ]]; then
 echo "==> headless parse (5 trials each, taking median)"
 run_block parse measure_parse
 
@@ -310,6 +321,7 @@ measure_scroll() {
 }
 echo "==> headless scroll and scroll-cold (5 trials each, taking median p99)"
 run_block scroll measure_scroll
+fi
 
 # ---- binary size: sub-second, so part of the fast gate --------------
 # judged against bench/size-budget.json, see bin/_size_budget.py
@@ -324,58 +336,12 @@ for bin in $(python3 "$ROOT/bin/_size_budget.py" binaries); do
   fi
 done
 
+if bench_lane bps; then bench_bps; fi
+if bench_lane startup && [[ $MODE == lanes ]]; then
+  bench_console_check
+  bench_window_gauge startup measure-startup.sh STARTUP_OUT
+fi
 if [[ $MODE == "full" ]]; then
-  # The product in its window: shell, core and one session, one pane,
-  # the same trial script and the same certificate the other terminals
-  # in the snapshot were read with.  This is the figure that is divided
-  # by the best other terminal's.
-  echo "==> live PTY through the product's window (this takes a minute)"
-  (cd "$ROOT" && MEASURE_TERMS=marspot MEASURE_ROUNDS="${BENCH_APP_ROUNDS:-4}" \
-    bash bin/_remote-measure-others-runner.sh > "$CUR_DIR/app.json" 2> "$CUR_DIR/measure-app.log") || true
-  grep -E '^==> (grid|\[marspot)' "$CUR_DIR/measure-app.log" || true
-
-  # Same settle between stages, for the same reason as after the build:
-  # by this point the run has already pushed a few hundred MB through a
-  # pty and written the disk hard, and the stage that follows is the one
-  # most sensitive to both.  Without it the L3 numbers came out 40 %
-  # below what the identical binary produced when `bin/measure-l3.sh`
-  # was run on its own (106.5 vs 194.5 MB/s on ascii) — a measurement
-  # reporting the run's own wake, not the product.
-  [[ "$BENCH_SETTLE_S" != "0" ]] && sleep "$BENCH_SETTLE_S"
-
-  # ...and the session alone: every pane a user has is an L3 with a
-  # file-backed scrollback, and this is the instruction count a change
-  # to marspot-session or marspot-term moves.
-  #
-  # This was never wired up: the script existed, bench.sh only ever
-  # READ its output file, and the probe that produced it had been
-  # deleted with the L4 shelld (888bf1b) - so the file went stale, then
-  # past the 7-day guard, and the product path vanished from the gate
-  # entirely.  Running it here closes that loop.
-  echo "==> live PTY through L3 (the shipped path)"
-  (cd "$ROOT" && ./bin/measure-l3.sh > "$CUR_DIR/measure-l3.log" 2>&1) || true
-  tail -6 "$CUR_DIR/measure-l3.log"
-  cp "$ROOT/bench/results/l3-throughput.json" "$CUR_DIR/l3.json" || true
-
-  # Nine panes producing output at once.  One session alone cannot show
-  # what sessions cost each other: shared caches, the disk they all
-  # write their scrollback to, cores they compete for.  The instructions
-  # are summed over the nine and gate; the rate is what the nine
-  # absorbed together.
-  #
-  # This replaces a check that read a nine-window snapshot of three
-  # terminals from a file no gate path produced, and so failed on every
-  # run.
-  MULTI_N="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('multi_session_l3',{}).get('sessions',0))" "$BASELINE")"
-  MULTI_S="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('multi_session_l3',{}).get('scenario',''))" "$BASELINE")"
-  if [[ "$MULTI_N" != "0" && -n "$MULTI_S" ]]; then
-    echo "==> $MULTI_N sessions absorbing $MULTI_S at once"
-    (cd "$ROOT" && ./bin/measure-l3.sh --sessions "$MULTI_N" --scenario "$MULTI_S" \
-      > "$CUR_DIR/measure-l3-multi.log" 2>&1) || true
-    tail -3 "$CUR_DIR/measure-l3-multi.log"
-    cp "$ROOT/bench/results/l3-multi.json" "$CUR_DIR/l3-multi.json" || true
-  fi
-
   bench_key_latency
 
   bench_window_gauges
@@ -391,7 +357,9 @@ if [[ "$MODE" == "full" ]]; then
   [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "bin/_bench_gate.py --self-test failed" >&2; exit 1; }
 fi
 set +e
-python3 "$ROOT/bin/_bench_gate.py" "$BASELINE" "$CUR_DIR" "$MODE" "$UPDATE" "$ROOT"
+GATE_MODE=$MODE
+[[ $MODE != lanes ]] || GATE_MODE="lanes:$LANES_ARG"
+python3 "$ROOT/bin/_bench_gate.py" "$BASELINE" "$CUR_DIR" "$GATE_MODE" "$UPDATE" "$ROOT"
 PERF_RC=$?
 set -e
 

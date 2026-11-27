@@ -8,6 +8,7 @@
 # Usage:
 #   bin/bench-remote.sh                # fast tier, on marspot_host bench
 #   bin/bench-remote.sh --full         # full tier
+#   bin/bench-remote.sh --lanes=startup,bps   # only those --full lanes
 #   bin/bench-remote.sh --size-tables  # module tables for a size budget
 #   HOST=<host> bin/bench-remote.sh --full
 #
@@ -204,6 +205,7 @@ MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
 case " $* " in
   *" --size-tables "*) BENCH_UNTIL_DEFAULT="+40m"; BENCH_KIND=size-tables ;;
   *" --full "*) BENCH_UNTIL_DEFAULT="+20m"; BENCH_KIND=full-bench ;;
+  *" --lanes="*) BENCH_UNTIL_DEFAULT="+15m"; BENCH_KIND=bench-lanes ;;
   *) BENCH_UNTIL_DEFAULT="+10m"; BENCH_KIND=bench ;;
 esac
 UNTIL=" $(lock_until "${MARSPOT_BENCH_UNTIL:-$BENCH_UNTIL_DEFAULT}" "$BENCH_KIND" "$REMOTE_NAME")"

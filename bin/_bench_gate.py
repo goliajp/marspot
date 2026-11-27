@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The verdict half of bin/bench.sh.
 
-  _bench_gate.py <baseline.json> <cur-dir> <fast|full> <update 0|1> <root>
+  _bench_gate.py <baseline.json> <cur-dir> <fast|full|lanes:LIST> <update 0|1> <root>
   _bench_gate.py --self-test
 
 The vs-best rows divide the product by the best other terminal in
@@ -25,6 +25,10 @@ one day while its instructions per byte stayed within 209 to 213.
 
 Units: MB/s is 10^6 bytes per second in every column and every
 baseline key.
+
+A lanes run (bin/bench.sh --lanes) judges only the rows of the lanes it
+ran: `startup` (bin/measure-startup.sh) and `bps` (the product's MB/s in
+its window, and L3 alone and nine at once).
 
 Exit: 0 passed, 1 a gating row is over its limit, 3 nothing is over its
 limit but at least one gating row has no valid reading.
@@ -103,6 +107,12 @@ if sys.argv[1:] == ["--self-test"]:
 
 baseline_path, cur_dir, mode, update_str, root = sys.argv[1:6]
 do_update = update_str == "1"
+LANES = set(mode.removeprefix("lanes:").split(",")) if mode.startswith("lanes:") else set()
+
+
+def ran(lane):
+    """Whether this run measured a --full lane."""
+    return mode == "full" or lane in LANES
 baseline = json.load(open(baseline_path))
 rows = []
 
@@ -203,7 +213,7 @@ def best_other_mbps(sid):
 
 
 # ---- the shipped path: one marspot-session per pane ----------------------
-l3 = l3_doc("l3.json") if mode == "full" else None
+l3 = l3_doc("l3.json") if ran("bps") else None
 for entry in baseline["scenarios"]:
     sid = entry["id"]
     short = sid.removeprefix("cat-")
@@ -225,8 +235,8 @@ for entry in baseline["scenarios"]:
 # product is the fastest.  On 2026-11-13 it is level with the best other
 # terminal, inside the spread between rounds, so the ratio is printed
 # on every run and does not yet decide the exit code.
-app = (l3_doc("app.json") or {}).get("marspot") if mode == "full" else None
-if mode == "full":
+app = (l3_doc("app.json") or {}).get("marspot") if ran("bps") else None
+if ran("bps"):
     rounds = (app or {}).get("rounds", [])
     used = [rd for rd in (rounds[1:] if len(rounds) >= 3 else rounds) if not rd.get("polluted")]
     loads = [x for rd in rounds for x in rd.get("load1", [])]
@@ -271,7 +281,7 @@ if mode == "full":
             r.update(verdict="inconclusive", note=elsewhere)
 
 # ---- nine sessions absorbing the same scenario at once -------------------
-multi = l3_doc("l3-multi.json") if mode == "full" else None
+multi = l3_doc("l3-multi.json") if ran("bps") else None
 multi_cfg = baseline.get("multi_session_l3")
 if multi is not None and multi_cfg:
     sid = multi_cfg["scenario"]
@@ -335,6 +345,7 @@ if mode == "full":
     row("app footprint 12 panes", fp["sum_bytes"] / 1024 if fp else None, "KiB",
         cfg.get("sum_KiB_max"), True, trials=[x / 1024 for x in (fp or {}).get("sum_bytes_samples", [])],
         host=host)
+if ran("startup"):
     st = l3_doc("startup.json")
     cfg = baseline.get("app_startup", {})
     for kind in ("cold", "warm"):
