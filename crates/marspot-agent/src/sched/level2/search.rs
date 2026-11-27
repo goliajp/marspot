@@ -266,8 +266,12 @@ fn active(e: &mut Eval, cur: &[Sched]) -> Vec<usize> {
 
 /// The plan of exactly `scheds`, costed and timed, with no search.
 pub(super) fn evaluate(input: &Input, scheds: &[Sched]) -> Plan {
-    let g = Grid::new(input);
-    let ctx = Ctx::new(input, &g);
+    evaluate_on(input, &Grid::new(input), scheds)
+}
+
+/// As `evaluate`, on the grid `g` of `input` already worked out.
+pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched]) -> Plan {
+    let ctx = Ctx::new(input, g);
     let sim = Sim::new(&ctx);
     let mut e = Eval { ctx, sim, charge: 0.0 };
     let idle = e.cost(&vec![Sched::STAY; input.panes.len()]).totals;

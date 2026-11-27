@@ -36,6 +36,9 @@ pub struct Grid {
     /// if nobody moves: the latest moment a switch off it averts the
     /// refusal.
     pub late: Vec<Option<usize>>,
+    /// Per account, when it empties at the high band if nobody moves,
+    /// capped at the horizon: the deadline a switch off it is taken by.
+    pub deadline: Vec<f64>,
 }
 
 fn index(accounts: &[Account], id: u8) -> Option<usize> {
@@ -50,15 +53,17 @@ impl Grid {
     /// The grid, with a cut one reading before each account empties at
     /// the high band if nobody moves.
     pub fn new(input: &Input) -> Grid {
-        let base = Grid::build(input, &[]);
-        let deadline = Ctx::new(input, &base).deadline;
+        let mut base = Grid::build(input, &[]);
+        let deadline = Ctx::deadlines(input, &base);
         let late: Vec<Option<f64>> = deadline.iter().map(|d| (*d < H2).then_some(*d - READING_H).filter(|t| *t > 0.0)).collect();
         if late.iter().all(Option::is_none) {
+            base.deadline = deadline;
             return base;
         }
         let extra: Vec<f64> = late.iter().flatten().copied().collect();
         let mut g = Grid::build(input, &extra);
         g.late = late.iter().map(|t| t.and_then(|t| cut_at(&g.cuts, t))).collect();
+        g.deadline = deadline;
         g
     }
 
@@ -78,7 +83,8 @@ impl Grid {
         let renews_f = input.accounts.iter().map(|a| (a.q.tf > 0.0 && a.q.tf < a.q.t - SAME_H).then(|| cut_at(&cuts, a.q.tf)).flatten()).collect();
         let keeper = keepers(input, &on);
         let late = vec![None; input.accounts.len()];
-        Grid { cuts, on, first, renews, renews_f, keeper, late }
+        let deadline = vec![H2; input.accounts.len()];
+        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline }
     }
 
     pub fn segs(&self) -> usize {

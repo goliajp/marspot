@@ -109,8 +109,7 @@ impl Standing {
 
     /// The standing schedules on `input`'s panes, re-timed to `now`;
     /// `None` when a switch no longer holds.
-    pub fn schedules(&self, input: &Input, now: i64) -> Option<Vec<Sched>> {
-        let g = Grid::new(input);
+    pub fn schedules(&self, input: &Input, g: &Grid, now: i64) -> Option<Vec<Sched>> {
         let mut out = vec![Sched::STAY; input.panes.len()];
         let mut sw = self.switches.clone();
         sw.sort_by_key(|s| (s.sid, s.order));

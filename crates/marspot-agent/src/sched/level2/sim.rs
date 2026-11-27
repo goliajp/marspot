@@ -59,16 +59,23 @@ pub(super) struct Ctx<'a, 'b> {
 }
 
 impl<'a, 'b> Ctx<'a, 'b> {
+    /// The context on `grid`, whose deadlines it takes.
     pub fn new(input: &'a Input<'b>, grid: &'a Grid) -> Self {
         let fresh = |j: &usize| input.accounts[*j].q.open && !input.accounts[*j].q.stale;
         let best = |room: &dyn Fn(usize) -> f64| (0..input.accounts.len()).filter(fresh).filter(|&j| room(j) > EPS).max_by(|&a, &b| room(a).total_cmp(&room(b)).then(b.cmp(&a)));
         let young_on = [best(&|j| input.accounts[j].q.phi()), best(&|j| input.accounts[j].q.r)];
-        let mut c = Ctx { input, grid, deadline: vec![H2; input.accounts.len()], young_on };
+        Ctx { input, grid, deadline: grid.deadline.clone(), young_on }
+    }
+
+    /// When each account empties at the high band if nobody moves,
+    /// capped at the horizon.  Cut points do not change a run in which
+    /// nobody moves, so any grid of the same input gives the same.
+    pub fn deadlines(input: &'a Input<'b>, grid: &'a Grid) -> Vec<f64> {
+        let c = Ctx::new(input, grid);
         let mut s = Sim::new(&c);
         let stay = vec![Sched::STAY; input.panes.len()];
         s.run(&c, &stay, 1);
-        c.deadline = s.empty.iter().map(|e| e.unwrap_or(H2)).collect();
-        c
+        s.empty.iter().map(|e| e.unwrap_or(H2)).collect()
     }
 }
 
