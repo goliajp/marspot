@@ -148,6 +148,7 @@ fn sched_level2_equals_the_exhaustive_search_in_exact_mode_and_is_close_otherwis
 fn sched_level2_gap_to_the_fluid_bound_is_reported_at_every_size() {
     let mut rng = Rng(7);
     let mut rows = Vec::new();
+    let mut late = 0;
     for _ in 0..200 {
         let (na, np) = (2 + rng.below(15), 2 + rng.below(29));
         let (a, p) = world(&mut rng, na, np);
@@ -158,6 +159,16 @@ fn sched_level2_gap_to_the_fluid_bound_is_reported_at_every_size() {
         i.pi = l1.pi;
         let plan = plan(&i, None);
         assert!(plan.switches.iter().all(|s| s.t_dead >= s.t_open), "a window that closes before it opens: {:?}", plan.switches);
+        // a window opened as late as still leaves a clean rest at the
+        // stopping rule's chance is a clean one
+        for s in &plan.switches {
+            let pane = p.iter().find(|x| x.sid == s.sid).expect("its pane");
+            let lead = -(1.0 - window::CLEAN_CHANCE).ln() / pane.clean_per_h;
+            if pane.clean_per_h > 0.0 && s.t_open > 0.0 && (s.t_dead - s.t_open - lead).abs() < 1e-9 {
+                late += 1;
+                assert_eq!(s.kind, Kind::Clean, "{s:?}");
+            }
+        }
         rows.push((a.len(), p.len(), plan.money_h2(i.pi) - l1.money.total, plan.idle.money - plan.totals.money));
     }
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
@@ -165,4 +176,5 @@ fn sched_level2_gap_to_the_fluid_bound_is_reported_at_every_size() {
     let gains: Vec<f64> = rows.iter().map(|r| r.3).collect();
     println!("fluid bound: 200 worlds of 2-16 accounts, 2-30 panes; plan money over the day minus the week's bound: mean {:.4} weeks; gain over idle mean {:.4}", mean(&gaps), mean(&gains));
     assert!(gains.iter().all(|g| *g >= -1e-9), "a plan worse than doing nothing");
+    assert!(late > 0, "no window was opened late: the check above checked nothing");
 }

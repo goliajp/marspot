@@ -4,7 +4,7 @@
 
 use super::search::Eval;
 use super::tally::Stage;
-use super::window::{dead_by_gain, kind};
+use super::window::{dead_by_gain, kind_of_window};
 use super::window::{CLEAN_CHANCE, NOTICE_LEAD_H};
 use super::{H2, Mode, Pane, Plan, Sched, Switch, Totals};
 
@@ -34,6 +34,11 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 Some(j) if averts => g.dead_for(p, j).max(t_open),
                 _ => dead_by_gain(t_open, gain, pane.rewrite),
             };
+            // the window's length is taken as worked out: `t_dead` less the
+            // opening moved up to it differs from the lead by rounding, and
+            // a clean rest's chance taken on that falls under the stopping
+            // rule's for about half of them
+            let w = if averts { (t_dead - t_open).min(lead(pane)) } else { t_dead - t_open };
             let t_open = if averts { t_open.max(t_dead - lead(pane)) } else { t_open };
             switches.push(Switch {
                 sid: pane.sid,
@@ -42,7 +47,7 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 order: h as u8,
                 t_open,
                 t_dead,
-                kind: kind(pane, t_open, t_dead),
+                kind: kind_of_window(pane, w),
                 exempt: e.exempt(p, s, h),
                 gain,
             });
