@@ -216,39 +216,48 @@ mod settings_modal {
     fn a_window_with_room_gets_the_panel_at_its_natural_size() {
         at_scale_1(|| {
             assert_eq!(
-                dump(1600.0, 1800.0, &Settings::default()),
-                "panel 320.0,84.0 960.0x1632.0\n\
-                 group \"Idle reclamation\" at 356.0,164.0 w 888.0\n\
-                 card 356.0,191.0 888.0x287.7\n\
-                 row ReclaimEnabled band 356.0,191.0 888.0x95.9 label 234.5 desc 268.0 ctl 1152.0,209.0 68.0x40.0\n\
-                 sep 380.0,286.9 840.0x1.0\n\
-                 row ReclaimIdleMinutes band 356.0,286.9 888.0x95.9 label 330.4 desc 363.9 ctl 873.0,302.9 347.0x44.0\n\
-                 sep 380.0,382.8 840.0x1.0\n\
-                 row ReclaimPrefetch band 356.0,382.8 888.0x95.9 label 426.3 desc 459.8 ctl 1152.0,400.8 68.0x40.0\n\
-                 group \"Appearance\" at 356.0,518.7 w 888.0\n\
-                 card 356.0,545.7 888.0x671.3\n\
-                 row Theme band 356.0,545.7 888.0x95.9 label 589.2 desc 622.7 ctl 839.2,561.7 380.8x44.0\n\
-                 sep 380.0,641.6 840.0x1.0\n\
-                 row Language band 356.0,641.6 888.0x95.9 label 685.1 desc 718.6 ctl 892.0,657.6 328.0x44.0\n\
-                 sep 380.0,737.5 840.0x1.0\n\
-                 row FontFamily band 356.0,737.5 888.0x95.9 label 781.0 desc 814.5 ctl 832.0,753.5 388.0x44.0\n\
-                 sep 380.0,833.4 840.0x1.0\n\
-                 row FontSize band 356.0,833.4 888.0x95.9 label 876.9 desc 910.4 ctl 1068.0,849.4 152.0x44.0\n\
-                 sep 380.0,929.3 840.0x1.0\n\
-                 row DimScale band 356.0,929.3 888.0x95.9 label 972.8 desc 1006.3 ctl 905.2,945.3 314.8x44.0\n\
-                 sep 380.0,1025.2 840.0x1.0\n\
-                 row CircledWide band 356.0,1025.2 888.0x95.9 label 1068.7 desc 1102.2 ctl 1152.0,1043.2 68.0x40.0\n\
-                 sep 380.0,1121.1 840.0x1.0\n\
-                 row HelperStrip band 356.0,1121.1 888.0x95.9 label 1164.6 desc 1198.1 ctl 1152.0,1139.1 68.0x40.0\n\
-                 group \"Claude Code\" at 356.0,1257.0 w 888.0\n\
-                 card 356.0,1284.0 888.0x191.8\n\
-                 row CcStatuslineHook band 356.0,1284.0 888.0x95.9 label 1327.5 desc 1361.0 ctl 1152.0,1302.0 68.0x40.0\n\
-                 sep 380.0,1379.9 840.0x1.0\n\
-                 row CcModelGuard band 356.0,1379.9 888.0x95.9 label 1423.4 desc 1456.9 ctl 1152.0,1397.9 68.0x40.0\n\
-                 group \"Scrolling\" at 356.0,1515.8 w 888.0\n\
-                 card 356.0,1542.8 888.0x95.9\n\
-                 row ScrollFactor band 356.0,1542.8 888.0x95.9 label 1586.3 desc 1619.8 ctl 892.0,1558.8 328.0x44.0\n\
-                 footer base 1679.7\n",
+                dump(1600.0, 2283.0, &Settings::default()),
+                "panel 320.0,100.0 960.0x2083.0\n\
+                 group \"Idle reclamation\" at 356.0,180.0 w 888.0\n\
+                 card 356.0,207.0 888.0x287.7\n\
+                 row ReclaimEnabled band 356.0,207.0 888.0x95.9 label 250.5 desc 284.0 ctl 1152.0,225.0 68.0x40.0\n\
+                 sep 380.0,302.9 840.0x1.0\n\
+                 row ReclaimIdleMinutes band 356.0,302.9 888.0x95.9 label 346.4 desc 379.9 ctl 873.0,318.9 347.0x44.0\n\
+                 sep 380.0,398.8 840.0x1.0\n\
+                 row ReclaimPrefetch band 356.0,398.8 888.0x95.9 label 442.3 desc 475.8 ctl 1152.0,416.8 68.0x40.0\n\
+                 group \"Appearance\" at 356.0,534.7 w 888.0\n\
+                 card 356.0,561.7 888.0x671.3\n\
+                 row Theme band 356.0,561.7 888.0x95.9 label 605.2 desc 638.7 ctl 839.2,577.7 380.8x44.0\n\
+                 sep 380.0,657.6 840.0x1.0\n\
+                 row Language band 356.0,657.6 888.0x95.9 label 701.1 desc 734.6 ctl 892.0,673.6 328.0x44.0\n\
+                 sep 380.0,753.5 840.0x1.0\n\
+                 row FontFamily band 356.0,753.5 888.0x95.9 label 797.0 desc 830.5 ctl 832.0,769.5 388.0x44.0\n\
+                 sep 380.0,849.4 840.0x1.0\n\
+                 row FontSize band 356.0,849.4 888.0x95.9 label 892.9 desc 926.4 ctl 1068.0,865.4 152.0x44.0\n\
+                 sep 380.0,945.3 840.0x1.0\n\
+                 row DimScale band 356.0,945.3 888.0x95.9 label 988.8 desc 1022.3 ctl 905.2,961.3 314.8x44.0\n\
+                 sep 380.0,1041.2 840.0x1.0\n\
+                 row CircledWide band 356.0,1041.2 888.0x95.9 label 1084.7 desc 1118.2 ctl 1152.0,1059.2 68.0x40.0\n\
+                 sep 380.0,1137.1 840.0x1.0\n\
+                 row HelperStrip band 356.0,1137.1 888.0x95.9 label 1180.6 desc 1214.1 ctl 1152.0,1155.1 68.0x40.0\n\
+                 group \"Claude Code\" at 356.0,1273.0 w 888.0\n\
+                 card 356.0,1300.0 888.0x191.8\n\
+                 row CcStatuslineHook band 356.0,1300.0 888.0x95.9 label 1343.5 desc 1377.0 ctl 1152.0,1318.0 68.0x40.0\n\
+                 sep 380.0,1395.9 840.0x1.0\n\
+                 row CcModelGuard band 356.0,1395.9 888.0x95.9 label 1439.4 desc 1472.9 ctl 1152.0,1413.9 68.0x40.0\n\
+                 group \"Scrolling\" at 356.0,1531.8 w 888.0\n\
+                 card 356.0,1558.8 888.0x95.9\n\
+                 row ScrollFactor band 356.0,1558.8 888.0x95.9 label 1602.3 desc 1635.8 ctl 892.0,1574.8 328.0x44.0\n\
+                 group \"Agent CLIs\" at 356.0,1694.7 w 888.0\n\
+                 card 356.0,1721.7 888.0x383.6\n\
+                 row InstallCli(0) band 356.0,1721.7 888.0x95.9 label 1765.2 desc 1798.7 ctl 924.2,1737.7 295.8x44.0\n\
+                 sep 380.0,1817.6 840.0x1.0\n\
+                 row InstallCli(1) band 356.0,1817.6 888.0x95.9 label 1861.1 desc 1894.6 ctl 924.2,1833.6 295.8x44.0\n\
+                 sep 380.0,1913.5 840.0x1.0\n\
+                 row InstallCli(2) band 356.0,1913.5 888.0x95.9 label 1957.0 desc 1990.5 ctl 924.2,1929.5 295.8x44.0\n\
+                 sep 380.0,2009.5 840.0x1.0\n\
+                 row InstallCli(3) band 356.0,2009.5 888.0x95.9 label 2053.0 desc 2086.5 ctl 924.2,2025.5 295.8x44.0\n\
+                 footer base 2146.4\n",
             );
         });
     }
@@ -262,39 +271,48 @@ mod settings_modal {
     fn a_narrow_window_clamps_the_width_and_the_contents_follow() {
         at_scale_1(|| {
             assert_eq!(
-                dump(800.0, 1800.0, &Settings::default()),
-                "panel 16.0,84.0 768.0x1632.0\n\
-                 group \"Idle reclamation\" at 52.0,164.0 w 696.0\n\
-                 card 52.0,191.0 696.0x287.7\n\
-                 row ReclaimEnabled band 52.0,191.0 696.0x95.9 label 234.5 desc 268.0 ctl 656.0,209.0 68.0x40.0\n\
-                 sep 76.0,286.9 648.0x1.0\n\
-                 row ReclaimIdleMinutes band 52.0,286.9 696.0x95.9 label 330.4 desc 363.9 ctl 377.0,302.9 347.0x44.0\n\
-                 sep 76.0,382.8 648.0x1.0\n\
-                 row ReclaimPrefetch band 52.0,382.8 696.0x95.9 label 426.3 desc 459.8 ctl 656.0,400.8 68.0x40.0\n\
-                 group \"Appearance\" at 52.0,518.7 w 696.0\n\
-                 card 52.0,545.7 696.0x671.3\n\
-                 row Theme band 52.0,545.7 696.0x95.9 label 589.2 desc 622.7 ctl 343.2,561.7 380.8x44.0\n\
-                 sep 76.0,641.6 648.0x1.0\n\
-                 row Language band 52.0,641.6 696.0x95.9 label 685.1 desc 718.6 ctl 396.0,657.6 328.0x44.0\n\
-                 sep 76.0,737.5 648.0x1.0\n\
-                 row FontFamily band 52.0,737.5 696.0x95.9 label 781.0 desc 814.5 ctl 336.0,753.5 388.0x44.0\n\
-                 sep 76.0,833.4 648.0x1.0\n\
-                 row FontSize band 52.0,833.4 696.0x95.9 label 876.9 desc 910.4 ctl 572.0,849.4 152.0x44.0\n\
-                 sep 76.0,929.3 648.0x1.0\n\
-                 row DimScale band 52.0,929.3 696.0x95.9 label 972.8 desc 1006.3 ctl 409.2,945.3 314.8x44.0\n\
-                 sep 76.0,1025.2 648.0x1.0\n\
-                 row CircledWide band 52.0,1025.2 696.0x95.9 label 1068.7 desc 1102.2 ctl 656.0,1043.2 68.0x40.0\n\
-                 sep 76.0,1121.1 648.0x1.0\n\
-                 row HelperStrip band 52.0,1121.1 696.0x95.9 label 1164.6 desc 1198.1 ctl 656.0,1139.1 68.0x40.0\n\
-                 group \"Claude Code\" at 52.0,1257.0 w 696.0\n\
-                 card 52.0,1284.0 696.0x191.8\n\
-                 row CcStatuslineHook band 52.0,1284.0 696.0x95.9 label 1327.5 desc 1361.0 ctl 656.0,1302.0 68.0x40.0\n\
-                 sep 76.0,1379.9 648.0x1.0\n\
-                 row CcModelGuard band 52.0,1379.9 696.0x95.9 label 1423.4 desc 1456.9 ctl 656.0,1397.9 68.0x40.0\n\
-                 group \"Scrolling\" at 52.0,1515.8 w 696.0\n\
-                 card 52.0,1542.8 696.0x95.9\n\
-                 row ScrollFactor band 52.0,1542.8 696.0x95.9 label 1586.3 desc 1619.8 ctl 396.0,1558.8 328.0x44.0\n\
-                 footer base 1679.7\n"
+                dump(800.0, 2283.0, &Settings::default()),
+                "panel 16.0,100.0 768.0x2083.0\n\
+                 group \"Idle reclamation\" at 52.0,180.0 w 696.0\n\
+                 card 52.0,207.0 696.0x287.7\n\
+                 row ReclaimEnabled band 52.0,207.0 696.0x95.9 label 250.5 desc 284.0 ctl 656.0,225.0 68.0x40.0\n\
+                 sep 76.0,302.9 648.0x1.0\n\
+                 row ReclaimIdleMinutes band 52.0,302.9 696.0x95.9 label 346.4 desc 379.9 ctl 377.0,318.9 347.0x44.0\n\
+                 sep 76.0,398.8 648.0x1.0\n\
+                 row ReclaimPrefetch band 52.0,398.8 696.0x95.9 label 442.3 desc 475.8 ctl 656.0,416.8 68.0x40.0\n\
+                 group \"Appearance\" at 52.0,534.7 w 696.0\n\
+                 card 52.0,561.7 696.0x671.3\n\
+                 row Theme band 52.0,561.7 696.0x95.9 label 605.2 desc 638.7 ctl 343.2,577.7 380.8x44.0\n\
+                 sep 76.0,657.6 648.0x1.0\n\
+                 row Language band 52.0,657.6 696.0x95.9 label 701.1 desc 734.6 ctl 396.0,673.6 328.0x44.0\n\
+                 sep 76.0,753.5 648.0x1.0\n\
+                 row FontFamily band 52.0,753.5 696.0x95.9 label 797.0 desc 830.5 ctl 336.0,769.5 388.0x44.0\n\
+                 sep 76.0,849.4 648.0x1.0\n\
+                 row FontSize band 52.0,849.4 696.0x95.9 label 892.9 desc 926.4 ctl 572.0,865.4 152.0x44.0\n\
+                 sep 76.0,945.3 648.0x1.0\n\
+                 row DimScale band 52.0,945.3 696.0x95.9 label 988.8 desc 1022.3 ctl 409.2,961.3 314.8x44.0\n\
+                 sep 76.0,1041.2 648.0x1.0\n\
+                 row CircledWide band 52.0,1041.2 696.0x95.9 label 1084.7 desc 1118.2 ctl 656.0,1059.2 68.0x40.0\n\
+                 sep 76.0,1137.1 648.0x1.0\n\
+                 row HelperStrip band 52.0,1137.1 696.0x95.9 label 1180.6 desc 1214.1 ctl 656.0,1155.1 68.0x40.0\n\
+                 group \"Claude Code\" at 52.0,1273.0 w 696.0\n\
+                 card 52.0,1300.0 696.0x191.8\n\
+                 row CcStatuslineHook band 52.0,1300.0 696.0x95.9 label 1343.5 desc 1377.0 ctl 656.0,1318.0 68.0x40.0\n\
+                 sep 76.0,1395.9 648.0x1.0\n\
+                 row CcModelGuard band 52.0,1395.9 696.0x95.9 label 1439.4 desc 1472.9 ctl 656.0,1413.9 68.0x40.0\n\
+                 group \"Scrolling\" at 52.0,1531.8 w 696.0\n\
+                 card 52.0,1558.8 696.0x95.9\n\
+                 row ScrollFactor band 52.0,1558.8 696.0x95.9 label 1602.3 desc 1635.8 ctl 396.0,1574.8 328.0x44.0\n\
+                 group \"Agent CLIs\" at 52.0,1694.7 w 696.0\n\
+                 card 52.0,1721.7 696.0x383.6\n\
+                 row InstallCli(0) band 52.0,1721.7 696.0x95.9 label 1765.2 desc 1798.7 ctl 428.2,1737.7 295.8x44.0\n\
+                 sep 76.0,1817.6 648.0x1.0\n\
+                 row InstallCli(1) band 52.0,1817.6 696.0x95.9 label 1861.1 desc 1894.6 ctl 428.2,1833.6 295.8x44.0\n\
+                 sep 76.0,1913.5 648.0x1.0\n\
+                 row InstallCli(2) band 52.0,1913.5 696.0x95.9 label 1957.0 desc 1990.5 ctl 428.2,1929.5 295.8x44.0\n\
+                 sep 76.0,2009.5 648.0x1.0\n\
+                 row InstallCli(3) band 52.0,2009.5 696.0x95.9 label 2053.0 desc 2086.5 ctl 428.2,2025.5 295.8x44.0\n\
+                 footer base 2146.4\n"
             );
         });
     }
@@ -345,7 +363,7 @@ mod settings_modal {
         at_scale_1(|| {
             let s = Settings::default();
             let mut m = measure();
-            let rect = panel_rect(1600.0, 1800.0, &s, &mut m, 30.0);
+            let rect = panel_rect(1600.0, 2283.0, &s, &mut m, 30.0);
             let mut all = 0usize;
             walk(rect, 0.0, &s, &mut measure(), |_| all += 1);
             let mut shown = 0usize;

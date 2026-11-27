@@ -174,4 +174,13 @@ pub const ALL: &[Msg] = &[
     Msg::LangEnglish,
     Msg::LangJapanese,
     Msg::LangChinese,
+    Msg::SettingsAgentClis,
+    Msg::InstallClaude,
+    Msg::InstallCodex,
+    Msg::InstallGemini,
+    Msg::InstallKimi,
+    Msg::CostInstallCli,
+    Msg::ConsentAsk,
+    Msg::ConsentYes,
+    Msg::ConsentNo,
 ];

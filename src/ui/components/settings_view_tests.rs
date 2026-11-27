@@ -116,7 +116,7 @@ fn the_surface_puts_rows_cards_and_controls_where_the_walk_does() {
 fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
     let mut font = FontCache::build().expect("font");
     let s = Settings::default();
-    let sp = laid_out(&mut font, (1000.0, 1800.0), false, s.clone());
+    let sp = laid_out(&mut font, (1000.0, 2400.0), false, s.clone());
     let mut surface = sp.surface.borrow_mut();
     let surface = &mut surface.kept.surface;
     let press = |surface: &mut golia_ui_core::Surface<golia_ui_core::NoOut>, t: Target| {
@@ -202,7 +202,7 @@ fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
 fn a_row_that_is_greyed_out_is_skipped_and_swallows_the_press() {
     let mut font = FontCache::build().expect("font");
     let s = Settings { reclaim_enabled: false, ..Default::default() };
-    let sp = laid_out(&mut font, (1000.0, 1800.0), false, s.clone());
+    let sp = laid_out(&mut font, (1000.0, 2400.0), false, s.clone());
     let mut surface = sp.surface.borrow_mut();
     let surface = &mut surface.kept.surface;
     let mut stops = Vec::new();
@@ -252,8 +252,8 @@ fn a_control_scrolled_out_of_view_is_not_hit_and_the_focus_scrolls_to_its_row() 
                         above = Some(at);
                     }
                     let whole = band.y_top >= content.y_top && band.y_top + band.h <= content.y_top + content.h;
-                    if whole && matches!(row.control(&s), Control::Toggle(_)) {
-                        shown = Some(at);
+                    if whole {
+                        shown = Some((row, at));
                     }
                 }
             });
@@ -261,8 +261,8 @@ fn a_control_scrolled_out_of_view_is_not_hit_and_the_focus_scrolls_to_its_row() 
             let surface = &mut surface.kept.surface;
             let above = above.expect("scrolling to the end puts a control above the panel");
             assert_eq!(surface.hit(above), None, "scale {scale}");
-            let shown = shown.expect("a toggle is in view at the end");
-            assert!(surface.hit(shown).is_some(), "scale {scale}: a control in view is not hit");
+            let (row, shown) = shown.expect("a row is in view at the end");
+            assert!(surface.hit(shown).is_some(), "scale {scale}: {row:?}, in view, is not hit");
 
             // Tab to the first row: it is above the view, and comes into it
             surface.key(Key::Tab);

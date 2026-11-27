@@ -39,6 +39,8 @@ struct PaneSpec {
     history: HistoryView,
     /// Rows the pane gives up to a strip.
     strip: u16,
+    /// What the core shows over it.
+    notice: Option<String>,
 }
 
 fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
@@ -52,6 +54,7 @@ fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSp
         hits: &[],
         history: HistoryView::default(),
         strip: 0,
+        notice: None,
     }
 }
 
@@ -192,7 +195,7 @@ fn snapshot_on(
             bot_fixed_h_cells: 0,
             highlight_spans: p.hits,
             search_overlay: p.search.clone(),
-            history: p.history, session: 0, notice: None,
+            history: p.history, session: 0, notice: p.notice.as_deref(),
             strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_view_tests::strip_under(grid, strip)),
             seq: 1 + i as u64,
         })
@@ -454,4 +457,19 @@ crate::snapshot_kit::snapshots_in_other_themes! {
     chrome_snapshot_search_light, chrome_snapshot_search_contrast = chrome_snapshot_search;
     chrome_snapshot_menu_light, chrome_snapshot_menu_contrast = chrome_snapshot_menu;
     chrome_snapshot_terminal_light, chrome_snapshot_terminal_contrast = chrome_snapshot_terminal;
+}
+
+/// The question asked over the focused pane before an agent CLI's
+/// first install, in a window of two panes.
+#[test]
+pub(super) fn chrome_snapshot_install_ask() {
+    use crate::ui::strings::{text, Arg};
+    let ask = text(Arg::InstallAsk { cli: "codex", place: "~/.codex/packages + ~/.local/bin", megabytes: 740 });
+    let panes = [PaneSpec { notice: Some(ask), ..pane("smix", "", SessionState::Active) }, pane("devops", "", SessionState::Idle)];
+    snapshot("chrome_install_ask", (1200, 640), (2, 1), &panes, 0, |_, _, _| {});
+}
+
+#[test]
+fn chrome_snapshot_install_ask_2x() {
+    density_kit::at_scale(2.0, chrome_snapshot_install_ask);
 }

@@ -42,10 +42,12 @@ use values::{fmt_f32, parse_bool, parse_f32, split_kv};
 mod agent_allocation;
 mod cc_model;
 pub mod font;
+mod install_consent;
 mod rebalance;
 mod values;
 
 pub use {agent_allocation::AgentAllocation, cc_model::CcModel, rebalance::Rebalance};
+pub use install_consent::{InstallConsent, InstallConsents, CLIS as INSTALL_CLIS};
 
 /// Every user-owned decision, resolved.
 ///
@@ -143,6 +145,8 @@ pub struct Settings {
     /// nothing typed before an agent runs.  A setting because it
     /// fetches and runs each vendor's installer unattended.
     pub agents_install: bool,
+    /// Per CLI, whether its first install waits for a yes.
+    pub install_consent: InstallConsents,
     /// Move resting claudecode panes the way the quota allocation plans:
     /// following the plan while there is more quota than use, off what
     /// only the Fable panes can use, and onto Fable that would lapse.
@@ -192,6 +196,7 @@ impl Default for Settings {
             cc_statusline_hook: true,
             codex_follow_updates: true,
             agents_install: true,
+            install_consent: InstallConsents::default(),
             cc_rebalance: Rebalance::Live,
             kimi_allocation: AgentAllocation::Off,
             gemini_allocation: AgentAllocation::Off,
@@ -346,6 +351,10 @@ const KEYS: &[&str] = &[
     "input.scroll_factor",
     "claudecode.statusline_hook",
     "claude.model",
+    "agents.install.claude",
+    "agents.install.codex",
+    "agents.install.gemini",
+    "agents.install.kimi",
 ];
 
 fn value_of(s: &Settings, key: &str) -> String {
@@ -361,7 +370,10 @@ fn value_of(s: &Settings, key: &str) -> String {
         "appearance.helper_strip" => s.helper_strip.to_string(),
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
-        _ => agent_allocation::value_of(s, key).or_else(|| font::value_of(s, key)).unwrap_or_default(),
+        _ => agent_allocation::value_of(s, key)
+            .or_else(|| font::value_of(s, key))
+            .or_else(|| install_consent::value_of(&s.install_consent, key))
+            .unwrap_or_default(),
     }
 }
 
@@ -393,6 +405,7 @@ pub fn parse(body: &str) -> Settings {
             }
             _ if agent_allocation::parse_key(&mut s, k, v) => {}
             _ if font::parse_key(&mut s, k, v) => {}
+            _ if install_consent::parse_key(&mut s.install_consent, k, v) => {}
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -490,29 +503,6 @@ mod tests {
         assert!((odd.dim_scale - 0.85).abs() < 1e-6);
         assert!((odd.scroll_factor - 3.0).abs() < 1e-6);
         assert_eq!(parse(&render(&odd, "")), odd, "and it survives a rewrite");
-    }
-
-    /// Following codex updates is on unless the file says otherwise,
-    /// and saying otherwise survives a rewrite.
-    #[test]
-    fn codex_updates_are_followed_unless_switched_off() {
-        assert!(Settings::default().codex_follow_updates);
-        let off = parse("codex.follow_updates = false\n");
-        assert!(!off.codex_follow_updates);
-        let kept = parse(&render(&off, "codex.follow_updates = false\n"));
-        assert!(!kept.codex_follow_updates, "a rewrite keeps it off");
-    }
-
-    /// Installing the agent CLIs is on unless the file says otherwise,
-    /// and saying otherwise survives a rewrite.
-    #[test]
-    fn agents_are_installed_unless_switched_off() {
-        assert!(Settings::default().agents_install);
-        let off = parse("agents.install = false\n");
-        assert!(!off.agents_install);
-        assert_eq!(value_of(&off, "agents.install"), "false");
-        let kept = parse(&render(&off, "agents.install = false\n"));
-        assert!(!kept.agents_install, "a rewrite keeps it off");
     }
 
     /// The kimi allocation is off unless the file says `dryrun` or

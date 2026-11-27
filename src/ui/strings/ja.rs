@@ -207,6 +207,16 @@ fn text(m: Msg) -> &'static str {
         Msg::LangEnglish => "English",
         Msg::LangJapanese => "日本語",
         Msg::LangChinese => "简体中文",
+
+        Msg::SettingsAgentClis => "エージェントCLI",
+        Msg::InstallClaude => "claudeが無ければインストール",
+        Msg::InstallCodex => "codexが無ければインストール",
+        Msg::InstallGemini => "geminiが無ければインストール",
+        Msg::InstallKimi => "kimiが無ければインストール",
+        Msg::CostInstallCli => "配布元からダウンロードします。「しない」以外では更新も確認なしで追従します",
+        Msg::ConsentAsk => "確認する",
+        Msg::ConsentYes => "インストール",
+        Msg::ConsentNo => "しない",
     }
 }
 
@@ -235,5 +245,10 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
             write!(out, "全アカウント共通のClaude Codeのデフォルトモデルが確認なしで{to}に変更されたため、{back}に戻しました")
         }
         Arg::ModelNowIs(to) => write!(out, "全アカウント共通のClaude Codeのデフォルトモデルは{to}になりました"),
+        Arg::InstallAsk { cli, place, megabytes } => write!(
+            out,
+            "{cli}を{place}にインストールしますか？配布元からダウンロードし、約{megabytes} MBを使います。\
+             Ctrl-Option-Yでインストール、Ctrl-Option-Nで今後もインストール・更新しません。ほかのキーはペインに送られます"
+        ),
     }
 }

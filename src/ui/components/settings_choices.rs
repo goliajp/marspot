@@ -3,6 +3,7 @@
 
 use marspot_term::language::LangId;
 use marspot_term::palette::ThemeId;
+use marspot_term::settings::InstallConsent;
 
 use crate::ui::strings::Msg;
 
@@ -38,6 +39,11 @@ pub const LANGUAGE_CHOICES: &[Option<LangId>] =
     &[None, Some(LangId::En), Some(LangId::Ja), Some(LangId::ZhHans)];
 pub const LANGUAGE_LABELS: &[Msg] =
     &[Msg::ThemeSystem, Msg::LangEnglish, Msg::LangJapanese, Msg::LangChinese];
+
+/// Whether an agent CLI found missing is installed: asked first, at
+/// once, or never.
+pub const CONSENT_CHOICES: &[InstallConsent] = &[InstallConsent::Ask, InstallConsent::Yes, InstallConsent::No];
+pub const CONSENT_LABELS: &[Msg] = &[Msg::ConsentAsk, Msg::ConsentYes, Msg::ConsentNo];
 
 /// The line under the language row: what choosing costs, or, while the
 /// items the system provides are still in the language Marspot was

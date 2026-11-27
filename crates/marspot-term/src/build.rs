@@ -22,7 +22,9 @@ pub fn own() -> &'static str {
 /// puts it decides which comes first.  A release build merges the two;
 /// a debug build lays the needle out on its own ahead of the marker,
 /// and reading from there found no fingerprint at all, so a debug L3
-/// never handed over.
+/// never handed over.  The needle and this function's `|END` can also
+/// sit side by side as `MARSPOT_FP=|END`, so a marker needs both a sha
+/// and a timestamp.
 pub fn of_file(path: &Path) -> Option<String> {
     let buf = std::fs::read(path).ok()?;
     let needle = b"MARSPOT_FP=";
@@ -34,13 +36,19 @@ pub fn of_file(path: &Path) -> Option<String> {
             .windows(4)
             .position(|w| w == b"|END")
             .and_then(|end| std::str::from_utf8(&tail[..end]).ok())
-            .filter(|s| s[needle.len()..].bytes().all(|b| b.is_ascii_graphic()));
+            .filter(|s| well_formed(&s[needle.len()..]));
         if let Some(s) = marker {
             return Some(s.to_string());
         }
         from = start + needle.len();
     }
     None
+}
+
+/// `<sha>|<ts>`, each non-empty and printable.
+fn well_formed(body: &str) -> bool {
+    body.bytes().all(|b| b.is_ascii_graphic())
+        && body.split_once('|').is_some_and(|(sha, ts)| !sha.is_empty() && !ts.is_empty() && !ts.contains('|'))
 }
 
 #[cfg(test)]
@@ -62,6 +70,18 @@ mod tests {
             of_file(&p).as_deref(),
             Some("MARSPOT_FP=unknown|2026-10-17T15:27:04")
         );
+    }
+
+    /// The needle and the reader's own `|END` laid out side by side
+    /// ahead of the marker are not a fingerprint.
+    #[test]
+    fn an_empty_marker_ahead_of_the_real_one_is_passed_over() {
+        let dir = TempDir::new("build-marker");
+        let p = dir.join("adjacent-literals");
+        let mut body = b"MARSPOT_FP=|END\0MARSPOT_FP=abc|END\0".to_vec();
+        body.extend_from_slice(b"MARSPOT_FP=0123abc|2026-11-28T06:44:27|END");
+        std::fs::write(&p, body).unwrap();
+        assert_eq!(of_file(&p).as_deref(), Some("MARSPOT_FP=0123abc|2026-11-28T06:44:27"));
     }
 
     #[test]

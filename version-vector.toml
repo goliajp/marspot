@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.854"  # a prompt jump overtaken by a key or scroll is dropped; a jump to live marks the prompt row
-core    = "0.12.754"  # a prompt jump overtaken by a key or scroll is dropped; a jump to live marks the prompt row
-session = "0.11.480"  # a prompt jump answers with the prompt row and the jump it answers
+shell   = "0.7.857"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
+core    = "0.12.757"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
+session = "0.11.482"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp

@@ -16,6 +16,7 @@ use super::chrome_snapshot_tests as chrome;
 use super::density_kit::{capture, compare, Capture};
 use super::panel_snapshot_tests as panel;
 use super::reset_snapshot_tests as resets;
+use super::settings_agents_snapshot_tests as agents;
 use crate::render_metal::{MetalRenderer, WindowRender};
 use crate::snapshot_kit::{in_language, in_theme};
 use crate::ui::components::chrome_target::ChromeTarget;
@@ -75,6 +76,7 @@ scenes_hold_at_both_scales! {
     density_settings = panel::panel_snapshot_settings, 14;
     density_settings_ja = settings_ja, 14;
     density_shortcuts = panel::panel_snapshot_shortcuts, 23;
+    density_settings_agents = agents::panel_snapshot_settings_agents, 13;
     density_layout = panel::panel_snapshot_layout, 7;
     density_layout_grid = panel::panel_snapshot_layout_grid, 13;
     density_process = panel::panel_snapshot_process, 5;
@@ -92,6 +94,7 @@ scenes_hold_at_both_scales! {
     density_chrome_terminal = chrome::chrome_snapshot_terminal, 0;
     density_chrome_scrollback = chrome::chrome_snapshot_scrollback, 0;
     density_chrome_prompt_jump = chrome::chrome_snapshot_prompt_jump, 0;
+    density_chrome_install_ask = chrome::chrome_snapshot_install_ask, 1;
 }
 
 /// A sheet with one thing wrong in it: a card placed in points and

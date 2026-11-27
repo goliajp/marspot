@@ -1,7 +1,9 @@
 //! Sentences shown over a pane: the one the shell sends (`Notice`),
 //! over the focused pane of every window until it has been up long
-//! enough to read, and the question a held `/model` asks over its own
-//! pane until it is answered (`model_guard`).
+//! enough to read, the question a held `/model` asks over its own
+//! pane until it is answered (`model_guard`), and the question before
+//! an agent CLI's first install, over the focused pane until it is
+//! answered (`install_ask`).
 //!
 //! Nothing ticks for it: the loop's wait includes the moment the
 //! notice comes down, and with none up there is nothing to wait for.
@@ -24,6 +26,7 @@ pub(super) struct Notices {
     /// session, until the moment it no longer stands for what the box
     /// holds (`model_guard::UNSENT_STANDS`); at most `UNSENT_CAP`.
     pub(super) unsent: Vec<(u64, marspot::pane_read::slash_model::Typed, Instant)>,
+    pub(super) install: super::install_ask::InstallAsks,
 }
 
 impl Notices {
@@ -36,7 +39,7 @@ impl Notices {
     pub(super) fn over(&self, sid: Option<u64>, focused: bool) -> Option<&str> {
         match &self.guard {
             Some(held) if sid == Some(held.sid) => Some(marspot::ui::strings::t(marspot::ui::strings::Msg::ModelGuardNotice)),
-            _ => self.shell_text().filter(|_| focused),
+            _ => self.install.shown().or_else(|| self.shell_text()).filter(|_| focused),
         }
     }
 
@@ -65,6 +68,7 @@ impl CoreApp {
 
     /// Once per loop turn: a notice whose time is up comes down.
     pub(super) fn notices_tick(&mut self) {
+        self.install_ask_tick();
         if self.notices.expire(Instant::now()) {
             lx_event!("NOTICE_GONE", "the shell's notice came down");
             self.windows.iter_mut().for_each(|w| w.needs_render = true);
