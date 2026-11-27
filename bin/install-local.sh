@@ -12,11 +12,10 @@
 # Run it after you've made changes and want them in your live terminal:
 #
 #   bin/install-local.sh            # build, install, silent-update the
-#                                   #   running app — L1 / L2 / L3 all
-#                                   #   swap if changed. L1 swap is the
-#                                   #   ~100 ms NSWindow flash (sessions
-#                                   #   survive via L3 reattach); known
-#                                   #   cost, by design.
+#                                   #   running app — L1 / L2 / L3 all swap
+#                                   #   if changed. L1 swap is the ~100 ms
+#                                   #   NSWindow flash (sessions survive
+#                                   #   via L3 reattach); known, by design.
 #   bin/install-local.sh --status   # what's installed + running
 #   bin/install-local.sh --no-build # install the existing target/release
 #
@@ -116,7 +115,8 @@ fi
 # ── 1. Build ──────────────────────────────────────────────────────
 if (( BUILD )); then
   echo "==> building release (shell + core + session + peer cli)"
-  ( cd "$ROOT" && cargo build --release \
+  # an unstaged edit moves no git file build.rs watches; this variable reruns it so the name follows the tree
+  ( cd "$ROOT" && MARSPOT_GIT_SHA="$("$ROOT/bin/_git-sha.sh")" cargo build --release \
       --bin marspot-shell --bin marspot-core --bin marspot-session --bin marspot-peer 2>&1 | tail -3 )
 fi
 # marspot-session is the per-pane L3 engine: core spawns it as its

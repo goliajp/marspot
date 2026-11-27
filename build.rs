@@ -71,31 +71,6 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=version-vector.toml");
 
-    // Re-run when the commit changes.  `.git/HEAD` only changes on a
-    // branch *switch* — a commit on the current branch leaves HEAD
-    // (`ref: refs/heads/<branch>`) byte-identical and just moves the ref
-    // it points at, so watching HEAD alone bakes a stale sha after every
-    // commit.  Resolve HEAD's ref and watch that loose-ref file too, plus
-    // packed-refs (post-`git gc`) and the index (staging).
     println!("cargo:rerun-if-changed=build.rs");
-    // Only watch paths that EXIST.  A `rerun-if-changed` naming a
-    // missing file is forever stale to cargo, so the script reran on every
-    // single cargo invocation, re-emitted a fresh `MARSPOT_BUILD_TS`
-    // (`date`), and with it recompiled and relinked every crate and
-    // test harness — 3.6 s wall / 19.7 s CPU, 47 rustc runs, for a tree
-    // with no change in it (2026-09-28).  `packed-refs` does not exist
-    // until `git gc` writes one; the loose ref does, and after a gc the
-    // two swap places, which this handles by asking each time.
-    for p in [".git/HEAD", ".git/packed-refs", ".git/index"] {
-        if std::path::Path::new(p).exists() {
-            println!("cargo:rerun-if-changed={p}");
-        }
-    }
-    if let Ok(head) = std::fs::read_to_string(".git/HEAD")
-        && let Some(refname) = head.strip_prefix("ref: ").map(str::trim) {
-            let p = format!(".git/{refname}");
-            if std::path::Path::new(&p).exists() {
-                println!("cargo:rerun-if-changed={p}");
-            }
-        }
+    build_sha::print_git_watch();
 }

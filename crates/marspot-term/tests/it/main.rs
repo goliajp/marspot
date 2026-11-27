@@ -2,7 +2,8 @@
 
 mod alignment_and_column_mode;
 mod bell;
-// the build scripts' sha chooser, with its tests
+// the build scripts' sha chooser, with its tests; the printing half is the scripts' alone
+#[allow(dead_code)]
 #[path = "../../build_sha.rs"]
 mod build_sha;
 mod cluster_cells;

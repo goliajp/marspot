@@ -208,3 +208,32 @@ fn a_dirty_peer_is_compared_by_its_bytes() {
     assert!(field(&line, "why").ends_with(",peer:bytes-differ"), "{line}");
     assert!(field(&line, "swap").ends_with("peer"), "{line}");
 }
+
+/// An install with an unstaged edit, the edit thrown away, and the same
+/// commit installed again: the second install swaps every layer back.
+/// The first install's binaries name `<commit>-dirty` (install-local's
+/// build reruns build.rs for that), and their layer numbers are those of
+/// the clean build, so the layer-number skip must not take them.
+#[test]
+fn a_dirty_install_then_the_clean_commit_swaps_back() {
+    let case = Case::new();
+    let dirty = format!("{}-dirty", case.commit);
+    std::fs::write(case.src.join("src/lib.rs"), "edited").unwrap();
+    for name in BINS {
+        copy_with_commit(name, &case.target, &dirty);
+    }
+    let line = case.explain();
+    assert_eq!(field(&line, "swap"), "shell,core,session,peer", "{line}");
+
+    // the dirty set is installed, the edit reverted, and the next build
+    // names the clean commit again
+    for name in BINS {
+        std::fs::copy(case.target.join(name), case.running.join(name)).unwrap();
+        resign(&copy_with_commit(name, &case.target, &case.commit));
+    }
+    git(&case.src, &["checkout", "--", "src/lib.rs"]);
+    let line = case.explain();
+    assert_eq!(field(&line, "why"), ALL_BYTES_DIFFER, "{line}");
+    assert_eq!(field(&line, "swap"), "shell,core,session,peer", "{line}");
+    assert_eq!(field(&line, "from"), dirty, "{line}");
+}
