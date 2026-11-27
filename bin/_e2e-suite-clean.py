@@ -211,7 +211,7 @@ def by_reason(c):
     return "; ".join("%d %s" % (n, r) for r, n in c.most_common()) or "none"
 
 
-def dock_check(d, b, wide, wide_unread):
+def dock_check(d, b, wide_unread):
     dock = read(d, "dock.log")
     if dock is None or not dock.startswith("Timestamp"):
         wide_unread.append("dock log: log show gave no output")
@@ -283,12 +283,12 @@ def window(d, b, me):
     return ("unknown", unread) if unread else ("alone", [])
 
 
-def tiles_check(b, c, under, left, wide, wide_unread):
+def tiles_check(b, c, left, unread):
     """each kept or recent tile added, and each kept tile gone: the lists have a cap, so
     a new entry can push the oldest out and leave the count as it was"""
     for k in ("persistent", "recent"):
         if k + "_entries" not in b:
-            wide_unread.append("%s tiles not read before the suite" % k)
+            unread.append("%s tiles not read before the suite" % k)
             continue
         if k not in c:
             continue
@@ -353,8 +353,8 @@ def check(d, before, lrc, lout, me, prefixes):
     known = [k for k in os.environ.get("CLEAN_KNOWN", "").split("\n") if k] + [v for k, v in pairs if k == "known"]
     known = ["%s:%s" % (k.split(":", 1)[0], strip(k.split(":", 1)[1])) for k in known if ":" in k]
     c, recs, why = state(d)
-    unread += [w for w in why if w.startswith("lsappinfo")]
-    wide_unread += [w for w in why if not w.startswith("lsappinfo")]
+    # the app list and the tile lists carry hard conditions: unread in any window
+    unread += why
     print("before: fg=%s persistent=%s recent=%s start=%s" % tuple(b.get(k, "?") for k in ("fg", "persistent", "recent", "start")))
     n = lambda k: len(c[k]) if k in c else "?"
     print("after:  fg=%s persistent=%s recent=%s" % (c.get("fg", "?"), n("persistent"), n("recent")))
@@ -366,8 +366,8 @@ def check(d, before, lrc, lout, me, prefixes):
             left.append("foreground apps changed: added %s, gone %s" % (
                 sorted((now - was).elements()), sorted((was - now).elements())))
     under = lambda p: any(strip(p).startswith(x) for x in prefixes)
-    tiles_check(b, c, under, left, wide, unread)
-    dock_check(d, b, wide, wide_unread)
+    tiles_check(b, c, left, unread)
+    dock_check(d, b, wide_unread)
     for r in recs or []:
         if key(r) in known:
             known.remove(key(r))

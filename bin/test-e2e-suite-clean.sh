@@ -19,10 +19,12 @@ DOCK='1) "Dock" ASN:0x0-0x1001:
 2) "Finder" ASN:0x0-0x1002:
     bundle path="/System/Library/CoreServices/Finder.app"
     executable path="/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder"
+    bundleID="com.apple.finder"
     pid = 729 token=[sess=1] type="Foreground" flavor=3'
 MARSPOT='3) "Marspot" ASN:0x0-0x1003:
     bundle path="/tmp/msp-e2e-1-1-lander/Marspot.app"
     executable path="/tmp/msp-e2e-1-1-lander/Marspot.app/Contents/MacOS/marspot-shell"
+    bundleID=[ NULL ]
     pid = 4242 token=[sess=1] type="BackgroundOnly" flavor=3'
 MARSPOT_PRIVATE="${MARSPOT//"/tmp/"/"/private/tmp/"}"
 HEADER='Timestamp              Ty Process[PID:TID]'
@@ -67,7 +69,7 @@ base() {
   local d="$T/$1"
   mkdir -p "$d/in"
   printf 'start=2026-11-27 10:00:00\nstart_epoch=1700000000\nfg=1\npersistent=2\nrecent=1\nothers_snap=\ndock_live=1\ntcc_live=1\n' >"$d/before"
-  echo 'fg_set=["/System/Library/CoreServices/Finder.app"]' >>"$d/before"
+  echo 'fg_set=["com.apple.finder"]' >>"$d/before"
   echo "persistent_entries=$(entries A B)" >>"$d/before"
   echo "recent_entries=$(entries C)" >>"$d/before"
   printf '%s\n' "$DOCK" >"$d/in/lsappinfo.txt"
@@ -176,7 +178,7 @@ expect foreground 1 "left: foreground apps changed: added ['/tmp/msp-e2e-1-1-lan
 base foreground-swap
 printf '%s\n%s\n' "${DOCK//type=\"Foreground\"/type=\"BackgroundOnly\"}" "${MARSPOT//BackgroundOnly/Foreground}" \
   >"$T/foreground-swap/in/lsappinfo.txt"
-expect foreground-swap 1 "left: foreground apps changed: added ['/tmp/msp-e2e-1-1-lander/Marspot.app'], gone ['/System/Library/CoreServices/Finder.app']"
+expect foreground-swap 1 "left: foreground apps changed: added ['/tmp/msp-e2e-1-1-lander/Marspot.app'], gone ['com.apple.finder']"
 
 base tcc
 printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/tcc/in/tcc.ndjson"
@@ -269,7 +271,7 @@ expect shared 0 "window: shared-window (holding at check: 5000)" "info: dock: 2 
 base shared-log
 printf '1699999990\theavy\t0\ttook\told\t/\n1699999999\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n1700000100\theavy\t3\ttook\tcargo build\t/\n' >"$T/shared-log/in/lock.log"
 rm "${T:?}/shared-log/in/persistent.txt"
-expect shared-log 0 "window: shared-window (1 lock take/release in the window)" "info: defaults: com.apple.dock persistent"
+expect shared-log 2 "window: shared-window (1 lock take/release in the window)" "unread: defaults: com.apple.dock persistent"
 
 base shared-ours
 sed -i '' 's/^others_snap=$/others_snap=5000/' "$T/shared-ours/before"
