@@ -54,7 +54,7 @@ define_class!(
 /// Whether the quit event being handled says why: the system puts a
 /// reason on the one it sends at logout, restart and shutdown, and
 /// nothing a user does in the app's own interface carries one.
-fn quit_event_gives_a_reason() -> bool {
+pub fn quit_event_gives_a_reason() -> bool {
     // `kAEQuitReason`
     const WHY: u32 = u32::from_be_bytes(*b"why?");
     let Some(manager) = objc2::runtime::AnyClass::get(c"NSAppleEventManager") else { return false };
