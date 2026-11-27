@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.824"  # the lib it links takes typed_now and the icon draw from the recorded-AppKit split
-core    = "0.12.738"  # the lib takes typed_now and the icon draw from the recorded-AppKit split
+shell   = "0.7.825"  # recorded icon masks are served only with a sandbox state dir set
+core    = "0.12.739"  # recorded icon masks are served only with a sandbox state dir set
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

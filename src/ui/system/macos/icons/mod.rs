@@ -12,7 +12,7 @@
 mod fixture;
 mod raster;
 
-pub use fixture::{find as find_recorded, RECORDED_ENV};
+pub use fixture::{find as find_recorded, recorded_file};
 
 use marspot_term::layout::Rect;
 

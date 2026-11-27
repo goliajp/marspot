@@ -16,6 +16,17 @@ use super::{mask_side, Symbol};
 /// Names a file of recorded masks; set only by tests and the sandbox.
 pub const RECORDED_ENV: &str = "MARSPOT_TEST_ICON_MASKS";
 
+/// The file [`RECORDED_ENV`] names, empty when there is none.  Read only
+/// with a sandbox state dir set (`MARSPOT_STATE_DIR`, which the test runs
+/// and the window suites set and the installed app never has), so the
+/// app as it ships draws live even with the variable left around.
+pub fn recorded_file() -> Vec<u8> {
+    if std::env::var_os("MARSPOT_STATE_DIR").is_none_or(|d| d.is_empty()) {
+        return Vec::new();
+    }
+    std::env::var_os(RECORDED_ENV).and_then(|p| std::fs::read(p).ok()).unwrap_or_default()
+}
+
 /// The mask of `symbol` at `point_px` in a recorded file, and its side:
 /// `symbol u8, point_px u16 le, side u16 le`, then `side * side` bytes
 /// of coverage, repeated.  A torn entry ends the search.
@@ -38,7 +49,7 @@ pub fn find(file: &[u8], symbol: u16, point_px: u16) -> Option<(u16, &[u8])> {
 #[cfg(not(test))]
 pub(super) fn draw_recorded(symbol: u16, point_px: u32, side: u32, mask: &mut [u8]) -> bool {
     static FILE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    let file = FILE.get_or_init(|| std::env::var_os(RECORDED_ENV).and_then(|p| std::fs::read(p).ok()).unwrap_or_default());
+    let file = FILE.get_or_init(recorded_file);
     match find(file, symbol, point_px as u16) {
         Some((s, found)) if s as u32 == side => {
             mask.copy_from_slice(found);

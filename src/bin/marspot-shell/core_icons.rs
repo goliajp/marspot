@@ -87,12 +87,11 @@ impl CoreIcons {
 }
 
 /// The masks of `batch`: those in the file of recorded masks a test or
-/// the sandbox names, and the rest from a drawer.  Each drawer is one
-/// more app registration, and the runner starts the app hundreds of
-/// times a day.
+/// the sandbox names (read only in a sandbox), and the rest from a
+/// drawer.  Each drawer is one more app registration, and the runner
+/// starts the app hundreds of times a day.
 fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
-    use marspot::ui::system::macos::icons::RECORDED_ENV;
-    let recorded = std::env::var_os(RECORDED_ENV).and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    let recorded = marspot::ui::system::macos::icons::recorded_file();
     let (mut drawn, rest) = from_recorded(&recorded, batch);
     if !rest.is_empty() {
         drawn.extend(draw_with(drawer, &rest));
