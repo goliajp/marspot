@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.822"  # a sandbox shell serves the recorded icon masks instead of starting a drawer
-core    = "0.12.736"  # the window code takes its Dock policy from app::dock (no tile under MARSPOT_TEST_NO_DOCK)
+shell   = "0.7.823"  # the shell reads recorded icon masks through the lib's lookup
+core    = "0.12.737"  # a process given MARSPOT_TEST_ICON_MASKS draws the icons it holds from the recorded file
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

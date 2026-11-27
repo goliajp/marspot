@@ -86,14 +86,12 @@ impl CoreIcons {
     }
 }
 
-/// Set by the sandbox to the masks AppKit drew, recorded (the unit
-/// tests' file): a shell a window test or a gauge starts serves those
-/// it has from there.  Each drawer is one more app registration, and
-/// the runner starts the app hundreds of times a day.
-const RECORDED_ENV: &str = "MARSPOT_TEST_ICON_MASKS";
-
-/// The masks of `batch`: the recorded ones, and the rest from a drawer.
+/// The masks of `batch`: those in the file of recorded masks a test or
+/// the sandbox names, and the rest from a drawer.  Each drawer is one
+/// more app registration, and the runner starts the app hundreds of
+/// times a day.
 fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
+    use marspot::ui::system::macos::icons::RECORDED_ENV;
     let recorded = std::env::var_os(RECORDED_ENV).and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
     let (mut drawn, rest) = from_recorded(&recorded, batch);
     if !rest.is_empty() {
@@ -102,21 +100,16 @@ fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
     drawn
 }
 
-/// `(found, not found)` for `batch` in a recorded file: `symbol u8,
-/// point_px u16 le, side u16 le`, then `side * side` bytes, repeated.
+/// `(found, not found)` for `batch` in a file of recorded masks.
 fn from_recorded(file: &[u8], batch: &[(u16, u16)]) -> (Vec<Drawn>, Vec<(u16, u16)>) {
-    let mut found: Vec<Drawn> = Vec::new();
-    let mut at = 0;
-    while at + 5 <= file.len() {
-        let key = (file[at] as u16, u16::from_le_bytes([file[at + 1], file[at + 2]]));
-        let side = u16::from_le_bytes([file[at + 3], file[at + 4]]);
-        let Some(mask) = file.get(at + 5..at + 5 + side as usize * side as usize) else { break };
-        if batch.contains(&key) && !found.iter().any(|d| (d.0, d.1) == key) {
-            found.push((key.0, key.1, side, mask.to_vec()));
+    let mut found = Vec::new();
+    let mut rest = Vec::new();
+    for &(symbol, point_px) in batch {
+        match marspot::ui::system::macos::icons::find_recorded(file, symbol, point_px) {
+            Some((side, mask)) => found.push((symbol, point_px, side, mask.to_vec())),
+            None => rest.push((symbol, point_px)),
         }
-        at += 5 + mask.len();
     }
-    let rest = batch.iter().filter(|k| !found.iter().any(|d| (d.0, d.1) == **k)).copied().collect();
     (found, rest)
 }
 

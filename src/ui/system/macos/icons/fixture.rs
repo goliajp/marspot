@@ -1,21 +1,59 @@
-//! The masks the unit tests draw icons with, as AppKit drew them.
+//! Masks as AppKit drew them, recorded.
 //!
-//! Loading a system symbol registers the process with LaunchServices,
-//! and the suite runs every test in a process of its own: drawn live,
-//! each test that paints the chrome was one more app registration on
-//! the runner.  So the tests read the masks from a file AppKit wrote,
-//! and the live checks below compare that file with what AppKit draws
-//! now.  They are ignored in the suite; `bin/appkit-fixtures.sh` runs
-//! them (with `--write`, rewrites the file).
+//! Loading a system symbol registers the process with LaunchServices.
+//! The test suite runs every test in a process of its own, and the
+//! runner starts the app hundreds of times a day: drawn live, each was
+//! one more app registration there.  So the lib's unit tests read the
+//! masks from a file AppKit wrote, and any other process given that
+//! file in [`RECORDED_ENV`] (the test runs, the sandbox) takes the
+//! masks it holds from there.  The live check below compares the file
+//! with what AppKit draws now; it is ignored in the suite and run by
+//! `bin/appkit-fixtures.sh` (with `--write`, it rewrites the file).
 
+#[cfg(test)]
 use super::{mask_side, Symbol};
 
+/// Names a file of recorded masks; set only by tests and the sandbox.
+pub const RECORDED_ENV: &str = "MARSPOT_TEST_ICON_MASKS";
+
+/// The mask of `symbol` at `point_px` in a recorded file, and its side:
 /// `symbol u8, point_px u16 le, side u16 le`, then `side * side` bytes
-/// of coverage, repeated.
+/// of coverage, repeated.  A torn entry ends the search.
+pub fn find(file: &[u8], symbol: u16, point_px: u16) -> Option<(u16, &[u8])> {
+    let mut at = 0;
+    while at + 5 <= file.len() {
+        let key = (file[at] as u16, u16::from_le_bytes([file[at + 1], file[at + 2]]));
+        let side = u16::from_le_bytes([file[at + 3], file[at + 4]]);
+        let mask = file.get(at + 5..at + 5 + side as usize * side as usize)?;
+        if key == (symbol, point_px) {
+            return Some((side, mask));
+        }
+        at += 5 + mask.len();
+    }
+    None
+}
+
+/// Fill `mask` from the file [`RECORDED_ENV`] names; false when there
+/// is none, or it has no such mask.
+#[cfg(not(test))]
+pub(super) fn draw_recorded(symbol: u16, point_px: u32, side: u32, mask: &mut [u8]) -> bool {
+    static FILE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let file = FILE.get_or_init(|| std::env::var_os(RECORDED_ENV).and_then(|p| std::fs::read(p).ok()).unwrap_or_default());
+    match find(file, symbol, point_px as u16) {
+        Some((s, found)) if s as u32 == side => {
+            mask.copy_from_slice(found);
+            true
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
 static MASKS: &[u8] = include_bytes!("../../../../../tests/fixtures/appkit/icon-masks.bin");
 
 /// The sizes the chrome's tests draw at: every symbol at the two
 /// toolbar sizes, the marks at the sizes of every close and add button.
+#[cfg(test)]
 fn sizes() -> Vec<(Symbol, u32)> {
     let mut out = Vec::new();
     for symbol in Symbol::ALL {
@@ -28,28 +66,21 @@ fn sizes() -> Vec<(Symbol, u32)> {
 }
 
 /// Fill `mask` with the recorded mask of `symbol` at `point_px`.
+#[cfg(test)]
 pub(super) fn draw(symbol: Symbol, point_px: u32, side: u32, mask: &mut [u8]) {
-    let mut at = 0;
-    while at + 5 <= MASKS.len() {
-        let sym = MASKS[at];
-        let px = u16::from_le_bytes([MASKS[at + 1], MASKS[at + 2]]) as u32;
-        let s = u16::from_le_bytes([MASKS[at + 3], MASKS[at + 4]]) as usize;
-        let body = &MASKS[at + 5..at + 5 + s * s];
-        if sym == symbol as u8 && px == point_px {
-            assert_eq!(s, side as usize, "the recorded {} at {point_px} px has another side", symbol.name());
-            mask.copy_from_slice(body);
-            return;
-        }
-        at += 5 + s * s;
-    }
-    panic!(
-        "no recorded mask for {} at {point_px} px: add the size in icons/fixture.rs and run bin/appkit-fixtures.sh --write",
-        symbol.name()
-    );
+    let Some((s, found)) = find(MASKS, symbol as u16, point_px as u16) else {
+        panic!(
+            "no recorded mask for {} at {point_px} px: add the size in icons/fixture.rs and run bin/appkit-fixtures.sh --write",
+            symbol.name()
+        );
+    };
+    assert_eq!(s as u32, side, "the recorded {} at {point_px} px has another side", symbol.name());
+    mask.copy_from_slice(found);
 }
 
 /// What AppKit draws now, for every size the tests use, in the file's
 /// format.
+#[cfg(test)]
 fn live() -> Vec<u8> {
     let mut out = Vec::new();
     for (symbol, px) in sizes() {
@@ -74,4 +105,13 @@ fn live_appkit_icon_masks_are_the_recorded_ones() {
         return;
     }
     assert!(now == MASKS, "AppKit draws the icons differently now: run bin/appkit-fixtures.sh --write and review");
+}
+
+#[test]
+fn a_recorded_mask_is_found_by_symbol_and_size_and_a_torn_file_has_none() {
+    let (side, mask) = find(MASKS, Symbol::Plus as u16, 26).expect("plus at 26 px");
+    assert_eq!(side as u32, mask_side(26));
+    assert!(mask.iter().any(|&a| a > 0));
+    assert!(find(MASKS, Symbol::Plus as u16, 99).is_none());
+    assert!(find(&MASKS[..10], Symbol::Sidebar as u16, 13).is_none());
 }

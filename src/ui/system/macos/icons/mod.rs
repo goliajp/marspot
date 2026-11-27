@@ -9,9 +9,10 @@
 //! A mask is rasterised on its first use at a size and never on a
 //! frame after that.
 
-#[cfg(test)]
 mod fixture;
 mod raster;
+
+pub use fixture::{find as find_recorded, RECORDED_ENV};
 
 use marspot_term::layout::Rect;
 
@@ -176,10 +177,13 @@ pub fn draw_for_core(symbol: u16, point_px: u16) -> Option<(u16, Vec<u8>)> {
 }
 
 /// Draw `symbol` at `point_px` into `mask`, `side` × `side`: AppKit's
-/// drawing, recorded for the unit tests (see `fixture`).
+/// drawing, or the same recorded where a test or the sandbox has a
+/// file of it (see `fixture`).
 fn draw(symbol: Symbol, point_px: u32, side: u32, mask: &mut [u8]) {
     #[cfg(not(test))]
-    raster::rasterise(symbol.name(), point_px, side, mask);
+    if !fixture::draw_recorded(symbol as u16, point_px, side, mask) {
+        raster::rasterise(symbol.name(), point_px, side, mask);
+    }
     #[cfg(test)]
     fixture::draw(symbol, point_px, side, mask);
 }
