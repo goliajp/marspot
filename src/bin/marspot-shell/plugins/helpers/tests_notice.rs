@@ -169,22 +169,33 @@ fn named(obs: &Observation, name: &str) -> Vec<(i32, i32)> {
     procs.iter().filter(|p| p.name() == name).map(|p| (p.row.pid, p.row.ppid)).collect()
 }
 
+/// The outer and the inner of two claudes in pane 1 with a process that
+/// is not a claude between them.
+///
+/// Until a forked child execs it carries its parent's argv: the outer
+/// claude's fork that is about to become the inner shell reads as a
+/// second claude right under it, so two claudes alone are not yet the
+/// nesting.
+fn nested(obs: &Observation) -> Option<(i32, i32)> {
+    let procs = obs.session(1)?.descendants.as_slice();
+    let parent = |pid: i32| procs.iter().find(|p| p.row.pid == pid).map(|p| p.row.ppid);
+    let both = named(obs, "claude");
+    match both[..] {
+        [(a, _), (b, pb)] if parent(pb) == Some(a) && pb != a => Some((a, b)),
+        [(a, pa), (b, _)] if parent(pa) == Some(b) && pa != b => Some((b, a)),
+        _ => None,
+    }
+}
+
 /// A claude in the pane that started an agent of its own through a shell
 /// of its own, both registered: the notice is the outer one's.
 #[test]
 fn helpers_a_notice_goes_to_the_outer_of_two_nested_sessions() {
     let script = b"(exec -a claude /bin/bash -c '/bin/bash -c \"(exec -a claude /bin/sleep 30) & wait\" & wait')\n";
-    let (sh, obs, seen) = pane_running(script, |o| named(o, "claude").len() == 2);
+    let (sh, obs, seen) = pane_running(script, |o| nested(o).is_some());
     end(sh, &obs);
-    assert!(seen, "the two claudes never showed up");
-    let procs: Vec<(i32, i32)> = obs.session(1).unwrap().descendants.iter().map(|p| (p.row.pid, p.row.ppid)).collect();
-    let parent = |pid: i32| procs.iter().find(|(p, _)| *p == pid).map(|(_, pp)| *pp);
-    let both = named(&obs, "claude");
-    let (outer, inner) = match both[..] {
-        [(a, _), (b, pb)] if parent(pb) == Some(a) && pb != a => (a, b),
-        [(a, pa), (b, _)] if parent(pa) == Some(b) && pa != b => (b, a),
-        _ => panic!("no shell between the two claudes: {both:?} in {procs:?}"),
-    };
+    assert!(seen, "two claudes with a shell between them never showed up");
+    let (outer, inner) = nested(&obs).expect("the nesting stays once it is there");
     let entries = vec![record(inner, "/tmp/inner.sock"), record(outer, "/tmp/outer.sock")];
     assert_eq!(super::inbox_of::in_pane(&entries, &obs, 1).as_deref(), Some("/tmp/outer.sock"));
     assert_eq!(super::inbox_of::in_pane(&entries[..1], &obs, 1).as_deref(), Some("/tmp/inner.sock"), "alone, the inner one is the top");
