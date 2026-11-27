@@ -149,51 +149,61 @@ fn sched_level2_closed_loop_hold_out_weeks_16_to_20() {
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_1_to_4() {
     compare_driven("as the shell drives it, weeks 1-4", 1000..1004, 1.0, 1.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_5_to_8() {
     compare_driven("as the shell drives it, weeks 5-8", 1004..1008, 1.0, 1.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_1_to_4() {
     compare_driven("as the shell drives it, forecast × 3, weeks 1-4, three-hour speed true", 1000..1004, 3.0, 1.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_1_to_4_three_hour_speed_as_wrong() {
     compare_driven("as the shell drives it, forecast × 3, weeks 1-4, three-hour speed as wrong", 1000..1004, 3.0, 3.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_5_to_8() {
     compare_driven("as the shell drives it, forecast × 3, weeks 5-8, three-hour speed true", 1004..1008, 3.0, 1.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_high_5_to_8_three_hour_speed_as_wrong() {
     compare_driven("as the shell drives it, forecast × 3, weeks 5-8, three-hour speed as wrong", 1004..1008, 3.0, 3.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_1_to_4() {
     compare_driven("as the shell drives it, forecast ÷ 3, weeks 1-4, three-hour speed true", 1000..1004, 1.0 / 3.0, 1.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_1_to_4_three_hour_speed_as_wrong() {
     compare_driven("as the shell drives it, forecast ÷ 3, weeks 1-4, three-hour speed as wrong", 1000..1004, 1.0 / 3.0, 1.0 / 3.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_5_to_8() {
     compare_driven("as the shell drives it, forecast ÷ 3, weeks 5-8, three-hour speed true", 1004..1008, 1.0 / 3.0, 1.0, true);
 }
 
 #[test]
+#[ignore = "eight weeks driven tick by tick as the shell: minutes in a debug build; run with --release -- --ignored"]
 fn sched_level2_closed_loop_driven_as_the_shell_forecast_three_times_low_5_to_8_three_hour_speed_as_wrong() {
     compare_driven("as the shell drives it, forecast ÷ 3, weeks 5-8, three-hour speed as wrong", 1004..1008, 1.0 / 3.0, 1.0 / 3.0, true);
 }
