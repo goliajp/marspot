@@ -30,7 +30,7 @@ cd "$ROOT"
 
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"
-HOST="${HOST:-$(marspot_host bench)}"
+HOST="${HOST:-$(marspot_host bench bench-marspot)}"
 DO_GATE=1
 for arg in "$@"; do
   case "$arg" in
@@ -141,7 +141,7 @@ PY
 if (( DO_GATE == 1 )); then
   echo
   echo "==> bench-remote --full to re-verify gate (this rebuilds marspot too)"
-  bin/bench-remote.sh --full
+  HOST="$HOST" bin/bench-remote.sh --full
 fi
 
 echo

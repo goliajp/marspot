@@ -49,8 +49,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_lib.sh"
 # shellcheck source=bin/_lock-mark.sh
 source "$ROOT/bin/_lock-mark.sh"
-HOST="${HOST:-$(marspot_host test)}"
 REMOTE_NAME="${REMOTE_NAME:-test-marspot}"
+HOST="${HOST:-$(marspot_host test "$REMOTE_NAME")}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"

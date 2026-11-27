@@ -30,8 +30,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_lib.sh"
 # shellcheck source=bin/_lock-mark.sh
 source "$ROOT/bin/_lock-mark.sh"
-HOST="${HOST:-$(marspot_host bench)}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
+HOST="${HOST:-$(marspot_host bench "$REMOTE_NAME")}"
 REMOTE_DIR="work/$REMOTE_NAME"
 OUT_DIR="$ROOT/bench/remote-runs/multi-$(date -u +%Y%m%dT%H%M%SZ)"
 (( $# > 0 )) || { sed -n '2,14p' "$0"; exit 2; }

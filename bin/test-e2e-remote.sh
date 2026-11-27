@@ -100,8 +100,8 @@ DEFAULT_SUITES=(
 )
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOST="${HOST:-$(source "$ROOT/bin/_lib.sh" && marspot_host test)}"
 REMOTE_NAME="${REMOTE_NAME:-e2e-marspot}"
+HOST="${HOST:-$(source "$ROOT/bin/_lib.sh" && marspot_host gui "$REMOTE_NAME")}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"

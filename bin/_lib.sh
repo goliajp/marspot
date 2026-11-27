@@ -25,19 +25,9 @@ mkdir -p "$RESULTS_DIR"
 MARKER_PREFIX="/tmp/marspot-bench"
 
 # ---- runner hosts ----------------------------------------------------------
-# Tests, the CI mac job and window e2e go to the test host.  Benchmarks go
-# to the bench host, which runs nothing else: there the build and the
-# measurement share one `bench-lock bench` hold.  The environment overrides
-# either name; how a host is picked changes here and nowhere else.
-MARSPOT_TEST_HOST="${MARSPOT_TEST_HOST:-mini2}"
-MARSPOT_BENCH_HOST="${MARSPOT_BENCH_HOST:-mini3}"
-marspot_host() {
-  case "${1:-}" in
-    test)  echo "$MARSPOT_TEST_HOST" ;;
-    bench) echo "$MARSPOT_BENCH_HOST" ;;
-    *) echo "marspot_host: test|bench, not '${1:-}'" >&2; return 2 ;;
-  esac
-}
+# marspot_host test|gui|bench [copy-name]: the one place a runner is chosen
+# shellcheck source=bin/_host.sh
+source "$ROOT/bin/_host.sh"
 
 # ---- cargo binary resolution -------------------------------------------
 #

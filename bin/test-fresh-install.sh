@@ -2,7 +2,7 @@
 # bin/test-fresh-install.sh — the disk image, on a Mac, as someone who
 # has never had marspot or any agent CLI.
 #
-#   bin/test-fresh-install.sh build/dist/Marspot-0.4.0.dmg     # host: marspot_host test
+#   bin/test-fresh-install.sh build/dist/Marspot-0.4.0.dmg     # host: marspot_host gui
 #   HOST=<host> bin/test-fresh-install.sh <dmg>
 #
 # What the other suites cannot see is the machine that has nothing: no
@@ -30,7 +30,7 @@ set -euo pipefail
 DMG="${1:?usage: $0 <Marspot.dmg>}"
 # shellcheck source=/dev/null
 source "$(cd "$(dirname "$0")/.." && pwd)/bin/_lib.sh"
-HOST="${HOST:-$(marspot_host test)}"
+HOST="${HOST:-$(marspot_host gui)}"
 WAIT="${FRESH_WAIT:-420}"
 RUN_ID="fresh-$$-$(date +%s)"
 REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"

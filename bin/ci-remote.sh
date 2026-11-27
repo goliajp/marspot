@@ -72,12 +72,12 @@ fi
 
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"
-MAC="${MAC:-$(marspot_host test)}"
-LINUX="${LINUX:-lx64}"
 # CI_REMOTE_NAME gives a checkout a remote copy of its own, so that two
 # checkouts do not wait for each other; the copy is a full build tree on
 # both runners and is forgotten with `remote-sync <host> --name <it> --forget`
 NAME="${CI_REMOTE_NAME:-ci-marspot}"
+MAC="${MAC:-$(marspot_host test "$NAME")}"
+LINUX="${LINUX:-lx64}"
 TIMEOUT="${CI_JOB_TIMEOUT:-3600}"
 MAX_WAIT="${CI_MAX_WAIT:-3600}"
 LOGS="$(mktemp -d)"
