@@ -1859,3 +1859,6 @@ fn submit_paste_drops_end_marker_in_the_text() {
 
 #[path = "origin_tests.rs"]
 mod origin_tests;
+
+#[path = "badge_tests.rs"]
+mod badge_tests;

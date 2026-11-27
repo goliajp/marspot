@@ -590,7 +590,7 @@ pub struct PtyOp {
     /// is worse than waiting (nothing uses that yet, but a "park" is
     /// exactly that shape).
     pub escape_hatch: bool,
-    /// Badge while running; a spinner is appended.
+    /// Badge while running; [`WORKING_MARK`] is appended while a step works.
     pub badge: Option<String>,
     /// Told how the run ended: the submitter's own channel back, since
     /// the queue's reports go to whoever owns the queue.
@@ -667,10 +667,6 @@ impl PtyOp {
 /// there are callers rather than after.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
 
-/// How often a spinner advances.  Eight frames at this rate is one
-/// turn a second, which reads as motion without being a strobe — and
-/// it decouples the animation from the tick, which is 16 ms while a
-/// pane is drawing and ~250 ms when the window is idle.
 /// How long [`StepKind::Submit`] waits for the pasted text to appear
 /// before sending the return anyway.
 ///
@@ -848,19 +844,20 @@ pub struct SubmitState {
 /// keeps its own sense of scale.
 const LATE_EMPTY_GRACE: u32 = 10;
 
-const SPINNER_FRAME: Duration = Duration::from_millis(125);
+/// How often a working run's badge is looked at again, for the note a
+/// job step adds to it.
+const WORKING_BADGE_EVERY: Duration = Duration::from_millis(125);
+
+/// What a working run's badge ends with.  Not a spinner: one only turns
+/// on a timer, and the supervisor ticks once a second at most, so its
+/// frames came irregularly and read as frozen.
+pub const WORKING_MARK: char = '…';
 
 /// How often a parked run re-asserts its badge.
 ///
 /// Nothing is animating, so this exists only so a core that came up
 /// with no badges (a silent update, a crash) gets them back.
 const PARKED_BADGE_EVERY: Duration = Duration::from_secs(8);
-
-/// Braille spinner — the eight standard frames, one per tick.
-pub fn spinner_frame(phase: u8) -> char {
-    const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
-    FRAMES[(phase as usize) % FRAMES.len()]
-}
 
 /// Runs a [`PtyOp`] as a PaneSession.
 pub struct OpRunner {
@@ -906,7 +903,6 @@ pub struct OpRunner {
     /// could never time out because its deadline restarted 60 times a
     /// second.
     started: bool,
-    spin_phase: u8,
     /// When the badge was last sent — see the throttle in `on_tick`.
     badge_at: SystemTime,
     on_finish: Option<Box<dyn FnMut(&dyn PaneSessionHost, &OpOutcome) + Send>>,
@@ -932,7 +928,6 @@ impl OpRunner {
             ready_saw: None,
             cleaned: false,
             started: false,
-            spin_phase: 0,
             badge_at: SystemTime::UNIX_EPOCH,
             on_finish: None,
         }
@@ -1671,7 +1666,6 @@ impl PaneSession for OpRunner {
     }
 
     fn on_tick(&mut self, host: &dyn PaneSessionHost) {
-        self.spin_phase = self.spin_phase.wrapping_add(1);
         if self.finished.is_some() {
             host.end();
             return;
@@ -1696,11 +1690,10 @@ impl PaneSession for OpRunner {
             // 16 ms while anything is drawing.  A step that waits for
             // the user can hold that for hours.
             //
-            // While a step is *working* the spinner has to turn, so the
-            // badge is re-sent as fast as it changes; on the parked
-            // step there is nothing to animate, so it is re-asserted
-            // only often enough to survive a core that restarted with
-            // no badges.
+            // While a step is *working* a job's note can change, so the
+            // badge is looked at often (an unchanged one sends nothing);
+            // on the parked step it is re-asserted only often enough to
+            // survive a core that restarted with no badges.
             let idle = matches!(
                 self.op.steps.get(self.at).map(|s| &s.kind),
                 Some(StepKind::AwaitUser)
@@ -1715,7 +1708,7 @@ impl PaneSession for OpRunner {
                 .now()
                 .duration_since(self.badge_at)
                 .unwrap_or_default();
-            let due = since >= if idle { PARKED_BADGE_EVERY } else { SPINNER_FRAME };
+            let due = since >= if idle { PARKED_BADGE_EVERY } else { WORKING_BADGE_EVERY };
             if due {
                 self.badge_at = self.env.now();
                 let note = match self.op.steps.get(self.at).map(|s| &s.kind) {
@@ -1723,7 +1716,7 @@ impl PaneSession for OpRunner {
                     _ => None,
                 };
                 let note = note.as_deref().unwrap_or("");
-                let text = if idle { b.clone() } else { format!("{b}{note} {}", spinner_frame(self.spin_phase)) };
+                let text = if idle { b.clone() } else { format!("{b}{note} {WORKING_MARK}") };
                 host.set_badge(&text);
             }
         }
