@@ -158,6 +158,13 @@ impl Drop for FileScrollback {
         // Everything buffered reaches the page cache before the files
         // close.  No fsync.  The mappings go with the tiers.
         self.bin.borrow_mut().flush();
+        // a segment still being made would be created, sized or given
+        // its header after the files were let go: a reopen of the same
+        // history could list it half made and delete it, or miss it and
+        // give its own next segment the same slot
+        if let Some(pending) = self.pending.take() {
+            drop(pending.wait());
+        }
     }
 }
 

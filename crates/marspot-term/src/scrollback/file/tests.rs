@@ -97,6 +97,39 @@ fn an_older_binary_does_not_destroy_segments() {
     }
 }
 
+/// The next segment, asked for and still being made when the history is
+/// dropped, is whole once the drop returns: nothing writes a file of the
+/// history after it, so a reopen never finds one half made.
+#[test]
+fn a_drop_waits_for_the_segment_being_made() {
+    let tmp = TmpDir::new("drop-prep");
+    let mut sb = open(&tmp);
+    let mut pushed = 0;
+    // into the second segment (64 lines in the first), before the third is asked for
+    while pushed < 100 {
+        push(&mut sb, &mut pushed);
+    }
+    assert!(sb.pending.is_none() && sb.segs.len() == 2, "the second segment is in use, the third not asked for");
+    let (release, gate) = std::sync::mpsc::channel();
+    sb.hooks.prep_gate = Some(gate);
+    // past the mark where the third is asked for (half of the second's
+    // 128 lines), short of its use
+    while pushed < 150 {
+        push(&mut sb, &mut pushed);
+    }
+    assert!(sb.pending.is_some(), "the next segment is being made");
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        release.send(()).unwrap();
+    });
+    drop(sb);
+    let abi = crate::grid::CELL_MEM_BYTES as u32;
+    let listing = crate::segment::list(&tmp.path, "scrollback", crate::segment::Kind::Scrollback, abi).unwrap();
+    assert!(listing.bad.is_empty(), "a segment is half made: {:?}", listing.bad);
+    assert_eq!(listing.spare.len(), 1, "the drop returned before the segment was made");
+    releaser.join().unwrap();
+}
+
 /// An image that replaces itself runs no destructors: after the flush
 /// every line is in the files, the index as well as the records,
 /// however little of a buffer they filled.
