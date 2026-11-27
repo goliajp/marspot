@@ -24,8 +24,9 @@
 #   record    the shell's own LaunchServices record lists every
 #             session and every pane's shell
 #
-# Then: twenty quits leave one shell, the same pid and coalition, no
-# larger; the end of the login session ends the shell; closing the last
+# Then: twenty quits and openings about 0.4 s apart, not paced for the
+# Dock, leave one shell, the same pid and coalition, no larger, and the
+# Dock with as many tiles as before them; the end of the login session ends the shell; closing the last
 # kept session ends a resident shell and leaves nothing behind.
 #
 # A failed check is recorded and the walk goes on; the exit code is
@@ -168,10 +169,12 @@ state "opened from outside the sessions' coalition"
 # back what the closed windows held over the next seconds: read when it has
 settled_footprint() { local f i; for (( i = 0; i < 50; i++ )); do f=$("$PROBE" footprint "$1"); (( f <= RESIDENT_KIB )) && break; sleep 0.2; done; echo "$f"; }
 RESIDENT_KIB=32768
-keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0; foots=""
+# the Dock holds the open app's tile and no other of ours before them
+dock_settled 1
+keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0; foots=""; loop_start=$SECONDS
 for (( round = 1; round <= 20; round++ )); do
   residents=$(count SHELL_RESIDENT)
-  quit_app
+  quit_app_unpaced
   wait_count SHELL_RESIDENT $((residents + 1)) 10 || break
   foots+=" $(settled_footprint "$L1")"
   open_app
@@ -185,9 +188,15 @@ if (( n_ok == 20 )); then
   echo "    resident footprint after each quit, KiB:$foots; descriptors open: $(lsof -p "$L1" 2>/dev/null | grep -c .)"
   most=$(tr ' ' '\n' <<<"$foots" | sort -n | tail -1)
   (( most <= RESIDENT_KIB )) || bad "a resident shell was still at ${most} KiB ten seconds after its quit (budget ${RESIDENT_KIB})"
+  echo "    twenty quits and openings took $(( SECONDS - loop_start )) s"
 else
   bad "round $((n_ok + 1)) of 20 did not come back as the same single shell (shells: $(shells_running | tr '\n' ' '))"
 fi
+# a quit that came before the Dock dropped the tile of the one before
+# leaves that tile behind for good: one more than the open app's is a
+# tile left
+dock_settled 1
+ok "the Dock holds the open app's tile and no other of ours after twenty quick quits (probe at index $DOCK_LAST)"
 reattached
 state "after twenty quits"
 
