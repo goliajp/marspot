@@ -331,8 +331,9 @@ def quiet_preflight(r, under):
         return False
     if r["svcs"] <= QUIET_SERVICES:
         return True
+    # only a bundle this run made under its own scratch prefix, never the shared build tree
     return (r["svcs"] == {"kTCCServiceDeveloperTool"} and SYSPOLICYD in r["paths"]
-            and any(under(p) for p in r["paths"]))
+            and any(under(p) and "/msp-e2e-" in p for p in r["paths"]))
 
 
 def check(d, before, lrc, lout, me, prefixes):

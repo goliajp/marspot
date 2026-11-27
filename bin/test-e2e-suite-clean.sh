@@ -216,6 +216,9 @@ expect devtool-ours 0 "developer_tool_preflights=1"
 base devtool-elsewhere
 { devtool 274.2 "$BUILD"; echo '{"count":3,"finished":1}'; } >"$T/devtool-elsewhere/in/tcc.ndjson"
 expect devtool-elsewhere 1 "left: tcc: kTCCServiceDeveloperTool"
+base devtool-build-tree
+{ devtool 274.3 "$BUILD"; echo '{"count":3,"finished":1}'; } >"$T/devtool-build-tree/in/tcc.ndjson"
+expect devtool-build-tree 1 "left: tcc: kTCCServiceDeveloperTool" -- /Users/u/work/e2e-marspot/
 
 # the same client reuses its msgID for a second preflight seconds later (seen on a runner)
 base listen-reuse
