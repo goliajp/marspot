@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.843"  # a deadline handed over to the next image is never more than the Dock settle wait
-core    = "0.12.744"  # app_delegate exposes whether a quit event says why (the resident asks it)
-session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)
+shell   = "0.7.844"  # the Dock leave deadline crosses the resident's own exec instead of being swept
+core    = "0.12.745"  # marspot-term lists the Dock leave deadline for shell image execs (not used by core)
+session = "0.11.473"  # marspot-term lists the Dock leave deadline for shell image execs (not used by session)
