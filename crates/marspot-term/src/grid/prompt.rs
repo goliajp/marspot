@@ -63,3 +63,39 @@ impl PromptMark {
         }
     }
 }
+
+impl super::Grid {
+    /// The view offset that puts the nearest prompt start above the
+    /// line at the top of the view at the top of the view, or `None`
+    /// when there is no earlier prompt a view can reach.
+    ///
+    /// `view_offset` counts rows scrolled back from the live screen,
+    /// the way `cell_at_view` does.  The marks are read where they are
+    /// kept, one line at a time and nothing collected; a view reaches
+    /// at most `u16::MAX` lines back, so that is as far as it looks.
+    pub fn prompt_above(&self, view_offset: u16) -> Option<u16> {
+        let sb = self.scrollback_len();
+        let top = sb - (view_offset as usize).min(sb);
+        let reach = sb.saturating_sub(u16::MAX as usize);
+        (reach..top)
+            .rev()
+            .find(|&i| self.scrollback_prompt(i) == PromptMark::PromptStart)
+            .map(|i| (sb - i) as u16)
+    }
+
+    /// The view offset that puts the nearest prompt start below the
+    /// line at the top of the view at the top of the view, `0` (the
+    /// live screen) when that prompt is on the live screen, or `None`
+    /// when there is no later prompt.
+    pub fn prompt_below(&self, view_offset: u16) -> Option<u16> {
+        let sb = self.scrollback_len();
+        let top = sb - (view_offset as usize).min(sb);
+        if top >= sb {
+            return None;
+        }
+        if let Some(i) = (top + 1..sb).find(|&i| self.scrollback_prompt(i) == PromptMark::PromptStart) {
+            return Some((sb - i) as u16);
+        }
+        (0..self.rows()).any(|r| self.row_prompt(r) == PromptMark::PromptStart).then_some(0)
+    }
+}
