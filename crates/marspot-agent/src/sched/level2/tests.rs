@@ -211,8 +211,10 @@ fn sched_level2_a_pane_is_planned_at_its_recent_speed_when_that_is_off_its_band(
     assert_eq!(planned_speed(0.004, 0.005, 0.6, 1.5), 0.004);
     // three times the level, past the band's top: the recent speed
     assert_eq!(planned_speed(0.004, 0.012, 0.6, 1.5), 0.012);
-    // a third of it, under the band's bottom: the recent speed
-    assert_eq!(planned_speed(0.012, 0.004, 0.6, 1.5), 0.004);
+    // a third of it, under the band's bottom: the band's bottom, since a
+    // pane idle for three hours reads a recent speed of nothing
+    assert!((planned_speed(0.012, 0.004, 0.6, 1.5) - 0.012 * 0.6).abs() < 1e-15);
+    assert!((planned_speed(0.012, 0.0, 0.6, 1.5) - 0.012 * 0.6).abs() < 1e-15);
     // no level yet: the level as given
     assert_eq!(planned_speed(0.0, 0.004, 0.6, 1.5), 0.0);
 }

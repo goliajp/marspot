@@ -3,9 +3,11 @@
 //! levels and bands, and the rest of the fleet's use as demand below
 //! pane level.
 //!
-//! A pane's level is the forecast's 24-hour mean per class, or its
-//! three-hour speed when that lies outside the pane band around the
-//! mean, the scan's measured speed before it has one; its high band is
+//! A pane's level is the forecast's 24-hour mean per class, its
+//! three-hour speed when that lies above the pane band around the mean,
+//! the band's bottom when the three-hour speed lies below it (a pane
+//! idle for three hours is not planned at nothing), and the scan's
+//! measured speed before it has a mean; its high band is
 //! the level times the pane band's high multiplier.  A switch rewrites the context the
 //! pane's last reply read (the typical one where none was read).  Lost
 //! background work is the pane's plain speed times its background-work
