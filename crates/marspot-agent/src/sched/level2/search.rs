@@ -83,7 +83,18 @@ impl<'a, 'b> Eval<'a, 'b> {
 
     /// Switches that count toward the fleet's day.
     pub fn counted(&self, s: &[Sched]) -> usize {
-        s.iter().enumerate().map(|(p, sc)| (0..sc.n as usize).filter(|&h| !self.exempt(p, sc, h)).count()).sum()
+        s.iter().enumerate().map(|(p, sc)| self.counted_of(p, sc)).sum()
+    }
+
+    /// Switches of pane `p` following `s` that count toward the fleet's day.
+    fn counted_of(&self, p: usize, s: &Sched) -> usize {
+        (0..s.n as usize).filter(|&h| !self.exempt(p, s, h)).count()
+    }
+
+    /// The linear score of pane `p` following `s` with the charge on its
+    /// counted switches, as the simulated cost it is tried against has.
+    fn charged(&self, p: usize, s: &Sched, linear: f64) -> f64 {
+        linear + self.charge * self.counted_of(p, s) as f64
     }
 
     /// Notice-switches inside the first hour.
@@ -197,13 +208,13 @@ fn sweep(e: &mut Eval, cur: &mut [Sched], cost: &mut Cost, order: &[usize]) -> b
     // proposals are priced off the last run, which may be a trial
     // that differs from `cur` in one pane: close enough to rank by
     for &p in order {
-        let here = score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]);
+        let here = e.charged(p, &cur[p], score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]));
         let mut props = proposals(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, KEEP);
         if cur[p] != Sched::STAY {
             props.push((score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &Sched::STAY), Sched::STAY));
         }
         for (sc, s) in props {
-            if sc < here - SCREEN {
+            if e.charged(p, &s, sc) < here - SCREEN {
                 kept |= e.try_pane(cur, cost, p, s);
             }
         }
