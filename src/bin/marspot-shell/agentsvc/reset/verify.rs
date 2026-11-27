@@ -28,18 +28,23 @@ pub(super) struct Access {
 const URL_FILE: &str = ".config/devops/api-url";
 const KEY_FILE: &str = ".config/devops/api-key";
 
+pub(super) const NO_DEVOPS: &str =
+    "devops confirms claims sent to the control socket and is not set up on this machine: claim it on the accounts panel";
+
 /// The devops address and key, from the user's home.
 pub(super) fn access() -> Result<Access, Outcome> {
     access_in(Path::new(&std::env::var_os("HOME").unwrap_or_default()))
 }
 
 /// The devops address and key under `home`; both files must say
-/// something, or the claim is refused before anything is tried.
+/// something, or the claim is refused before anything is tried.  A
+/// machine without devops claims on the accounts panel, which needs
+/// neither.
 pub(super) fn access_in(home: &Path) -> Result<Access, Outcome> {
     let read = |f: &str| std::fs::read_to_string(home.join(f)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     match (read(URL_FILE), read(KEY_FILE)) {
         (Some(base), Some(key)) => Ok(Access { base, key }),
-        _ => Err(Outcome::of(Res::Error, "no devops credential")),
+        _ => Err(Outcome::of(Res::Unavailable, NO_DEVOPS)),
     }
 }
 

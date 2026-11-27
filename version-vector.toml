@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.864"  # a stale devops feed is no source of resets and is not compared with
+shell   = "0.7.865"  # a socket reset claim on a machine without devops points to the accounts panel
 core    = "0.12.758"  # font family matching never waits on a font macOS has not downloaded
 session = "0.11.482"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
