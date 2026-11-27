@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.823"  # the shell reads recorded icon masks through the lib's lookup
-core    = "0.12.737"  # a process given MARSPOT_TEST_ICON_MASKS draws the icons it holds from the recorded file
+shell   = "0.7.824"  # the lib it links takes typed_now and the icon draw from the recorded-AppKit split
+core    = "0.12.738"  # the lib takes typed_now and the icon draw from the recorded-AppKit split
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)
