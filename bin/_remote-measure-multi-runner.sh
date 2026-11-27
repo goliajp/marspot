@@ -46,7 +46,9 @@ START_SKEW_S=0.03
 COOLDOWN_S=3
 [[ $N =~ ^[1-9][0-9]?$ ]] || { echo "MULTI_WINDOWS wants a count, got '$N'" >&2; exit 2; }
 
-trap 'exit 143' HUP INT TERM
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 ASUSER=""
 if [[ -n "${SSH_CONNECTION:-}" ]]; then

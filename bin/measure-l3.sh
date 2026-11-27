@@ -206,7 +206,9 @@ cleanup() {
   rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
-trap 'exit 143' TERM INT HUP
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 for scenario in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$scenario.bin"

@@ -124,8 +124,12 @@ done
 # no longer share.
 if (( DO_BUILD )); then
   echo "==> building marspot (release)"
+  # the example in a build of its own that names no bins: selecting an
+  # example unifies dev-dependency features, and naming bins in it (or
+  # -p marspot-session alone) would replace shipped binaries with ones
+  # that never ship
   ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
-  ( cd "$ROOT" && cargo build --release -p marspot-session --bin marspot-session --example l3_throughput 2>&1 | tail -3 )
+  ( cd "$ROOT" && cargo build --release --example l3_throughput 2>&1 | tail -3 )
 fi
 
 # ---- key-to-frame latency: the timed build ------------------------------

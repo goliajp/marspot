@@ -284,6 +284,8 @@ case " $* " in
     if scp -q "$HOST:$REMOTE_DIR/bench/baseline.json" "$OUT_DIR/baseline.json"; then
       if diff -u "$ROOT/bench/baseline.json" "$OUT_DIR/baseline.json"; then
         echo "==> bench/baseline.json unchanged on $HOST"
+      elif ! git -C "$ROOT" diff --quiet HEAD -- bench/baseline.json; then
+        echo "==> bench/baseline.json has local changes; the re-locked one is left at $OUT_DIR/baseline.json" >&2
       else
         cp "$OUT_DIR/baseline.json" "$ROOT/bench/baseline.json"
         echo "==> bench/baseline.json updated from $HOST (diff above); commit it"
