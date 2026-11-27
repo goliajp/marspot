@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.855"  # marspot-term: per-CLI install answers in the settings and the InstallAsk frame
-core    = "0.12.755"  # marspot-term: per-CLI install answers in the settings and the InstallAsk frame
+core    = "0.12.756"  # the install question over the focused pane, answered only by Ctrl-Option-Y or Ctrl-Option-N; settings rows per agent CLI
 session = "0.11.481"  # marspot-term: per-CLI install answers in the settings and the InstallAsk frame

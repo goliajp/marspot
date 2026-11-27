@@ -143,7 +143,7 @@ impl CoreApp {
         if pressed && self.search_consume_key(wi, &event, modifiers) {
             return;
         }
-        if self.model_guard_key(wi, &event, modifiers) {
+        if self.model_guard_key(wi, &event, modifiers) || self.install_ask_key(wi, &event, modifiers) {
             return;
         }
 

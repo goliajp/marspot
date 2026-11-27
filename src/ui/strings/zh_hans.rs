@@ -194,6 +194,16 @@ fn text(m: Msg) -> &'static str {
         Msg::LangEnglish => "English",
         Msg::LangJapanese => "日本語",
         Msg::LangChinese => "简体中文",
+
+        Msg::SettingsAgentClis => "Agent 命令行工具",
+        Msg::InstallClaude => "缺少 claude 时安装",
+        Msg::InstallCodex => "缺少 codex 时安装",
+        Msg::InstallGemini => "缺少 gemini 时安装",
+        Msg::InstallKimi => "缺少 kimi 时安装",
+        Msg::CostInstallCli => "从发行方下载；除非选「不装」，之后的更新不再问、自动跟随",
+        Msg::ConsentAsk => "先问",
+        Msg::ConsentYes => "安装",
+        Msg::ConsentNo => "不装",
     }
 }
 
@@ -218,5 +228,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::RanFor { minutes: m } => write!(out, "{} 小时 {} 分", m / 60, m % 60),
         Arg::ModelPutBack { to, back } => write!(out, "所有账号共用的 Claude Code 默认模型未经确认被改成了 {to}，已改回 {back}"),
         Arg::ModelNowIs(to) => write!(out, "所有账号共用的 Claude Code 默认模型现在是 {to}"),
+        Arg::InstallAsk { cli, place, megabytes } => write!(
+            out,
+            "要把 {cli} 安装到 {place} 吗？从发行方下载，约占 {megabytes} MB。按 Ctrl-Option-Y 安装，按 Ctrl-Option-N 以后不装也不更新；其他键照常发给窗格"
+        ),
     }
 }

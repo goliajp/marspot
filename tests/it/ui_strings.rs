@@ -27,7 +27,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 166;
+    const EXPECTED: usize = 175;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -114,6 +114,12 @@ const SAMPLES: &[(Arg<'static>, &str, &[&str])] = &[
         &["fable", "opus"],
     ),
     (Arg::ModelNowIs("sonnet"), "Claude Code's default model for every account is now sonnet", &["sonnet"]),
+    (
+        Arg::InstallAsk { cli: "codex", place: "~/.codex", megabytes: 740 },
+        "Install codex into ~/.codex? It is downloaded from its vendor and takes about 740 MB. \
+         Ctrl-Option-Y installs it, Ctrl-Option-N never installs or updates it; other keys go to the pane",
+        &["codex", "~/.codex", "740"],
+    ),
 ];
 
 /// The sentences built around a value read as they did when each call

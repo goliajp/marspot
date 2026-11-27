@@ -213,6 +213,16 @@ fn text(m: Msg) -> &'static str {
         Msg::LangEnglish => "English",
         Msg::LangJapanese => "日本語",
         Msg::LangChinese => "简体中文",
+
+        Msg::SettingsAgentClis => "Agent CLIs",
+        Msg::InstallClaude => "Install claude when it is missing",
+        Msg::InstallCodex => "Install codex when it is missing",
+        Msg::InstallGemini => "Install gemini when it is missing",
+        Msg::InstallKimi => "Install kimi when it is missing",
+        Msg::CostInstallCli => "downloads its vendor's build; marspot keeps it updated unless set to Don't install",
+        Msg::ConsentAsk => "Ask",
+        Msg::ConsentYes => "Install",
+        Msg::ConsentNo => "Don't install",
     }
 }
 
@@ -247,5 +257,10 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
              it was put back to {back}"
         ),
         Arg::ModelNowIs(to) => write!(out, "Claude Code's default model for every account is now {to}"),
+        Arg::InstallAsk { cli, place, megabytes } => write!(
+            out,
+            "Install {cli} into {place}? It is downloaded from its vendor and takes about {megabytes} MB. \
+             Ctrl-Option-Y installs it, Ctrl-Option-N never installs or updates it; other keys go to the pane"
+        ),
     }
 }

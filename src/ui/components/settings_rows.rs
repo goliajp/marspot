@@ -23,6 +23,8 @@ pub enum Row {
     ScrollFactor,
     CcStatuslineHook,
     CcModelGuard,
+    /// Whether the agent CLI `INSTALL_CLIS[i]` is installed when missing.
+    InstallCli(usize),
 }
 
 /// A row's control shape.
@@ -119,6 +121,15 @@ pub const SECTIONS: &[Section] = &[
             cost: Msg::CostWheelSpeed,
         }],
     },
+    Section {
+        heading: Msg::SettingsAgentClis,
+        rows: &[
+            RowSpec { row: Row::InstallCli(0), label: Msg::InstallClaude, cost: Msg::CostInstallCli },
+            RowSpec { row: Row::InstallCli(1), label: Msg::InstallCodex, cost: Msg::CostInstallCli },
+            RowSpec { row: Row::InstallCli(2), label: Msg::InstallGemini, cost: Msg::CostInstallCli },
+            RowSpec { row: Row::InstallCli(3), label: Msg::InstallKimi, cost: Msg::CostInstallCli },
+        ],
+    },
 ];
 
 /// Index of the chosen value in a float choice list, or `usize::MAX`
@@ -183,6 +194,10 @@ impl Row {
                 options: SCROLL_LABELS,
                 chosen: chosen_f32(SCROLL_CHOICES, s.scroll_factor),
             },
+            Row::InstallCli(i) => Control::Segmented {
+                options: CONSENT_LABELS,
+                chosen: CONSENT_CHOICES.iter().position(|c| *c == s.install_consent.0[i]).unwrap_or(usize::MAX),
+            },
         }
     }
 
@@ -215,7 +230,8 @@ impl Row {
             | Row::DimScale
             | Row::ScrollFactor
             | Row::CcStatuslineHook
-            | Row::CcModelGuard => false,
+            | Row::CcModelGuard
+            | Row::InstallCli(_) => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
     }
@@ -249,6 +265,7 @@ impl Row {
             Row::FontSize => next.font_size = step_font_size(s.font_size, seg == 1)?,
             Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
             Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
+            Row::InstallCli(i) => *next.install_consent.0.get_mut(i)? = *CONSENT_CHOICES.get(seg)?,
         }
         (next != *s).then_some(next)
     }

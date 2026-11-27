@@ -251,6 +251,16 @@ pub enum Msg {
     CostFontFamily,
     FontSize,
     CostFontSize,
+    // Settings — whether each agent CLI found missing is installed
+    SettingsAgentClis,
+    InstallClaude,
+    InstallCodex,
+    InstallGemini,
+    InstallKimi,
+    CostInstallCli,
+    ConsentAsk,
+    ConsentYes,
+    ConsentNo,
 }
 
 /// A month, day and time of day, local. Written `M/D HH:mm` in every
@@ -307,6 +317,8 @@ pub enum Arg<'a> {
     ModelPutBack { to: &'a str, back: &'a str },
     /// The shared default model changed and was kept.
     ModelNowIs(&'a str),
+    /// Over the focused pane: may this agent CLI be installed, there, taking that much.
+    InstallAsk { cli: &'a str, place: &'a str, megabytes: u32 },
 }
 
 /// One language: the fixed sentences and the ones built around a value.
