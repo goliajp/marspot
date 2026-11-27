@@ -33,25 +33,34 @@ dock_baseline() {
 }
 
 # until the probe lands at the baseline plus OWN (default 0: the app is
-# quit; 1 while it is open) under the same Dock
-dock_settled() {
+# quit; 1 while it is open) under the same Dock.  Returns 1 with the
+# reason in DOCK_WHY, for a walk that records it and goes on.
+dock_check() {
   local own=${1:-0} out got="" want start=$SECONDS
-  [[ -n $DOCK_BASE ]] || die "the Dock was not probed before the app was first opened"
+  DOCK_WHY=""
+  [[ -n $DOCK_BASE ]] || { DOCK_WHY="the Dock was not probed before the app was first opened"; return 1; }
   want=$(( ${DOCK_BASE#*:} + own ))
   while :; do
-    out="$(dock_probe "$DOCK_PROBE_EXE")" || die "the Dock probe with $own tile(s) of ours expected: ${out#unread=}"
+    out="$(dock_probe "$DOCK_PROBE_EXE")" \
+      || { DOCK_WHY="the Dock probe with $own tile(s) of ours expected: ${out#unread=}"; return 1; }
     got="$(sed -n 's/^dock_pid=//p' <<<"$out"):$(sed -n 's/^index=//p' <<<"$out")"
-    [[ ${got%%:*} == "${DOCK_BASE%%:*}" ]] || die "the Dock restarted during the walk (pid ${DOCK_BASE%%:*}, now ${got%%:*})"
+    [[ ${got%%:*} == "${DOCK_BASE%%:*}" ]] \
+      || { DOCK_WHY="the Dock restarted during the walk (pid ${DOCK_BASE%%:*}, now ${got%%:*})"; return 1; }
     DOCK_LAST=${got#*:}
     (( DOCK_LAST == want )) && return 0
     # below where it should be: some other tile went, and one of ours could be
     # hidden behind it; waiting cannot tell
     (( DOCK_LAST > want )) \
-      || die "unreadable: the Dock probe at index $DOCK_LAST, below $want (${DOCK_BASE#*:} before the app was opened, $own of ours expected)"
+      || { DOCK_WHY="unreadable: the Dock probe at index $DOCK_LAST, below $want (${DOCK_BASE#*:} before the app was opened, $own of ours expected)"; return 1; }
     (( SECONDS - start < DOCK_SETTLE_S )) \
-      || die "the Dock still holds $(( DOCK_LAST - want )) tile(s) of ours too many ${DOCK_SETTLE_S}s on: the probe at index $DOCK_LAST, $want expected (${DOCK_BASE#*:} before the app was opened, $own of ours)"
+      || { DOCK_WHY="the Dock still holds $(( DOCK_LAST - want )) tile(s) of ours too many ${DOCK_SETTLE_S}s on: the probe at index $DOCK_LAST, $want expected (${DOCK_BASE#*:} before the app was opened, $own of ours)"; return 1; }
     sleep 1
   done
+}
+
+# dock_check, ending the suite when it fails
+dock_settled() {
+  dock_check "$@" || die "$DOCK_WHY"
 }
 
 # the quit alone, not waiting for the Dock

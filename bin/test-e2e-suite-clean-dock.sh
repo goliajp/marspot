@@ -353,7 +353,8 @@ pace() { # name, our tiles expected, expected exit, expected last line, then the
       a="$(sed -n "${n}p" "'"$T/answers.$name"'")"; [[ -n $a ]] || a="$(tail -1 "'"$T/answers.$name"'")"
       [[ $a == unread=* ]] && { echo "$a"; return 2; }; printf "dock_pid=%s\nindex=%s\n" "${a%%:*}" "${a#*:}"; }
     DOCK_PROBE_EXE=x DOCK_SETTLE_S=1 DOCK_BASE=726:56
-    dock_settled '"$own"' && echo settled' 2>&1)" || got=$?
+    if [[ -n "'"${CHECK:-}"'" ]]; then dock_check '"$own"' && echo settled || { echo "WHY: $DOCK_WHY"; echo returned; }
+    else dock_settled '"$own"' && echo settled; fi' 2>&1)" || got=$?
   if [[ $got == "$want" && $(tail -1 <<<"$out") == "$last"* ]]; then echo "  ok    $name"; else
     echo "  FAIL  $name: exit $got (wanted $want), printed: $out"; failed=1; fi
 }
@@ -368,6 +369,18 @@ pace unread 0 1 "DIE: the Dock probe with 0 tile(s) of ours expected: the Dock l
 pace open-settled 1 0 settled 726:58 726:57
 pace open-left 1 1 "DIE: the Dock still holds 1 tile(s) of ours too many 1s on: the probe at index 58, 57 expected (56 before the app was opened, 1 of ours)" 726:58
 pace open-below 1 1 "DIE: unreadable: the Dock probe at index 56, below 57 (56 before the app was opened, 1 of ours expected)" 726:56
+# the variant a walk records and goes on from: returns with the reason, the suite not ended
+CHECK=1 pace check-settled 1 0 settled 726:58 726:57
+CHECK=1 pace check-left 1 0 returned 726:58
+CHECK=1 pace check-restarted 0 0 returned 900:56
+out="$(cd "$T" && ROOT="$ROOT" SB="$T" bash -c '
+  die() { echo "DIE: $*"; exit 1; }
+  source "$ROOT/bin/_ownership-quit.sh"
+  dock_probe() { printf "dock_pid=726\nindex=58\n"; }
+  DOCK_PROBE_EXE=x DOCK_SETTLE_S=1 DOCK_BASE=726:56
+  dock_check 1; echo "rc=$? why=$DOCK_WHY"' 2>&1)"
+if [[ $out == "rc=1 why=the Dock still holds 1 tile(s) of ours too many 1s on: the probe at index 58, 57 expected (56 before the app was opened, 1 of ours)" ]]; then
+  echo "  ok    check-why"; else echo "  FAIL  check-why: $out"; failed=1; fi
 
 ((failed)) && exit 1
 echo "PASS: test-e2e-suite-clean-dock"

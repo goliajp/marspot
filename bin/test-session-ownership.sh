@@ -168,7 +168,7 @@ state "opened from outside the sessions' coalition"
 # twenty quits and openings: one process throughout.  The graphics driver hands
 # back what the closed windows held over the next seconds: read when it has
 settled_footprint() { local f i; for (( i = 0; i < 50; i++ )); do f=$("$PROBE" footprint "$1"); (( f <= RESIDENT_KIB )) && break; sleep 0.2; done; echo "$f"; }
-RESIDENT_KIB=32768
+RESIDENT_KIB=32768 QUICK_QUITS_MOST_S=12
 keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0; foots=""; loop_start=$SECONDS
 for (( round = 1; round <= 20; round++ )); do
   residents=$(count SHELL_RESIDENT)
@@ -186,7 +186,12 @@ if (( n_ok == 20 )); then
   echo "    resident footprint after each quit, KiB:$foots; descriptors open: $(lsof -p "$L1" 2>/dev/null | grep -c .)"
   most=$(tr ' ' '\n' <<<"$foots" | sort -n | tail -1)
   (( most <= RESIDENT_KIB )) || bad "a resident shell was still at ${most} KiB ten seconds after its quit (budget ${RESIDENT_KIB})"
-  echo "    twenty quits and openings took $(( SECONDS - loop_start )) s"
+  took=$(( SECONDS - loop_start ))
+  echo "    twenty quits and openings took $took s"
+  # slower than this, most quits came after the Dock had dropped the tile
+  # before, and the check below proves nothing about quick ones
+  (( took <= QUICK_QUITS_MOST_S )) \
+    || bad "invalid: twenty quits and openings took $took s, more than $QUICK_QUITS_MOST_S: they were not quick enough to test a quit before the Dock dropped the tile before"
 else
   bad "round $((n_ok + 1)) of 20 did not come back as the same single shell (shells: $(shells_running | tr '\n' ' '))"
 fi
@@ -194,8 +199,11 @@ fi
 # leaves that tile behind for good: one more than the open app's is a
 # tile left.  (Before them the app can have none: the shell a handover
 # started loses its tile with the one that handed over.)
-dock_settled 1
-ok "the Dock holds the open app's tile and no other of ours after twenty quick quits (probe at index $DOCK_LAST)"
+if dock_check 1; then
+  ok "the Dock holds the open app's tile and no other of ours after twenty quick quits (probe at index $DOCK_LAST)"
+else
+  bad "$DOCK_WHY"
+fi
 reattached
 state "after twenty quits"
 
@@ -222,7 +230,7 @@ printf '#!/bin/sh\nwhile kill -0 "$1" 2>/dev/null; do sleep 0.2; done\necho "lan
   "$MARSPOT_STATE_DIR" > "$MARSPOT_STATE_DIR/pending-bundle/land.sh"
 chmod +x "$MARSPOT_STATE_DIR/pending-bundle/land.sh"
 if [[ -n $L1 ]]; then
-  [[ -z "$(dev_core_pids)" ]] || { quit_app; sleep 1; }
+  [[ -z "$(dev_core_pids)" ]] || { quit_app_unpaced; dock_check || bad "$DOCK_WHY"; sleep 1; }
   kept=($(dev_session_pids))
   (( ${#kept[@]} == 2 )) || bad "expected the two sessions of the walk to be kept, found ${#kept[@]}"
   for (( i = 0; i < ${#kept[@]}; i++ )); do
