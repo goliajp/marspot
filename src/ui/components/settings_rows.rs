@@ -15,6 +15,8 @@ pub enum Row {
     ReclaimPrefetch,
     Theme,
     Language,
+    FontFamily,
+    FontSize,
     DimScale,
     CircledWide,
     HelperStrip,
@@ -29,6 +31,10 @@ pub enum Control {
     Toggle(bool),
     /// One of N, with the chosen index.
     Segmented { options: &'static [Msg], chosen: usize },
+    /// A value with a button either side: the previous and next of a
+    /// list (`arrows`), or one less and one more.  Segment 0 is the
+    /// first button, 1 the second.
+    Picker { value: String, arrows: bool, prev: bool, next: bool },
 }
 
 pub struct RowSpec {
@@ -75,6 +81,8 @@ pub const SECTIONS: &[Section] = &[
         rows: &[
             RowSpec { row: Row::Theme, label: Msg::Theme, cost: Msg::CostTheme },
             RowSpec { row: Row::Language, label: Msg::Language, cost: Msg::CostLanguage },
+            RowSpec { row: Row::FontFamily, label: Msg::FontFamily, cost: Msg::CostFontFamily },
+            RowSpec { row: Row::FontSize, label: Msg::FontSize, cost: Msg::CostFontSize },
             // The ladder's *order* is not offered — it says what
             // marspot knows about each pane.  Only its volume is.
             RowSpec { row: Row::DimScale, label: Msg::DimOtherPanes, cost: Msg::CostDimOtherPanes },
@@ -156,6 +164,19 @@ impl Row {
                 options: LANGUAGE_LABELS,
                 chosen: LANGUAGE_CHOICES.iter().position(|l| *l == s.appearance_language).unwrap_or(usize::MAX),
             },
+            Row::FontFamily => Control::Picker {
+                value: s.font_family.clone(),
+                arrows: true,
+                // one family is nowhere to step to
+                prev: crate::font_families::installed().len() > 1,
+                next: crate::font_families::installed().len() > 1,
+            },
+            Row::FontSize => Control::Picker {
+                value: font_size_label(s.font_size),
+                arrows: false,
+                prev: s.font_size > FONT_SIZE_MIN,
+                next: s.font_size < FONT_SIZE_MAX,
+            },
             Row::DimScale => Control::Segmented {
                 options: DIM_LABELS,
                 chosen: chosen_f32(DIM_CHOICES, s.dim_scale),
@@ -164,6 +185,16 @@ impl Row {
                 options: SCROLL_LABELS,
                 chosen: chosen_f32(SCROLL_CHOICES, s.scroll_factor),
             },
+        }
+    }
+
+    /// Whether this row is a picker, and if so whether it steps along a
+    /// list (`true`) or through numbers.
+    pub fn picker_arrows(self) -> Option<bool> {
+        match self {
+            Row::FontFamily => Some(true),
+            Row::FontSize => Some(false),
+            _ => None,
         }
     }
 
@@ -179,6 +210,8 @@ impl Row {
             Row::ReclaimEnabled
             | Row::Theme
             | Row::Language
+            | Row::FontFamily
+            | Row::FontSize
             | Row::CircledWide
             | Row::HelperStrip
             | Row::DimScale
@@ -211,11 +244,30 @@ impl Row {
             }
             Row::Theme => next.appearance_theme = *THEME_CHOICES.get(seg)?,
             Row::Language => next.appearance_language = *LANGUAGE_CHOICES.get(seg)?,
+            Row::FontFamily => {
+                let list = crate::font_families::installed();
+                next.font_family = crate::font_families::step(&list, &s.font_family, seg == 1)?.to_string();
+            }
+            Row::FontSize => next.font_size = step_font_size(s.font_size, seg == 1)?,
             Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
             Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
         }
         (next != *s).then_some(next)
     }
+}
+
+/// The size shown between the size row's buttons: whole points bare,
+/// a hand-edited half point with its fraction.
+pub fn font_size_label(pt: f32) -> String {
+    if pt.fract() == 0.0 { format!("{pt:.0}") } else { format!("{pt:.1}") }
+}
+
+/// One point down or up from `pt`, to a whole point, within the range
+/// the panel offers; `None` at the end of the range.  A hand-edited
+/// size outside the range steps into it.
+fn step_font_size(pt: f32, up: bool) -> Option<f32> {
+    let to = if up { (pt.floor() + 1.0).max(FONT_SIZE_MIN) } else { (pt.ceil() - 1.0).min(FONT_SIZE_MAX) };
+    (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&to).then_some(to)
 }
 
 /// Every row, flattened in draw order.

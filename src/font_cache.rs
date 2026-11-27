@@ -19,24 +19,15 @@ use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGSize;
 use core_text::font::{new_from_name, CTFont, CTFontRef};
 use core_text::font_descriptor::{
-    kCTFontBoldTrait, kCTFontColorGlyphsTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
+    kCTFontColorGlyphsTrait, kCTFontOrientationDefault,
 };
 use marspot_term::fast_hash::FxHashMap;
 use std::collections::HashMap;
 
-// Match iTerm2's default profile (Normal Font = "Monaco 12") so a
-// user switching from iTerm2 to marspot sees identical text.  Menlo is
-// retained as the fallback chain target inside FontCache::build for
-// the rare case where Monaco isn't installed (it ships with macOS,
-// so this should never fire in practice).
-// Font choice: Monaco — macOS-native, what every old-school terminal
-// app reaches for.  Was briefly switched to JetBrains Mono when the
-// CT font-smoothing thickening + sRGB-encoded Metal target were
-// double-bolding glyphs, but with both fixed (atlas no longer asks
-// for smoothing, target is `BGRA8Unorm`) Monaco reads at the
-// designed weight again — the comparison-to-iTerm2 sweet spot.
+// The grid font is the settings' `appearance.font_family` / `font_size`
+// (default Monaco 12, iTerm2's default profile).  A family the machine
+// does not have is drawn in this one, and Menlo after it.
 pub const FONT_NAME: &str = "Monaco";
-pub const FONT_POINT: f64 = 12.0;
 
 /// UI font — used for chrome (panels, tab strip, sidebar, etc.).
 /// PTY/terminal grid keeps `FONT_NAME` mono.  System default on
@@ -413,6 +404,12 @@ pub struct FontCache {
     /// [`FontCache::set_shaper`].  Same Send+Sync+'static bound as
     /// `Rasteriser`; lets FontCache stay clonable / movable.
     shaper: Box<dyn crate::font_trait::Shaper>,
+    /// The family and size the settings named when this was built —
+    /// as named, so a family that is not installed does not read as a
+    /// change on every look.
+    pub built_for: (String, f32),
+    /// The grid font's point size in physical pixels.
+    point: f64,
 }
 
 /// Hard cap on `char_cache` entries.  Realistic terminal use
@@ -425,33 +422,24 @@ const CHAR_CACHE_CAP: usize = 8192;
 
 impl FontCache {
     pub fn build() -> Result<Self, String> {
-        // The terminal cell is the other half of the same rule: its
-        // metrics are used as physical pixels, so the point size that
-        // produces them has to carry the display's scale or the grid
+        // The terminal cell's metrics are used as physical pixels, so
+        // the point size has to carry the display's scale or the grid
         // comes out half physical size on a retina Mac.
-        let font_point = FONT_POINT * crate::ui::chrome_scale();
-        let font = new_from_name(FONT_NAME, font_point)
-            .or_else(|_| new_from_name("Menlo", font_point))
-            .map_err(|_| "could not load font".to_string())?;
-
+        let s = marspot_term::settings::get();
+        let font_point = s.font_size as f64 * crate::ui::chrome_scale();
+        let faces = crate::font_families::open(&s.font_family, font_point)
+            .or_else(|| crate::font_families::open(FONT_NAME, font_point))
+            .or_else(|| crate::font_families::open("Menlo", font_point))
+            .ok_or("no terminal font: neither the chosen family nor Monaco is installed")?;
+        let font = faces.regular.clone();
         let cell_w = compute_cell_width(&font);
         let ascent = font.ascent();
         let cell_h = ascent + font.descent() + font.leading();
 
-        let bold_mask = kCTFontBoldTrait;
-        let italic_mask = kCTFontItalicTrait;
-        let try_variant =
-            |traits: u32| font.clone_with_symbolic_traits(traits, bold_mask | italic_mask);
-        let regular = font.clone();
-        let bold = try_variant(bold_mask).unwrap_or_else(|| font.clone());
-        let italic = try_variant(italic_mask).unwrap_or_else(|| font.clone());
-        let bold_italic =
-            try_variant(bold_mask | italic_mask).unwrap_or_else(|| font.clone());
-
-        let mut fonts = FontRegistry::new(regular);
-        let bold_idx = fonts.intern(bold);
-        let italic_idx = fonts.intern(italic);
-        let bold_italic_idx = fonts.intern(bold_italic);
+        let mut fonts = FontRegistry::new(faces.regular);
+        let bold_idx = fonts.intern(faces.bold);
+        let italic_idx = fonts.intern(faces.italic);
+        let bold_italic_idx = fonts.intern(faces.bold_italic);
 
         let text_fallback_idxs = language::text_fallback(&mut fonts, font_point);
 
@@ -498,6 +486,8 @@ impl FontCache {
             text_fallback_idxs,
             shape_cache: crate::font_shape::ShapeCache::default(),
             shaper,
+            built_for: (s.font_family.clone(), s.font_size),
+            point: font_point,
         })
     }
 

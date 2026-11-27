@@ -181,7 +181,7 @@ pub(super) fn snapshot_on(
 
 #[test]
 pub(super) fn panel_snapshot_settings() {
-    snapshot("settings", 1000, 1552, |renderer, layout| {
+    snapshot("settings", 1000, 1760, |renderer, layout| {
         open_settings(renderer, layout, None);
     });
 }
@@ -193,6 +193,7 @@ pub(super) fn open_settings(
     layout: &Layout,
     pointer: Option<(f64, f64)>,
 ) -> SettingsRender {
+    crate::font_families::refresh_now();
     {
         let settings = crate::settings::Settings {
             reclaim_enabled: false,

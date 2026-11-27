@@ -48,6 +48,8 @@ impl CoreApp {
                 // Pick up anything edited by hand since the last look, so
                 // the panel never shows a value the file disagrees with.
                 marspot::settings::reload_if_changed();
+                // a font installed since the last look is offered
+                marspot::font_families::refresh();
             }
             Some(SurfaceKind::Layout) => {
                 // Staged values start from the live grid on every open.

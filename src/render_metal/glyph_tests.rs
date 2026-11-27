@@ -215,20 +215,20 @@ fn fonts_rebuild_only_when_the_scale_actually_moves() {
     };
     let (w0, h0) = r.cell_dims();
 
-    assert!(!r.rebuild_fonts_if_scale_changed(), "nothing moved");
+    assert!(!r.rebuild_fonts_if_stale(), "nothing moved");
     assert_eq!(r.cell_dims(), (w0, h0));
 
     crate::ui::set_chrome_scale(2.0);
-    assert!(r.rebuild_fonts_if_scale_changed(), "a new density rebuilds");
+    assert!(r.rebuild_fonts_if_stale(), "a new density rebuilds");
     let (w2, h2) = r.cell_dims();
     assert!(
         (w2 - w0 * 2.0).abs() < 0.5 && (h2 - h0 * 2.0).abs() < 0.5,
         "the cell has to double with the density: {w0:.2}x{h0:.2} -> {w2:.2}x{h2:.2}",
     );
-    assert!(!r.rebuild_fonts_if_scale_changed(), "and settle");
+    assert!(!r.rebuild_fonts_if_stale(), "and settle");
 
     crate::ui::set_chrome_scale(saved);
-    assert!(r.rebuild_fonts_if_scale_changed());
+    assert!(r.rebuild_fonts_if_stale());
     let (w1, h1) = r.cell_dims();
     assert!(
         (w1 - w0).abs() < 0.01 && (h1 - h0).abs() < 0.01,

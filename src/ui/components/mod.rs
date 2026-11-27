@@ -79,6 +79,8 @@ mod settings_view_tests;
 #[cfg(test)]
 mod settings_rows_view_tests;
 #[cfg(test)]
+mod settings_font_tests;
+#[cfg(test)]
 mod shortcuts_view_tests;
 #[cfg(test)]
 mod helpers_view_tests;

@@ -244,6 +244,11 @@ pub enum Msg {
     LangEnglish,
     LangJapanese,
     LangChinese,
+    // Settings — the terminal font
+    FontFamily,
+    CostFontFamily,
+    FontSize,
+    CostFontSize,
 }
 
 /// A month, day and time of day, local. Written `M/D HH:mm` in every

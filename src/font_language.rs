@@ -50,8 +50,7 @@ impl FontCache {
     /// shaped line and measured width made under the old one is
     /// forgotten.  Called when the language changes, not per frame.
     pub fn follow_language(&mut self) {
-        let point = super::FONT_POINT * crate::ui::chrome_scale();
-        self.text_fallback_idxs = text_fallback(&mut self.fonts, point);
+        self.text_fallback_idxs = text_fallback(&mut self.fonts, self.point);
         self.char_cache.clear();
         self.shape_cache = crate::font_shape::ShapeCache::default();
         self.ui_measure = UiMeasureCache::default();

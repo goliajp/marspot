@@ -203,6 +203,10 @@ fn text(m: Msg) -> &'static str {
 
         Msg::Language => "Language",
         Msg::CostLanguage => "applies at once to Marspot's own panels and menus",
+        Msg::FontFamily => "Font",
+        Msg::CostFontFamily => "every pane re-wraps to the new cell size; full-screen programs redraw",
+        Msg::FontSize => "Font size",
+        Msg::CostFontSize => "larger is easier to read and fits fewer rows and columns in each pane",
         Msg::CostLanguageRelaunch => "items the system provides switch after Marspot is relaunched",
         Msg::LangEnglish => "English",
         Msg::LangJapanese => "日本語",

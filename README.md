@@ -181,9 +181,9 @@ Honest list, because you will hit these in the first hour:
   ignored, since there is no printer, so what a program prints stays
   on screen. Blinking text (SGR 5) is drawn steady.
 - The settings panel offers the theme (dark, light, high contrast),
-  the language and a handful of behaviours. Fonts, font size and key
-  bindings are not configurable yet — the keys listed above are the
-  keys.
+  the language, the terminal font and its size, and a handful of
+  behaviours. Key bindings are not configurable yet — the keys listed
+  above are the keys.
 
 ## Licence
 

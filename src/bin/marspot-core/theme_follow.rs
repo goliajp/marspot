@@ -35,6 +35,9 @@ static WATCHER: OnceLock<Option<Watcher>> = OnceLock::new();
 /// Watch the files; `wake` is called, from the watcher's thread, after
 /// one of them changed.
 pub(super) fn watch(wake: impl Fn() + Send + 'static) {
+    // the font families the settings panel offers, listed off this
+    // thread before anyone opens it
+    marspot::font_families::refresh();
     let files = [
         marspot::settings::path(),
         marspot::system_theme::path(),
@@ -73,6 +76,8 @@ impl super::CoreApp {
         if looked {
             LOOK_AT_MS.store(now + LOOK_EVERY_MS, Ordering::Relaxed);
             marspot::settings::reload_if_changed();
+            // a font chosen in the settings lands in every window
+            self.adopt_fonts();
         }
         // the language rides the same look
         self.follow_language(looked);

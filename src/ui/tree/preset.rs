@@ -14,7 +14,8 @@ use crate::ui::components::panel_chrome::{self, PanelChrome};
 use crate::ui::core::ViewPainter;
 use crate::ui::strings::{Msg, t};
 use crate::ui::theme::spec::{self, control as c, header};
-use golia_ui_core::{Action, GroupKind, Length, Ui, WidgetId, WidgetState};
+use crate::ui::tree::Tone;
+use golia_ui_core::{Action, AlignCross, GroupKind, Length, TextFont, Ui, WidgetId, WidgetState};
 use marspot_term::layout::Rect;
 
 /// One segment of a segmented control.  `data[0]` is nonzero for the
@@ -166,6 +167,37 @@ pub fn stepper(ui: &mut Ui<'_>, minus: Step, value: &str, plus: Step) {
     });
 }
 
+/// A picker: a value with a button either side, drawn as previous /
+/// next when `arrows` and as minus / plus otherwise.  The value is set
+/// in `font`, centred in `value_w` points and cut short if it is wider.
+pub fn picker(ui: &mut Ui<'_>, prev: Step, value: &str, value_w: f64, next: Step, arrows: bool, font: TextFont) {
+    let side = Length::Pt(c::STEPPER_BUTTON);
+    ui.hstack(|ui| {
+        let end = |ui: &mut Ui<'_>, step: Step, part: StepperPart| {
+            ui.leaf(STEP, side, side)
+                .leaf(STEP, [(part == StepperPart::Plus) as u32, arrows as u32])
+                .radius(Length::Pt(c::BUTTON_RADIUS))
+                .widget(step.id, step.action)
+                .disabled(!step.enabled);
+        };
+        end(ui, prev, StepperPart::Minus);
+        ui.hstack(|ui| {
+            ui.spacer();
+            ui.text_copy(font, Tone::Fg.into(), value).truncate();
+            ui.spacer();
+        })
+        .width(Length::Pt(value_w))
+        .height(side)
+        .align_cross(AlignCross::Center);
+        end(ui, next, StepperPart::Plus);
+    });
+}
+
+/// `(width, height)` of a [`picker`] whose value is `value_w` points.
+pub fn picker_size(value_w: f64) -> (f64, f64) {
+    (spec::px(2.0 * c::STEPPER_BUTTON + value_w), spec::px(c::STEPPER_BUTTON))
+}
+
 /// A status chip: 0 fine, 1 near a limit, anything else a problem.
 pub fn chip(ui: &mut Ui<'_>, m: Measure<'_>, label: &str, severity: u8) {
     let (w, h) = controls::chip_size(label, m);
@@ -206,7 +238,7 @@ pub(super) fn paint(
         TOGGLE => controls::paint_toggle(p, rect, on, state.disabled),
         STEP => {
             let part = if on { StepperPart::Plus } else { StepperPart::Minus };
-            controls::paint_stepper_button(p, spec::snap_rect(rect), part, !state.disabled, state.hovered)
+            controls::paint_step(p, spec::snap_rect(rect), part, data[1] != 0, !state.disabled, state.hovered)
         }
         STEP_VALUE => controls::paint_stepper_value(p, spec::snap_rect(rect), label),
         CHIP => controls::paint_chip(p, rect, label, data[0] as u8),
