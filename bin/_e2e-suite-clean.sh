@@ -5,14 +5,17 @@
 #
 #   snap BEFORE [--lock-pid N] [--live CACHE]
 #       the Foreground record count, the Dock's kept and recent tiles,
-#       the marspot records already listed, the other holders of the lock
+#       every tile the Dock lists (bin/_dock-tiles.py), the marspot records already listed, the other holders of the lock
 #       and this holder's command (N is this suite's holder) and the start
 #       time, written to BEFORE.  Also proves the Dock and tccd log
 #       queries still match anything (24 h back); a positive answer is
 #       kept in CACHE for the rest of the run.
 #   check BEFORE RESULT [--suite-rc N] [--lock-pid N] [--known PID:PATH]... PREFIX...
 #       after the suite, with records given up to ten seconds to go:
-#       - every Dock tile inserted was removed again
+#       - the Dock lists no tile it did not list before, read from the
+#         Dock itself (a tile it kept after its app went is in no app
+#         list), and held at most two of ours at once during the suite
+#         (from the spread of its insert indexes)
 #       - the Foreground count is what BEFORE says, and no kept or recent
 #         tile was added (nor a kept one gone)
 #       - lsappinfo lists no marspot executable or bundle that was not
@@ -27,16 +30,19 @@
 #       says it), then the raw counts, what was found and a last line
 #       clean=0 (nothing left), 1 (something left) or 2 (could not read);
 #       the exit status is the same number.
+#       A tile found left behind with no other holder of the lock stays
+#       until the Dock restarts: the check restarts it (`restored:`).
 #
 # E2E_CLEAN_INPUTS=DIR reads saved inputs from DIR instead of the live
-# sources (lsappinfo.txt, persistent.txt, recent.txt, dock.log,
+# sources (lsappinfo.txt, dock-tiles.txt, persistent.txt, recent.txt, dock.log,
 # tcc.ndjson, status.txt, lock.log, probe-dock.log, probe-tcc.ndjson; a
 # missing file is a source that could not be read).
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 mode=${1:?usage: snap BEFORE ... | check BEFORE RESULT ...}
 before=${2:?before file}
-DOCK_PRED='process == "Dock" AND subsystem == "com.apple.dock" AND category == "dock-tiles"'
+# with loginwindow's line naming each app launched: whose tile the Dock inserts next
+DOCK_PRED='(process == "Dock" AND subsystem == "com.apple.dock" AND category == "dock-tiles") OR (process == "loginwindow" AND eventMessage CONTAINS "Got App URL")'
 TCC_PRED='process == "tccd" AND eventMessage BEGINSWITH "AUTHREQ_"'
 LOCK_LOG=/Users/Shared/bench-lock.log
 
@@ -63,8 +69,15 @@ tcc_probe() { /usr/bin/log show --last 24h --style ndjson --predicate "$TCC_PRED
 # from a few seconds before the snap (LOOKBACK in _e2e-suite-clean.py):
 # our own take is logged just before it
 lock_lines() { /usr/bin/awk -F'\t' -v s="$start_epoch" '$1 >= s - 5' "$LOCK_LOG"; }
+# the Dock's own list of its tiles, or `untrusted` (it never prompts)
+dock_tiles() {
+  local pid
+  pid=$(/usr/bin/pgrep -x -U "$(id -u)" Dock) || return 1
+  /usr/bin/python3 "$here/_dock-tiles.py" "$pid"
+}
 grab_state() {
   grab lsappinfo.txt /usr/bin/lsappinfo list
+  grab dock-tiles.txt dock_tiles
   grab persistent.txt dock_key persistent-apps
   grab recent.txt dock_key recent-apps
 }
@@ -142,6 +155,11 @@ out="$head$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" ch
 clean=${out##*clean=}
 # the decision itself failing proves nothing either way
 case $clean in 0 | 1 | 2) ;; *) out+=$'\n'"unread: the check failed"$'\n'"clean=2"; clean=2 ;; esac
+if [[ $out == *$'\n'"restore: dock"$'\n'* && -z ${E2E_CLEAN_INPUTS:-} ]]; then
+  krc=0
+  /bin/launchctl kickstart -k "gui/$(id -u)/com.apple.Dock.agent" >/dev/null 2>&1 || krc=$?
+  out="${out%clean=*}restored: the Dock restarted (launchctl exit $krc)"$'\n'"clean=$clean"
+fi
 printf '%s\n' "$out" >"$result.tmp" && mv "$result.tmp" "$result"
 printf '%s\n' "$out"
 exit "$clean"

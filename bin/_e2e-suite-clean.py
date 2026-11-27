@@ -5,10 +5,12 @@
 # counts, what was found and last clean=0|1|2 (also the exit status).
 # CLEAN_KNOWN holds PID:PATH records listed before the run, one per line.
 import collections, json, os, re, sys, urllib.parse
-from datetime import datetime
+
+# no __pycache__ next to the scripts, in this tree or a runner's copy
+sys.dont_write_bytecode = True
+import _e2e_dock as dock  # noqa: E402
 
 DOCK_APP = "/System/Library/CoreServices/Dock.app"
-INSERT, REMOVE = "Inserting tile", "Removing tiles identical to"
 
 
 def read(d, n):
@@ -83,7 +85,8 @@ def state(d):
         recs = None
     else:
         c["fg"] = sum(r["type"] == "Foreground" for r in recs)
-        # a running app's Dock tile exists only for a regular (Foreground) app
+        # the regular apps running: a tile the Dock kept after its app went is not among
+        # them, and is read from the Dock itself (_e2e_dock.tiles_check)
         c["fg_set"] = sorted(r["bundle"] or (r["paths"] or [r["name"]])[0] for r in recs if r["type"] == "Foreground")
     for k, n in (("persistent", "persistent.txt"), ("recent", "recent.txt")):
         t = read(d, n)
@@ -92,10 +95,6 @@ def state(d):
         else:
             c[k] = tile_entries(t)
     return c, recs, why
-
-
-def tile_lines(text):
-    return [l for l in (text or "").splitlines() if INSERT in l or REMOVE in l]
 
 
 def tcc_requests(text):
@@ -170,6 +169,7 @@ def snap(d, me):
         if k in c:
             out += ["%s=%d" % (k, len(c[k])), "%s_entries=%s" % (k, json.dumps(c[k]))]
     out += ["unread=" + w for w in why]
+    out += dock.snap(d, read)
     out += ["known=" + key(r) for r in recs or [] if any(ours(p) for p in r["paths"] + [r["name"]])]
     st = read(d, "status.txt")
     if st is not None:
@@ -178,62 +178,9 @@ def snap(d, me):
         if own is not None:
             out.append("self_cmd=" + own)
     if read(d, "probe-dock.log") is not None or read(d, "probe-tcc.ndjson") is not None:
-        out.append("dock_live=%d" % bool(tile_lines(read(d, "probe-dock.log"))))
+        out.append("dock_live=%d" % bool(dock.tile_lines(read(d, "probe-dock.log"))))
         out.append("tcc_live=%d" % bool(tcc_requests(read(d, "probe-tcc.ndjson"))))
     print("\n".join(out))
-
-
-def dock_count(lines):
-    """inserts and removals by reason, and removal events: a removal line right after a
-    removal line of another reason within a second is the same removal logged twice,
-    which only ever undercounts removals.  Every line that is not an insert counts as a
-    removal: one by an unrelated app while we hold the lock alone can offset one of our
-    inserts here, and the lsappinfo record check is what catches our app then"""
-    ins, rem, events, prev = collections.Counter(), collections.Counter(), 0, None
-    for l in lines:
-        m = re.search(r"for reason: (.*?)\s*$", l)
-        reason = m.group(1) if m else "?"
-        t = datetime.strptime(l[:23], "%Y-%m-%d %H:%M:%S.%f")
-        if INSERT in l:
-            ins[reason] += 1
-            prev = None
-            continue
-        rem[reason] += 1
-        if prev and prev[1] != reason and (t - prev[0]).total_seconds() <= 1.0:
-            prev = None
-            continue
-        events += 1
-        prev = (t, reason)
-    return ins, rem, events
-
-
-def by_reason(c):
-    return "; ".join("%d %s" % (n, r) for r, n in c.most_common()) or "none"
-
-
-def dock_check(d, b, wide_unread):
-    dock = read(d, "dock.log")
-    if dock is None or not dock.startswith("Timestamp"):
-        wide_unread.append("dock log: log show gave no output")
-        return
-    lines = tile_lines(dock)
-    if not lines and b.get("dock_live") != "1":
-        wide_unread.append("dock log: no tile line in the suite nor in the 24 h probe (predicate or format dead)")
-        return
-    try:
-        ins, rem, events = dock_count(lines)
-    except ValueError:
-        wide_unread.append("dock log: a tile line without a time")
-        return
-    print("dock: inserts=%d removal_lines=%d removal_events=%d" % (sum(ins.values()), sum(rem.values()), events))
-    print("dock: inserts by reason: " + by_reason(ins))
-    print("dock: removals by reason: " + by_reason(rem))
-    idx = [int(i) for i in re.findall(r"at index: (\d+)", "\n".join(lines))]
-    print("dock: max insert index=%s" % (max(idx) if idx else "none"))
-    # one "Removing tiles identical to" line can take several tiles away, so more inserts than
-    # removal lines is information; the Foreground set and the tile lists are the hard checks
-    if sum(ins.values()) > events:
-        print("info: dock: %d tile insert(s), %d removal(s)" % (sum(ins.values()), events))
 
 
 def window(d, b, me):
@@ -368,7 +315,9 @@ def check(d, before, lrc, lout, me, prefixes):
                 sorted((now - was).elements()), sorted((was - now).elements())))
     under = lambda p: any(strip(p).startswith(x) for x in prefixes)
     tiles_check(b, c, left, unread)
-    dock_check(d, b, wide_unread)
+    named = lambda p: ours(p) or under(p)
+    dock.log_check(d, b, read, ours, under, left, wide, wide_unread)
+    dock.tiles_check(d, b, read, named, left, wide, unread)
     for r in recs or []:
         if key(r) in known:
             known.remove(key(r))
@@ -390,6 +339,9 @@ def check(d, before, lrc, lout, me, prefixes):
         print("window: alone")
         left, unread = left + wide, unread + wide_unread
     print("".join("left: %s\n" % l for l in left) + "".join("unread: %s\n" % u for u in unread), end="")
+    # a tile left in the Dock stays until the Dock restarts; restarting it is ours to do only alone
+    if kind == "alone" and any(l.startswith("dock") for l in left):
+        print("restore: dock")
     clean = 1 if left else 2 if unread else 0
     print("clean=%d" % clean)
     return clean

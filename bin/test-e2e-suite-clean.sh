@@ -12,96 +12,8 @@ T="$(mktemp -d /tmp/marspot-suite-clean.XXXXXX)"
 trap 'rm -rf "${T:?}"' EXIT
 failed=0
 
-DOCK='1) "Dock" ASN:0x0-0x1001:
-    bundle path="/System/Library/CoreServices/Dock.app"
-    executable path="/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock"
-    pid = 726 token=[sess=1] type="UIElement" flavor=4
-2) "Finder" ASN:0x0-0x1002:
-    bundle path="/System/Library/CoreServices/Finder.app"
-    executable path="/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder"
-    bundleID="com.apple.finder"
-    pid = 729 token=[sess=1] type="Foreground" flavor=3'
-MARSPOT='3) "Marspot" ASN:0x0-0x1003:
-    bundle path="/tmp/msp-e2e-1-1-lander/Marspot.app"
-    executable path="/tmp/msp-e2e-1-1-lander/Marspot.app/Contents/MacOS/marspot-shell"
-    bundleID=[ NULL ]
-    pid = 4242 token=[sess=1] type="BackgroundOnly" flavor=3'
-MARSPOT_PRIVATE="${MARSPOT//"/tmp/"/"/private/tmp/"}"
-HEADER='Timestamp              Ty Process[PID:TID]'
-TILE='Df Dock[726:1d82] [com.apple.dock:dock-tiles]'
-launch() { echo "2026-11-27 10:00:$1 $TILE Inserting tile: <private> at index: 37 for reason: -[DockBar _handleLaunchNotification:data:]"; }
-remove() { echo "2026-11-27 10:00:$1 $TILE Removing tiles identical to: <private> for reason: ${2:-_emptyDeleteList()}"; }
-TILE_REMOVED='-[DockBar handleDockEventTileRemoved:]'
-ndjson() { python3 -c 'import json,sys; [print(json.dumps({"eventMessage": m})) for m in sys.argv[1:]]' "$@"; }
-attribution() { # msgID, responsible path, accessing path
-  echo "AUTHREQ_ATTRIBUTION: msgID=$1, attribution={responsible={TCCDProcess: identifier=x, pid=1708, auid=501, euid=501, responsible_path=$2, binary_path=$2}, accessing={TCCDProcess: identifier=y, pid=70053, auid=501, euid=501, binary_path=$3}, requesting={TCCDProcess: identifier=com.apple.WindowServer, pid=422, auid=88, euid=88, binary_path=/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/WindowServer}, },"
-}
-ctx() { echo "AUTHREQ_CTX: msgID=$1, function=<private>, service=$2, preflight=yes, query=1, client_dict=(null), daemon_dict=<private>"; }
-OTHER=/Applications/Other.app/Contents/MacOS/Other
-BUILD=/Users/u/work/e2e-marspot/target/release/marspot-shell
-LANDER=/private/tmp/msp-e2e-1-1-lander/Marspot.app/Contents/MacOS/marspot-shell
-TCC_OTHER="$(ndjson "$(ctx 9.1 kTCCServiceCamera)" "$(attribution 9.1 "$OTHER" "$OTHER")")"
-TCC_OURS="$(ndjson "$(ctx 401.7 kTCCServiceAppleEvents)" "$(attribution 401.7 "$BUILD" "$OTHER")")"
-result() { echo "AUTHREQ_RESULT: msgID=$1, authValue=1, authReason=5, authVersion=1, desired_auth=0, error=(null),"; }
-TCC_LISTEN="$(ndjson "$(ctx 403.1 kTCCServiceListenEvent)" "$(attribution 403.1 "$OTHER" "$BUILD")" "$(result 403.1)")"
-TCC_LISTEN_PROMPT="$(ndjson "$(attribution 404.1 "$OTHER" "$BUILD")" "$(ctx 404.1 kTCCServiceListenEvent)" \
-  "AUTHREQ_PROMPTING: msgID=404.1, service=kTCCServiceListenEvent" "$(result 404.1)")"
-TCC_LISTEN_ASK="$(ndjson "AUTHREQ_CTX: msgID=405.1, function=<private>, service=kTCCServiceListenEvent, preflight=no, query=1," \
-  "$(attribution 405.1 "$OTHER" "$BUILD")" "$(result 405.1)")"
-TCC_ACCESSING="$(ndjson "$(ctx 402.1 kTCCServiceListenEvent)" "$(attribution 402.1 "$OTHER" "$LANDER")")"
-ME=$'4000\theavy\tholding since 2026-11-27 10:00:00\tsh -c stopped=; ...'
-SOMEONE=$'5000\theavy\tholding since 2026-11-27 09:59:00\tcargo build'
-# tile LABEL [PATH [BUNDLE]]: one Dock tile as `defaults read com.apple.dock` prints it
-tile() {
-  printf '    {\n        GUID = 1;\n        "tile-data" =         {\n            "bundle-identifier" = "%s";\n' "${3:-com.x.$1}"
-  printf '            "file-data" =             {\n                "_CFURLString" = "file://%s/";\n            };\n' "${2:-/Applications/$1.app}"
-  printf '            "file-label" = %s;\n        };\n        "tile-type" = "file-tile";\n    },\n' "$1"
-}
-# each argument is one tile's words, split on purpose
-# shellcheck disable=SC2086
-tiles() { echo "("; local t; for t in "$@"; do tile $t; done; echo ")"; }
-# the before snapshot's list of the tiles in /Applications named
-entries() { local o="" l; for l; do o+="${o:+, }[\"/Applications/$l.app/\", \"com.x.$l\", \"$l\"]"; done; echo "[$o]"; }
-OURS_TILE="Marspot /private/tmp/msp-e2e-1-1-lander/Marspot.app com.goliajp.marspot"
-
-# $1 name; fills $T/$1 with the inputs of a clean suite run alone
-base() {
-  local d="$T/$1"
-  mkdir -p "$d/in"
-  printf 'start=2026-11-27 10:00:00\nstart_epoch=1700000000\nfg=1\npersistent=2\nrecent=1\nothers_snap=\ndock_live=1\ntcc_live=1\n' >"$d/before"
-  echo 'fg_set=["com.apple.finder"]' >>"$d/before"
-  echo "persistent_entries=$(entries A B)" >>"$d/before"
-  echo "recent_entries=$(entries C)" >>"$d/before"
-  printf '%s\n' "$DOCK" >"$d/in/lsappinfo.txt"
-  tiles A B >"$d/in/persistent.txt"
-  tiles C >"$d/in/recent.txt"
-  { echo "$HEADER"; launch 01.000; remove 05.000; } >"$d/in/dock.log"
-  printf '%s\n{"count":2,"finished":1}\n' "$TCC_OTHER" >"$d/in/tcc.ndjson"
-  printf '%s\n' "$ME" >"$d/in/status.txt"
-  # our own take, logged a second before the snap
-  printf '1699999999\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$d/in/lock.log"
-}
-
-# $1 name, $2 expected exit, then lines the result must have, then -- and
-# the extra arguments of the check
-expect() {
-  local name=$1 want=$2 d="$T/$1" got=0 ok=1 line
-  shift 2
-  local lines=()
-  while [[ $# -gt 0 && $1 != -- ]]; do lines+=("$1"); shift; done
-  [[ $# -gt 0 ]] && shift
-  E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" check "$d/before" "$d/result" \
-    --suite-rc 0 --lock-pid 4000 "$@" /tmp/msp-e2e-1- >"$d/out" 2>&1 || got=$?
-  [[ $got == "$want" && $(tail -1 "$d/result") == "clean=$want" && $(head -1 "$d/result") == suite_rc=0 ]] || ok=0
-  for line in "${lines[@]}"; do grep -qF -- "$line" "$d/result" || ok=0; done
-  if ((ok)); then
-    echo "  ok    $name (clean=$got)"
-  else
-    echo "  FAIL  $name: exit $got, wanted $want with: ${lines[*]}"
-    sed 's/^/        /' "$d/out"
-    failed=1
-  fi
-}
+# shellcheck source=bin/_e2e-suite-clean-fixtures.sh
+source "$ROOT/bin/_e2e-suite-clean-fixtures.sh"
 
 base clean
 expect clean 0 "dock: inserts=1 removal_lines=1 removal_events=1" "dock: removals by reason: 1 _emptyDeleteList()" "window: alone"
@@ -112,12 +24,12 @@ expect tile-removed 0 "dock: removals by reason: 1 $TILE_REMOVED"
 
 base insert
 launch 06.000 >>"$T/insert/in/dock.log"
-expect insert 0 "info: dock: 2 tile insert(s), 1 removal(s)" "dock: max insert index=37"
+expect insert 0 "dock: inserts=2 removal_lines=1 removal_events=1" "dock: tiles at once=1 (most allowed 2, insert index 37..37)"
 
 # one removal logged under both reasons is one removal
 base logged-twice
 { echo "$HEADER"; launch 01.000; launch 02.000; remove 05.000; remove 05.004 "$TILE_REMOVED"; } >"$T/logged-twice/in/dock.log"
-expect logged-twice 0 "dock: inserts=2 removal_lines=2 removal_events=1" "info: dock: 2 tile insert(s), 1 removal(s)"
+expect logged-twice 0 "dock: inserts=2 removal_lines=2 removal_events=1"
 
 base two-removals
 { echo "$HEADER"; launch 01.000; launch 02.000; remove 05.000; remove 05.104; } >"$T/two-removals/in/dock.log"
@@ -265,7 +177,7 @@ base shared
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared/in/status.txt"
 launch 06.000 >>"$T/shared/in/dock.log"
 printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/shared/in/tcc.ndjson"
-expect shared 0 "window: shared-window (holding at check: 5000)" "info: dock: 2 tile insert(s), 1 removal(s)" \
+expect shared 0 "window: shared-window (holding at check: 5000)" "dock: inserts=2 removal_lines=1" \
   "info: tcc: kTCCServiceAppleEvents $BUILD"
 
 base shared-log
@@ -328,7 +240,7 @@ expect own-unknown 2 "1 lock take in the start second, not told apart from ours"
 d="$T/snap"
 mkdir -p "$d/in"
 printf '%s\n%s\n' "$DOCK" "$MARSPOT_PRIVATE" >"$d/in/lsappinfo.txt"
-cp "$T/clean/in/persistent.txt" "$T/clean/in/recent.txt" "$d/in/"
+cp "$T/clean/in/persistent.txt" "$T/clean/in/recent.txt" "$T/clean/in/dock-tiles.txt" "$d/in/"
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$d/in/status.txt"
 cp "$T/clean/in/dock.log" "$d/in/probe-dock.log"
 printf '%s\n' "$TCC_OTHER" >"$d/in/probe-tcc.ndjson"
@@ -338,7 +250,7 @@ E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before2" --loc
 E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before3" --lock-pid 4000
 ok=1
 for l in fg=1 persistent=2 recent=1 "known=4242:/tmp/msp-e2e-1-1-lander/Marspot.app" others_snap=5000 dock_live=1 tcc_live=1 \
-  "self_cmd=sh -c stopped=; ..." "recent_entries=[[\"/Applications/C.app/\", \"com.x.C\", \"C\"]]"; do
+  "self_cmd=sh -c stopped=; ..." "dock_tiles=$(dock_json Finder A B C)" "recent_entries=[[\"/Applications/C.app/\", \"com.x.C\", \"C\"]]"; do
   grep -qxF -- "$l" "$d/before" && grep -qxF -- "$l" "$d/before2" || ok=0
 done
 grep -qx 'dock_live=1' "$d/live" && grep -qx 'tcc_live=1' "$d/live" || ok=0
