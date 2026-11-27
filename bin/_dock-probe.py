@@ -14,7 +14,10 @@
 # 4 at once when an insert or app line has no time it can be read by (printed
 # as `untimed=LINE`).
 # Which app an insert is for is decided as in the suite's check
-# (_e2e_dock.attributed).
+# (_e2e_dock.attributed), and an insert taken as EXE's stands only once
+# the stream holds a line logged ATTRIBUTE_S past it or SETTLE_S went by
+# with the same answer: a second insert or name logged just after it
+# would make it unattributable, and a stream line can come late.
 import sys, time
 
 sys.dont_write_bytecode = True
@@ -22,11 +25,13 @@ import _e2e_dock as dock  # noqa: E402
 
 TILES = "[com.apple.dock:dock-tiles]"
 BANNER = "Filtering the log data"
+SETTLE_S = 1.0
 
 
 def find_insert(lines, exe, pid):
-    """(index, line number) of the first tile the Dock pid inserted that is named for exe;
-    "other" when another Dock logged a tile line before it, or None"""
+    """(index, line number, settled) of the first tile the Dock pid inserted that is named
+    for exe, settled when a later line is logged ATTRIBUTE_S past it; "other" when another
+    Dock logged a tile line before it, or None"""
     named = {n: (i, u) for n, i, _, u in dock.attributed(lines)}
     for n, l in enumerate(lines, 1):
         if TILES not in l:
@@ -34,8 +39,18 @@ def find_insert(lines, exe, pid):
         if dock.dock_pid(l) != pid:
             return "other"
         if n in named and named[n][1] == dock.strip_url(exe):
-            return named[n][0], n
+            t = dock.stamp(l)
+            later = any((dock.stamp(k) - t).total_seconds() > dock.ATTRIBUTE_S for k in lines[n:] if timed(k))
+            return named[n][0], n, later
     return None
+
+
+def timed(l):
+    try:
+        dock.stamp(l)
+        return True
+    except ValueError:
+        return False
 
 
 def find_removal(lines, start, pid):
@@ -69,18 +84,31 @@ def untimed(lines):
     return None
 
 
-def poll(paths, secs, look):
+def poll(paths, secs, look, settle=None):
     """look's answer once it has one, None at SECS; Untimed(line) at once when a line it reads
-    has no time: waiting does not give it one"""
+    has no time: waiting does not give it one.  With settle, an answer stands once settle says
+    so or it held SETTLE_S unchanged; one that has not stood by SECS is None"""
     end = time.monotonic() + secs
+    held = None
     while True:
         lines = [l for p in paths for l in read_lines(p)]
         try:
             got = look(lines)
         except ValueError:
             raise Untimed(untimed(lines))
-        if got is not None or time.monotonic() >= end:
-            return got
+        now = time.monotonic()
+        if settle is None:
+            if got is not None or now >= end:
+                return got
+        elif got is None:
+            held = None
+        else:
+            if held is None or held[0] != got:
+                held = (got, now)
+            if settle(got) or now - held[1] >= SETTLE_S:
+                return got
+        if now >= end:
+            return None
         time.sleep(0.1)
 
 
@@ -97,12 +125,13 @@ def answer(a):
         got = poll(a[2:], float(a[1]), lambda ls: True if any(BANNER in l for l in ls) else None)
         return 0 if got else 1
     if a[0] == "insert":
-        got = poll([a[1]], float(a[4]), lambda ls: find_insert(ls, a[2], a[3]))
+        got = poll([a[1]], float(a[4]), lambda ls: find_insert(ls, a[2], a[3]),
+                   lambda g: g == "other" or g[2])
         if got == "other":
             return 3
         if got is None:
             return 1
-        print("index=%d\nline=%d" % got)
+        print("index=%d\nline=%d" % got[:2])
         return 0
     if a[0] == "removed":
         got = poll([a[1]], float(a[4]), lambda ls: find_removal(ls, int(a[2]), a[3]))

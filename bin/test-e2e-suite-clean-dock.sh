@@ -105,11 +105,11 @@ expect probe-tile-stays 0 "dock: tiles at once=2 (most allowed 2, insert index 3
 # the suite's first tile before the removal line after the probe: A at 38 beside the probe's tile,
 # which then goes (A moves to 37), B at 38, C at 39.  Three held, two counted: not read
 base probe-went-late
-{ echo "$HEADER"; opened "$DOCKPROBE_URL" 00.000; launch 00.004 37; opened "$APP_URL" 00.200; launch 00.204 38
+{ echo "$HEADER"; opened "$DOCKPROBE_URL" 00.000; launch 00.004 37; opened "$APP_URL" 00.300; launch 00.304 38
   remove 00.600; opened "$APP_URL" 01.000; launch 01.004 38; opened "$APP_URL" 02.000; launch 02.004 39
   remove 03.000; remove 04.000; remove 05.000; } >"$T/probe-went-late/in/dock.log"
 expect probe-went-late 2 "dock: tiles at once=2 (most allowed 2, insert index 38..39, 37 before the suite)" \
-  "unread: dock: tiles at once: the suite's tile at 2026-11-27 10:00:00.204 came before the Dock logged the probe's tile gone, so the count can be one low"
+  "unread: dock: tiles at once: the suite's tile at 2026-11-27 10:00:00.304 came before the Dock logged the probe's tile gone, so the count can be one low"
 # quit and opened again faster than the Dock drops the last tile (mini2, 2026-11-27 22:16:04):
 # a tile per opening, index 25 up to 41, all of them kept
 base quick-reopens
@@ -171,6 +171,28 @@ base probe-lines
   opened "$APP_URL" 01.000; launch 01.004 37; remove 05.000
   opened "$DOCKPROBE_URL" 09.000; launch 09.004 39; remove 09.900; } >"$T/probe-lines/in/dock.log"
 expect probe-lines 0 "dock: tiles at once=1 (most allowed 2, insert index 37..37, 37 before the suite)"
+
+# step B on mini2, 2026-11-28 01:45:32 (Dock pid 84089): the probe after test-reopen-after-quit.sh,
+# another project's headless browser named 1 ms nearer its insert than the probe.  The probe's
+# index is 10, as before the suite
+CHROME=/Users/x/Library/Caches/ms-playwright/chromium_headless_shell-1200/chrome-mac/headless_shell
+stepb() { opened "$DOCKPROBE_URL" 32.214; opened "$CHROME" 32.215; opened "$CHROME" 32.223; opened "$DOCKPROBE_URL" 32.225
+  launch 32.227 10; opened "$CHROME" 32.228; opened "$DOCKPROBE_URL" 32.240; }
+# the step B lines as the suite's log sees them: the probe's insert is not the suite's, and with
+# the index equal before and after, the suite is clean
+base step-b
+probe_before step-b 10
+probed 10 >"$T/step-b/in/probe-end.txt"
+{ echo "$HEADER"; stepb; remove 33.000; } >"$T/step-b/in/dock.log"
+expect step-b 0 "dock: tiles at once=0 (most allowed 2)" "dock probe: index before=10 after=10"
+# two inserts in one window with two programs named, next to another job: not passed
+base two-in-window
+probe_before two-in-window 10
+probed 10 >"$T/two-in-window/in/probe-end.txt"
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/two-in-window/in/status.txt"
+{ echo "$HEADER"; opened "$DOCKPROBE_URL" 02.000; opened "$APP_URL" 02.001; launch 02.004 10; launch 02.010 11
+  remove 03.000; remove 04.000; } >"$T/two-in-window/in/dock.log"
+expect two-in-window 2 "(2 insert(s) named for no app)"
 
 # a tile gone during the suite lowers the base: stricter, never laxer
 base lower-insert
@@ -252,16 +274,35 @@ reads removed-after 0 "" py removed "$S" 8 726 0
 reads removed-none 1 "" py removed "$S" 9 726 0
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.300 40; } >"$S.late"
 reads insert-too-late 1 "" py insert "$S.late" "$EXE" 726 0
-# the name logged 5 ms after the insert (mini2, 2026-11-27 22:35:59.996)
+# the name logged 5 ms after the insert (mini2, 2026-11-27 22:35:59.996); nothing logged after
+# it, so it stands once it held a second
 { echo 'Filtering'; launch 02.000 40; opened "$DOCKPROBE_URL" 02.005; } >"$S.after"
-reads insert-named-after 0 $'index=40\nline=2' py insert "$S.after" "$EXE" 726 0
+reads insert-named-after 0 $'index=40\nline=2' py insert "$S.after" "$EXE" 726 3
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.other"
 reads insert-other-dock 3 "" py insert "$S.other" "$EXE" 900 0
-# the nearest name on either side wins: another app named 100 ms before, the probe 10 ms after
+# another app named nearer the insert than the probe, on either side: it took no tile in the
+# lines, the probe is built to take one, and the Dock inserted one
 { echo 'Filtering'; opened /Applications/Other.app 02.000; launch 02.100 40; opened "$DOCKPROBE_URL" 02.110; } >"$S.near"
-reads insert-nearest-after 0 $'index=40\nline=3' py insert "$S.near" "$EXE" 726 0
+reads insert-other-before 0 $'index=40\nline=3' py insert "$S.near" "$EXE" 726 3
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.100 40; opened /Applications/Other.app 02.110; } >"$S.near2"
-reads insert-nearest-other 1 "" py insert "$S.near2" "$EXE" 726 0
+reads insert-other-after 0 $'index=40\nline=3' py insert "$S.near2" "$EXE" 726 3
+# the same, with the other app known to take a tile: whose cannot be told, so it is not taken
+{ echo 'Filtering'; opened /Applications/Other.app 01.000; launch 01.004 39; remove 01.500
+  opened "$DOCKPROBE_URL" 02.000; launch 02.100 40; opened /Applications/Other.app 02.110; } >"$S.near3"
+reads insert-other-taker 1 "" py insert "$S.near3" "$EXE" 726 0
+# step B: the probe's index is 10, as before the suite
+{ echo 'Filtering'; stepb; remove 47.867; } >"$S.stepb"
+reads insert-step-b 0 $'index=10\nline=6' py insert "$S.stepb" "$EXE" 726 0
+# two inserts in one window with two programs named: neither is guessed
+{ echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; opened /Applications/Other.app 02.001; launch 02.004 40
+  launch 02.010 41; remove 03.000; } >"$S.two"
+reads insert-two-in-window 1 "" py insert "$S.two" "$EXE" 726 0
+# a second insert logged just after the probe's makes it unattributable: the answer waits for
+# the window to pass
+{ echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.grow"
+( sleep 0.4; { opened /Applications/Other.app 02.005; launch 02.010 41; remove 03.000; } >>"$S.grow" ) &
+reads insert-grows 1 "" py insert "$S.grow" "$EXE" 726 2
+wait
 # a line with no time is answered at once, not after the wait
 { echo 'Filtering'; echo "garbled Got App URL: file://$DOCKPROBE_URL/"; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.untimed"
 t0=$SECONDS

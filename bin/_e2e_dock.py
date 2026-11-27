@@ -68,21 +68,45 @@ def strip_url(p):
 
 
 def attributed(lines):
-    """(line number from 1, insert index, Dock pid, app) for each insert line: the app is the
-    one named by loginwindow's line nearest to the insert, before or after it, within
-    ATTRIBUTE_S, or None.  The name comes first nearly always (1 of 608 inserts on mini2,
-    2026-11-27 21:30-23:07, had it 5 ms after), and a program can be named again after its
-    insert (the ownership walk's probe is named three times per start)"""
+    """(line number from 1, insert index, Dock pid, app) for each insert line, the app or None.
+    The apps named for an insert are those loginwindow names within ATTRIBUTE_S of it, before
+    or after: the name comes first nearly always (1 of 608 inserts on mini2, 2026-11-27
+    21:30-23:07, had it 5 ms after), and a program is named again around its insert (the
+    probes are named three times per start), so the nearest name says nothing.
+      - another insert within ATTRIBUTE_S: None, two tiles and the names cannot be paired
+      - one app named: that app
+      - several named: the one of them known to take a tile, or None when that is not one app.
+        Known to take a tile: the Dock probe (a regular app built for it), and an app named
+        alone next to an insert alone elsewhere in the lines.  A program named here that is
+        known to take no tile (another project's headless browser, named 1 ms nearer the
+        probe's insert than the probe on mini2, 2026-11-28 01:45:32) is not a candidate, since
+        the Dock inserted one tile in the window.  A program whose first tile ever is this
+        one is not known yet: then the probe can be named for it, the residue of the rule"""
     urls = [(stamp(l), strip_url(l.split(URL, 1)[1])) for l in lines if URL in l]
-    out = []
+    ins = []
     for n, l in enumerate(lines, 1):
         m = re.search(r"Inserting tile: .* at index: (\d+)", l)
-        if not m:
-            continue
-        t = stamp(l)
-        near = [(abs((t - ut).total_seconds()), u) for ut, u in urls]
-        near = [c for c in near if c[0] <= ATTRIBUTE_S]
-        out.append((n, int(m.group(1)), dock_pid(l), min(near)[1] if near else None))
+        if m:
+            ins.append((n, int(m.group(1)), dock_pid(l), stamp(l)))
+
+    def near(t):
+        return abs(t.total_seconds()) <= ATTRIBUTE_S
+
+    def named(n, t):
+        crowded = any(near(t - u) for k, _, _, u in ins if k != n)
+        return crowded, {u for ut, u in urls if near(t - ut)}
+
+    seen = [(n, i, p) + named(n, t) for n, i, p, t in ins]
+    takers = {next(iter(u)) for _, _, _, c, u in seen if not c and len(u) == 1}
+    out = []
+    for n, i, p, crowded, apps in seen:
+        known = [u for u in apps if u in takers or u.endswith(PROBE)]
+        app = None
+        if not crowded and len(apps) == 1:
+            app = next(iter(apps))
+        elif not crowded and len(known) == 1:
+            app = known[0]
+        out.append((n, i, p, app))
     return out
 
 
