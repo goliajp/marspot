@@ -85,7 +85,7 @@ pub(super) fn accounts(r: &Row) -> (Vec<Account>, f64) {
 pub(super) fn plan_row(r: &Row, scale: f64) -> Plan {
     let (acc, pi) = accounts(r);
     let panes = panes(r, scale);
-    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, short: true, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false };
+    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false };
     plan(&i, None)
 }
 
@@ -97,33 +97,38 @@ fn line(plan: &Plan) -> String {
     plan.switches.iter().map(|s| format!("{}:P{}>P{}@{:.1}-{:.1}/{}", s.sid, s.from, s.to, s.t_open, s.t_dead, s.kind.word())).collect::<Vec<_>>().join(" ")
 }
 
-/// What the rows must give at the logged loads: 481 leaves P3 for P7,
-/// 428 stays as the keeper, 482 stays.  Where 441 goes is printed, not
-/// asserted: P7 holds 20 points and over the day cannot carry 441, 481
-/// and 430 without running out itself, and P5's plain room is what the
-/// keeper falls back on when P3 empties under it, so the plan sends 441
-/// to P8 (whose reserve is taken already) or lets the refusal place it.
+/// What the rows must give at the logged loads: 441 leaves P3 for P7,
+/// 428 stays as the keeper, 482 stays, P8 is never a target.  Where 481
+/// goes is printed, not asserted: P3 empties at the high band within
+/// two hours, and of 481 and 430, which run at nearly the same plain
+/// speed, the plan moves 430, whose rewrite costs half of 481's
+/// (481 holds 0.9 M tokens), and lets 481 stay with the keeper.
 fn check(plan: &Plan, what: &str) -> Vec<String> {
     let mut bad = Vec::new();
-    if to_of(plan, 481) != vec![7] {
-        bad.push(format!("{what}: 481 goes {:?}", to_of(plan, 481)));
+    if to_of(plan, 441) != vec![7] {
+        bad.push(format!("{what}: 441 goes {:?}", to_of(plan, 441)));
     }
     if !to_of(plan, 428).is_empty() || !to_of(plan, 482).is_empty() {
         bad.push(format!("{what}: 428 or 482 moves"));
+    }
+    if plan.switches.iter().any(|s| s.to == 8) {
+        bad.push(format!("{what}: P8 is a target"));
     }
     bad
 }
 
 #[test]
-fn sched_level2_rows_of_the_evening_plan_481_off_p3_to_p7() {
+fn sched_level2_rows_of_the_evening_plan_441_off_p3_to_p7() {
     let rows = rows();
     assert_eq!(rows.len(), 9);
-    let mut bad = Vec::new();
+    let (mut bad, mut p7) = (Vec::new(), 0);
     for (n, r) in rows.iter().enumerate() {
         let plan = plan_row(r, 1.0);
         println!("row {n} pane {}: mode={} {}", r.sid, plan.mode.word(), line(&plan));
         bad.extend(check(&plan, &format!("row {n}")));
+        p7 += usize::from(to_of(&plan, 481) == vec![7]);
     }
+    println!("481 to P7 in {p7} of {} rows", rows.len());
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
@@ -149,7 +154,7 @@ fn sched_level2_rows_print_what_441_weighs() {
     let r = &rows()[3];
     let (acc, pi) = accounts(r);
     let panes = panes(r, 1.0);
-    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, short: true, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false };
+    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false };
     let plan = plan(&i, None);
     println!("row 3: pi {pi:.3}; {}", acc.iter().map(|a| format!("P{} r={:.3} phi={:.3} spare={:.3} price={:.2}/{:.2}", a.q.id, a.q.r, a.q.phi(), a.spare, a.price[0], a.price[1])).collect::<Vec<_>>().join("; "));
     let k = panes.iter().position(|p| p.sid == 441).unwrap();

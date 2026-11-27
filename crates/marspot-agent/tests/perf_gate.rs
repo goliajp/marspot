@@ -104,7 +104,11 @@ fn sched_state_bytes() {
 const PLAN_BUDGET: Duration = Duration::from_millis(824);
 
 /// The standing plan re-timed and re-costed at the same size.
-const RETIME_BUDGET: Duration = Duration::from_micros(478);
+const RETIME_BUDGET: Duration = Duration::from_micros(20_721);
+
+/// One full search whose exhaustive pass enumerates the most joint
+/// choices it allows.
+const EXACT_BUDGET: Duration = Duration::from_micros(18_285);
 
 fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pane>) {
     let a = (0..accounts)
@@ -141,7 +145,7 @@ fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pa
 }
 
 fn plan_input<'a>(a: &'a [level2::Account], p: &'a [level2::Pane]) -> level2::Input<'a> {
-    level2::Input { accounts: a, panes: p, young: [0.001, 0.003], window_full: 0.528, pi: 0.5, short: true, fleet_left: 8, notices_left: 4, stale_feed: false }
+    level2::Input { accounts: a, panes: p, young: [0.001, 0.003], window_full: 0.528, pi: 0.5, fleet_left: 8, notices_left: 4, stale_feed: false }
 }
 
 #[test]
@@ -179,12 +183,54 @@ fn sched_plan_retime_perf_gate() {
     let mut times = Vec::new();
     for k in 0..200 {
         let t0 = Instant::now();
-        black_box(level2::pass::retime(&mut st, black_box(&i), 1_800_000_000 + 2 * k));
+        let pass = black_box(level2::pass::retime(&mut st, black_box(&i), 1_800_000_000 + 2 * k));
         times.push(t0.elapsed());
+        // a pass that finds the structure gone returns at once and times
+        // nothing
+        let pass = pass.expect("the standing structure holds on the gate's input");
+        assert!(!pass.plan.switches.is_empty(), "the re-time evaluated no switch");
     }
     let p = p95(times.split_off(10));
     println!("sched plan re-time P95 {p:?}, {} standing switches, budget {RETIME_BUDGET:?}", st.switches.len());
     assert!(p < RETIME_BUDGET, "P95 {p:?} over {RETIME_BUDGET:?}");
+}
+
+/// Four accounts that last the day, five panes spread over them: each
+/// pane may stay or go to any of the other three at once, 4^5 = 1024
+/// joint choices, the exhaustive pass's cap.
+fn exact_world() -> (Vec<level2::Account>, Vec<level2::Pane>) {
+    let a = (0..4u8)
+        .map(|i| {
+            let t = 12.0 + 2.0 * f64::from(i);
+            let q = Quant { id: i + 1, r: 0.9, f: 0.3, t: 30.0 + t, tf: t, open: true, stale: false };
+            level2::Account { spare: q.n(), q, price: [0.9, 0.8 + 0.01 * f64::from(i)] }
+        })
+        .collect();
+    let (_, mut p) = plan_world(4, 5);
+    for (k, pane) in p.iter_mut().enumerate() {
+        let b = 0.002 + 0.0005 * k as f64;
+        (pane.restricted, pane.speed, pane.high, pane.long_background) = (false, [0.0, b], [0.0, b * 1.5], false);
+    }
+    (a, p)
+}
+
+#[test]
+fn sched_plan_exact_worst_case_perf_gate() {
+    let (a, p) = exact_world();
+    let i = plan_input(&a, &p);
+    let mut times = Vec::new();
+    let mut last = None;
+    for _ in 0..40 {
+        let t0 = Instant::now();
+        last = Some(black_box(level2::plan(black_box(&i), None)));
+        times.push(t0.elapsed());
+    }
+    let pl = last.expect("a plan");
+    let p = p95(times.split_off(5));
+    println!("sched plan P95 per full search in exact mode at its cap {p:?} ({} switches, mode {}, {} simulations), budget {EXACT_BUDGET:?}", pl.switches.len(), pl.mode.word(), pl.sims);
+    assert_eq!(pl.mode, level2::Mode::Exact);
+    assert!(pl.sims >= 1024, "{} simulations: the exhaustive pass did not reach its cap", pl.sims);
+    assert!(p < EXACT_BUDGET, "P95 {p:?} over {EXACT_BUDGET:?}");
 }
 
 #[test]

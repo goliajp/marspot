@@ -29,7 +29,7 @@ pub(crate) fn pane(sid: u64, on: u8, restricted: bool, a: f64, b: f64) -> Pane {
 }
 
 pub(crate) fn input<'a>(accounts: &'a [Account], panes: &'a [Pane]) -> Input<'a> {
-    Input { accounts, panes, young: [0.0; 2], window_full: KAPPA, pi: 0.5, short: false, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false }
+    Input { accounts, panes, young: [0.0; 2], window_full: KAPPA, pi: 0.5, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false }
 }
 
 fn targets(p: &Plan, sid: u64) -> Vec<u8> {
@@ -54,7 +54,10 @@ fn sched_level2_a_pane_leaves_an_account_that_runs_out_before_it_does() {
     // the slowest stays to use the rest; the others leave before the refusal
     assert_eq!(plan.switches.len(), 2, "{:?}", plan.switches);
     for s in &plan.switches {
-        assert!(s.sid != 11 && (s.from, s.to, s.t_open) == (1, 2, 0.0), "{s:?}");
+        // the window opens as late as still leaves a clean rest at the
+        // stopping rule's chance: 4 rests an hour
+        let lead = -(1.0 - window::CLEAN_CHANCE).ln() / 4.0;
+        assert!(s.sid != 11 && (s.from, s.to) == (1, 2) && (s.t_open - (s.t_dead - lead).max(0.0)).abs() < 1e-9, "{s:?}");
         assert!(s.exempt, "the switch averts a refusal within two hours");
         assert!(s.t_dead > 0.0 && s.t_dead < 2.0 / 1.5, "{s:?}");
     }

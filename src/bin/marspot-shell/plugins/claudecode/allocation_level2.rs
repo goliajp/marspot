@@ -84,7 +84,7 @@ impl PanePlan {
         let now = snap.now;
         let refused = self.note_refusals(snap);
         let b = build(a, snap, view, forecast, class, &self.standing);
-        let input = Input { accounts: &b.accounts, panes: &b.panes, young: b.young, window_full: KAPPA_FABLE, pi: b.pi, short: b.short, fleet_left: b.fleet_left, notices_left: NOTICES_PER_HOUR, stale_feed: b.stale_feed };
+        let input = Input { accounts: &b.accounts, panes: &b.panes, young: b.young, window_full: KAPPA_FABLE, pi: b.pi, fleet_left: b.fleet_left, notices_left: NOTICES_PER_HOUR, stale_feed: b.stale_feed };
         let quants: Vec<_> = b.accounts.iter().map(|x| x.q.clone()).collect();
         let high: Vec<f64> = b.accounts.iter().map(|x| b.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
         let mut counted: Vec<u64> = b.panes.iter().map(|p| p.sid).collect();

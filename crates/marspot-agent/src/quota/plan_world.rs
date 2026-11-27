@@ -21,7 +21,7 @@ use super::speed::PaneUse;
 use super::waste::{self, PARAMS, switch_cost};
 use super::waste_world::{Ev, Fixture};
 use super::{Class, EPS, KAPPA_FABLE, Load, Quant, RHO0};
-use crate::sched::level1::{self, H2, World};
+use crate::sched::level1::{self, World};
 use crate::sched::level2::{self, Account, DWELL_H, FLEET_PER_DAY, Input, NOTICES_PER_HOUR, Pane, Plan};
 
 const WEEK_S: i64 = 7 * 24 * 3600;
@@ -260,8 +260,7 @@ impl W {
             })
             .collect();
         let day = self.run.planned.iter().filter(|x| now - x.0 < 86_400).count();
-        let short = l1.unserved_until(0, H2) + l1.unserved_until(1, H2) > 1e-9;
-        let i = Input { accounts: &accounts, panes: &panes, young: [0.0; 2], window_full: KAPPA_FABLE, pi: l1.pi, short, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
+        let i = Input { accounts: &accounts, panes: &panes, young: [0.0; 2], window_full: KAPPA_FABLE, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
         level2::plan(&i, None)
     }
 }

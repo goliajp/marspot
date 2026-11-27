@@ -118,7 +118,12 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     let mut e = Eval { ctx, sim, charge: 0.0 };
     let n = input.panes.len();
     let idle = vec![Sched::STAY; n];
-    let start: Vec<Sched> = start.filter(|s| s.len() == n).map(<[Sched]>::to_vec).unwrap_or_else(|| idle.clone());
+    let mut start: Vec<Sched> = start.filter(|s| s.len() == n).map(<[Sched]>::to_vec).unwrap_or_else(|| idle.clone());
+    for (p, s) in start.iter_mut().enumerate() {
+        if !g.in_time(p, s) {
+            *s = Sched::STAY;
+        }
+    }
     let (mut best, mut mode, active) = solve(&mut e, &start);
     if !e.fits(&best) {
         (best, mode) = fit(&mut e, best, mode);
@@ -266,8 +271,12 @@ fn active(e: &mut Eval, cur: &[Sched]) -> Vec<usize> {
 
 /// The plan of exactly `scheds`, costed and timed, with no search.
 pub(super) fn evaluate(input: &Input, scheds: &[Sched]) -> Plan {
-    let g = Grid::new(input);
-    let ctx = Ctx::new(input, &g);
+    evaluate_on(input, &Grid::new(input), scheds)
+}
+
+/// As `evaluate`, on the grid `g` of `input` already worked out.
+pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched]) -> Plan {
+    let ctx = Ctx::new(input, g);
     let sim = Sim::new(&ctx);
     let mut e = Eval { ctx, sim, charge: 0.0 };
     let idle = e.cost(&vec![Sched::STAY; input.panes.len()]).totals;

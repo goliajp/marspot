@@ -1,12 +1,17 @@
 //! The pane horizon cut into segments, and what each pane may do.
 //!
 //! Cut points are the six-hour buckets, every renewal inside the
-//! horizon, and the moment each pane's earliest switch is allowed.  A
-//! switch happens at a cut point.  Targets pass the hard filters at
+//! horizon, the moment each pane's earliest switch is allowed, and the
+//! latest moment a switch off each account still averts the refusal:
+//! one reading and one point of reading error at its load before it
+//! empties at the high band if nobody moves.  A switch happens at a cut
+//! point.  Targets pass the hard filters at
 //! the moment they are proposed: open, fresh, taking the pane's class,
 //! not barred, not just left, not this pane's account, and lasting the
 //! pane six hours at the high band with the panes already there.
 
+use super::sim::Ctx;
+use super::window::dead_by_exhaustion;
 use super::{Account, H2, Input, LASTS_H, Pane};
 use crate::quota::EPS;
 
@@ -28,6 +33,16 @@ pub struct Grid {
     /// Each pane is a keeper: it uses up its account's rest and is not
     /// moved off it.
     pub keeper: Vec<bool>,
+    /// Each account's cut at `dead`.
+    pub late: Vec<Option<usize>>,
+    /// Per account, when it empties at the high band if nobody moves,
+    /// capped at the horizon: the deadline a switch off it is taken by.
+    pub deadline: Vec<f64>,
+    /// Per account that empties inside the horizon, the latest moment a
+    /// switch off it averts the refusal: `deadline` less one reading and
+    /// one point of reading error at its high-band load; the horizon for
+    /// the others.
+    pub dead: Vec<f64>,
 }
 
 fn index(accounts: &[Account], id: u8) -> Option<usize> {
@@ -39,13 +54,46 @@ fn cut_at(cuts: &[f64], h: f64) -> Option<usize> {
 }
 
 impl Grid {
+    /// The grid, with a cut at the latest moment a switch off each
+    /// account that empties inside the horizon averts the refusal.
     pub fn new(input: &Input) -> Grid {
+        let mut base = Grid::build(input, &[]);
+        let deadline = Ctx::deadlines(input, &base);
+        let dead: Vec<f64> = deadline.iter().enumerate().map(|(j, d)| if *d < H2 { dead_by_exhaustion(*d, high_load(input, &base.on, j)) } else { H2 }).collect();
+        let late: Vec<Option<f64>> = dead.iter().map(|t| (*t < H2 && *t > 0.0).then_some(*t)).collect();
+        if late.iter().all(Option::is_none) {
+            (base.deadline, base.dead) = (deadline, dead);
+            return base;
+        }
+        let extra: Vec<f64> = late.iter().flatten().copied().collect();
+        let mut g = Grid::build(input, &extra);
+        g.late = late.iter().map(|t| t.and_then(|t| cut_at(&g.cuts, t))).collect();
+        (g.deadline, g.dead) = (deadline, dead);
+        g
+    }
+
+    /// Every switch of pane `p` off an account that empties inside the
+    /// horizon is taken by the latest moment it averts the refusal, but
+    /// for a first switch at the pane's first allowed moment, which no
+    /// schedule can take earlier.
+    pub fn in_time(&self, p: usize, s: &super::Sched) -> bool {
+        let mut from = self.on[p];
+        s.hops().iter().enumerate().all(|(h, hop)| {
+            let at = hop.at as usize;
+            let ok = (h == 0 && at == self.first[p]) || from.is_none_or(|j| self.cuts[at] <= self.dead[j] + SAME_H);
+            from = Some(hop.to as usize);
+            ok
+        })
+    }
+
+    fn build(input: &Input, extra: &[f64]) -> Grid {
         let mut cuts: Vec<f64> = vec![0.0, H2];
         cuts.extend((1..(H2 / BUCKET_H) as usize).map(|k| k as f64 * BUCKET_H));
         for a in input.accounts {
             cuts.extend([a.q.t, a.q.tf].into_iter().filter(|t| *t > 0.0 && *t < H2));
         }
         cuts.extend(input.panes.iter().map(|p| p.earliest_h).filter(|t| *t > 0.0 && *t < H2));
+        cuts.extend_from_slice(extra);
         cuts.sort_by(f64::total_cmp);
         cuts.dedup_by(|b, a| *b - *a < SAME_H);
         let on: Vec<Option<usize>> = input.panes.iter().map(|p| index(input.accounts, p.on)).collect();
@@ -53,7 +101,10 @@ impl Grid {
         let renews = input.accounts.iter().map(|a| (a.q.t > 0.0).then(|| cut_at(&cuts, a.q.t)).flatten()).collect();
         let renews_f = input.accounts.iter().map(|a| (a.q.tf > 0.0 && a.q.tf < a.q.t - SAME_H).then(|| cut_at(&cuts, a.q.tf)).flatten()).collect();
         let keeper = keepers(input, &on);
-        Grid { cuts, on, first, renews, renews_f, keeper }
+        let late = vec![None; input.accounts.len()];
+        let deadline = vec![H2; input.accounts.len()];
+        let dead = deadline.clone();
+        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead }
     }
 
     pub fn segs(&self) -> usize {
@@ -99,6 +150,11 @@ impl Grid {
     pub fn movable(&self, input: &Input, p: usize) -> bool {
         !input.stale_feed && !self.keeper[p] && input.panes[p].switches_left > 0 && self.first[p] < self.segs()
     }
+}
+
+/// Weeks an hour the panes on account `j` use at the high band.
+pub(super) fn high_load(input: &Input, on: &[Option<usize>], j: usize) -> f64 {
+    input.panes.iter().enumerate().filter(|(k, _)| on[*k] == Some(j)).map(|(_, p)| p.high[0] + p.high[1]).sum()
 }
 
 /// Hours account `j` lasts at the high band with the panes on it, and

@@ -1,7 +1,8 @@
 //! The plan as log lines and as the status file, amounts in points.
 //!
 //! `sched.plan` carries the money of the plan over the pane horizon
-//! without the value left at its end (lapse, reserve taken at `pi`,
+//! without the value left at its end (lapse, the lapse the loads at its
+//! end leave at a renewal soon after it, reserve taken at `pi`,
 //! rewrites, lost background work, rewrites at refusals), the gain over
 //! doing nothing (value left included), the fluid bound of the week
 //! from level 1 and the difference, the switches with their windows,
@@ -15,7 +16,7 @@ use std::fmt::Write;
 use super::{Account, Input, Plan};
 
 /// Switches written in the line; the rest are counted.
-const LINE_SWITCHES: usize = 4;
+const LINE_SWITCHES: usize = 3;
 const LINE_TODAY: usize = 4;
 /// The status file lists at most this many accounts and panes.
 const STATUS_ACCOUNTS: usize = 16;
@@ -45,7 +46,7 @@ impl Plan {
     /// The money over the pane horizon, without what is left at its end.
     pub fn money_h2(&self, pi: f64) -> f64 {
         let t = &self.totals;
-        t.lapsed + pi * t.reserve_taken + t.rewrites + t.lost_work + t.refused
+        t.lapsed + t.lapse_after + pi * t.reserve_taken + t.rewrites + t.lost_work + t.refused
     }
 
     /// `sched.plan`.
@@ -55,13 +56,14 @@ impl Plan {
         let mut out = String::new();
         let _ = write!(
             out,
-            "trigger={} mode={} plan={:08x} prev={:08x} money={} lapsed={} reserve={} rewrites={} lost={} refused={} gain={} eff={:.2} bound={} gap={} sw=",
+            "trigger={} mode={} plan={:08x} prev={:08x} money={} lapsed={} after={} reserve={} rewrites={} lost={} refused={} gain={} eff={:.2} bound={} gap={} sw=",
             s.trigger,
             self.mode.word(),
             s.id as u32,
             s.prev as u32,
             pts(money),
             pts(t.lapsed),
+            pts(t.lapse_after),
             pts(input.pi * t.reserve_taken),
             pts(t.rewrites),
             pts(t.lost_work),

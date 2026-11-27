@@ -40,7 +40,6 @@ pub(super) struct Built {
     pub panes: Vec<Pane>,
     pub young: [f64; 2],
     pub pi: f64,
-    pub short: bool,
     pub fleet_left: usize,
     pub stale_feed: bool,
     /// Panes whose three-hour speed is outside their band.
@@ -98,13 +97,11 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             disturb_left: DISTURB_PER_DAY,
         });
     }
-    let unserved = l1.unserved_until(0, H2) + l1.unserved_until(1, H2);
     Built {
         accounts,
         panes,
         young,
         pi: l1.pi,
-        short: unserved > 1e-9,
         fleet_left: FLEET_PER_DAY.saturating_sub(a.day_moves.len() + a.day_pending.len()),
         stale_feed: snap.feed_at.is_none_or(|f| now - f > STALE_FEED_S),
         outside,

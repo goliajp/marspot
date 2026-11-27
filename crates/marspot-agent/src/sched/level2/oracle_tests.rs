@@ -105,8 +105,7 @@ fn sched_level2_equals_the_exhaustive_search_in_exact_mode_and_is_close_otherwis
     while exact + search < 200 {
         let (na, np) = (2 + rng.below(4), 1 + rng.below(4));
         let (a, p) = world(&mut rng, na, np);
-        let mut i = input(&a, &p);
-        i.short = rng.next() < 0.5;
+        let i = input(&a, &p);
         let Some((ex, idle)) = exhaustive(&i) else {
             skipped += 1;
             continue;
@@ -125,7 +124,11 @@ fn sched_level2_equals_the_exhaustive_search_in_exact_mode_and_is_close_otherwis
             }
         } else {
             search += 1;
-            search_close += usize::from(gap <= 0.002_f64.max(0.05 * ex.money.abs()));
+            let close = gap <= 0.002_f64.max(0.05 * ex.money.abs());
+            search_close += usize::from(close);
+            if !close {
+                println!("  search miss: gap {gap:.6} money {m:.6} against {:.6} (idle {:.6}), {} active of {} panes, {} accounts, plan {:?} best {:?}", ex.money, idle.money, plan.active, p.len(), a.len(), plan.totals, ex.totals);
+            }
         }
     }
     gaps.sort_by(f64::total_cmp);

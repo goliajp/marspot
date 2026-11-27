@@ -1,5 +1,6 @@
 //! Proposals for one pane: every schedule of at most two switches
-//! whose switch times are its first allowed moment and the renewals
+//! whose switch times are its first allowed moment, the last moment
+//! before its account empties at the high band, and the renewals
 //! inside the horizon, scored by linear prices read off the last run.
 //! This is the shortest path over (segment, account, switches used)
 //! with the switch times restricted to those moments; a switch at any
@@ -48,6 +49,12 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
     for &j in &targets {
         out.push(Sched::one(j, first));
     }
+    // the same switch at the last moment it averts the refusal
+    if let Some(late) = g.on[p].and_then(|j| g.late[j]).filter(|&c| c > first) {
+        for &j in &targets {
+            out.push(Sched::one(j, late));
+        }
+    }
     for (k, r) in g.renews.iter().enumerate() {
         let Some(r) = *r else { continue };
         if r < first || !g.admits_after_renewal(input, p, k) {
@@ -71,10 +78,11 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
 }
 
 /// The pane's own limits: switches left this week, disturbing actions
-/// left today.
+/// left today; and every switch off an account that empties is in time
+/// to avert the refusal.
 pub(super) fn allowed(input: &Input, g: &Grid, deadline: &[f64], p: usize, s: &Sched) -> bool {
     let pane = &input.panes[p];
-    if s.n > pane.switches_left {
+    if s.n > pane.switches_left || !g.in_time(p, s) {
         return false;
     }
     let disturbing = kinds(input, g, deadline, p, s).filter(|k| k.disturbing()).count();

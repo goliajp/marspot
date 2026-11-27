@@ -2,7 +2,8 @@
 //! the standing structure re-timed and re-costed.
 
 use super::standing::{Ended, Standing, Verdict};
-use super::{Input, Plan, evaluate, plan};
+use super::grid::Grid;
+use super::{Input, Plan, evaluate, plan, search};
 
 pub struct Pass {
     pub plan: Plan,
@@ -13,12 +14,13 @@ pub struct Pass {
 
 /// The standing plan on `input`, with ended switches removed.
 fn timed(standing: &mut Standing, input: &Input, now: i64) -> (Option<Plan>, Ended) {
-    let first = standing.schedules(input, now).map(|s| evaluate(input, &s));
+    let g = Grid::new(input);
+    let first = standing.schedules(input, &g, now).map(|s| search::evaluate_on(input, &g, &s));
     let ended = standing.end(first.as_ref(), input, now);
     if ended.cancelled.is_empty() && ended.missed.is_empty() && first.is_some() {
         return (first, ended);
     }
-    let again = standing.schedules(input, now).map(|s| evaluate(input, &s));
+    let again = standing.schedules(input, &g, now).map(|s| search::evaluate_on(input, &g, &s));
     (again, ended)
 }
 

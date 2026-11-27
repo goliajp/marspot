@@ -1,7 +1,11 @@
 //! A planned switch's window `[t_open, t_dead]` and the kind of
 //! boundary it is expected to be taken at.
 //!
-//! `t_open` is when the switch is planned, usually now.  `t_dead` is,
+//! `t_open` is when the switch is planned, usually now; for a switch off
+//! an account that empties inside the horizon it is as late as still
+//! leaves a clean rest before `t_dead` at the stopping rule's chance
+//! (`finish`), so a forecast that eases in the meantime cancels it
+//! before it is taken.  `t_dead` is,
 //! for a switch that averts a refusal, the source's exhaustion at the
 //! high band less one reading interval and one point of reading error
 //! at its load; for a switch that only saves reserve, the moment its

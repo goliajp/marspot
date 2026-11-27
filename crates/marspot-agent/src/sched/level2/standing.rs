@@ -29,6 +29,9 @@ pub const INERTIA: f64 = 0.25;
 /// Pins kept at most.
 const PINS_CAP: usize = 64;
 const SWITCHES_CAP: usize = 128;
+/// Windows are kept to the second: a window opening at a cut may read
+/// up to half a second after it.
+const SECOND_H: f64 = 1.0 / 3600.0;
 
 /// One switch of the standing plan, in absolute time.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,8 +112,7 @@ impl Standing {
 
     /// The standing schedules on `input`'s panes, re-timed to `now`;
     /// `None` when a switch no longer holds.
-    pub fn schedules(&self, input: &Input, now: i64) -> Option<Vec<Sched>> {
-        let g = Grid::new(input);
+    pub fn schedules(&self, input: &Input, g: &Grid, now: i64) -> Option<Vec<Sched>> {
         let mut out = vec![Sched::STAY; input.panes.len()];
         let mut sw = self.switches.clone();
         sw.sort_by_key(|s| (s.sid, s.order));
@@ -122,17 +124,17 @@ impl Standing {
                 if input.panes[p].on != s.from || !g.admits(input, p, j) {
                     return None;
                 }
-                g.cuts.iter().position(|c| *c >= open_h - 1e-6).unwrap_or(0).max(g.first[p])
+                g.cuts.iter().position(|c| *c >= open_h - SECOND_H).unwrap_or(0).max(g.first[p])
             } else {
                 let prev = out[p].hops().first()?.at as usize;
-                g.cuts.iter().position(|c| *c >= open_h.max(g.cuts[prev] + DWELL_H) - 1e-6)?
+                g.cuts.iter().position(|c| *c >= open_h.max(g.cuts[prev] + DWELL_H) - SECOND_H)?
             };
             if at >= g.segs() || out[p].n as usize != s.order as usize {
                 return None;
             }
             out[p].push(j, at);
         }
-        Some(out)
+        (0..out.len()).all(|p| g.in_time(p, &out[p])).then_some(out)
     }
 
     /// Committed switches whose gain is gone or whose deadline passed are

@@ -74,8 +74,7 @@ fn sched_plan_replay_keeps_switches_and_refusals_down() {
     }
     let day = p.planned.iter().filter(|x| x.0 - fx.t0 < 86_400).count();
     println!("planned switches in the first day {day} (the world does not tell refusal-averting ones apart); bar of 11.2: switches <= 12");
-    // the bar of 11.2 is 12; the count is printed next to it and held
-    // here to no more than what happened
-    assert!(p.switches <= actual.switches, "{} switches against {}", p.switches, actual.switches);
+    assert!(p.switches <= 12, "{} switches against the bar of 12", p.switches);
+    assert!(p.switches <= actual.switches, "{} switches against the {} of the day replayed", p.switches, actual.switches);
     assert!(p.refusals.len() <= 1, "{} refusals", p.refusals.len());
 }
