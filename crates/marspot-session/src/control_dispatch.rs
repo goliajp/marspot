@@ -3,7 +3,7 @@
 use std::sync::mpsc::Sender;
 
 use marspot_term::shell_proto::{
-    MsgType, decode_frame_cells, decode_get_selection_text, decode_grid_resize, decode_grid_scroll,
+    MsgType, decode_frame_cells, decode_get_selection_text, decode_grid_resize, decode_grid_scroll_asked,
     decode_key_event, decode_pane_type, decode_pane_watch, decode_paste, decode_prompt_jump, decode_search_cancel,
     decode_search_scrollback, wire_to_event,
 };
@@ -41,8 +41,8 @@ pub(super) fn dispatch(
             }
         }
         MsgType::GridScroll => {
-            if let Ok(off) = decode_grid_scroll(payload)
-                && tx.send(SessionEvent::Scroll(off)).is_err()
+            if let Ok((off, seq)) = decode_grid_scroll_asked(payload)
+                && tx.send(SessionEvent::Scroll(off, seq)).is_err()
             {
                 return false;
             }

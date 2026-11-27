@@ -213,7 +213,7 @@ impl GridShmReader {
                 let flags = (*h).flags;
                 let scroll_push_count = (*h).scroll_push_count;
                 let scrollback_len = (*h).scrollback_len;
-                let view_offset = (*h).view_offset as u16;
+                let (view_offset, view_seq) = super::snapshot::split_view_word((*h).view_offset);
                 // the layout is the frame's own: a session switches it
                 // when its reader says what it reads
                 let cell_size = std::ptr::read_volatile(&(*h).cell_size);
@@ -249,6 +249,7 @@ impl GridShmReader {
                         scroll_push_count,
                         scrollback_len,
                         view_offset,
+                        view_seq,
                     });
                 }
                 // Torn read — writer published mid-copy; retry.

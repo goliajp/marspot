@@ -36,6 +36,7 @@ pub use control::ControlReach;
 mod peek;
 pub use peek::Peek;
 mod scrim;
+mod view_sync;
 pub use scrim::{ScrimFade, SCRIM_FADE};
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
@@ -710,6 +711,8 @@ pub struct L3Conn {
     /// Counts the scrolls asked for; a prompt jump carries it, and its
     /// answer is taken only while no scroll has been asked since.
     view_seq: u32,
+    /// Whether the last frame answers every view ask: see `view_sync`.
+    view_sync: view_sync::ViewSync,
     /// Scrollback depth from the last snapshot — L2 has no scrollback of
     /// its own, so this is what `apply_scroll_lines` clamps against.
     snap_scrollback_len: u32,
@@ -781,6 +784,7 @@ impl L3Conn {
         let Some(snap) = self.read_into_mirror() else {
             return false; // never published yet (seq 0)
         };
+        self.took_frame(&snap);
         self.cursor_visible = snap.flags & FLAG_CURSOR_VISIBLE != 0;
         self.app_cursor_keys = snap.flags & FLAG_APP_CURSOR_KEYS != 0;
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
@@ -1255,14 +1259,6 @@ impl Pane {
         } else {
             0
         }
-    }
-
-    /// Drain the PTY reader into the terminal parser. Returns the
-    /// number of bytes consumed; `0` means the wake was spurious or
-    /// the channel went empty. Containers use this in the
-    /// `user_event` callback to decide whether to request_redraw.
-    pub fn pump(&mut self) -> usize {
-        self.session.pump()
     }
 
     pub fn observe_exit(&mut self) {

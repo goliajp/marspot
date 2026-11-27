@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use super::{L3Conn, Pane, PaneBackend};
 use crate::render::HighlightSpan;
 use crate::shell_proto::{
-    encode_grid_scroll, encode_prompt_jump, encode_search_cancel, encode_search_more, encode_search_scrollback,
-    Frame, MsgType, PromptDir, PromptJump, PromptJumped,
+    encode_grid_scroll_asked, encode_prompt_jump, encode_search_cancel, encode_search_more,
+    encode_search_scrollback, view_ask_seq, Frame, MsgType, PromptDir, PromptJump, PromptJumped,
 };
 
 /// How long the row a jump put on top stays marked.
@@ -60,13 +60,18 @@ impl L3Conn {
             return;
         }
         self.req_view_offset = Some(view_offset);
-        let _ = self.control.send(Frame::new(MsgType::GridScroll, encode_grid_scroll(view_offset)));
+        let seq = view_ask_seq(self.view_seq);
+        self.view_sync.asked(seq);
+        let _ = self.control.send_with(MsgType::GridScroll, |out| encode_grid_scroll_asked(view_offset, seq, out));
     }
 
     /// Ask the session to move the view to the prompt `dir` of it.  Until
     /// it answers, where it publishes is unknown here, so the next scroll
-    /// is sent even to the offset last asked for.
+    /// is sent even to the offset last asked for.  A jump is an ask of its
+    /// own: the answer to an earlier one is stale once it is sent.
     fn forward_prompt_jump(&mut self, dir: PromptDir) {
+        self.view_seq = self.view_seq.wrapping_add(1);
+        self.view_sync.asked(view_ask_seq(self.view_seq));
         self.req_view_offset = None;
         let jump = PromptJump { dir, seq: self.view_seq };
         let _ = self.control.send_with(MsgType::PromptJump, |out| encode_prompt_jump(jump, out));
@@ -87,16 +92,20 @@ impl Pane {
     /// it moved to and marks the prompt's row until `now + PROMPT_FLASH`.
     /// An answer to a jump asked before a later key or scroll is dropped:
     /// the session has already moved on to where that one said.  True
-    /// when the answer was taken.
+    /// when the answer was taken.  A frame read before the answer that
+    /// already shows the jump says where the view is now: the program
+    /// may have printed since the jump.
     pub fn prompt_jumped(&mut self, said: PromptJumped, now: Instant) -> bool {
+        let mut at = said.view_offset;
         if let PaneBackend::L3(c) = &mut self.session {
             if said.seq.is_some_and(|s| s != c.view_seq) {
                 return false;
             }
+            at = c.view_sync.settled().unwrap_or(at);
             // where the session is, so a scroll to there is not sent
-            c.req_view_offset = Some(said.view_offset);
+            c.req_view_offset = Some(at);
         }
-        self.view_offset = said.view_offset;
+        self.view_offset = at;
         let span = HighlightSpan { view_row: said.row, col_start: 0, col_end_inclusive: u16::MAX };
         self.prompt_flash = Some(PromptFlash { span, until: now + PROMPT_FLASH });
         true
