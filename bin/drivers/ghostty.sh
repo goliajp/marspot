@@ -12,8 +12,9 @@
 #     Spawn a fresh Ghostty surface running <cmd>. <cmd> is the shell
 #     string the surface should execute — we wrap it in a temp script
 #     because Ghostty's -e wants an executable path, not an inline
-#     bash string.  With --pid-file, the pid of the Ghostty it started
-#     is appended to <file>, so the caller can stop exactly that.
+#     bash string.  With --pid-file, `<pid> <launch-epoch>` of the
+#     Ghostty it started is appended to <file>, so the caller can stop
+#     exactly that.
 #
 #   bin/drivers/ghostty.sh run-recorded <pid-file> <executable>
 #     Spawn a fresh Ghostty running <executable> and append its pid to
@@ -66,8 +67,10 @@ case "$cmd_word" in
     if [[ -n "${1:-}" && -n "${2:-}" ]]; then
       size_args=(--window-width="$1" --window-height="$2")
     fi
+    # the pid file line is `<pid> <launch-epoch>` (bin/_app-pids.sh)
+    launched_at=$(date +%s)
     "$GHOSTTY_BIN" ${size_args[@]+"${size_args[@]}"} -e "$wrapper" &
-    [[ -z $pid_file ]] || echo $! >> "$pid_file"
+    [[ -z $pid_file ]] || echo "$! $launched_at" >> "$pid_file"
     disown 2>/dev/null || true
     ;;
   run-recorded)

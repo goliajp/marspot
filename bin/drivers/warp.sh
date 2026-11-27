@@ -38,14 +38,19 @@ source "$ROOT/bin/_app-pids.sh"
 
 cmd_word=${1:-}
 shift || true
-# --pid-file <file>: once the app is up, append its pid there.  The
-# caller passes it only for an app that was not running before, so it
-# can later stop exactly what it started.
+# --pid-file <file>: append the app's pid there when this launch is what
+# started it (bin/_app-pids.sh), so the caller can stop exactly that.
 pid_file=""
 if [[ ${1:-} == --pid-file ]]; then
   pid_file=${2:?pid-file}
   shift 2
 fi
+# what of the app runs just before the launch, and when the launch began
+pre_launch() {
+  [[ -z $pid_file ]] && return 0
+  pid_before=$(app_pid "$1")
+  launched_at=$(date +%s)
+}
 
 case "$cmd_word" in
   run-single)
@@ -59,8 +64,9 @@ case "$cmd_word" in
     printf '#!/bin/bash\n%s\n' "$user_cmd" > "$wrapper"
     chmod 0755 "$wrapper"
     short_cmd="bash $wrapper; exit"
+    pre_launch dev.warp.Warp-Stable
     open -a Warp
-    [[ -z $pid_file ]] || record_app_pid dev.warp.Warp-Stable "$pid_file"
+    [[ -z $pid_file ]] || record_app_pid dev.warp.Warp-Stable "$pid_file" "$pid_before" "$launched_at"
     sleep 0.8  # focus settle
     osascript <<APPLESCRIPT >/dev/null
 tell application "System Events"
@@ -93,8 +99,9 @@ windows:
           commands:
             - exec: $wrapper; exit
 YAML
+    pre_launch dev.warp.Warp-Stable
     open "warp://launch/marspot-bench.yaml"
-    [[ -z $pid_file ]] || record_app_pid dev.warp.Warp-Stable "$pid_file"
+    [[ -z $pid_file ]] || record_app_pid dev.warp.Warp-Stable "$pid_file" "$pid_before" "$launched_at"
     ;;
   paste-block)
     n=${1:?n}; shift

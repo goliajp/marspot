@@ -130,9 +130,10 @@ build_one_cmd() {
 #   - iTerm / Terminal.app windows: AppleScript-trackable by integer
 #     id. Drivers return the ids of windows they create; trap closes
 #     exactly those (no collateral close of the user's other work).
-#   - App processes: an app that was not running before is quit and its
-#     recorded pids stopped (we are the only cause); one that was up is
-#     left alone — the user had a session.
+#   - App processes: each driver checks right before its launch whether
+#     the app runs; only an instance its launch brought up is recorded,
+#     and only recorded pids are stopped (bin/_app-pids.sh).  One that
+#     was up, or that someone else started between rounds, is left alone.
 #   - Temp wrapper files: always cleaned at exit; markers live in the
 #     run dir.
 SESSION_DIR="/tmp/marspot-bench-session-$$"
@@ -153,16 +154,15 @@ for stale in /tmp/marspot-bench-session-*; do
   fi
 done
 
-inventory_pid_running() {
-  # 1 if any non-grep process matches; 0 otherwise.
-  pgrep -f "$1" >/dev/null 2>&1 && echo 1 || echo 0
-}
-
-# Snapshot pre-existing state.
-PRE_ITERM=$(inventory_pid_running "iTerm.app/Contents/MacOS")
-PRE_TERMINAL=$(inventory_pid_running "Terminal.app/Contents/MacOS/Terminal")
-PRE_WARP=$(inventory_pid_running "Warp.app/Contents/MacOS/stable")
-PRE_GHOSTTY=$(inventory_pid_running "Ghostty.app/Contents/MacOS/ghostty")
+# shellcheck source=bin/_app-pids.sh
+source "$ROOT/bin/_app-pids.sh"
+# Snapshot pre-existing state, by the identity the drivers record (for
+# the log: each driver decides again right before its own launch).
+is_up() { [[ -n $(app_pid "$1") ]] && echo 1 || echo 0; }
+PRE_ITERM=$(is_up com.googlecode.iterm2)
+PRE_TERMINAL=$(is_up com.apple.Terminal)
+PRE_WARP=$(is_up dev.warp.Warp-Stable)
+PRE_GHOSTTY=$(is_up com.mitchellh.ghostty)
 printf 'PRE_ITERM=%s\nPRE_TERMINAL=%s\nPRE_WARP=%s\nPRE_GHOSTTY=%s\n' \
   "$PRE_ITERM" "$PRE_TERMINAL" "$PRE_WARP" "$PRE_GHOSTTY" \
   > "$SESSION_DIR/inventory"
@@ -173,14 +173,11 @@ WIN_iterm=""
 WIN_terminal=""
 
 # What this run started is stopped by the pids recorded when it started
-# it, never by a pattern (bin/_app-pids.sh).  The drivers record into
-# $SESSION_DIR/<terminal>.pids: iTerm, Terminal and Warp only when the
-# app was not running before this run; Ghostty always, since its driver
-# starts a process of its own.
-# shellcheck source=bin/_app-pids.sh
-source "$ROOT/bin/_app-pids.sh"
+# it, never by a pattern.  The drivers record into
+# $SESSION_DIR/<terminal>.pids: iTerm, Terminal and Warp only when that
+# launch brought the app up; Ghostty always, since its driver starts a
+# process of its own.
 GHOSTTY_PIDS="$SESSION_DIR/ghostty.pids"
-RUN_STARTED=$(date +%s)
 app_binary() {
   case "$1" in
     iterm)    echo "/Applications/iTerm.app/Contents/MacOS/iTerm2" ;;
@@ -189,33 +186,11 @@ app_binary() {
     ghostty)  echo "/Applications/Ghostty.app/Contents/MacOS/ghostty" ;;
   esac
 }
-was_up() {
-  case "$1" in
-    iterm)    [[ $PRE_ITERM == 1 ]] ;;
-    terminal) [[ $PRE_TERMINAL == 1 ]] ;;
-    warp)     [[ $PRE_WARP == 1 ]] ;;
-    ghostty)  [[ $PRE_GHOSTTY == 1 ]] ;;
-  esac
-}
-# --pid-file for a driver run, only for an app this run will start
-pid_file_args() {
-  was_up "$1" || echo "--pid-file $SESSION_DIR/$1.pids"
-}
 
 stop_app() {
-  local t=$1 name
-  [[ -s $SESSION_DIR/$t.pids ]] || return 0
-  name=$(applescript_name "$t")
-  # the polite quit reaches the whole app: only when it was not up before
-  # this run.  Its timeout bounds a quit held by a confirm dialog nobody
-  # can answer; the recorded pids are stopped either way.
-  if ! was_up "$t"; then
-    osascript -e "with timeout of 2 seconds" -e "tell application \"$name\" to quit" \
-              -e "end timeout" >/dev/null 2>&1 || true
-    sleep 0.5
-  fi
-  stop_recorded_pids "$SESSION_DIR/$t.pids" "$(app_binary "$t")" "$RUN_STARTED"
-  echo "==> stopped what this run started of $name" >&2
+  [[ -s $SESSION_DIR/$1.pids ]] || return 0
+  stop_recorded_pids "$SESSION_DIR/$1.pids" "$(app_binary "$1")"
+  echo "==> stopped what this run started of $(applescript_name "$1")" >&2
 }
 
 cleanup() {
@@ -255,8 +230,8 @@ MARKER_DIR=$(mktemp -d "$MARSPOT_BENCH_RUN_DIR/markers.XXXXXX")
 
 # Per-terminal close — runs immediately after that terminal's marker
 # completes (or times out). Closes only this terminal; the others
-# haven't been launched yet thanks to the sequential cycle below. The
-# same pre=1 → leave-running rule as the EXIT trap applies.
+# haven't been launched yet thanks to the sequential cycle below. Only
+# recorded pids are stopped, as in the EXIT trap.
 close_one() {
   local t=$1
   case "$t" in
@@ -347,12 +322,12 @@ for t in "${TERMS[@]}"; do
   echo "==> [${t} r${round}] launch (load1 ${load_start})" >&2
   launch_rc=0
   wrapper=""
-  # shellcheck disable=SC2086,SC2046
+  # shellcheck disable=SC2086
   case "$t" in
-    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs $(pid_file_args iterm) 1 "$cmd")" || launch_rc=$? ;;
-    warp)     bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" $(pid_file_args warp) "$cmd" || launch_rc=$? ;;
+    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs --pid-file "$SESSION_DIR/iterm.pids" 1 "$cmd")" || launch_rc=$? ;;
+    warp)     bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" --pid-file "$SESSION_DIR/warp.pids" "$cmd" || launch_rc=$? ;;
     ghostty)  bin/drivers/ghostty.sh run-single --pid-file "$GHOSTTY_PIDS" "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
-    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single $(pid_file_args terminal) "$cmd")" || launch_rc=$? ;;
+    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single --pid-file "$SESSION_DIR/terminal.pids" "$cmd")" || launch_rc=$? ;;
     marspot)
       # the pane's shell is a wrapper around the same command every
       # other terminal got

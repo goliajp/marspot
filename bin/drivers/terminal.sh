@@ -29,14 +29,19 @@ source "$ROOT/bin/_app-pids.sh"
 
 cmd_word=${1:-}
 shift || true
-# --pid-file <file>: once the app is up, append its pid there.  The
-# caller passes it only for an app that was not running before, so it
-# can later stop exactly what it started.
+# --pid-file <file>: append the app's pid there when this launch is what
+# started it (bin/_app-pids.sh), so the caller can stop exactly that.
 pid_file=""
 if [[ ${1:-} == --pid-file ]]; then
   pid_file=${2:?pid-file}
   shift 2
 fi
+# what of the app runs just before the launch, and when the launch began
+pre_launch() {
+  [[ -z $pid_file ]] && return 0
+  pid_before=$(app_pid "$1")
+  launched_at=$(date +%s)
+}
 
 case "$cmd_word" in
   run-single|run-windows)
@@ -62,6 +67,7 @@ case "$cmd_word" in
     # rely on AppleScript's implicit foregrounding (Terminal gets a
     # brief flash to front) and the scenario restores user focus
     # immediately after dispatch.
+    pre_launch com.apple.Terminal
     osascript <<APPLESCRIPT || rc=$?
 tell application "Terminal"
   set beforeIds to {}
@@ -89,7 +95,7 @@ tell application "Terminal"
 end tell
 APPLESCRIPT
     # recorded even when the script failed part way: the app is up
-    [[ -z $pid_file ]] || record_app_pid com.apple.Terminal "$pid_file"
+    [[ -z $pid_file ]] || record_app_pid com.apple.Terminal "$pid_file" "$pid_before" "$launched_at"
     exit "${rc:-0}"
     ;;
   close-windows)
