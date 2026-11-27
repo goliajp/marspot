@@ -130,6 +130,10 @@ impl super::CoreApp {
                 if let Some(t) = pane.search.as_ref().and_then(|s| s.bar.debounce_until) {
                     wait = sooner(wait, until(t));
                 }
+                // the row a prompt jump marked is unmarked on time
+                if let Some(t) = pane.prompt_flash_until() {
+                    wait = sooner(wait, until(t));
+                }
             }
         }
         wait = sooner(wait, self.pane_control.wait());

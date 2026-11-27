@@ -56,6 +56,7 @@ mod regions;
 mod reply_guard;
 mod uds_server;
 mod upkeep;
+mod view;
 mod watch;
 mod watch_text;
 
@@ -204,6 +205,8 @@ enum SessionEvent {
     /// the scrollback, so it publishes that window; L2 renders the mirror
     /// as-is (it can't scroll its window-only mirror itself).
     Scroll(u16),
+    /// L2 asks for the prompt before or after the view: see `view`.
+    PromptJump(marspot_term::shell_proto::PromptJump),
     /// L2 wants the clipboard text under a selection (Cmd-C). L3 owns the
     /// grid + scrollback, so it serialises the text and replies with a
     /// `SelectionText` frame. `(seq, anchor, focus, blockwise)`; `seq` is
@@ -925,18 +928,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     }
                 }
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
-                SessionEvent::Scroll(off) => {
-                    // L2(0.11.42+)mouse tracking on 时直接 encode +
-                    // InjectInput,不再走 Scroll wire.所以这里只剩老
-                    // scrollback path(non-mouse alt-screen 比如 less /
-                    // vim 主屏 history).
-                    lx_event!(
-                        "L3_SCROLL_RECV",
-                        "GridScroll received from L2",
-                        session_id = session.id(),
-                        off = off as u32
-                    );
-                    pending_scroll = Some(off);
+                SessionEvent::Scroll(off) => view::scroll(&session, off, &mut pending_scroll),
+                SessionEvent::PromptJump(jump) => {
+                    view::prompt_jump(&session, jump, &mut pending_scroll, frames.view_offset(), poke.as_mut())
                 }
                 // Each request gets its own reply (don't coalesce — L2 is
                 // blocking on a reply per request).

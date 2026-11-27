@@ -60,6 +60,8 @@ fn text(m: Msg) -> &'static str {
         Msg::CmdNewPane => "New Pane",
         Msg::CmdClosePanel => "Close Panel",
         Msg::CmdFind => "Find",
+        Msg::CmdPrevPrompt => "Jump to Previous Command",
+        Msg::CmdNextPrompt => "Jump to Next Command",
         Msg::CmdToggleSidebar => "Show or Hide Sidebar",
         Msg::CmdLayout => "Layout",
         Msg::CmdProcesses => "Process Monitor",

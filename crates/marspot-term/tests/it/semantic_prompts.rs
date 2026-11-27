@@ -122,3 +122,67 @@ fn jumping_back_lands_on_the_prompt() {
         "the offset points at a line that is not the prompt"
     );
 }
+
+/// Three commands, each a prompt line and eight lines of output, on a
+/// screen of four rows; the third command's output ends on screen.
+fn three_commands() -> Terminal {
+    let mut t = Terminal::new(20, 4);
+    for n in 1..=3 {
+        t.feed(&osc("133;A"));
+        t.feed(format!("$ cmd{n}\r\n").as_bytes());
+        for i in 0..8 {
+            t.feed(format!("out{n}.{i}\r\n").as_bytes());
+        }
+    }
+    t
+}
+
+/// The text of the line a view `off` rows back has at its top.
+fn top_line(t: &Terminal, off: u16) -> String {
+    let g = t.grid();
+    (0..g.cols()).map(|c| g.cell_at_view(off, c, 0).ch).collect::<String>().trim_end().to_string()
+}
+
+/// Back from the live screen, one prompt at a time, each at the top of
+/// the view; then forward the same way, and from the last prompt to the
+/// live screen only if a prompt is on it.
+#[test]
+fn jumps_step_through_the_prompts_both_ways() {
+    let mut t = three_commands();
+    let mut off = 0;
+    for want in ["$ cmd3", "$ cmd2", "$ cmd1"] {
+        off = t.grid().prompt_above(off).expect("a prompt behind the view");
+        assert_eq!(top_line(&t, off), want);
+    }
+    assert_eq!(t.grid().prompt_above(off), None, "nothing before the first prompt");
+    for want in ["$ cmd2", "$ cmd3"] {
+        let row;
+        (off, row) = t.grid().prompt_below(off).expect("a prompt ahead of the view");
+        assert_eq!(row, 0, "a prompt in the history goes on the top row");
+        assert_eq!(top_line(&t, off), want);
+    }
+    assert_eq!(t.grid().prompt_below(off), None, "no prompt after the last, on screen or off");
+    assert_eq!(t.grid().prompt_below(0), None, "the live screen is as far forward as it goes");
+
+    t.feed(&osc("133;A"));
+    t.feed(b"$ ");
+    let row = t.grid().cursor().1;
+    assert_eq!(
+        t.grid().prompt_below(off),
+        Some((0, row)),
+        "a prompt on the live screen is reached by going live, and it is on the cursor's row"
+    );
+}
+
+/// A shell that marks nothing has nowhere to jump either way.
+#[test]
+fn without_marks_neither_way_goes_anywhere() {
+    let mut t = Terminal::new(20, 4);
+    for i in 0..40 {
+        t.feed(format!("line {i}\r\n").as_bytes());
+    }
+    for off in [0, 5, 30] {
+        assert_eq!(t.grid().prompt_above(off), None);
+        assert_eq!(t.grid().prompt_below(off), None);
+    }
+}

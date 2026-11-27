@@ -591,6 +591,11 @@ pub enum MsgType {
     /// session → core: the pane's program rang the bell.  Empty
     /// payload; at most one per published frame.  An older core skips it.
     PaneBell = 125,
+    /// core → session: move the view to the prompt before or after the
+    /// line at its top; see `view`.
+    PromptJump = 126,
+    /// session → core: where a `PromptJump` moved the view; see `view`.
+    PromptJumped = 127,
     /// L2 → L1: draw this toolbar icon for me.  `symbol u16,
     /// point_px u16`.  Sent only by a core started with
     /// `MARSPOT_ICONS_FROM_SHELL`: drawing a system symbol registers
@@ -715,6 +720,8 @@ impl MsgType {
             123 => MsgType::SessionReadsFrameCells,
             124 => MsgType::PaneAwake,
             125 => MsgType::PaneBell,
+            126 => MsgType::PromptJump,
+            127 => MsgType::PromptJumped,
             130 => MsgType::PaneSpawn,
             131 => MsgType::PaneSpawned,
             132 => MsgType::PaneRetire,
@@ -770,6 +777,8 @@ mod pane_control;
 pub use pane_control::*;
 mod search;
 pub use search::*;
+mod view;
+pub use view::*;
 mod key_event;
 pub use key_event::{
     WireKeyEvent, WireKeyState, WireLogicalKind, WireNamedKey, decode_key_event, encode_key_event,
@@ -1824,44 +1833,6 @@ pub fn decode_pane_session_user_escape(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
-}
-
-/// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
-/// dims L2 wants this L3 session resized to (the in-view window L3
-/// publishes into the shm framebuffer follows these dims).
-pub fn encode_grid_resize(cols: u16, rows: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4);
-    out.extend_from_slice(&cols.to_le_bytes());
-    out.extend_from_slice(&rows.to_le_bytes());
-    out
-}
-
-pub fn decode_grid_resize(payload: &[u8]) -> io::Result<(u16, u16)> {
-    if payload.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "grid_resize payload < 4 bytes",
-        ));
-    }
-    let cols = u16::from_le_bytes(payload[0..2].try_into().unwrap());
-    let rows = u16::from_le_bytes(payload[2..4].try_into().unwrap());
-    Ok((cols, rows))
-}
-
-/// GridScroll payload: `view_offset: u16 LE` — rows up from the live
-/// tail that L3 should publish into the framebuffer (0 = live).
-pub fn encode_grid_scroll(view_offset: u16) -> Vec<u8> {
-    view_offset.to_le_bytes().to_vec()
-}
-
-pub fn decode_grid_scroll(payload: &[u8]) -> io::Result<u16> {
-    if payload.len() < 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "grid_scroll payload < 2 bytes",
-        ));
-    }
-    Ok(u16::from_le_bytes(payload[0..2].try_into().unwrap()))
 }
 
 /// GetSelectionText payload: `anchor(col u16, abs u32), focus(col u16,

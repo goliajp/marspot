@@ -19,6 +19,7 @@ mod move_region;
 mod pane_awake;
 mod pane_link;
 mod paste_markers;
+mod prompt_jump;
 mod self_execv;
 mod shadow_session;
 mod signals_in_the_pane;

@@ -54,6 +54,8 @@ fn text(m: Msg) -> &'static str {
         Msg::CmdNewPane => "新規ペイン",
         Msg::CmdClosePanel => "パネルを閉じる",
         Msg::CmdFind => "検索",
+        Msg::CmdPrevPrompt => "前のコマンドへ移動",
+        Msg::CmdNextPrompt => "次のコマンドへ移動",
         Msg::CmdToggleSidebar => "サイドバーを表示/非表示",
         Msg::CmdLayout => "レイアウト",
         Msg::CmdProcesses => "プロセスモニタ",

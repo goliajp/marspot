@@ -101,6 +101,8 @@ pub enum Msg {
     CmdNewPane,
     CmdClosePanel,
     CmdFind,
+    CmdPrevPrompt,
+    CmdNextPrompt,
     CmdToggleSidebar,
     CmdLayout,
     CmdProcesses,

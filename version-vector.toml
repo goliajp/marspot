@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.848"  # marspot-term settings cap the font family name and drop its control characters (not used by shell)
-core    = "0.12.748"  # only a monospaced face of the chosen family is drawn; an open settings panel is redrawn once the families are listed
-session = "0.11.476"  # marspot-term settings cap the font family name and drop its control characters (not used by session)
+shell   = "0.7.854"  # a prompt jump overtaken by a key or scroll is dropped; a jump to live marks the prompt row
+core    = "0.12.754"  # a prompt jump overtaken by a key or scroll is dropped; a jump to live marks the prompt row
+session = "0.11.480"  # a prompt jump answers with the prompt row and the jump it answers

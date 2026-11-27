@@ -300,37 +300,6 @@ impl Grid {
         self.sb_prompt.get(idx).copied().unwrap_or_default()
     }
 
-    /// The view offset that puts the nearest prompt above the current
-    /// one at the top of the screen, or `None` when there is no
-    /// earlier prompt to go to.
-    ///
-    /// `view_offset` counts rows scrolled back from the live screen,
-    /// the way `cell_at_view` does. Scanning is what kitty does too:
-    /// the marks are a byte a row and a screenful is a few dozen, so
-    /// there is nothing here worth an index.
-    pub fn prompt_above(&self, view_offset: u16) -> Option<u16> {
-        let sb = self.scrollback.len();
-        // The absolute line index currently at the top of the view,
-        // counting scrollback from 0 and then the live rows.
-        let top_abs = (sb + self.rows as usize).checked_sub(
-            self.rows as usize + view_offset as usize,
-        )?;
-        for abs in (0..top_abs).rev() {
-            let mark = if abs < sb {
-                self.scrollback_prompt(abs)
-            } else {
-                self.row_prompt((abs - sb) as u16)
-            };
-            if mark == PromptMark::PromptStart {
-                // Put that line at the top: everything below it,
-                // minus a screen, is how far back that is.
-                let below = sb + self.rows as usize - abs;
-                return Some((below.saturating_sub(self.rows as usize)) as u16);
-            }
-        }
-        None
-    }
-
     /// Continuation flag for scrollback line `idx` (same indexing as
     /// `scrollback_line`: 0 = oldest).
     ///

@@ -46,6 +46,8 @@ pub const ALL: &[Msg] = &[
     Msg::CmdNewPane,
     Msg::CmdClosePanel,
     Msg::CmdFind,
+    Msg::CmdPrevPrompt,
+    Msg::CmdNextPrompt,
     Msg::CmdToggleSidebar,
     Msg::CmdLayout,
     Msg::CmdProcesses,
