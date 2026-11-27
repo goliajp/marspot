@@ -45,6 +45,10 @@ pub struct Grid {
     /// one point of reading error at its high-band load; the horizon for
     /// the others.
     pub dead: Vec<f64>,
+    /// Per account, the high-band load of the panes on it now; per pane,
+    /// its own high-band load.
+    load: Vec<f64>,
+    pane_high: Vec<f64>,
     /// Each pane's targets, worked out when first asked for.
     targets: Vec<OnceCell<Vec<usize>>>,
 }
@@ -63,7 +67,7 @@ impl Grid {
     pub fn new(input: &Input) -> Grid {
         let mut base = Grid::build(input, &[]);
         let deadline = Ctx::deadlines(input, &base);
-        let dead: Vec<f64> = deadline.iter().enumerate().map(|(j, d)| if *d < H2 { dead_by_exhaustion(*d, high_load(input, &base.on, j)) } else { H2 }).collect();
+        let dead: Vec<f64> = deadline.iter().enumerate().map(|(j, d)| if *d < H2 { dead_by_exhaustion(*d, base.load[j]) } else { H2 }).collect();
         let late: Vec<Option<f64>> = dead.iter().map(|t| (*t < H2 && *t > 0.0).then_some(*t)).collect();
         if late.iter().all(Option::is_none) {
             (base.deadline, base.dead) = (deadline, dead);
@@ -84,10 +88,22 @@ impl Grid {
         let mut from = self.on[p];
         s.hops().iter().enumerate().all(|(h, hop)| {
             let at = hop.at as usize;
-            let ok = (h == 0 && at == self.first[p]) || from.is_none_or(|j| self.cuts[at] <= self.dead[j] + SAME_H);
+            let ok = (h == 0 && at == self.first[p]) || from.is_none_or(|j| self.cuts[at] <= self.dead_for(p, j) + SAME_H);
             from = Some(hop.to as usize);
             ok
         })
+    }
+
+    /// The latest moment pane `p` leaving account `j` averts the refusal.
+    /// Off an account the pane joined, the point of reading error is
+    /// taken at the account's load with the pane added.  When the account
+    /// empties is still the moment it would if nobody moved: that is the
+    /// deadline every switch is timed against.
+    pub fn dead_for(&self, p: usize, j: usize) -> f64 {
+        if self.on[p] == Some(j) || self.deadline[j] >= H2 {
+            return self.dead[j];
+        }
+        dead_by_exhaustion(self.deadline[j], self.load[j] + self.pane_high[p])
     }
 
     fn build(input: &Input, extra: &[f64]) -> Grid {
@@ -108,8 +124,10 @@ impl Grid {
         let late = vec![None; input.accounts.len()];
         let deadline = vec![H2; input.accounts.len()];
         let dead = deadline.clone();
+        let load = (0..input.accounts.len()).map(|j| high_load(input, &on, j)).collect();
+        let pane_high = input.panes.iter().map(|p| p.high[0] + p.high[1]).collect();
         let targets = vec![OnceCell::new(); input.panes.len()];
-        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead, targets }
+        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead, load, pane_high, targets }
     }
 
     pub fn segs(&self) -> usize {
