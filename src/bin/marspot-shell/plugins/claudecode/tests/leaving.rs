@@ -18,7 +18,7 @@ pub(super) fn account(mail: &str, u7: f64, reset: i64, at: i64) -> String {
 
 pub(super) fn write_feed(home: &std::path::Path, accounts: &[String]) {
     let body = format!(r#"{{"generated_at": "2026-11-25T00:00:00+00:00", "accounts": [{}]}}"#, accounts.join(","));
-    fs::write(home.join(".local/state/devops/claude-usage.json"), body).unwrap();
+    fs::write(usage_feed(home), body).unwrap();
 }
 
 /// The feed as the sweep reads it now: P1 at `u1` of its week, P2 at

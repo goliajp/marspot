@@ -1,6 +1,6 @@
 //! A new Claude helper as the shell starts one: the accounts from the
-//! feed under `HOME`, the other panes from the view the last sweep
-//! published, a line in `alloc_events` for every choice the core made,
+//! feed marspot collects itself (no devops here), the other panes from
+//! the view the last sweep published, a line in `alloc_events` for every choice the core made,
 //! and the reserve for the Fable panes.
 
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ fn home(tag: &str, rows: [Row; 2]) -> (TempDir, EnvGuard, Vec<(u8, PathBuf)>, i6
     let dir = TempDir::new(tag);
     let mut env = EnvGuard::new();
     env.set("HOME", dir.path()).set("MARSPOT_STATE_DIR", dir.join("state"));
+    crate::test_log::open();
     let now = unix_now();
     let at = crate::plugins::usage::iso_utc(now);
     let mut accounts = Vec::new();
@@ -39,10 +40,18 @@ fn home(tag: &str, rows: [Row; 2]) -> (TempDir, EnvGuard, Vec<(u8, PathBuf)>, i6
         ));
         homes.push((n, profile));
     }
-    let feed = dir.join(".local/state/devops/claude-usage.json");
+    // the feed marspot collects itself: no devops on this machine
+    let feed = marspot::cc_usage::own_feed_path();
     std::fs::create_dir_all(feed.parent().unwrap()).unwrap();
     std::fs::write(feed, format!(r#"{{"generated_at":"{at}","accounts":[{}]}}"#, accounts.join(","))).unwrap();
     (dir, env, homes, now)
+}
+
+/// Nothing in the log shows the placement leaning on devops.
+fn no_devops_lines() {
+    let log = crate::test_log::text();
+    let lines = crate::test_log::devops_lines(&log);
+    assert!(lines.is_empty(), "{lines:#?}");
 }
 
 fn pane(sid: u64, profile: u8, class: Class) -> PaneIn {
@@ -56,7 +65,7 @@ fn helper(sid: u64, profile: u8) -> PaneIn {
 /// The sweep's view at `at` of `panes`, each at its speed (restricted,
 /// plain), published for the helpers started after it.
 fn publish(tag: &str, at: i64, panes: &[(PaneIn, (f64, f64))]) {
-    let usage = marspot::cc_usage::read().expect("the feed under HOME");
+    let usage = marspot::cc_usage::read().expect("marspot's own feed");
     let mails: Vec<(u8, Option<String>)> = (1u8..=2).map(|n| (n, Some(format!("{tag}{n}@example")))).collect();
     let snap = Snapshot { now: at, accounts: accounts_of(&mails, &usage, at), panes: panes.iter().map(|p| p.0.clone()).collect(), ..Snapshot::default() };
     let rates: Vec<(f64, f64)> = panes.iter().map(|p| p.1).collect();
@@ -100,6 +109,7 @@ fn helpers_a_new_helper_with_fable_short_is_placed_where_there_is_room() {
     let inputs = Inputs::decode(&r.detail).expect("the inputs read back");
     assert_eq!(inputs.decide_by(&inputs.plan(), Rule::of_line(&r.detail)).map(|(to, _)| to), Some(2));
     assert!(inputs.b_f > 0.0, "the Fable panes' demand is in what it read: {inputs:?}");
+    no_devops_lines();
 }
 
 /// P1 renews first; a busy pane in the last view fills its gap, so the
@@ -136,6 +146,7 @@ fn helpers_a_new_helper_avoids_a_busy_account_and_is_counted_once() {
     let on2 = later.accounts.iter().position(|q| q.id == 2).unwrap();
     assert!((later.loads[on2].plain - RHO0).abs() < 1e-12, "the first helper once, from the view: {later:?}");
     assert!((later.b_n - (0.01 + 2.0 * RHO0)).abs() < 1e-12, "the busy pane, the first helper, the new one: {later:?}");
+    no_devops_lines();
 }
 
 /// A helper's pane shows in a view only after its container, agent and
@@ -177,6 +188,7 @@ fn helpers_a_placed_helper_counts_until_a_view_shows_its_pane() {
     let at = scene.accounts.iter().position(|q| q.id == first).unwrap();
     let want = RHO0 * if first == 1 { 2.0 } else { 1.0 };
     assert!((scene.loads[at].plain - want).abs() < 1e-12, "{scene:?}");
+    no_devops_lines();
 }
 
 /// Helpers started before any sweep has published a view stay counted
@@ -197,4 +209,5 @@ fn helpers_started_before_the_first_view_stay_counted_through_it() {
     let scene = claude_scene(&[1, 2], &accounts.rooms, usage.as_ref(), now);
     placed.settle(scene.shown.as_deref().unwrap(), now);
     assert_eq!(placed.counts(), before, "the first view's helper panes take nothing");
+    no_devops_lines();
 }

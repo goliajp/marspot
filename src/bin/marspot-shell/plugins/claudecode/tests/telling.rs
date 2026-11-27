@@ -9,7 +9,7 @@ fn feed(home: &std::path::Path, tag: &str, p1: (&str, f64), p2: (&str, f64)) {
 
 fn feed_renewing(home: &std::path::Path, tag: &str, p1: (&str, f64), p1_renews: i64, p2: (&str, f64)) {
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(home),
         format!(
             r#"{{"generated_at": "2026-11-06T00:00:00+00:00", "accounts": [
                {{"name":"A","email":"{tag}1@example","status":"{}","utilization_5h":null,

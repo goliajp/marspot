@@ -12,7 +12,7 @@ const BEFORE: i64 = 1_790_000_000;
 /// 2026-11-06. P1's week renews a week earlier, so with nothing else known it is where a resting pane goes.
 fn feed(home: &std::path::Path, tag: &str) {
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(home),
         format!(
             r#"{{"generated_at": "2026-11-06T00:00:00+00:00", "accounts": [
                {{"name":"A","email":"{tag}1@example","status":"allowed","utilization_5h":null,

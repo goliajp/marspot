@@ -21,7 +21,7 @@ fn feed(home: &Path) {
     let renews = FED + 150 * 3600;
     let renews2 = FED + 30 * 3600;
     fs::write(
-        home.join(".local/state/devops/claude-usage.json"),
+        usage_feed(home),
         format!(
             r#"{{"generated_at": "2026-11-05T00:00:00+00:00", "accounts": [
                {{"name":"A","email":"plan1@example","status":"allowed","utilization_5h":null,
