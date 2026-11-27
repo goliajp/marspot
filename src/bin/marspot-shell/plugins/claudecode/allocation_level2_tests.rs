@@ -137,7 +137,7 @@ fn allocation_level2_checks_the_pane_speeds_against_the_account_readings() {
         lines.extend(pp.scan(&mut a, &later, &view, Some(&fc), cp.last()).into_iter().filter(|l| l.0 == "sched.calib").map(|l| l.1));
     }
     let want = 100.0 * asked * 6.0;
-    assert_eq!(lines, vec![format!("ratio=3.000 factor=3.000 used={:.1} want={want:.1} P3={:.1}/{want:.1} P7=0.0/0.0", want * 3.0, want * 3.0)]);
+    assert_eq!(lines, vec![format!("ratio=3.000 factor=3.000 used={:.1} want={want:.1} P3={:.1}/{want:.1}", want * 3.0, want * 3.0)]);
     // with the feed stale for the next six hours no window closes
     for k in 37..=72 {
         later.now = NOW + k * 600;
