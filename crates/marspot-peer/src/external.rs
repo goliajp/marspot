@@ -19,6 +19,17 @@ pub const PREFIX: &str = "external:";
 /// Longest sender name, in bytes (the charset is ASCII).
 pub const MAX_NAME: usize = 40;
 
+/// Whether `name` starts with [`PREFIX`], in any case.
+pub fn starts_external(name: &str) -> bool {
+    name.get(..PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(PREFIX))
+}
+
+/// Whether `e` is the record [`send`] stands an outside sender on: pid 0,
+/// which no live session has, under a name behind [`PREFIX`].
+pub fn is_outside(e: &Entry) -> bool {
+    e.pid == 0 && e.name.as_deref().is_some_and(starts_external)
+}
+
 /// Whether `name` may stand behind `external:`.  It reaches agents as
 /// part of the sender header, so it is kept to a charset that cannot end
 /// that header, start a line, or pass for another attribute.
@@ -52,6 +63,11 @@ pub fn taken(name: &str, entries: &[Entry], panes: &[Pane]) -> Option<String> {
 /// Codex or Claude Code sets for every command, else by an ancestor that
 /// a registry record names (a Claude session's own pid, the agent behind
 /// a Codex, Gemini or Kimi record).
+///
+/// This keeps a caller from sending as an outsider by mistake; it is no
+/// security boundary.  A command a session runs can clear `CLAUDECODE`
+/// and detach from the session's process tree, but a session that asks
+/// before its commands run needs the person's approval for that.
 pub fn session_around(
     entries: &[Entry],
     pid: i32,
@@ -88,22 +104,57 @@ pub fn send(name: &str, around: Option<String>, entries: &[Entry], panes: &[Pane
     if let Some(who) = taken(name, entries, panes) {
         return Err(format!("--from {name:?} is the name of {who}; an outside sender must not pass for a pane or session, so nothing was sent"));
     }
-    peers::send(&sender(name), entries, panes, to, body, priority, false)
+    peers::send(&sender(name, &reply_socket(name)?), entries, panes, to, body, priority, false)
 }
 
-/// The record an outside sender stands on.  The reply address is one
-/// nobody listens on: an outside sender reads no replies, and the
-/// recipient's header check wants an address.  Its class is bypass: the
+/// Where replies to `name` would go: a path in this user's own temporary
+/// directory, which other users cannot enter, so no other user's process
+/// can bind it and read what a recipient sends back.  Nothing of ours
+/// binds it either; a Codex recipient forwards no answer to an
+/// `external:` sender.
+fn reply_socket(name: &str) -> Result<String, String> {
+    let dir = user_temp_dir()?;
+    let path = format!("{}/marspot-external-{name}.sock", dir.trim_end_matches('/'));
+    if !crate::envelope::is_address(&format!("uds:{path}")) {
+        return Err(format!("this user's temporary directory {dir:?} cannot be written into a reply address; nothing was sent"));
+    }
+    Ok(path)
+}
+
+/// The per-user temporary directory (mode 0700), asked of the system
+/// rather than read from `TMPDIR`, which a scheduled job may not have.
+#[cfg(target_os = "macos")]
+fn user_temp_dir() -> Result<String, String> {
+    let mut buf = [0 as libc::c_char; 1024];
+    // SAFETY: confstr writes at most buf.len() bytes, nul-terminated
+    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+    if n == 0 || n > buf.len() {
+        return Err("the system names no temporary directory for this user; nothing was sent".into());
+    }
+    // SAFETY: confstr returned success, so buf holds a nul-terminated string
+    let dir = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// The per-user runtime directory (mode 0700); `/tmp` is never used.
+#[cfg(not(target_os = "macos"))]
+fn user_temp_dir() -> Result<String, String> {
+    std::env::var("XDG_RUNTIME_DIR").map_err(|_| "XDG_RUNTIME_DIR is not set, so there is no per-user directory for a reply address; nothing was sent".into())
+}
+
+/// The record an outside sender stands on.  `socket` is the reply
+/// address from [`reply_socket`]: an outside sender reads no replies,
+/// and the recipient's header check wants an address.  Its class is bypass: the
 /// sender runs without anyone approving its steps, as the sessions
 /// marspot serves do; a recipient in the prompting class holds or
 /// refuses the message as it would any bypass sender's.
-fn sender(name: &str) -> Entry {
+fn sender(name: &str, socket: &str) -> Entry {
     Entry {
         pid: 0,
         session_id: None,
         name: Some(format!("{PREFIX}{name}")),
         cwd: None,
-        socket: Some(format!("/tmp/marspot-external-{name}.sock")),
+        socket: Some(socket.to_string()),
         status: None,
         proc_start: None,
         started_at_ms: None,

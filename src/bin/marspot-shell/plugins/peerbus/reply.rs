@@ -39,10 +39,16 @@ impl Asker {
 }
 
 /// Who asked, for a message whose content is `content`: nobody when
-/// the message is an answer this module relayed.
+/// the message is an answer this module relayed, or comes from a sender
+/// outside every session (`external:`), which reads no answers; its
+/// reply address is only a path, and the answer is not sent to it.
 pub(super) fn asker(content: &str, reply_to: String) -> Option<Asker> {
     let env = marspot_peer::envelope::parse(content);
-    if env.as_ref().is_some_and(|e| e.from_plugin.as_deref() == Some(RELAY_PLUGIN) || e.body.trim_start().starts_with(RELAYED_UNMARKED)) {
+    if env.as_ref().is_some_and(|e| {
+        e.from_plugin.as_deref() == Some(RELAY_PLUGIN)
+            || e.body.trim_start().starts_with(RELAYED_UNMARKED)
+            || e.from_name.as_deref().is_some_and(marspot_peer::external::starts_external)
+    }) {
         return None;
     }
     Some(Asker { reply_to, name: env.and_then(|e| e.from_name) })
@@ -274,6 +280,20 @@ mod tests {
         let h = Header { from: "uds:/tmp/cc-socks/b.sock".into(), from_name: None, from_mode: None };
         let v062 = encode(&h, "(Relayed by marspot: this Codex session's answer to your message, from its turn.)\n\nok");
         assert_eq!(super::asker(&v062, "uds:/tmp/cc-socks/b.sock".into()), None);
+    }
+
+    /// An outside sender's message gets no forwarded answer, whatever
+    /// its reply address; a session merely named like one still does.
+    #[test]
+    fn an_outside_sender_is_owed_no_answer() {
+        use marspot_peer::envelope::{encode, Header};
+        let from = "uds:/var/folders/x/T/marspot-external-devops-cron.sock";
+        for name in ["external:devops-cron", "EXTERNAL:job"] {
+            let msg = encode(&Header { from: from.into(), from_name: Some(name.into()), from_mode: None }, "report");
+            assert_eq!(super::asker(&msg, from.into()), None, "{name}");
+        }
+        let marked = encode(&Header { from: from.into(), from_name: Some("session-external:x".into()), from_mode: None }, "q");
+        assert!(super::asker(&marked, from.into()).is_some());
     }
 
     fn asker_of(content: &str, reply_to: &str) -> Asker {

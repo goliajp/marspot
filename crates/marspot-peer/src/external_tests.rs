@@ -3,7 +3,7 @@ use crate::envelope;
 use crate::registry::Agent;
 
 fn entry(pid: i32, name: &str) -> Entry {
-    Entry { pid, name: Some(name.into()), socket: Some(format!("/tmp/cc-socks/{pid}.sock")), class: None, ..sender("x") }
+    Entry { pid, name: Some(name.into()), socket: Some(format!("/tmp/cc-socks/{pid}.sock")), class: None, ..sender("x", "/tmp/x.sock") }
 }
 
 fn pane(base: &str, code: u16, shown: &str, pid: i32) -> Pane {
@@ -56,13 +56,26 @@ fn external_is_refused_inside_any_session() {
 /// nothing else, with an address and the bypass class.
 #[test]
 fn external_header_says_external() {
-    let me = sender("devops-cron");
+    let me = sender("devops-cron", &reply_socket("devops-cron").unwrap());
     assert_eq!(peers::display_name(&me, &[pane("x", 1, "x", 1)]), "external:devops-cron");
     let from = format!("uds:{}", me.socket.as_deref().unwrap());
     assert!(envelope::is_address(&from));
     let h = envelope::Header { from, from_name: Some(peers::display_name(&me, &[])), from_mode: me.class };
     let p = envelope::parse(&envelope::encode(&h, "report")).unwrap();
     assert_eq!((p.from_name.as_deref(), p.from_mode), (Some("external:devops-cron"), Some(Mode::Bypass)));
+}
+
+/// A session renamed `external:devops-cron`, or sitting in a pane of
+/// that name, does not read as the outside sender.
+#[test]
+fn a_session_named_like_an_outside_sender_is_marked() {
+    let posing = entry(901, "External:devops-cron");
+    assert_eq!(peers::display_name(&posing, &[]), "session-External:devops-cron");
+    assert_eq!(peers::display_name(&posing, &[pane("external:x", 2, "external:x#2", 901)]), "session-external:x#2");
+    assert_eq!(peers::display_name(&entry(902, "devops-external:x"), &[]), "devops-external:x");
+    let h = envelope::Header { from: "uds:/tmp/cc-socks/901.sock".into(), from_name: Some(peers::display_name(&posing, &[])), from_mode: None };
+    let p = envelope::parse(&envelope::encode(&h, "hi")).unwrap();
+    assert!(!starts_external(p.from_name.as_deref().unwrap()));
 }
 
 #[test]

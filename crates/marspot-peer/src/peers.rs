@@ -160,12 +160,15 @@ fn write_line(relay: Option<&str>, target: &str, name: &str, line: &str) -> Resu
 }
 
 /// What a session is called here: its pane's name when it is in a
-/// marspot pane, its own name otherwise.
+/// marspot pane, its own name otherwise.  Only `send --from` speaks as
+/// `external:`; a session or pane renamed to start with it gets
+/// `session-` in front, so it cannot pass for an outside sender.
 pub fn display_name(e: &Entry, panes: &[Pane]) -> String {
-    panes::of_pid(panes, e.pid)
+    let name = panes::of_pid(panes, e.pid)
         .map(|p| p.name.clone())
         .or_else(|| e.name.clone())
-        .unwrap_or_else(|| "?".into())
+        .unwrap_or_else(|| "?".into());
+    if crate::external::starts_external(&name) && !crate::external::is_outside(e) { format!("session-{name}") } else { name }
 }
 
 /// The session list: one row per peer with the name to send to, the

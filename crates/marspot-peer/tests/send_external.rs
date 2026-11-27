@@ -4,6 +4,7 @@
 //! outside the sandbox's own `HOME` is read or written.
 
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -136,7 +137,12 @@ fn external_send_reaches_claude_and_codex_panes_as_external() {
         let h = header_of(&sb.got(sock).unwrap_or_else(|| panic!("{to}: nothing arrived")));
         assert_eq!(h.from_name.as_deref(), Some("external:devops-cron"), "{to}");
         assert_eq!(h.from_mode, Some(Mode::Bypass), "{to}");
-        assert_eq!(h.from.as_deref(), Some("uds:/tmp/marspot-external-devops-cron.sock"), "{to}");
+        // the reply address sits in this user's own 0700 directory, never in /tmp
+        let reply = h.from.as_deref().and_then(|f| f.strip_prefix("uds:")).unwrap_or_else(|| panic!("{to}: no address"));
+        let dir = std::path::Path::new(reply).parent().unwrap();
+        assert!(reply.ends_with("/marspot-external-devops-cron.sock") && !reply.starts_with("/tmp/"), "{to}: {reply}");
+        let meta = std::fs::metadata(dir).unwrap();
+        assert_eq!((meta.mode() & 0o777, meta.uid()), (0o700, unsafe { libc::getuid() }), "{to}: {}", dir.display());
         assert_eq!(h.body, "runner report", "{to}");
     }
 }
