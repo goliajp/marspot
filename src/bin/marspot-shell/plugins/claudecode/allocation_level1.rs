@@ -15,7 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use marspot_agent::sched::forecast::Forecast;
-use marspot_agent::sched::level1::{self, Offer, World};
+use marspot_agent::sched::level1::{self, Level1, Offer, World};
 
 use super::allocation_inputs::AccountIn;
 use super::allocation_view::View;
@@ -29,6 +29,8 @@ pub(super) struct ClassPlan {
     key: Option<u64>,
     said: String,
     last_pi: Option<f64>,
+    /// The inputs and the plan last worked out, for level 2.
+    last: Option<(Inputs, Level1)>,
 }
 
 /// What one plan is worked out from.
@@ -71,6 +73,11 @@ fn key(accounts: &[AccountIn], forecast: Option<&Forecast>, i: &Inputs) -> u64 {
 }
 
 impl ClassPlan {
+    /// The inputs and the class plan last worked out.
+    pub(super) fn last(&self) -> Option<&(Inputs, Level1)> {
+        self.last.as_ref()
+    }
+
     /// One scan: the line when the inputs changed and the plan's line with them.
     pub(super) fn scan(&mut self, accounts: &[AccountIn], view: &View, forecast: Option<&Forecast>, slope_f: f64, now: i64) -> Option<String> {
         let i = inputs(accounts, view, forecast, slope_f, now);
@@ -93,6 +100,7 @@ impl ClassPlan {
         self.last_pi = Some(plan.pi);
         let ids: Vec<u8> = i.accounts.iter().map(|q| q.id).collect();
         let line = plan.line(&ids);
+        self.last = Some((i, plan));
         (line != self.said).then(|| {
             self.said = line.clone();
             line

@@ -112,6 +112,9 @@ pub struct Level1 {
     pub claims: Vec<Claim>,
     /// Claim combinations swept.
     pub combos: usize,
+    /// Accounts whose restricted window renews before their week: their
+    /// `Phi` is cut at that renewal.
+    pub tf_early: usize,
 }
 
 struct Solved {
@@ -226,6 +229,7 @@ pub fn plan(w: &World) -> Level1 {
         money,
         claims: chosen.claims,
         combos: chosen.combos,
+        tf_early: w.accounts.iter().filter(|q| q.tf.max(0.0) < q.t.max(0.0) - 1e-9).count(),
     }
 }
 

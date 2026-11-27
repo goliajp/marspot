@@ -142,3 +142,22 @@ fn sched_level1_plan_cost_at_sixteen_accounts_is_reported() {
     eprintln!("one plan: {took:?}, {} segments, {} combinations", p.cuts.len() - 1, p.combos);
     assert!(p.cuts.len() - 1 <= 80 && p.combos <= 16);
 }
+
+#[test]
+fn sched_level1_a_window_renewing_before_the_week_cuts_phi_there() {
+    // 0.3 of restricted window left, renewing at 10 h; the week at 100 h
+    let mut a = [q(1, 0.5, 0.3, 100.0)];
+    a[0].tf = 10.0;
+    let p = plan(&world(&a, [0.01, 0.0], 0.01));
+    assert_eq!(p.tf_early, 1);
+    assert!(p.line(&[1]).contains(" tf_early=1 "), "{}", p.line(&[1]));
+    // 0.1 before the window renews, nothing until the week does, then
+    // the renewed window's 0.528 against 0.68 asked
+    assert!((p.served[0] - 0.628).abs() < 1e-9, "{:?}", p.served);
+    assert!(p.unserved_until(0, 10.0) < 1e-12);
+    // the same account with both renewals at 100 h serves its whole 0.3 first
+    a[0].tf = 100.0;
+    let same = plan(&world(&a, [0.01, 0.0], 0.01));
+    assert_eq!(same.tf_early, 0);
+    assert!((same.served[0] - 0.828).abs() < 1e-9, "{:?}", same.served);
+}

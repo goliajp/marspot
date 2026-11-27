@@ -7,7 +7,8 @@
 //! worth; `alloc` turns an account decision of `quota` into candidates;
 //! `state` is what the scheduler remembers, in a fixed size; `forecast`
 //! is the demand the planner plans on, derived from facts; `level1` is
-//! the class plan over the week ahead.  Nothing
+//! the class plan over the week ahead; `level2` is the pane schedule
+//! over the day ahead and the standing plan across passes.  Nothing
 //! here reads a file, starts a thread or knows which agent it serves.
 
 pub mod alloc;
@@ -15,6 +16,7 @@ pub mod choose;
 pub mod constrain;
 pub mod forecast;
 pub mod level1;
+pub mod level2;
 pub mod price;
 pub mod reset;
 pub mod state;

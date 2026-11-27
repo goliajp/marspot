@@ -6,6 +6,7 @@ use super::allocation_adapter::{Allocation, events_dir};
 use super::allocation_forecast::Forecasting;
 use super::allocation_inputs::{MarksFile, snapshot};
 use super::allocation_level1::ClassPlan;
+use super::allocation_level2::PanePlan;
 use super::allocation_more::Hold;
 use super::*;
 
@@ -21,6 +22,7 @@ pub(super) fn worker_main(
     let mut allocation = Allocation::new(events_dir(&state));
     let mut forecast = Forecasting::new(&state);
     let mut class_plan = ClassPlan::default();
+    let mut pane_plan = PanePlan::new(&state);
     let mut marks = MarksFile::new(state.join("plugins").join("claudecode"));
     while let Ok(focus) = req_rx.recv() {
         // Deliberately outside `scan_once`: this one reaches out of
@@ -46,6 +48,12 @@ pub(super) fn worker_main(
             && let Some(line) = class_plan.scan(&snap.accounts, view, forecast.last(), allocation.slope_f(), now)
         {
             marspot::lx_info!("sched.level1", &line);
+        }
+        if let Some(view) = allocation.view.take() {
+            for (tag, line) in pane_plan.scan(&mut allocation, &snap, &view, forecast.last(), class_plan.last()) {
+                marspot::lx_info!(tag, &line);
+            }
+            allocation.view = Some(view);
         }
         result.alloc = allocation.view.take();
         if res_tx.send(result).is_err() {
