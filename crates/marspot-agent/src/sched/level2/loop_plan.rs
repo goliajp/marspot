@@ -20,7 +20,7 @@ fn buckets() -> Vec<f64> {
 }
 
 pub(super) fn planned(st: &mut Standing, read: &Read, panes: &[P], now: i64, bias: f64) {
-    with_input(read, panes, now, bias, |i| {
+    with_input(read, panes, now, bias, false, |i| {
         pass::full(st, i, now as u64, now);
     });
 }
@@ -36,7 +36,7 @@ pub(super) struct Driver {
 
 impl Driver {
     pub(super) fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: f64, refused: bool) {
-        with_input(read, panes, now, bias, |i| {
+        with_input(read, panes, now, bias, true, |i| {
             let quants: Vec<_> = i.accounts.iter().map(|x| x.q.clone()).collect();
             let high: Vec<f64> = i.accounts.iter().map(|x| i.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
             let counted: Vec<u64> = i.panes.iter().map(|p| p.sid).collect();
@@ -54,9 +54,17 @@ impl Driver {
     }
 }
 
-fn with_input(read: &Read, panes: &[P], now: i64, bias: f64, f: impl FnOnce(&Input)) {
+/// The pane band the shell uses without a forecast: `[restricted, plain]`.
+const BAND_LO: [f64; 2] = [0.3, 0.6];
+const BAND_HI: [f64; 2] = [2.5, 1.5];
+
+/// The level is the measured speed times `bias`; with `short`, as the
+/// shell plans, the measured speed itself where the level is off by more
+/// than its band.
+fn with_input(read: &Read, panes: &[P], now: i64, bias: f64, short: bool, f: impl FnOnce(&Input)) {
     let q = read.quants();
-    let sp: Vec<(f64, f64)> = panes.iter().map(|p| speeds(p, now)).map(|(f, n)| (f * bias, n * bias)).collect();
+    let level = |m: f64, c: usize| if short { planned_speed(m * bias, m, BAND_LO[c], BAND_HI[c]) } else { m * bias };
+    let sp: Vec<(f64, f64)> = panes.iter().map(|p| speeds(p, now)).map(|(f, n)| (level(f, 0), level(n, 1))).collect();
     let demand = [sp.iter().map(|x| x.0).sum(), sp.iter().map(|x| x.1).sum()];
     let b = buckets();
     let a_hi = b.iter().copied().fold(0.0, f64::max);

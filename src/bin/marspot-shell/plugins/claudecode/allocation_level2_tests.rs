@@ -84,3 +84,27 @@ fn allocation_level2_logs_a_plan_records_its_fact_and_writes_the_status() {
     assert_eq!((pp.passes, pp.full), (2, 1));
     let _ = fs::remove_dir_all(&r);
 }
+
+#[test]
+fn allocation_level2_plans_a_pane_at_its_three_hour_speed_when_that_is_off_the_band() {
+    let r = root("short");
+    let a = Allocation::new(events_dir(&r));
+    let (snap, view, _) = scene();
+    // 441 ran at its level for seven hours, then five times faster
+    let mut facts = Facts::default();
+    for k in 1..=10 {
+        let rate = if k <= 3 { 0.03 } else { 0.006 };
+        facts.used(NOW - k * 3600, 441, Class::Plain, rate);
+        facts.used(NOW - k * 3600, 481, Class::Plain, 0.004);
+        facts.used(NOW - k * 3600, 430, Class::Plain, 0.003);
+    }
+    let fc = forecast::build(&facts, NOW, &snap.live);
+    let fp = fc.panes.iter().find(|p| p.sid == 441).expect("441 in the forecast");
+    assert!(fp.short[1] > fp.day[1] * fc.pane_band[1].hi, "441's recent speed {} is inside the band of {}", fp.short[1], fp.day[1]);
+    let mut cp = ClassPlan::default();
+    cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
+    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default());
+    let p = b.panes.iter().find(|p| p.sid == 441).expect("441 planned");
+    assert_eq!(p.speed[1], fp.short[1]);
+    let _ = fs::remove_dir_all(&r);
+}

@@ -219,6 +219,15 @@ pub struct Plan {
     pub cuts: Vec<f64>,
 }
 
+/// The speed a pane is planned at in one class: its 24-hour level, or its
+/// short-window speed when that lies outside the level's band (`lo`, `hi`
+/// times the level).  A level that is off by more than its band is shown
+/// by the pane's own recent use, and planning on the level then times
+/// every switch off its account by a wrong exhaustion.
+pub fn planned_speed(day: f64, short: f64, lo: f64, hi: f64) -> f64 {
+    if day > 0.0 && (short > day * hi || short < day * lo) { short } else { day }
+}
+
 /// The plan for `input`, starting from `start` (the standing plan's
 /// schedules, re-timed) when given.
 pub fn plan(input: &Input, start: Option<&[Sched]>) -> Plan {

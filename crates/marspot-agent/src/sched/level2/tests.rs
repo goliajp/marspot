@@ -206,6 +206,18 @@ fn sched_level2_leaving_an_account_it_joined_takes_the_reading_error_at_the_load
 }
 
 #[test]
+fn sched_level2_a_pane_is_planned_at_its_recent_speed_when_that_is_off_its_band() {
+    // inside the band: the level
+    assert_eq!(planned_speed(0.004, 0.005, 0.6, 1.5), 0.004);
+    // three times the level, past the band's top: the recent speed
+    assert_eq!(planned_speed(0.004, 0.012, 0.6, 1.5), 0.012);
+    // a third of it, under the band's bottom: the recent speed
+    assert_eq!(planned_speed(0.012, 0.004, 0.6, 1.5), 0.004);
+    // no level yet: the level as given
+    assert_eq!(planned_speed(0.0, 0.004, 0.6, 1.5), 0.0);
+}
+
+#[test]
 fn sched_level2_a_retime_keeps_the_gain_of_a_refusal_averting_switch_not_yet_open() {
     let a = [acct(1, 0.02, 0.0, 100.0), acct(2, 0.6, 0.0, 120.0)];
     let p = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002), pane(12, 1, false, 0.0, 0.004)];
