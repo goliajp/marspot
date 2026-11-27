@@ -12,7 +12,10 @@
 //! against today's rule on the same wrong speeds, so the two sides see
 //! the same information.  Panes whose three-hour speed is outside the
 //! band around their level are handed to the triggers as the shell
-//! hands them; no offers are modelled.
+//! hands them; no offers are modelled.  As in the shell, the speeds are
+//! checked against what the accounts read (`calib`) and scaled by the
+//! factor in force.  The feed goes out now and then, and the accounts
+//! are read then as the shell reads them (`Feed`).
 
 use super::loop_world::{P, Policy, RESTS, WEEK, hours, speeds};
 use super::standing::Standing;
@@ -24,22 +27,110 @@ use crate::quota::waste::switch_cost;
 use crate::sched::level1::{self, World};
 
 /// What the policies read of the accounts: each one's week and
-/// restricted window, with this reading's error.
+/// restricted window, with this reading's error, or while the feed is
+/// out, as the shell reads them then (`Feed`).
 pub(super) struct Read<'a> {
     pub acc: &'a [(Quant, i64)],
     pub err: &'a [[f64; 2]],
+    pub feed: &'a Feed,
+    pub now: i64,
 }
 
 impl Read<'_> {
     pub(super) fn quants(&self) -> Vec<Quant> {
-        self.acc
+        if self.feed.out(self.now) {
+            return self.feed.stale(self.now);
+        }
+        self.fresh()
+    }
+
+    fn fresh(&self) -> Vec<Quant> {
+        fresh(self.acc, self.err)
+    }
+
+    /// The feed is older than the shell's stale-feed limit.
+    pub(super) fn stale_feed(&self) -> bool {
+        self.feed.out(self.now) && self.now - self.feed.since > STALE_FEED_S
+    }
+}
+
+fn fresh(acc: &[(Quant, i64)], err: &[[f64; 2]]) -> Vec<Quant> {
+    acc.iter()
+        .zip(err)
+        .map(|((q, _), e)| {
+            // an account that refuses reads empty: the feed knows it
+            let read = |x: f64, e: f64, top: f64| if x <= 0.0 { 0.0 } else { (x + e).clamp(0.0, top) };
+            let r = read(q.r, e[0], 1.0);
+            Quant { r, f: read(q.f.min(q.r), e[1], r), ..q.clone() }
+        })
+        .collect()
+}
+
+/// The shell's limits: a feed older than this is stale, and an account
+/// reading older than this has its week pushed forward by the measured
+/// speeds of the panes on it.
+const STALE_FEED_S: i64 = 15 * 60;
+const STALE_ACCOUNT_S: i64 = 30 * 60;
+/// Feed outages: how often one starts, an hour, and how long one lasts,
+/// seconds.  The recorded decisions of 11-24 to 11-26 read no stale
+/// account in 776 readings over 34 hours, which bounds the share of time
+/// with the feed out to a few percent: one outage in about four days,
+/// lasting from a reading missed to three hours (the length is not in
+/// the records).
+const OUT_PER_H: f64 = 0.01;
+const OUT_S: [f64; 2] = [20.0 * 60.0, 180.0 * 60.0];
+
+/// The usage feed as the shell sees it, outages drawn from a stream of
+/// their own so that both policies meet the same ones.
+pub(super) struct Feed {
+    rng: super::oracle_tests::Rng,
+    /// The last fresh reading, and when it was read.
+    last: Vec<Quant>,
+    since: i64,
+    until: i64,
+    /// The measured week an hour of the panes on each account, by input
+    /// order, as of the last step.
+    rate: Vec<f64>,
+}
+
+impl Feed {
+    pub(super) fn new(seed: u64) -> Self {
+        Feed { rng: super::oracle_tests::Rng(seed ^ 0x0FEE_D0FF_5EED_1234), last: Vec::new(), since: 0, until: 0, rate: Vec::new() }
+    }
+
+    fn out(&self, now: i64) -> bool {
+        now > self.since && now < self.until
+    }
+
+    /// A step at `now`: while the feed is up, its reading is kept and an
+    /// outage may start after it; while it is out, the speeds that push
+    /// the old readings forward are taken.
+    pub(super) fn step(&mut self, acc: &[(Quant, i64)], err: &[[f64; 2]], panes: &[P], now: i64, step_s: i64) {
+        if self.out(now) {
+            self.rate.clear();
+            self.rate.extend(acc.iter().map(|(q, _)| panes.iter().filter(|p| p.on == q.id).map(|p| speeds(p, now)).map(|(f, n)| f + n).sum::<f64>()));
+            return;
+        }
+        self.last = fresh(acc, err);
+        self.since = now;
+        if self.rng.next() < OUT_PER_H * step_s as f64 / 3600.0 {
+            self.until = now + (OUT_S[0] + (OUT_S[1] - OUT_S[0]) * self.rng.next()) as i64;
+        }
+    }
+
+    /// The accounts as the shell reads them while the feed is out: the
+    /// last reading, its week pushed forward once it is older than the
+    /// account limit; the clocks run on.
+    fn stale(&self, now: i64) -> Vec<Quant> {
+        let age = now - self.since;
+        let stale = age > STALE_ACCOUNT_S;
+        self.last
             .iter()
-            .zip(self.err)
-            .map(|((q, _), e)| {
-                // an account that refuses reads empty: the feed knows it
-                let read = |x: f64, e: f64, top: f64| if x <= 0.0 { 0.0 } else { (x + e).clamp(0.0, top) };
-                let r = read(q.r, e[0], 1.0);
-                Quant { r, f: read(q.f.min(q.r), e[1], r), ..q.clone() }
+            .enumerate()
+            .map(|(j, x)| {
+                let r = if stale { (x.r - self.rate.get(j).copied().unwrap_or(0.0) * age as f64 / 3600.0).max(0.0) } else { x.r };
+                let t = x.t - age as f64 / 3600.0;
+                Quant { r, t, tf: x.tf - age as f64 / 3600.0, stale, ..x.clone() }
             })
             .collect()
     }
@@ -62,15 +153,23 @@ pub(super) struct Driver {
     tr: Triggers,
     ended: bool,
     planned_once: bool,
+    calib: crate::sched::calib::Calib,
 }
 
 impl Driver {
     /// A reading at `now`; `refused`: a pane was refused since the last.
     pub(super) fn step(&mut self, policy: Policy, read: &Read, panes: &[P], now: i64, refused: bool) {
+        if let Policy::Planner { bias, short, .. } = policy {
+            let q = read.quants();
+            let sp = handed(panes, now, [bias, short]);
+            let asked: Vec<f64> = q.iter().map(|x| panes.iter().zip(&sp).filter(|(p, _)| p.on == x.id).map(|(_, s)| s[0] + s[1]).sum()).collect();
+            self.calib.observe(now, &q, &asked, read.stale_feed());
+        }
+        let f = self.calib.factor();
         match policy {
-            Policy::Planner { bias, short, shell: true } => self.pass(read, panes, now, [bias, short], refused),
+            Policy::Planner { bias, short, shell: true } => self.pass(read, panes, now, [bias, short], f, refused),
             Policy::Planner { bias, shell: false, .. } if refused || now % 3600 == 0 || !self.planned_once => {
-                with_input(read, panes, now, [bias, bias], |i, _| {
+                with_input(read, panes, now, [bias, bias], f, |i, _| {
                     pass::full(&mut self.st, i, now as u64, now);
                 });
                 self.planned_once = true;
@@ -79,8 +178,8 @@ impl Driver {
         }
     }
 
-    fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: [f64; 2], refused: bool) {
-        with_input(read, panes, now, bias, |i, outside| {
+    fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: f64, refused: bool) {
+        with_input(read, panes, now, bias, f, |i, outside| {
             let quants: Vec<_> = i.accounts.iter().map(|x| x.q.clone()).collect();
             let high: Vec<f64> = i.accounts.iter().map(|x| i.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
             let counted: Vec<u64> = i.panes.iter().map(|p| p.sid).collect();
@@ -106,10 +205,23 @@ const BAND_HI: [f64; 2] = [2.5, 1.5];
 /// speed the measured speed times `bias[1]`, and a pane is planned as
 /// the shell plans it (`planned_speed`); `f` also gets the panes whose
 /// three-hour speed is outside the band around their level.
-fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: impl FnOnce(&Input, &[u64])) {
+/// Each pane's planned speed as the shell would hand it, before the
+/// calibration factor.
+fn handed(panes: &[P], now: i64, bias: [f64; 2]) -> Vec<[f64; 2]> {
+    panes
+        .iter()
+        .map(|p| {
+            let (fa, na) = speeds(p, now);
+            let m = [fa, na];
+            let (day, short) = (m.map(|x| x * bias[0]), m.map(|x| x * bias[1]));
+            [0, 1].map(|c| planned_speed(day[c], short[c], BAND_LO[c], BAND_HI[c]))
+        })
+        .collect()
+}
+
+fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, f: impl FnOnce(&Input, &[u64])) {
     let q = read.quants();
     let mut outside = Vec::new();
-    let mut sp: Vec<[f64; 2]> = Vec::with_capacity(panes.len());
     for (k, p) in panes.iter().enumerate() {
         let (fa, na) = speeds(p, now);
         let m = [fa, na];
@@ -117,8 +229,8 @@ fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: impl FnOnce
         if (0..2).any(|c| day[c] > 0.0 && (short[c] > day[c] * BAND_HI[c] || short[c] < day[c] * BAND_LO[c])) {
             outside.push(k as u64);
         }
-        sp.push([0, 1].map(|c| planned_speed(day[c], short[c], BAND_LO[c], BAND_HI[c])));
     }
+    let sp: Vec<[f64; 2]> = handed(panes, now, bias).into_iter().map(|s| s.map(|x| x * factor)).collect();
     let demand = [sp.iter().map(|x| x[0]).sum(), sp.iter().map(|x| x[1]).sum()];
     let b = buckets();
     let a_hi = b.iter().copied().fold(0.0, f64::max);
@@ -148,6 +260,6 @@ fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: impl FnOnce
         })
         .collect();
     let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
-    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
+    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: read.stale_feed() };
     f(&i, &outside);
 }

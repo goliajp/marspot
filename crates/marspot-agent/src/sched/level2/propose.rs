@@ -1,7 +1,10 @@
 //! Proposals for one pane: every schedule of at most two switches
 //! whose switch times are its first allowed moment, the last moment
-//! before its account empties at the high band, and the renewals
-//! inside the horizon, scored by linear prices read off the last run.
+//! before its account empties at the high band, the renewals inside the
+//! horizon, and, onto an account that renews inside the horizon with
+//! week the panes there leave, the moment from which the pane at its
+//! level uses that up just by the renewal; scored by linear prices read
+//! off the last run.
 //! This is the shortest path over (segment, account, switches used)
 //! with the switch times restricted to those moments; a switch at any
 //! other time pays the same prices later and gains nothing the stopping
@@ -57,6 +60,10 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
     }
     for (k, r) in g.renews.iter().enumerate() {
         let Some(r) = *r else { continue };
+        // a move that uses up what would lapse at the renewal
+        if let Some(c) = g.drain_cut(input, p, k).map(|c| c.max(first)).filter(|&c| c < r && g.admits(input, p, k)) {
+            out.push(Sched::one(k, c));
+        }
         if r < first || !g.admits_after_renewal(input, p, k) {
             continue;
         }

@@ -110,6 +110,46 @@ fn allocation_level2_plans_a_pane_at_its_three_hour_speed_when_that_is_off_the_b
 }
 
 #[test]
+fn allocation_level2_checks_the_pane_speeds_against_the_account_readings() {
+    let r = root("calib");
+    let mut a = Allocation::new(events_dir(&r));
+    let (mut snap, view, fc) = scene();
+    snap.accounts[0].week_used = 0.5;
+    let mut cp = ClassPlan::default();
+    cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
+    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default());
+    let asked: f64 = b.panes.iter().filter(|p| p.on == b.accounts[0].q.id).map(|p| p.speed[0] + p.speed[1]).sum();
+    let mut pp = PanePlan::new(&r);
+    pp.scan(&mut a, &snap, &view, Some(&fc), cp.last());
+    // read every ten minutes for six hours, P3 losing three times what
+    // its panes' speeds put on it: under ten points asked, but the loss
+    // is over ten
+    let mut lines = Vec::new();
+    let mut later = snap.clone();
+    for k in 1..=36 {
+        later.now = NOW + k * 600;
+        later.feed_at = Some(later.now - 60);
+        later.accounts[0].week_used = 0.5 + asked * (k * 600) as f64 / 3600.0 * 3.0;
+        for acc in &mut later.accounts {
+            acc.measured_at = later.now - 60;
+        }
+        cp.scan(&later.accounts, &view, Some(&fc), 0.0, later.now);
+        lines.extend(pp.scan(&mut a, &later, &view, Some(&fc), cp.last()).into_iter().filter(|l| l.0 == "sched.calib").map(|l| l.1));
+    }
+    let want = 100.0 * asked * 6.0;
+    assert_eq!(lines, vec![format!("ratio=3.000 factor=3.000 used={:.1} want={want:.1} P3={:.1}/{want:.1} P7=0.0/0.0", want * 3.0, want * 3.0)]);
+    // with the feed stale for the next six hours no window closes
+    for k in 37..=72 {
+        later.now = NOW + k * 600;
+        later.feed_at = Some(NOW + 36 * 600);
+        cp.scan(&later.accounts, &view, Some(&fc), 0.0, later.now);
+        let log = pp.scan(&mut a, &later, &view, Some(&fc), cp.last());
+        assert!(log.iter().all(|l| l.0 != "sched.calib"), "{log:?}");
+    }
+    let _ = fs::remove_dir_all(&r);
+}
+
+#[test]
 fn allocation_level2_plans_a_pane_idle_for_three_hours_at_the_bottom_of_its_band() {
     let r = root("idle");
     let a = Allocation::new(events_dir(&r));
