@@ -22,6 +22,7 @@ mod mouse_track_check;
 mod origin_mode;
 mod osc52_end_to_end;
 mod osc8;
+mod prompt_reflow;
 mod pane_env_isolation;
 mod predict_expiry;
 mod relative_moves_respect_margins;

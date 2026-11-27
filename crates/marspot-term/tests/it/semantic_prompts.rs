@@ -156,7 +156,9 @@ fn jumps_step_through_the_prompts_both_ways() {
     }
     assert_eq!(t.grid().prompt_above(off), None, "nothing before the first prompt");
     for want in ["$ cmd2", "$ cmd3"] {
-        off = t.grid().prompt_below(off).expect("a prompt ahead of the view");
+        let row;
+        (off, row) = t.grid().prompt_below(off).expect("a prompt ahead of the view");
+        assert_eq!(row, 0, "a prompt in the history goes on the top row");
         assert_eq!(top_line(&t, off), want);
     }
     assert_eq!(t.grid().prompt_below(off), None, "no prompt after the last, on screen or off");
@@ -164,7 +166,12 @@ fn jumps_step_through_the_prompts_both_ways() {
 
     t.feed(&osc("133;A"));
     t.feed(b"$ ");
-    assert_eq!(t.grid().prompt_below(off), Some(0), "a prompt on the live screen is reached by going live");
+    let row = t.grid().cursor().1;
+    assert_eq!(
+        t.grid().prompt_below(off),
+        Some((0, row)),
+        "a prompt on the live screen is reached by going live, and it is on the cursor's row"
+    );
 }
 
 /// A shell that marks nothing has nowhere to jump either way.

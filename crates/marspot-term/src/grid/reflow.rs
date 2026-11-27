@@ -10,11 +10,12 @@
 
 use super::{Cell, CellAttrs, FLAG_CLUSTER, Grid, PromptMark, char_width, strip_links};
 
-/// A logical line being re-cut, and the clusters on it by cell offset,
-/// ascending.
+/// A logical line being re-cut, the clusters on it by cell offset,
+/// ascending, and what a shell said about it.
 struct Line {
     cells: Vec<Cell>,
     clusters: Vec<(usize, String)>,
+    prompt: PromptMark,
 }
 
 /// One row of the result.
@@ -23,6 +24,8 @@ struct Seg {
     /// A soft continuation of the row before it.
     cont: bool,
     clusters: Vec<(u16, String)>,
+    /// The line's mark, on its first segment only.
+    prompt: PromptMark,
 }
 
 impl Grid {
@@ -74,14 +77,15 @@ impl Grid {
             // a soft wrap on a blank has to glue at the old width
             row.resize(old_cols, Cell::default());
             self.take_history_clusters(i, &mut found);
-            absorb(&mut lines, row, &mut found, self.scrollback_wrapped(i));
+            let prompt = self.scrollback_prompt(i);
+            absorb(&mut lines, row, &mut found, self.scrollback_wrapped(i), prompt);
         }
         for r in 0..self.rows {
             let start = self.phys_row(r) * old_cols;
             let mut row: Vec<Cell> = self.cells[start..start + old_cols].iter().map(|&c| self.expand_cold(c)).collect();
             self.take_live_clusters(&mut row, &mut found);
-            let wrapped = self.wrapped[self.phys_row(r)];
-            absorb(&mut lines, row, &mut found, wrapped);
+            let (wrapped, prompt) = (self.wrapped[self.phys_row(r)], self.prompt[self.phys_row(r)]);
+            absorb(&mut lines, row, &mut found, wrapped, prompt);
             if r == self.cursor_row {
                 cursor_line = lines.len() - 1;
                 cursor_off = lines[cursor_line].cells.len() - old_cols + self.cursor_col as usize;
@@ -126,32 +130,25 @@ impl Grid {
     fn redistribute(&mut self, mut segs: Vec<Seg>, cols: u16, rows: u16) {
         let new_cols = cols as usize;
         let live_start = segs.len().saturating_sub(rows as usize);
-        // F3+10f — restart wipes File scrollback (truncates bin/idx);
-        // the loop below repopulates at new_cols from the gathered
-        // segments.  Net effect for File: entire file gets rewritten
-        // at the new width on every cols-change resize.  Cost is
-        // bounded (the on-disk file's size at the old width); the
-        // result is that historical content always matches the
-        // current display width with no width-drift artifacts.
+        // a file is truncated and rewritten at the new width: bounded by
+        // its size, and history never drifts from the display width
         self.scrollback.restart(new_cols);
         self.sb_wrapped.clear();
         self.sb_clusters.clear();
         self.sb_links.clear();
-        // Reflow re-cuts every logical line, so a mark that said "a
-        // prompt starts here" is about a row that no longer exists.
-        // Dropped rather than guessed at: a mark on the wrong line is
-        // worse than no mark, because it is the thing a jump lands on.
+        // each line's mark rides on its first segment: read before the
+        // file was restarted, filed again after that segment's row
         self.sb_prompt.clear();
         for i in 0..live_start {
             let mut row = segs[i].cells.clone();
             row.resize(new_cols, pad_cell(i, &segs));
-            // history keeps no link ids: they point into a pool it
-            // does not have
+            // history keeps no link ids: their pool is not kept with it
             strip_links(&mut row);
             // Wrapped-aware push so File variant records keep the
             // reflow-derived continuation flag.
             self.scrollback.push_line_with_wrapped(&row, segs[i].cont);
             self.sb_wrapped.push_back(segs[i].cont);
+            self.keep_row_prompt(segs[i].prompt);
             self.keep_row_extras::<true>(std::mem::take(&mut segs[i].clusters));
         }
         while self.sb_wrapped.len() > self.scrollback.len() {
@@ -161,6 +158,7 @@ impl Grid {
         self.trim_extras_mirrors::<true>();
         let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
         let mut new_wrapped = vec![false; rows as usize];
+        let mut new_prompt = vec![PromptMark::None; rows as usize];
         for (r, wrapped) in new_wrapped.iter_mut().enumerate().take(segs.len() - live_start) {
             let i = live_start + r;
             let dst = r * new_cols;
@@ -182,11 +180,10 @@ impl Grid {
                 }
             }
             *wrapped = segs[i].cont;
+            new_prompt[r] = segs[i].prompt;
         }
         self.replace_cells(cols, rows, &new_cells);
-        // Reflow re-cut every line; the old marks named rows that no
-        // longer exist.  See `clear_scrollback`'s sibling note.
-        self.prompt = vec![PromptMark::None; rows as usize];
+        self.prompt = new_prompt;
         self.wrapped = new_wrapped;
         self.cols = cols;
         self.rows = rows;
@@ -197,7 +194,7 @@ impl Grid {
 
 /// Add one row to the logical lines, taking `found` -- its clusters by
 /// column -- along with it.
-fn absorb(lines: &mut Vec<Line>, row: Vec<Cell>, found: &mut Vec<(u16, String)>, wrapped: bool) {
+fn absorb(lines: &mut Vec<Line>, row: Vec<Cell>, found: &mut Vec<(u16, String)>, wrapped: bool, prompt: PromptMark) {
     // clusters come from files and snapshots: keep those inside the
     // row, in column order, which `rewrap` relies on
     found.retain(|(c, _)| (*c as usize) < row.len());
@@ -225,9 +222,13 @@ fn absorb(lines: &mut Vec<Line>, row: Vec<Cell>, found: &mut Vec<(u16, String)>,
         let at = cells.len();
         cells.extend(row);
         prev.clusters.extend(found.drain(..).map(|(c, t)| (at + c as usize, t)));
+        // a prompt that starts on a continuation row still starts this line
+        if prompt == PromptMark::PromptStart || prev.prompt == PromptMark::None {
+            prev.prompt = prompt;
+        }
     } else {
         let clusters = found.drain(..).map(|(c, t)| (c as usize, t)).collect();
-        lines.push(Line { cells: row, clusters });
+        lines.push(Line { cells: row, clusters, prompt });
     }
 }
 
@@ -240,6 +241,7 @@ fn rewrap(lines: Vec<Line>, new_cols: usize, cursor_line: usize, cursor_off: usi
     let mut cursor_col_new = 0usize;
     for (li, line) in lines.into_iter().enumerate() {
         let mut clusters = line.clusters.into_iter().peekable();
+        let mut prompt = line.prompt;
         let line = line.cells;
         let mut start = 0usize;
         let mut first = true;
@@ -270,7 +272,8 @@ fn rewrap(lines: Vec<Line>, new_cols: usize, cursor_line: usize, cursor_off: usi
             while let Some((off, text)) = clusters.next_if(|(off, _)| *off < end) {
                 here.push(((off - start) as u16, text));
             }
-            segs.push(Seg { cells: line[start..end].to_vec(), cont: !first, clusters: here });
+            segs.push(Seg { cells: line[start..end].to_vec(), cont: !first, clusters: here, prompt });
+            prompt = PromptMark::None;
             first = false;
             start = end;
             if start >= line.len() {
@@ -279,7 +282,7 @@ fn rewrap(lines: Vec<Line>, new_cols: usize, cursor_line: usize, cursor_off: usi
         }
     }
     if segs.is_empty() {
-        segs.push(Seg { cells: Vec::new(), cont: false, clusters: Vec::new() });
+        segs.push(Seg { cells: Vec::new(), cont: false, clusters: Vec::new(), prompt: PromptMark::None });
     }
     (segs, cursor_seg, cursor_col_new)
 }

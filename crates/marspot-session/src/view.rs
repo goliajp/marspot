@@ -34,7 +34,7 @@ pub(crate) fn prompt_jump(
     let from = pending.unwrap_or(current);
     let to = match dir {
         PromptDir::Back => grid.prompt_above(from),
-        PromptDir::Forward => grid.prompt_below(from),
+        PromptDir::Forward => grid.prompt_below(from).map(|(off, _)| off),
     };
     lx_event!(
         "L3_PROMPT_JUMP",
