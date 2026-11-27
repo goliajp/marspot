@@ -3,7 +3,7 @@
 //! high band, and the refusals the plan still foresees.
 
 use super::search::Eval;
-use super::window::{dead_by_exhaustion, dead_by_gain, kind};
+use super::window::{dead_by_gain, kind};
 use super::window::{CLEAN_CHANCE, NOTICE_LEAD_H};
 use super::{H2, Mode, Pane, Plan, Sched, Switch, Totals};
 
@@ -22,12 +22,15 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
             let t_open = g.cuts[hop.at as usize];
             let gain = gain(e, best, p, h, totals_level.money);
             let (input, g) = (e.input(), e.grid());
-            let t_dead = match from {
-                Some(j) if e.ctx.deadline[j] < H2 => dead_by_exhaustion(e.ctx.deadline[j], high_load(input, g, j)),
-                _ => dead_by_gain(t_open, gain, pane.rewrite),
-            }
-            .max(t_open);
             let averts = from.is_some_and(|j| e.ctx.deadline[j] < H2);
+            // only a first switch at the pane's first allowed moment may
+            // open after the latest moment it averts the refusal
+            let first = h == 0 && hop.at as usize == g.first[p];
+            debug_assert!(first || from.is_none_or(|j| t_open <= g.dead[j] + 1e-6), "a switch planned after its deadline");
+            let t_dead = match from {
+                Some(j) if averts => g.dead[j].max(if first { t_open } else { 0.0 }),
+                _ => dead_by_gain(t_open, gain, pane.rewrite),
+            };
             let t_open = if averts { t_open.max(t_dead - lead(pane)) } else { t_open };
             switches.push(Switch {
                 sid: pane.sid,
@@ -53,10 +56,6 @@ fn gain(e: &mut Eval, best: &[Sched], p: usize, h: usize, money: f64) -> f64 {
     without[p].n = h as u8;
     let t = e.sim.run(&e.ctx, &without, 0);
     t.money - money
-}
-
-fn high_load(input: &super::Input, g: &super::Grid, j: usize) -> f64 {
-    input.panes.iter().enumerate().filter(|(k, _)| g.on[*k] == Some(j)).map(|(_, p)| p.high[0] + p.high[1]).sum()
 }
 
 /// How long before its deadline a switch off an account that empties

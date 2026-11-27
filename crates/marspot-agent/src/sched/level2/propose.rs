@@ -78,10 +78,11 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
 }
 
 /// The pane's own limits: switches left this week, disturbing actions
-/// left today.
+/// left today; and every switch off an account that empties is in time
+/// to avert the refusal.
 pub(super) fn allowed(input: &Input, g: &Grid, deadline: &[f64], p: usize, s: &Sched) -> bool {
     let pane = &input.panes[p];
-    if s.n > pane.switches_left {
+    if s.n > pane.switches_left || !g.in_time(p, s) {
         return false;
     }
     let disturbing = kinds(input, g, deadline, p, s).filter(|k| k.disturbing()).count();

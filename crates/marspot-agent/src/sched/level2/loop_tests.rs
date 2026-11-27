@@ -7,11 +7,13 @@
 //!
 //! The bar asserted is that no pane is switched twice by plan inside
 //! six hours.  Twenty weeks on seeds the planner was never tuned on are
-//! printed next to them and assert nothing.  Money and refusals no higher than today's rule are
-//! printed, not asserted: over the twenty weeks the planner refuses
-//! fewer panes but lapses more week at renewals than today's rule, which
-//! drains every account to its renewal however far off that is, while
-//! the planner sees lapse only up to two days past its horizon.
+//! printed next to them and assert nothing.  Money and refusals no
+//! higher than today's rule are printed, not asserted: over the twenty
+//! weeks the planner spends less and refuses fewer panes, but not in
+//! every five-week part, and it lapses more week at renewals than
+//! today's rule, which drains every account to its renewal however far
+//! off that is, while the planner sees lapse only up to two days past
+//! its horizon.
 
 use super::loop_world::{Policy, Week, hours, run};
 

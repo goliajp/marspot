@@ -118,7 +118,12 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     let mut e = Eval { ctx, sim, charge: 0.0 };
     let n = input.panes.len();
     let idle = vec![Sched::STAY; n];
-    let start: Vec<Sched> = start.filter(|s| s.len() == n).map(<[Sched]>::to_vec).unwrap_or_else(|| idle.clone());
+    let mut start: Vec<Sched> = start.filter(|s| s.len() == n).map(<[Sched]>::to_vec).unwrap_or_else(|| idle.clone());
+    for (p, s) in start.iter_mut().enumerate() {
+        if !g.in_time(p, s) {
+            *s = Sched::STAY;
+        }
+    }
     let (mut best, mut mode, active) = solve(&mut e, &start);
     if !e.fits(&best) {
         (best, mode) = fit(&mut e, best, mode);
