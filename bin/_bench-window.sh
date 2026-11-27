@@ -53,22 +53,25 @@ bench_key_latency() {
     "$ROOT/bench/results/latency/" 2>/dev/null || true
 }
 
+# bench_window_gauge <name> <script> <out-var>: one gauge in a sandbox
+# window of its own, its JSON to $CUR_DIR/<name>.json
+bench_window_gauge() {
+  local name=$1 script=$2 outvar=$3 sd="/tmp/msp-gauge-$$-$1"
+  echo "==> $script (a sandbox window)"
+  rm -rf "${sd:?}" && mkdir -p "$sd"
+  env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
+    /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
+  grep -E '^(footprint12|startup|pane-control) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
+  "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true
+  rm -rf "${sd:?}"
+}
+
 bench_window_gauges() {
-  local gauge name script outvar sd
   bench_console_check
   # The shipped app in a window: its memory with 12 panes open, and how
   # long it takes to show a pane's output after launch.  A window needs
   # the console session, which an ssh login of the console user reaches.
-  for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT \
-      panectl:measure-pane-control.sh:PANECTL_OUT; do
-    IFS=: read -r name script outvar <<<"$gauge"
-    sd="/tmp/msp-gauge-$$-$name"
-    echo "==> $script (a sandbox window)"
-    rm -rf "${sd:?}" && mkdir -p "$sd"
-    env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
-      /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
-    grep -E '^(footprint12|startup|pane-control) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
-    "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true
-    rm -rf "${sd:?}"
-  done
+  bench_window_gauge footprint measure-app-footprint.sh FP_OUT
+  bench_window_gauge startup measure-startup.sh STARTUP_OUT
+  bench_window_gauge panectl measure-pane-control.sh PANECTL_OUT
 }
