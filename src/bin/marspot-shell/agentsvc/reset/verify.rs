@@ -36,15 +36,19 @@ pub(super) fn access() -> Result<Access, Outcome> {
     access_in(Path::new(&std::env::var_os("HOME").unwrap_or_default()))
 }
 
+pub(super) const INCOMPLETE: &str =
+    "devops credential incomplete: ~/.config/devops needs both api-url and api-key to confirm a claim";
+
 /// The devops address and key under `home`; both files must say
 /// something, or the claim is refused before anything is tried.  A
-/// machine without devops claims on the accounts panel, which needs
-/// neither.
+/// machine without either is one without devops, which claims on the
+/// accounts panel; one with only one of them has a broken devops setup.
 pub(super) fn access_in(home: &Path) -> Result<Access, Outcome> {
     let read = |f: &str| std::fs::read_to_string(home.join(f)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     match (read(URL_FILE), read(KEY_FILE)) {
         (Some(base), Some(key)) => Ok(Access { base, key }),
-        _ => Err(Outcome::of(Res::Unavailable, NO_DEVOPS)),
+        (None, None) => Err(Outcome::of(Res::Unavailable, NO_DEVOPS)),
+        _ => Err(Outcome::of(Res::Error, INCOMPLETE)),
     }
 }
 

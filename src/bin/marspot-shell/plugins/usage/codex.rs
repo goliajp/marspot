@@ -15,7 +15,7 @@ use super::feed::{own_window, Account, Credits, OwnWindow, Reading, Window};
 
 const PROFILE_PREFIX: &str = ".codex-profile-";
 /// How long one app-server gets to answer before it is stopped.
-const ANSWER_WITHIN: Duration = Duration::from_secs(30);
+pub(super) const ANSWER_WITHIN: Duration = Duration::from_secs(30);
 
 const REQUESTS: &str = concat!(
     r#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"clientInfo":{"name":"marspot","version":"1.0.0"}}}"#,

@@ -140,8 +140,15 @@ fn reset_nothing_happens_without_devops_or_its_credential() {
     let none = verify::access_in(home.path()).err().expect("no files");
     assert_eq!((none.result, none.detail.as_str()), (Res::Unavailable, verify::NO_DEVOPS));
     std::fs::create_dir_all(home.join(".config/devops")).unwrap();
+    let half = |home: &std::path::Path| verify::access_in(home).err().map(|o| (o.result, o.detail));
+    let incomplete = Some((Res::Error, verify::INCOMPLETE.to_string()));
     std::fs::write(home.join(".config/devops/api-key"), "dk_test_2\n").unwrap();
-    assert_eq!(verify::access_in(home.path()).err().map(|o| o.detail), Some(verify::NO_DEVOPS.into()), "a key and no address");
+    assert_eq!(half(home.path()), incomplete, "a key and no address");
+    std::fs::remove_file(home.join(".config/devops/api-key")).unwrap();
+    std::fs::write(home.join(".config/devops/api-url"), "http://127.0.0.1:1\n").unwrap();
+    assert_eq!(half(home.path()), incomplete, "an address and no key");
+    std::fs::write(home.join(".config/devops/api-key"), "  \n").unwrap();
+    assert_eq!(half(home.path()), incomplete, "an address and an empty key");
 }
 
 #[test]

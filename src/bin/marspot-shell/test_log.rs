@@ -1,6 +1,9 @@
 //! The log of a test process, and the lines a machine without devops
-//! must never write.  Each test runs in a process of its own, so the
-//! log opened here is that test's alone.
+//! must never write.  The log sink is process-wide and opened once, so
+//! the log is one test's alone only under nextest, which runs each test
+//! in a process of its own.  Under plain `cargo test` every test of the
+//! binary shares the log under the first test's state root, and a check
+//! of it sees the lines of tests running beside it.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
