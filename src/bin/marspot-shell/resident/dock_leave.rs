@@ -72,10 +72,11 @@ pub(super) fn delay(age: Duration) -> Duration {
 }
 
 /// What is left at `now` of the wait an earlier image handed over as
-/// `carried`; nothing for a value that is not one.
+/// `carried`; nothing for a value that is not one, and never more than
+/// [`SETTLE`]: the value comes in through the environment.
 fn left_of(carried: Option<&str>, now: u64) -> Duration {
     let at = carried.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    Duration::from_nanos(at.saturating_sub(now))
+    Duration::from_nanos(at.saturating_sub(now)).min(SETTLE)
 }
 
 /// The wait an earlier image of this process handed over, if any.
@@ -166,6 +167,7 @@ mod tests {
         assert_eq!(left_of(Some("5000000000"), 9_000_000_000), Duration::ZERO);
         assert_eq!(left_of(None, 1), Duration::ZERO);
         assert_eq!(left_of(Some("soon"), 1), Duration::ZERO);
+        assert_eq!(left_of(Some("18446744073709551615"), 1), SETTLE, "a forged far deadline is capped");
     }
 
     // the one test that touches the process-wide hold and the
