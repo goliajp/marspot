@@ -11,7 +11,7 @@
 #          moment ago: new inodes and a code hash the machine has never
 #          seen, so macOS assesses each on its first exec and keeps no
 #          compiled shaders for the core -- what the first start after
-#          an install pays.  A plain copy was not cold: on mini it read
+#          an install pays.  A plain copy was not cold: on a runner it read
 #          the same as a relaunch.  (Purging the file cache needs root;
 #          the binaries' pages are in it from the copy.)
 #   warm   the same copies launched again right after
@@ -23,6 +23,8 @@
 # and is a measurement, so it runs on the runner, in the console
 # session, alone:
 #   E2E_LOCK=bench REMOTE_NAME=<own name> bin/test-e2e-remote.sh measure-startup.sh
+# On the bench host it runs only inside bin/bench.sh --full, from the
+# run dir bin/_lib.sh describes.
 set -uo pipefail
 trap 'exit 1' HUP INT TERM
 
@@ -32,10 +34,11 @@ dev_no_dock
 
 TRIALS="${STARTUP_TRIALS:-5}"
 OUT="${STARTUP_OUT:-$ROOT/build/startup.json}"
-BIN="$ROOT/target/release"
+BIN="${MARSPOT_BENCH_BIN_DIR:-$ROOT/target/release}"   # a bench run passes its copies
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 GAUGE="$ROOT/bin/_app_gauge.py"
-COPIES="$MARSPOT_STATE_DIR/copies"
+# inside a bench run the copies it launches belong in the run dir
+COPIES="${MARSPOT_BENCH_RUN_DIR:-$MARSPOT_STATE_DIR}/startup-copies"
 
 fail() {
   echo "FAIL: $*"
@@ -48,7 +51,7 @@ for b in marspot-shell marspot-core marspot-session; do
 done
 mkdir -p "$MARSPOT_STATE_DIR" "$(dirname "$OUT")"
 
-PANE_SH="$MARSPOT_STATE_DIR/startup-pane.sh"
+PANE_SH="${MARSPOT_BENCH_RUN_DIR:-$MARSPOT_STATE_DIR}/startup-pane.sh"
 cat > "$PANE_SH" <<'EOF'
 #!/bin/sh
 echo "marspot startup gauge"

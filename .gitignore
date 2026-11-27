@@ -19,6 +19,8 @@
 bench/scenarios/
 bench/results/
 bench/remote-runs/
+# a bench run's copies of the binaries, on the bench host (bin/_lib.sh)
+/run/
 
 # Local credentials — never committed.
 .env.local

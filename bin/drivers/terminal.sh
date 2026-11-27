@@ -10,6 +10,9 @@
 #   bin/drivers/terminal.sh run-single <cmd>
 #     Convenience for run-windows 1.  Prints the new window ID.
 #
+#   bin/drivers/terminal.sh <run-sub-command> --pid-file <file> ...
+#     Any run sub-command: also append the app's pid to <file>.
+#
 #   bin/drivers/terminal.sh close-windows <id> [<id>...]
 #     Close exactly those windows.  Terminal.app's `close window`
 #     command silently no-ops on windows whose shell is still alive
@@ -21,9 +24,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"
+# shellcheck source=bin/_app-pids.sh
+source "$ROOT/bin/_app-pids.sh"
 
 cmd_word=${1:-}
 shift || true
+# --pid-file <file>: append the app's pid there when this launch is what
+# started it (bin/_app-pids.sh), so the caller can stop exactly that.
+pid_file=""
+if [[ ${1:-} == --pid-file ]]; then
+  pid_file=${2:?pid-file}
+  shift 2
+fi
+# what of the app runs just before the launch, and when the launch began
+pre_launch() {
+  [[ -z $pid_file ]] && return 0
+  pid_before=$(app_pid "$1")
+  launched_at=$(date +%s)
+}
 
 case "$cmd_word" in
   run-single|run-windows)
@@ -49,7 +67,8 @@ case "$cmd_word" in
     # rely on AppleScript's implicit foregrounding (Terminal gets a
     # brief flash to front) and the scenario restores user focus
     # immediately after dispatch.
-    osascript <<APPLESCRIPT
+    pre_launch com.apple.Terminal
+    osascript <<APPLESCRIPT || rc=$?
 tell application "Terminal"
   set beforeIds to {}
   repeat with w in windows
@@ -75,6 +94,9 @@ tell application "Terminal"
   return newIds as text
 end tell
 APPLESCRIPT
+    # recorded even when the script failed part way: the app is up
+    [[ -z $pid_file ]] || record_app_pid com.apple.Terminal "$pid_file" "$pid_before" "$launched_at"
+    exit "${rc:-0}"
     ;;
   close-windows)
     if (( $# == 0 )); then

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bin/ci-remote.sh — run what .github/workflows/ci.yml runs, before a push.
 #
-# The macOS job runs on mini, the Linux one on lx64, at the same time.
+# The macOS job runs on marspot_host test, the Linux one on lx64, at the
+# same time.
 # On a pass it records the tree it checked in <git common dir>/ci-pass/, and the
 # pre-push hook this script installs refuses to push a commit whose
 # tree has no record.  A tree with uncommitted changes is checked but
@@ -12,7 +13,7 @@
 #
 # Usage:
 #   bin/ci-remote.sh          # check HEAD's tree
-#   MAC=mini LINUX=lx64 bin/ci-remote.sh
+#   MAC=<host> LINUX=lx64 bin/ci-remote.sh
 #   bin/ci-remote.sh --job mac|linux   # one job's steps, run on its host
 
 set -euo pipefail
@@ -69,12 +70,14 @@ if command -v gh >/dev/null; then
   fi
 fi
 
-MAC="${MAC:-mini}"
-LINUX="${LINUX:-lx64}"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"
 # CI_REMOTE_NAME gives a checkout a remote copy of its own, so that two
 # checkouts do not wait for each other; the copy is a full build tree on
 # both runners and is forgotten with `remote-sync <host> --name <it> --forget`
 NAME="${CI_REMOTE_NAME:-ci-marspot}"
+MAC="${MAC:-$(marspot_host test "$NAME")}"
+LINUX="${LINUX:-lx64}"
 TIMEOUT="${CI_JOB_TIMEOUT:-3600}"
 MAX_WAIT="${CI_MAX_WAIT:-3600}"
 LOGS="$(mktemp -d)"

@@ -17,7 +17,9 @@ set -euo pipefail
 
 DMG="${1:?usage: $0 <older Marspot.dmg> <rehearsal dir>}"
 REL="${2:?usage: $0 <older Marspot.dmg> <rehearsal dir>}"
-HOST="${HOST:-mini}"
+# shellcheck source=/dev/null
+source "$(cd "$(dirname "$0")/.." && pwd)/bin/_lib.sh"
+HOST="${HOST:-$(marspot_host gui)}"
 RUN_ID="relupd-$$-$(date +%s)"
 REMOTE="/tmp/marspot-$RUN_ID"
 # shellcheck source=bin/_lock-mark.sh

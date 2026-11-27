@@ -26,8 +26,8 @@
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-appkit-fixtures-marspot}"
+HOST="${HOST:-$(source "$ROOT/bin/_lib.sh" && marspot_host gui "$REMOTE_NAME")}"
 write=0
 [[ ${1:-} == --write ]] && write=1
 recorded="$ROOT/tests/fixtures/appkit/RECORDED"

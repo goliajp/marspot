@@ -8,7 +8,7 @@
 #
 # Usage:
 #   bin/sync-toolchain.sh                # this host
-#   HOST=mini bin/sync-toolchain.sh      # over ssh
+#   HOST=<host> bin/sync-toolchain.sh    # over ssh (bin/_lib.sh: marspot_host test / gui / bench)
 
 set -euo pipefail
 

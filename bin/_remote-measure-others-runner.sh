@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# bin/_remote-measure-others-mini.sh — runs on the bench host, driven
+# CARVE-OUT: pre-existing runner over the size limit; it shrinks on every touch
+# bin/_remote-measure-others-runner.sh — runs on the bench host, driven
 # from bin/remote-measure-others.sh. Emits a single JSON object on
 # stdout shaped like:
 #
@@ -20,13 +21,13 @@ cd "$ROOT"
 source "$ROOT/bin/_lib.sh"   # LIVE_MIN_BYTES + write_live_matrix_script
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 TRIALS=3
-# Console mode drives all four terminals. ssh mode falls back to
-# ghostty-only (see ASUSER block below). Terminal.app onboarding is
+# Console mode drives all four terminals. ssh mode drives what it can
+# reach (see the ssh block below). Terminal.app onboarding is
 # the one-time Automation grant during install-bench-launchagent.sh
 # first-fire, after which subsequent LaunchAgent-spawned runs reuse
 # the cached TCC scope.
 # Measurement order matters: marspot in the SAME cycle as every
-# competitor so all five are measured under identical mini load. The
+# competitor so all five are measured under identical load. The
 # cycle is sequential — at any moment exactly one terminal is doing
 # PTY work — so per-cell contention is zero. This is what makes the
 # vs-best-other ratio fair: every cell is the terminal vs an idle box.
@@ -49,56 +50,22 @@ ROUNDS=${MEASURE_ROUNDS:-3}
 # terminal merge in remote-measure-others.sh.
 MARKER_TIMEOUT_S=${MEASURE_MARKER_TIMEOUT_S:-120}
 # Seconds between one terminal's close and the next one's launch.
-# Lets mini cool: GPU thermal, scheduler-cached affinity, page-cache
+# Lets the host cool: GPU thermal, scheduler-cached affinity, page-cache
 # warmth for /tmp scenarios. 3 s is empirically enough for variance
 # to settle to ~5 % run-to-run.
 COOLDOWN_S=3
 
-# ssh→GUI bridge. Direct ssh dispatch can't reach Aqua / WindowServer.
-# After exhaustive testing on macOS 26.5 / iTerm 3.6.11 / Ghostty 1.3.1
-# the only terminal we can drive automatically via ssh is **Ghostty**,
-# using `sudo -n launchctl asuser <uid>` to inject the spawn into the
-# user's GUI launchd domain so NSApp init + Metal surface bootstrap.
-# Requires a one-time NOPASSWD sudoers entry:
-#   <user> ALL=(root) NOPASSWD: /bin/launchctl asuser <uid> *
-#
-# Why the other terminals can't be driven from ssh:
-#  * iTerm 3.6.11 AppleScript dispatch fails under both `launchctl
-#    bsexec gui/<uid>` (-1728 "Can't get application iTerm" — iTerm's
-#    AE entry is session-scoped, ssh-launched instances don't register
-#    where bsexec-spawned osascript can find them) and `sudo -n
-#    launchctl asuser` (-1712 timeout — root osascript needs a separate
-#    TCC Automation grant that can't be granted non-interactively).
-#    AS syntax also varies between versions — `create window with
-#    profile "Default"` errors at parse time in 3.6.11 even when iTerm
-#    is fully running.
-#  * Warp's driver depends on `tell application "System Events" to
-#    keystroke`. SE keystroke is a TCC Accessibility-gated path that
-#    is unreachable from any ssh-spawned osascript regardless of
-#    bridge (-1712 in both).
-#
-# Result: iTerm / Warp / Terminal.app baseline data must be refreshed
-# from a console (Screen Sharing) session via direct `bash
-# bin/_remote-measure-others-mini.sh` with no SSH_CONNECTION env. Per-
-# terminal merge keeps their previous snapshot intact when this ssh
-# run produces no entry for them.
-ASUSER=""
+# From ssh.  The ssh login of the console user reaches the console
+# session's window server, so Ghostty and the product are started from
+# this shell as they are, as this user.  The AppleScript-driven three
+# answer only while they already run in the console session (asked per
+# round below), and Warp's keystroke path needs an Accessibility grant
+# for whoever sends it; an ssh run that cannot reach one leaves its
+# snapshot from the same host as it was.
 SSH_MODE=0
 if [[ -n "${SSH_CONNECTION:-}" ]]; then
   SSH_MODE=1
-  uid="$(id -u)"
-  # into the GUI session, and back to this user: a terminal started as
-  # root is not the terminal anyone runs, and its files and processes
-  # are out of this script's reach afterwards
-  if sudo -n launchctl asuser "$uid" /usr/bin/true 2>/dev/null; then
-    ASUSER="sudo -n launchctl asuser $uid sudo -u $(id -un)"
-  fi
-  if [[ -z "$ASUSER" ]]; then
-    echo "==> ssh mode: NOPASSWD launchctl asuser not configured — even Ghostty will fail. Add to /etc/sudoers.d/marspot-bench:" >&2
-    echo "    $(id -un) ALL=(root) NOPASSWD: /bin/launchctl asuser $uid *" >&2
-  else
-    echo "==> ssh mode: ASUSER=on. Driving Ghostty only; iTerm/Warp/Terminal need console refresh." >&2
-  fi
+  echo "==> ssh mode: Ghostty and the product start from this login; iTerm/Warp/Terminal only when they answer" >&2
 fi
 
 # Make sure scenarios are present. gen-scenarios.sh writes the .bin
@@ -114,6 +81,7 @@ applescript_name() {
     iterm)    echo "iTerm" ;;
     warp)     echo "Warp" ;;
     terminal) echo "Terminal" ;;
+    ghostty)  echo "Ghostty" ;;
     *)        echo "$1" ;;
   esac
 }
@@ -134,12 +102,11 @@ build_one_cmd() {
   #     PTY, not that the terminal processed them; a terminal that
   #     drops under pressure finishes early and wins.
   #
-  # write_live_matrix_script (bin/_lib.sh) fixes both and hands every
+  # write_live_matrix_script (bin/_lib-live.sh) fixes both and hands every
   # terminal the same file to run.
   local marker=$1
-  # one script per terminal and round: a slow terminal can still be
-  # reading its script when the next one's is written
-  local script="/tmp/marspot-live-matrix-$$-$2.sh"
+  # per terminal and round (a slow one may still read its own); run dir only
+  local script="$MARSPOT_BENCH_RUN_DIR/live-matrix-$2.sh"
   local paths=()
   local s
   for s in "${SCENARIOS[@]}"; do
@@ -164,11 +131,12 @@ build_one_cmd() {
 #   - iTerm / Terminal.app windows: AppleScript-trackable by integer
 #     id. Drivers return the ids of windows they create; trap closes
 #     exactly those (no collateral close of the user's other work).
-#   - Warp / Ghostty processes: no AppleScript dictionary, no per-
-#     window handle. We record whether the app was running before; if
-#     NOT, the trap quits the app entirely (we are the only cause).
-#     If yes, we leave it alone — the user had a session.
-#   - Temp wrapper / marker files: always cleaned at exit.
+#   - App processes: each driver checks right before its launch whether
+#     the app runs; only an instance its launch brought up is recorded,
+#     and only recorded pids are stopped (bin/_app-pids.sh).  One that
+#     was up, or that someone else started between rounds, is left alone.
+#   - Temp wrapper files: always cleaned at exit; markers live in the
+#     run dir.
 SESSION_DIR="/tmp/marspot-bench-session-$$"
 mkdir -p "$SESSION_DIR"
 
@@ -187,16 +155,15 @@ for stale in /tmp/marspot-bench-session-*; do
   fi
 done
 
-inventory_pid_running() {
-  # 1 if any non-grep process matches; 0 otherwise.
-  pgrep -f "$1" >/dev/null 2>&1 && echo 1 || echo 0
-}
-
-# Snapshot pre-existing state.
-PRE_ITERM=$(inventory_pid_running "iTerm.app/Contents/MacOS")
-PRE_TERMINAL=$(inventory_pid_running "Terminal.app/Contents/MacOS/Terminal")
-PRE_WARP=$(inventory_pid_running "Warp.app/Contents/MacOS/stable")
-PRE_GHOSTTY=$(inventory_pid_running "Ghostty.app/Contents/MacOS/ghostty")
+# shellcheck source=bin/_app-pids.sh
+source "$ROOT/bin/_app-pids.sh"
+# Snapshot pre-existing state, by the identity the drivers record (for
+# the log: each driver decides again right before its own launch).
+is_up() { [[ -n $(app_pid "$1") ]] && echo 1 || echo 0; }
+PRE_ITERM=$(is_up com.googlecode.iterm2)
+PRE_TERMINAL=$(is_up com.apple.Terminal)
+PRE_WARP=$(is_up dev.warp.Warp-Stable)
+PRE_GHOSTTY=$(is_up com.mitchellh.ghostty)
 printf 'PRE_ITERM=%s\nPRE_TERMINAL=%s\nPRE_WARP=%s\nPRE_GHOSTTY=%s\n' \
   "$PRE_ITERM" "$PRE_TERMINAL" "$PRE_WARP" "$PRE_GHOSTTY" \
   > "$SESSION_DIR/inventory"
@@ -204,65 +171,27 @@ echo "==> pre-flight: iterm=$PRE_ITERM terminal=$PRE_TERMINAL warp=$PRE_WARP gho
 
 # macOS ships bash 3.2 → no `declare -A`. Use one var per terminal.
 WIN_iterm=""
-WIN_warp=""
-WIN_ghostty=""
 WIN_terminal=""
-LAUNCHED_TERMS=()
 
-# Ghostty is stopped by the pids its driver recorded at launch, never by
-# a pattern: the bench host is shared, and a pattern reaches every
-# process whose command line happens to match.
-GHOSTTY_BIN_PATH="/Applications/Ghostty.app/Contents/MacOS/ghostty"
+# What this run started is stopped by the pids recorded when it started
+# it, never by a pattern.  The drivers record into
+# $SESSION_DIR/<terminal>.pids: iTerm, Terminal and Warp only when that
+# launch brought the app up; Ghostty always, since its driver starts a
+# process of its own.
 GHOSTTY_PIDS="$SESSION_DIR/ghostty.pids"
-RUN_STARTED=$(date +%s)
-stop_recorded_ghostty() {
-  local p started
-  [[ -s $GHOSTTY_PIDS ]] || return 0
-  # the polite quit reaches the whole app: only when it was not up
-  # before this run
-  if [[ $PRE_GHOSTTY == 0 ]]; then
-    osascript -e 'tell application "Ghostty" to quit' >/dev/null 2>&1 || true
-    sleep 0.5
-  fi
-  # a pid is ours only while it is still that binary and was started
-  # after this run began: a pid can be reused
-  for p in $(cat "$GHOSTTY_PIDS"); do
-    [[ $(ps -o comm= -p "$p" 2>/dev/null) == "$GHOSTTY_BIN_PATH" ]] || continue
-    started=$(date -j -f "%a %b %d %T %Y" "$(ps -o lstart= -p "$p")" +%s 2>/dev/null) || continue
-    (( started >= RUN_STARTED )) || continue
-    kill "$p" 2>/dev/null || true
-  done
-  : > "$GHOSTTY_PIDS"
+app_binary() {
+  case "$1" in
+    iterm)    echo "/Applications/iTerm.app/Contents/MacOS/iTerm2" ;;
+    terminal) echo "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal" ;;
+    warp)     echo "/Applications/Warp.app/Contents/MacOS/stable" ;;
+    ghostty)  echo "/Applications/Ghostty.app/Contents/MacOS/ghostty" ;;
+  esac
 }
 
-quit_app_if_we_spawned() {
-  # $1=app-display-name, $2=ps-pattern, $3=PRE_<APP> snapshot value.
-  # If app was NOT running before our test, quit it now. If it was
-  # already up, leave it (user had a session).
-  local name=$1 pat=$2 was_running=$3
-  if [[ "$was_running" == "0" ]]; then
-    # Polite AE quit first — works for Cocoa apps even without an
-    # AS dictionary (NSApplication respects the standard quit event).
-    osascript -e "tell application \"$name\" to quit" 2>/dev/null || true
-    sleep 0.5
-    # Backstop for processes that ignore the AE (Ghostty 1.x sometimes
-    # does). Match the binary path to avoid friendly fire on similarly-
-    # named user processes.
-    pkill -f "$pat" 2>/dev/null || true
-    # In ssh mode the app was spawned through `sudo -n launchctl asuser`
-    # and therefore runs as ROOT — a plain pkill from this shell cannot
-    # touch it, so this cleanup silently left every Ghostty it started
-    # alive (found 2026-08-18: four of them, plus their wrapper scripts,
-    # surviving several runs).  Retry through the same privilege the
-    # spawn used.  Harmless when $ASUSER is empty.
-    if [[ -n "${ASUSER:-}" ]] && pgrep -f "$pat" >/dev/null 2>&1; then
-      # shellcheck disable=SC2086
-      $ASUSER /usr/bin/pkill -9 -f "$pat" 2>/dev/null || true
-    fi
-    echo "==> cleanup: quit $name (we spawned it)" >&2
-  else
-    echo "==> cleanup: leaving $name running (was up before this run)" >&2
-  fi
+stop_app() {
+  [[ -s $SESSION_DIR/$1.pids ]] || return 0
+  stop_recorded_pids "$SESSION_DIR/$1.pids" "$(app_binary "$1")"
+  echo "==> stopped what this run started of $(applescript_name "$1")" >&2
 }
 
 cleanup() {
@@ -278,93 +207,44 @@ cleanup() {
   [[ -n "$WIN_iterm" ]]    && bin/drivers/iterm.sh    close-windows "$WIN_iterm"    >/dev/null 2>&1 || true
   [[ -n "$WIN_terminal" ]] && bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
 
-  # If the app wasn't running pre-flight, we caused the whole launch —
-  # quit the app entirely so the process count returns to zero. If it
-  # was running, we already closed only our windows above and leave the
-  # rest of the user's session alone.
-  # Only for a terminal this run launched: one it never started is not
-  # its to quit.
-  local launched=" ${LAUNCHED_TERMS[*]:-} "
-  [[ $launched != *" iterm "* ]]    || quit_app_if_we_spawned "iTerm"    "iTerm.app/Contents/MacOS"              "$PRE_ITERM"
-  [[ $launched != *" terminal "* ]] || quit_app_if_we_spawned "Terminal" "Terminal.app/Contents/MacOS/Terminal"  "$PRE_TERMINAL"
-  [[ $launched != *" warp "* ]]     || quit_app_if_we_spawned "Warp"     "Warp.app/Contents/MacOS/stable"        "$PRE_WARP"
-  [[ $launched != *" ghostty "* ]]  || stop_recorded_ghostty
+  # what this run started of each app, by its recorded pids
+  local t
+  for t in iterm terminal warp ghostty; do stop_app "$t"; done
 
   # the product, if a round was interrupted while it was up
   bin/drivers/marspot.sh close-app >/dev/null 2>&1 || true
 
-  # Always-clean residue: driver wrappers + scenario markers.
-
-  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* /tmp/marspot-wrapper-* 2>/dev/null || true
+  # driver wrappers; the markers go with the run dir
+  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
   rm -f /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
-  # Same story as the processes: anything a root-spawned terminal wrote
-  # (wrappers, markers) is root-owned, and /tmp is sticky — this shell
-  # can neither delete nor overwrite it, and a stale root-owned marker
-  # blocks the NEXT run rather than this one.
-  if [[ -n "${ASUSER:-}" ]]; then
-    # shellcheck disable=SC2086
-    $ASUSER /bin/rm -f /tmp/measure-*-all.txt /tmp/ghostty-wrapper-* \
-                        /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
-  fi
-  rm -f /tmp/measure-*-all.txt 2>/dev/null || sudo -n rm -f /tmp/measure-*-all.txt 2>/dev/null || true
   rm -rf "$SESSION_DIR" 2>/dev/null || true
+  bench_run_end
   echo "==> cleanup done (script rc=$rc)" >&2
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+bench_run_begin   # the product runs from the run dir's copies
+# Each round's marker, in a dir made fresh for this run and owned by the
+# user running it: a round that was skipped or timed out leaves no file,
+# and only files here are read.
+MARKER_DIR=$(mktemp -d "$MARSPOT_BENCH_RUN_DIR/markers.XXXXXX")
 
 # Per-terminal close — runs immediately after that terminal's marker
 # completes (or times out). Closes only this terminal; the others
-# haven't been launched yet thanks to the sequential cycle below. The
-# same pre=1 → leave-running rule as the EXIT trap applies.
+# haven't been launched yet thanks to the sequential cycle below. Only
+# recorded pids are stopped, as in the EXIT trap.
 close_one() {
   local t=$1
-  # Use `if` blocks instead of `[[ test ]] && { block }` — the latter
-  # returns false when the test is false and trips `set -e` at the end
-  # of the function, killing the script mid-cycle. `if` short-circuits
-  # cleanly with no failing exit code.
   case "$t" in
-    iterm)
-      if [[ -n "$WIN_iterm" ]]; then
-        bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true
-      fi
-      if [[ "$PRE_ITERM" == "0" ]]; then
-        # iTerm's "Prompt before quitting" preference can block an AS
-        # quit indefinitely waiting for a Confirm dialog the receiver
-        # can't answer. Polite AS quit first (clean teardown if the
-        # prompt is disabled), pkill backstop within 1 s otherwise.
-        osascript -e 'tell application "iTerm" to quit saving no' >/dev/null 2>&1 &
-        sleep 1
-        pkill -f "iTerm.app/Contents/MacOS/iTerm2" 2>/dev/null || true
-      fi
-      ;;
-    terminal)
-      if [[ -n "$WIN_terminal" ]]; then
-        bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
-      fi
-      if [[ "$PRE_TERMINAL" == "0" ]]; then
-        # Same Confirm-dialog risk as iTerm.
-        osascript -e 'tell application "Terminal" to quit' >/dev/null 2>&1 &
-        sleep 1
-        pkill -f "Terminal.app/Contents/MacOS/Terminal" 2>/dev/null || true
-      fi
-      ;;
-    warp)
-      if [[ "$PRE_WARP" == "0" ]]; then
-        osascript -e 'tell application "Warp" to quit' >/dev/null 2>&1 || true
-        sleep 0.5
-        pkill -f "Warp.app/Contents/MacOS/stable" 2>/dev/null || true
-      fi
-      ;;
-    ghostty)
-      stop_recorded_ghostty
-      ;;
-    marspot)
-      # The app quits when its one pane's shell exits.  This stops what
-      # is left of it, by the pids its own state dir recorded, and
-      # removes that state dir.
-      bin/drivers/marspot.sh close-app >&2 || true
-      ;;
+    iterm)    [[ -z $WIN_iterm ]] || bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true ;;
+    terminal) [[ -z $WIN_terminal ]] || bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true ;;
+  esac
+  case "$t" in
+    # The app quits when its one pane's shell exits.  This stops what
+    # is left of it, by the pids its own state dir recorded, and
+    # removes that state dir.
+    marspot) bin/drivers/marspot.sh close-app >&2 || true ;;
+    *)       stop_app "$t" ;;
   esac
   return 0
 }
@@ -374,11 +254,10 @@ close_one() {
 GRID_COLS=""
 GRID_ROWS=""
 probe_grid() {
-  local out="$SESSION_DIR/grid" probe="$SESSION_DIR/grid-probe.sh"
+  local out="$SESSION_DIR/grid" probe="$MARSPOT_BENCH_RUN_DIR/grid-probe.sh"
   printf '#!/bin/sh\nstty size > %s.tmp < /dev/tty\nmv %s.tmp %s\n' "$out" "$out" "$out" > "$probe"
   chmod 0755 "$probe"
-  # shellcheck disable=SC2086
-  $ASUSER bin/drivers/marspot.sh run-app "$probe" >&2 || return 0
+  bin/drivers/marspot.sh run-app "$probe" >&2 || return 0
   local i
   for ((i = 0; i < 100; i++)); do
     [[ -s $out ]] && break
@@ -412,8 +291,8 @@ echo "==> load1 $(load1) before the first round" >&2
 # per-cell CPU / IO contention is zero.
 for ((round = 1; round <= ROUNDS; round++)); do
 for t in "${TERMS[@]}"; do
-  # Ghostty and marspot are started through `sudo asuser` and always
-  # work from ssh.  The AppleScript-driven three are reachable only
+  # Ghostty and marspot are started from this login and work from
+  # ssh.  The AppleScript-driven three are reachable only
   # while the app is already running in the user's GUI session
   # (verified 2026-08-19: `tell application "iTerm" to count windows`
   # answered from a plain ssh shell).  So ask instead of assuming: one
@@ -437,8 +316,7 @@ for t in "${TERMS[@]}"; do
     continue
   fi
 
-  marker="/tmp/measure-${t}-r${round}-all.txt"
-  rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
+  marker="$MARKER_DIR/measure-${t}-r${round}.txt"
   cmd="$(build_one_cmd "$marker" "${t}-r${round}")"
 
   load_start="$(load1)"
@@ -447,17 +325,17 @@ for t in "${TERMS[@]}"; do
   wrapper=""
   # shellcheck disable=SC2086
   case "$t" in
-    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
-    warp)     $ASUSER bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" "$cmd" || launch_rc=$? ;;
-    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single --pid-file "$GHOSTTY_PIDS" "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
-    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
+    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs --pid-file "$SESSION_DIR/iterm.pids" 1 "$cmd")" || launch_rc=$? ;;
+    warp)     bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" --pid-file "$SESSION_DIR/warp.pids" "$cmd" || launch_rc=$? ;;
+    ghostty)  bin/drivers/ghostty.sh run-single --pid-file "$GHOSTTY_PIDS" "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
+    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single --pid-file "$SESSION_DIR/terminal.pids" "$cmd")" || launch_rc=$? ;;
     marspot)
       # the pane's shell is a wrapper around the same command every
       # other terminal got
-      wrapper=$(mktemp /tmp/marspot-wrapper-XXXXXX)
+      wrapper="$MARSPOT_BENCH_RUN_DIR/wrapper-$t-r$round"
       printf '#!/bin/bash\n%s\n' "$cmd" > "$wrapper"
       chmod 0755 "$wrapper"
-      $ASUSER bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
+      bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
       ;;
   esac
 
@@ -465,7 +343,6 @@ for t in "${TERMS[@]}"; do
     echo "==> [${t} r${round}] driver failed rc=$launch_rc — skipping" >&2
     continue
   fi
-  LAUNCHED_TERMS+=("$t")
 
   saw_done=0
   for _ in $(seq 1 "$MARKER_TIMEOUT_S"); do
@@ -492,10 +369,9 @@ done
 # LaunchAgent receiver, set -e from a driver, marker-wait timeout,
 # anything). Don't duplicate cleanup here.
 
-# Parse markers → JSON on stdout. Markers may be root-owned (when the
-# surface ran under sudo asuser); they're mode 0644 world-readable so
-# this user-mode parse can still read them.
+# Parse markers → JSON on stdout.
 LIVE_MIN_BYTES="$LIVE_MIN_BYTES" LIVE_SENTINEL_CPR="$LIVE_SENTINEL_CPR" MEASURE_ROUNDS="$ROUNDS" \
+  MEASURE_MARKER_DIR="$MARKER_DIR" \
   python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys, datetime, subprocess, platform
 SCENARIOS = sys.argv[1:]
@@ -608,11 +484,13 @@ def read_marker(path):
     return by_scn, grid, load, dropped
 
 ROOT = os.environ.get("PWD", os.getcwd())
-# Mirrors LIVE_MIN_BYTES in bin/_lib.sh — passed through the
+# Mirrors LIVE_MIN_BYTES in bin/_lib-live.sh — passed through the
 # environment by the shell half so the two cannot drift apart.
 LIVE_MIN_BYTES = int(os.environ.get("LIVE_MIN_BYTES", 32 * 1024 * 1024))
 SENTINEL = os.environ["LIVE_SENTINEL_CPR"]
 ROUNDS = int(os.environ["MEASURE_ROUNDS"])
+# this run's own markers only: a fixed path would read an earlier run's
+MARKER_DIR = os.environ["MEASURE_MARKER_DIR"]
 # a round taken above this 1-minute load is not a reading (the gate's
 # own ceiling)
 LOAD_MAX = float(os.environ.get("MARSPOT_BENCH_LOAD_MAX", "5.0"))
@@ -623,7 +501,7 @@ for t in TERMS:
     rounds = []
     grid = None
     for r in range(1, ROUNDS + 1):
-        marker = f"/tmp/measure-{t}-r{r}-all.txt"
+        marker = os.path.join(MARKER_DIR, f"measure-{t}-r{r}.txt")
         if not os.path.exists(marker):
             continue
         by_scn, g, load, dropped = read_marker(marker)
@@ -660,7 +538,7 @@ for t in TERMS:
     rec["method"] = os.environ.get("MEASURE_METHOD") or (
                      "ssh→LaunchAgent (com.marspot.bench-trigger)"
                      if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.marspot")
-                     else "ssh, started in the GUI session" if os.environ.get("SSH_CONNECTION")
+                     else "ssh login of the console user" if os.environ.get("SSH_CONNECTION")
                      else "console / Screen Sharing")
     if grid:
         rec["grid"] = grid

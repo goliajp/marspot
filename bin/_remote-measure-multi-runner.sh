@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# bin/_remote-measure-multi-mini.sh — N terminal windows absorbing the
+# bin/_remote-measure-multi-runner.sh — N terminal windows absorbing the
 # same corpus at the same moment, for the product and for the terminals
 # whose drivers can open N windows on the bench host.  Runs there, the
-# way bin/_remote-measure-others-mini.sh does, and prints one JSON
+# way bin/_remote-measure-others-runner.sh does, and prints one JSON
 # object on stdout:
 #
 #   { "windows": 4, "host": {...},
 #     "marspot": { "grid": "99x35", "cat-ascii_MBps": 301.2, ..., "rounds": [...] },
 #     "ghostty": { ... } }
 #
-#   MULTI_WINDOWS=4 MEASURE_ROUNDS=4 bash bin/_remote-measure-multi-mini.sh
+#   MULTI_WINDOWS=4 MEASURE_ROUNDS=4 bash bin/_remote-measure-multi-runner.sh
 #
 # What a figure is.  Every window runs the same trial script.  A trial
 # has a start time all N windows share, read off the wall clock; each
@@ -46,18 +46,9 @@ START_SKEW_S=0.03
 COOLDOWN_S=3
 [[ $N =~ ^[1-9][0-9]?$ ]] || { echo "MULTI_WINDOWS wants a count, got '$N'" >&2; exit 2; }
 
-trap 'exit 143' HUP INT TERM
-
-ASUSER=""
-if [[ -n "${SSH_CONNECTION:-}" ]]; then
-  uid="$(id -u)"
-  if sudo -n launchctl asuser "$uid" /usr/bin/true 2>/dev/null; then
-    ASUSER="sudo -n launchctl asuser $uid sudo -u $(id -un)"
-  else
-    echo "==> no way into the GUI session from ssh (launchctl asuser is not allowed)" >&2
-    exit 1
-  fi
-fi
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 SESSION_DIR="/tmp/marspot-multi-$$"
 mkdir -p "$SESSION_DIR"
@@ -77,8 +68,9 @@ stop_ghostty() {
     [[ $pid =~ ^[0-9]+$ ]] && (( pid > 300 )) || continue
     comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
     [[ $comm == */Ghostty.app/Contents/MacOS/ghostty ]] || continue
-    began="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
-    began_s="$(date -j -f '%a %b %d %T %Y' "$began" +%s 2>/dev/null || echo 0)"
+    # lstart and its parse follow the locale
+    began="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null || true)"
+    began_s="$(LC_ALL=C date -j -f '%a %b %d %T %Y' "$began" +%s 2>/dev/null || echo 0)"
     (( began_s >= RUN_STARTED )) || continue
     kill -TERM "$pid" 2>/dev/null || true
   done < "$GHOSTTY_PIDS"
@@ -92,9 +84,14 @@ cleanup() {
   stop_ghostty
   bin/drivers/marspot.sh close-app >/dev/null 2>&1
   [[ -n ${MULTI_KEEP:-} ]] || rm -rf "$SESSION_DIR"
+  bench_run_end
   exit "$rc"
 }
 trap cleanup EXIT
+bench_run_begin   # the product runs from the run dir's copies
+# and so do the scripts its panes run; the markers stay in SESSION_DIR
+SCRIPT_DIR="$MARSPOT_BENCH_RUN_DIR/multi"
+mkdir -p "$SCRIPT_DIR"
 
 # The script every window of one terminal and round runs.
 write_multi_script() {
@@ -179,22 +176,20 @@ for ((round = 1; round <= ROUNDS; round++)); do
 for t in "${TERMS[@]}"; do
   prefix="$SESSION_DIR/m-$t-r$round"
   start_file="$SESSION_DIR/start-$t-r$round"
-  script="$SESSION_DIR/trial-$t-r$round.sh"
+  script="$SCRIPT_DIR/trial-$t-r$round.sh"
   write_multi_script "$script" "$prefix" "$start_file"
-  wrapper="$SESSION_DIR/wrapper-$t-r$round"
+  wrapper="$SCRIPT_DIR/wrapper-$t-r$round"
   printf '#!/bin/bash\n%s; exit\n' "$script" > "$wrapper"
   chmod 0755 "$wrapper"
   load_start="$(load1)"
   echo "==> [$t r$round] launch $N (load1 $load_start)" >&2
   case "$t" in
     marspot)
-      # shellcheck disable=SC2086
-      $ASUSER bin/drivers/marspot.sh run-app "$wrapper" "$N" >&2
+      bin/drivers/marspot.sh run-app "$wrapper" "$N" >&2
       ;;
     ghostty)
       for ((i = 0; i < N; i++)); do
-        # shellcheck disable=SC2086
-        $ASUSER bin/drivers/ghostty.sh run-recorded "$GHOSTTY_PIDS" "$wrapper" >&2
+        bin/drivers/ghostty.sh run-recorded "$GHOSTTY_PIDS" "$wrapper" >&2
       done
       ;;
     *) echo "no way to open $N windows of $t" >&2; exit 2 ;;

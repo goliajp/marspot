@@ -126,8 +126,13 @@ TARGET_MIB="${TARGET_MIB:-128}"
 # Build session bin + probe together (version-skew guard: a stale probe
 # would create a grid_shm region an updated marspot-session refuses).
 # The build's exit code decides, not whether a binary is lying in target/.
-dev_require_probe l3_throughput || fail "could not build the probe"
-dev_require_bin marspot-session || fail "could not build marspot-session"
+# Inside a bench run the two are the run dir's copies of what bin/bench.sh
+# built before the measurement: building here would change target/ and
+# not the copies, and compile in the middle of the measurement.
+if [[ -z "${MARSPOT_BENCH_RUN_DIR:-}" ]]; then
+  dev_require_probe l3_throughput || fail "could not build the probe"
+  dev_require_bin marspot-session || fail "could not build marspot-session"
+fi
 [[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
 
@@ -191,7 +196,7 @@ run_trial() {
   load1 >> "$RUN_DIR/trial.load"
 }
 
-RUN_DIR=$(mktemp -d)
+RUN_DIR=$(mktemp -d "${MARSPOT_BENCH_RUN_DIR:-${TMPDIR:-/tmp}}/measure-l3.XXXXXX")
 cleanup() {
   local p
   # stopped mid-trial: the load sampler and the probes of that trial
@@ -201,7 +206,9 @@ cleanup() {
   rm -rf "$RUN_DIR"
 }
 trap cleanup EXIT
-trap 'exit 143' TERM INT HUP
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 
 for scenario in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$scenario.bin"

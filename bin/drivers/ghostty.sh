@@ -4,17 +4,17 @@
 # Ghostty 1.3.x has no public AppleScript dictionary, but the binary
 # accepts `-e <executable>` (xterm-style) to spawn a fresh surface that
 # runs the given command and dies. That's the cleanest path for bench:
-# no AppleScript, no System Events keystroke (SE is blocked under
-# launchctl-asuser / bsexec ssh sessions anyway — TCC Accessibility
-# boundary).
+# no AppleScript, no System Events keystroke (that one needs a TCC
+# Accessibility grant for whoever sends it).
 #
 # Usage:
 #   bin/drivers/ghostty.sh run-single [--pid-file <file>] <cmd> [cols rows]
 #     Spawn a fresh Ghostty surface running <cmd>. <cmd> is the shell
 #     string the surface should execute — we wrap it in a temp script
 #     because Ghostty's -e wants an executable path, not an inline
-#     bash string.  With --pid-file, the pid of the Ghostty it started
-#     is appended to <file>, so the caller can stop exactly that.
+#     bash string.  With --pid-file, `<pid> <launch-epoch>` of the
+#     Ghostty it started is appended to <file>, so the caller can stop
+#     exactly that.
 #
 #   bin/drivers/ghostty.sh run-recorded <pid-file> <executable>
 #     Spawn a fresh Ghostty running <executable> and append its pid to
@@ -22,12 +22,9 @@
 #
 #   bin/drivers/ghostty.sh quit (refuses)
 #
-# Note on ssh+ssh-driven runs: the caller (e.g.
-# bin/_remote-measure-others-mini.sh) wraps this driver in
-# `sudo -n launchctl asuser <uid>` so the spawned ghostty lives in the
-# user's GUI launchd domain. Without that, ssh-spawned ghostty has no
-# Aqua bootstrap and its surface never materializes. The wrapper is
-# transparent to this driver.
+# Over ssh the caller (e.g. bin/_remote-measure-others-runner.sh) runs
+# this from the ssh login of the console user, which reaches that
+# session's window server; a login of anyone else gets no surface.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -70,8 +67,10 @@ case "$cmd_word" in
     if [[ -n "${1:-}" && -n "${2:-}" ]]; then
       size_args=(--window-width="$1" --window-height="$2")
     fi
+    # the pid file line is `<pid> <launch-epoch>` (bin/_app-pids.sh)
+    launched_at=$(date +%s)
     "$GHOSTTY_BIN" ${size_args[@]+"${size_args[@]}"} -e "$wrapper" &
-    [[ -z $pid_file ]] || echo $! >> "$pid_file"
+    [[ -z $pid_file ]] || echo "$! $launched_at" >> "$pid_file"
     disown 2>/dev/null || true
     ;;
   run-recorded)

@@ -20,7 +20,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 dev_no_dock
 
 OUT="${PANECTL_OUT:-$ROOT/build/pane-control.json}"
-BIN="$ROOT/target/release"
+BIN="${MARSPOT_BENCH_BIN_DIR:-$ROOT/target/release}"   # a bench run passes its copies
 SD="$MARSPOT_STATE_DIR"
 APPLOG="$SD/logs/marspot.log"
 PEER="$BIN/marspot-peer"
@@ -40,7 +40,8 @@ dev_kill_shell_core
 dev_wipe_state
 rm -rf "$SD/sessions" "$SD/retired"
 mkdir -p "$SD/logs"
-PANE_SH="$SD/pane.sh"
+# inside a bench run every script a pane runs belongs in the run dir
+PANE_SH="${MARSPOT_BENCH_RUN_DIR:-$SD}/panectl-pane.sh"
 printf '#!/bin/sh\nPS1="$ " exec /bin/sh\n' > "$PANE_SH"
 chmod +x "$PANE_SH"
 python3 - "$SD" <<'PY' || fail "could not write the layout"
