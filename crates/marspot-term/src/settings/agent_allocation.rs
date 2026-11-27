@@ -73,6 +73,17 @@ pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
 mod tests {
     use super::super::*;
 
+    /// Following codex updates is on unless the file says otherwise,
+    /// and saying otherwise survives a rewrite.
+    #[test]
+    fn codex_updates_are_followed_unless_switched_off() {
+        assert!(Settings::default().codex_follow_updates);
+        let off = parse("codex.follow_updates = false\n");
+        assert!(!off.codex_follow_updates);
+        let kept = parse(&render(&off, "codex.follow_updates = false\n"));
+        assert!(!kept.codex_follow_updates, "a rewrite keeps it off");
+    }
+
     #[test]
     fn gemini_allocation_is_off_unless_written_dryrun_or_live() {
         assert_eq!(Settings::default().gemini_allocation, AgentAllocation::Off);
