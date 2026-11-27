@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.861"  # a move off an emptying account onto one renewing inside the horizon opens when planned (comment, tests)
+shell   = "0.7.862"  # a move onto an account before its renewal is timed at 0.35 of the pane's level, from a sweep
 core    = "0.12.758"  # font family matching never waits on a font macOS has not downloaded
 session = "0.11.482"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp

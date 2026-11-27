@@ -21,8 +21,12 @@ const BUCKET_H: f64 = 6.0;
 /// A move onto an account before its renewal is timed as if the pane
 /// ran at this share of its level: what is left there lapses whole when
 /// the pane runs slower than its level, while an account it empties
-/// early costs one refusal and a move on.
-pub(super) const DRAIN_PACE: f64 = 0.5;
+/// early costs one refusal and a move on.  Swept from 0.3 to 0.8 over
+/// 638 closed-loop weeks the planner was never tuned on, refusals did not
+/// move with it beyond noise and money was lowest at 0.3-0.35, about
+/// 0.05 points a week under 0.5; 0.35 also had the fewest weeks dearer
+/// than today's rule.
+pub(super) const DRAIN_PACE: f64 = 0.35;
 const SAME_H: f64 = 1e-6;
 
 /// Where accounts and panes are, by index.
