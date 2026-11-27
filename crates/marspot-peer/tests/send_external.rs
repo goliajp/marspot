@@ -150,10 +150,16 @@ fn external_send_reaches_claude_and_codex_panes_as_external() {
 #[test]
 fn external_send_under_a_pane_or_session_name_is_refused() {
     let sb = Sandbox::new();
-    for name in ["marspot", "marspot#1024", "marspot#9906", "marspot-6a"] {
+    for name in ["marspot", "marspot-6a"] {
         let out = sb.run(&["send", "--from", name, "marspot#1024", "hi"], &[]);
         assert_eq!(out.status.code(), Some(3), "{name}");
         assert!(stderr(&out).contains("must not pass for a pane or session"), "{name}: {}", stderr(&out));
+    }
+    // a pane's base#code form never gets that far: '#' is not a sender name's character
+    for name in ["marspot#1024", "marspot#9906"] {
+        let out = sb.run(&["send", "--from", name, "marspot#1024", "hi"], &[]);
+        assert_eq!(out.status.code(), Some(3), "{name}");
+        assert!(stderr(&out).contains("letters, digits"), "{name}: {}", stderr(&out));
     }
     let out = sb.run(&["send", "--from", "cron\u{1b}[2J", "marspot#1024", "hi"], &[]);
     assert_eq!(out.status.code(), Some(3));
