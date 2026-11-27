@@ -38,15 +38,15 @@ ctx() { echo "AUTHREQ_CTX: msgID=$1, function=<private>, service=$2, preflight=y
 OTHER=/Applications/Other.app/Contents/MacOS/Other
 BUILD=/Users/u/work/e2e-marspot/target/release/marspot-shell
 LANDER=/private/tmp/msp-e2e-1-1-lander/Marspot.app/Contents/MacOS/marspot-shell
-TCC_OTHER="$(ndjson "$(attribution 9.1 "$OTHER" "$OTHER")" "$(ctx 9.1 kTCCServiceCamera)")"
-TCC_OURS="$(ndjson "$(attribution 401.7 "$BUILD" "$OTHER")" "$(ctx 401.7 kTCCServiceAppleEvents)")"
+TCC_OTHER="$(ndjson "$(ctx 9.1 kTCCServiceCamera)" "$(attribution 9.1 "$OTHER" "$OTHER")")"
+TCC_OURS="$(ndjson "$(ctx 401.7 kTCCServiceAppleEvents)" "$(attribution 401.7 "$BUILD" "$OTHER")")"
 result() { echo "AUTHREQ_RESULT: msgID=$1, authValue=1, authReason=5, authVersion=1, desired_auth=0, error=(null),"; }
-TCC_LISTEN="$(ndjson "$(attribution 403.1 "$OTHER" "$BUILD")" "$(ctx 403.1 kTCCServiceListenEvent)" "$(result 403.1)")"
+TCC_LISTEN="$(ndjson "$(ctx 403.1 kTCCServiceListenEvent)" "$(attribution 403.1 "$OTHER" "$BUILD")" "$(result 403.1)")"
 TCC_LISTEN_PROMPT="$(ndjson "$(attribution 404.1 "$OTHER" "$BUILD")" "$(ctx 404.1 kTCCServiceListenEvent)" \
   "AUTHREQ_PROMPTING: msgID=404.1, service=kTCCServiceListenEvent" "$(result 404.1)")"
-TCC_LISTEN_ASK="$(ndjson "$(attribution 405.1 "$OTHER" "$BUILD")" \
-  "AUTHREQ_CTX: msgID=405.1, function=<private>, service=kTCCServiceListenEvent, preflight=no, query=1" "$(result 405.1)")"
-TCC_ACCESSING="$(ndjson "$(attribution 402.1 "$OTHER" "$LANDER")" "$(ctx 402.1 kTCCServiceListenEvent)")"
+TCC_LISTEN_ASK="$(ndjson "AUTHREQ_CTX: msgID=405.1, function=<private>, service=kTCCServiceListenEvent, preflight=no, query=1," \
+  "$(attribution 405.1 "$OTHER" "$BUILD")" "$(result 405.1)")"
+TCC_ACCESSING="$(ndjson "$(ctx 402.1 kTCCServiceListenEvent)" "$(attribution 402.1 "$OTHER" "$LANDER")")"
 ME=$'4000\theavy\tholding since 2026-11-27 10:00:00\tsh -c stopped=; ...'
 SOMEONE=$'5000\theavy\tholding since 2026-11-27 09:59:00\tcargo build'
 # tile LABEL [PATH [BUNDLE]]: one Dock tile as `defaults read com.apple.dock` prints it
@@ -181,7 +181,7 @@ expect tcc-accessing 1 "left: tcc: kTCCServiceListenEvent $OTHER ${LANDER#/priva
 
 base listen-preflight
 printf '%s\n%s\n{"count":5,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" >"$T/listen-preflight/in/tcc.ndjson"
-expect listen-preflight 0 "tcc: requests=2 ours=1 listen_event_preflights=1" "info: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+expect listen-preflight 0 "tcc: requests=2 ours=1 listen_event_preflights=1 screen_capture_preflights=0" "info: tcc: kTCCServiceListenEvent $OTHER $BUILD"
 
 base listen-prompt
 printf '%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN_PROMPT" >"$T/listen-prompt/in/tcc.ndjson"
@@ -196,6 +196,26 @@ base listen-collide
 printf '%s\n%s\n%s\n{"count":8,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" "${TCC_LISTEN_ASK//405.1/403.1}" \
   >"$T/listen-collide/in/tcc.ndjson"
 expect listen-collide 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+
+# the window server's screen-recording preflight before the shell captures its own window
+base capture-preflight
+ndjson "$(ctx 175.2117 kTCCServiceScreenCapture)" "$(attribution 175.2117 "$OTHER" "$BUILD")" "$(result 175.2117)" \
+  >"$T/capture-preflight/in/tcc.ndjson"
+echo '{"count":3,"finished":1}' >>"$T/capture-preflight/in/tcc.ndjson"
+expect capture-preflight 0 "screen_capture_preflights=1" "info: tcc: kTCCServiceScreenCapture $OTHER $BUILD"
+
+# the same client reuses its msgID for a second preflight seconds later (seen on a runner)
+base listen-reuse
+printf '%s\n%s\n%s\n{"count":8,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" "$TCC_LISTEN" >"$T/listen-reuse/in/tcc.ndjson"
+expect listen-reuse 0 "listen_event_preflights=2"
+
+# two requests under one msgID, interleaved: the one left without its own lines still fails
+base listen-interleave
+ndjson "$(ctx 403.1 kTCCServiceListenEvent)" \
+  "AUTHREQ_CTX: msgID=403.1, function=<private>, service=kTCCServiceListenEvent, preflight=no, query=1," \
+  "$(attribution 403.1 "$OTHER" "$BUILD")" "$(result 403.1)" >"$T/listen-interleave/in/tcc.ndjson"
+echo '{"count":4,"finished":1}' >>"$T/listen-interleave/in/tcc.ndjson"
+expect listen-interleave 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
 
 base prompt-no-id
 printf '%s\n%s\n{"count":3,"finished":1}\n' "$TCC_OTHER" "$(ndjson "AUTHREQ_PROMPTING: service=kTCCServiceCamera")" \

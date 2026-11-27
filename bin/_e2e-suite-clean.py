@@ -97,7 +97,7 @@ def tcc_requests(text):
     """per msgID: every service, CTX preflight value and desired_auth seen, so two requests that
     share a msgID (pid.counter wraps) can never pass as one preflight; a prompt line without a
     msgID is kept under its own key"""
-    reqs = {}
+    reqs, seen = {}, {}
     for n, line in enumerate((text or "").splitlines()):
         try:
             msg = json.loads(line).get("eventMessage", "")
@@ -106,7 +106,13 @@ def tcc_requests(text):
         m = re.search(r"msgID=([^,]+)", msg)
         if not m and not msg.startswith("AUTHREQ_PROMPTING"):
             continue
+        # a client may reuse a msgID for its next request: each CTX line starts a new one, and
+        # the lines after it attach to the newest
         key = m.group(1) if m else "!prompt-%d" % n
+        if msg.startswith("AUTHREQ_CTX") and key in seen:
+            seen[key] += 1
+        seen.setdefault(key, 0)
+        key = "%s#%d" % (key, seen[key])
         r = reqs.setdefault(key, {"svcs": set(), "paths": [], "ctx": [], "prompt": False, "desired": set()})
         r["svcs"].update(re.findall(r"\bservice=(\w+)", msg))
         if msg.startswith("AUTHREQ_CTX"):
@@ -118,10 +124,17 @@ def tcc_requests(text):
         for p in re.findall(r"(?:binary|responsible)_path=([^,}]+)", msg):
             if strip(p) not in r["paths"]:
                 r["paths"].append(strip(p))
-    for r in reqs.values():
+    for k, r in reqs.items():
         r["svc"] = ",".join(sorted(r["svcs"])) or "?"
+        # interleaved requests under one msgID may leave a CTX without its own paths: it takes
+        # every path seen under that msgID, so a request of ours is never dropped as not ours
+        for o, q in reqs.items():
+            if o != k and o.split("#")[0] == k.split("#")[0]:
+                r["paths"] += [p for p in q["paths"] if p not in r["paths"]]
     return reqs
 
+
+QUIET_SERVICES = {"kTCCServiceListenEvent", "kTCCServiceScreenCapture"}
 
 # seconds before the snap in which our own take of the lock may be logged
 LOOKBACK = 5
@@ -292,8 +305,10 @@ def tcc_check(d, b, under, left, wide, unread):
         unread.append("tcc log: no request in the suite nor in the 24 h probe (predicate or format dead)")
         return
     mine = [r for k, r in reqs.items() if k.startswith("!") or any(ours(p) for p in r["paths"])]
-    quiet = [r for r in mine if listen_preflight(r)]
-    print("tcc: requests=%d ours=%d listen_event_preflights=%d" % (len(reqs), len(mine), len(quiet)))
+    quiet = [r for r in mine if quiet_preflight(r)]
+    count = lambda svc: sum(1 for r in quiet if r["svcs"] == {svc})
+    print("tcc: requests=%d ours=%d listen_event_preflights=%d screen_capture_preflights=%d" % (
+        len(reqs), len(mine), count("kTCCServiceListenEvent"), count("kTCCServiceScreenCapture")))
     for r in mine:
         line = "tcc: %s %s" % (r["svc"], " ".join(r["paths"]))
         if r in quiet:
@@ -302,11 +317,12 @@ def tcc_check(d, b, under, left, wide, unread):
         (left if r["prompt"] or any(under(p) for p in r["paths"]) else wide).append(line)
 
 
-def listen_preflight(r):
-    """the input-monitoring preflight AppKit and the window server make for every app with
-    key windows: it asks, never prompts and records nothing; any other request is a finding"""
-    return (r["svcs"] == {"kTCCServiceListenEvent"} and r["ctx"] == [["yes"]] and not r["prompt"]
-            and r["desired"] == {0})
+def quiet_preflight(r):
+    """the input-monitoring and screen-recording preflights AppKit and the window server make
+    (the latter before the shell captures its own window): they ask, never prompt and record
+    nothing; any other request is a finding"""
+    return (len(r["svcs"]) == 1 and r["svcs"] <= QUIET_SERVICES and r["ctx"] == [["yes"]]
+            and not r["prompt"] and r["desired"] == {0})
 
 
 def check(d, before, lrc, lout, me, prefixes):
