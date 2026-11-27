@@ -38,6 +38,8 @@ source "$ROOT/bin/_dev-sandbox.sh"
 
 OWN_SCRATCH=msp-one OWN_BUNDLE_ID=com.goliajp.marspot.e2e-one-record OWN_BUNDLE_NAME=MarspotOneRecordTest
 source "$ROOT/bin/_ownership-lib.sh"
+# this suite watches the drawer at work, so no recorded masks
+unset MARSPOT_TEST_ICON_MASKS
 
 OUTSIDE="$MARSPOT_STATE_DIR/binaries/current/marspot-shell"
 # the core draws no system symbol itself, so LaunchServices has no

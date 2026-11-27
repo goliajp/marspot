@@ -86,9 +86,43 @@ impl CoreIcons {
     }
 }
 
+/// Set by the sandbox to the masks AppKit drew, recorded (the unit
+/// tests' file): a shell a window test or a gauge starts serves those
+/// it has from there.  Each drawer is one more app registration, and
+/// the runner starts the app hundreds of times a day.
+const RECORDED_ENV: &str = "MARSPOT_TEST_ICON_MASKS";
+
+/// The masks of `batch`: the recorded ones, and the rest from a drawer.
+fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
+    let recorded = std::env::var_os(RECORDED_ENV).and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
+    let (mut drawn, rest) = from_recorded(&recorded, batch);
+    if !rest.is_empty() {
+        drawn.extend(draw_with(drawer, &rest));
+    }
+    drawn
+}
+
+/// `(found, not found)` for `batch` in a recorded file: `symbol u8,
+/// point_px u16 le, side u16 le`, then `side * side` bytes, repeated.
+fn from_recorded(file: &[u8], batch: &[(u16, u16)]) -> (Vec<Drawn>, Vec<(u16, u16)>) {
+    let mut found: Vec<Drawn> = Vec::new();
+    let mut at = 0;
+    while at + 5 <= file.len() {
+        let key = (file[at] as u16, u16::from_le_bytes([file[at + 1], file[at + 2]]));
+        let side = u16::from_le_bytes([file[at + 3], file[at + 4]]);
+        let Some(mask) = file.get(at + 5..at + 5 + side as usize * side as usize) else { break };
+        if batch.contains(&key) && !found.iter().any(|d| (d.0, d.1) == key) {
+            found.push((key.0, key.1, side, mask.to_vec()));
+        }
+        at += 5 + mask.len();
+    }
+    let rest = batch.iter().filter(|k| !found.iter().any(|d| (d.0, d.1) == **k)).copied().collect();
+    (found, rest)
+}
+
 /// Run `drawer --draw-icons` for `batch` and read what it wrote: each
 /// mask as a length and an `IconMask` payload.
-fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
+fn draw_with(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
     let list: Vec<String> = batch.iter().map(|(s, p)| format!("{s}:{p}")).collect();
     let started = std::time::Instant::now();
     let out = match std::process::Command::new(drawer)
@@ -166,6 +200,17 @@ mod tests {
         out.truncate(out.len() - 1);
         assert_eq!(read_masks(&out), vec![a]);
         assert!(read_masks(&[]).is_empty());
+    }
+
+    #[test]
+    fn recorded_masks_are_served_and_the_rest_left_to_a_drawer() {
+        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/appkit/icon-masks.bin")).unwrap();
+        let (found, rest) = from_recorded(&file, &[(5, 26), (5, 99)]);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].0, found[0].1, found[0].2), (5, 26, 46));
+        assert!(found[0].3.iter().any(|&a| a > 0), "a recorded mask has ink");
+        assert_eq!(rest, vec![(5, 99)]);
+        assert_eq!(from_recorded(&file[..10], &[(0, 13)]), (Vec::new(), vec![(0, 13)]), "a torn file serves nothing");
     }
 
     #[test]

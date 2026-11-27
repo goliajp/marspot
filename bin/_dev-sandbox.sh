@@ -48,6 +48,11 @@ dev_no_dock() {
   export MARSPOT_TEST_NO_DOCK=1
 }
 
+# The toolbar icons AppKit drew, recorded: the sandbox's shell serves
+# them from here instead of starting a drawer, one app registration less
+# per launch.  A suite that tests the drawer unsets it.
+export MARSPOT_TEST_ICON_MASKS="${MARSPOT_TEST_ICON_MASKS:-$ROOT/tests/fixtures/appkit/icon-masks.bin}"
+
 DEV_TARGET="$ROOT/target/release"
 
 # Where a suite keeps the output of what it launches: inside its state

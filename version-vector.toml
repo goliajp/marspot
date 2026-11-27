@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.821"  # a shell started by a gauge or benchmark takes no Dock tile and asks for no activation
+shell   = "0.7.822"  # a sandbox shell serves the recorded icon masks instead of starting a drawer
 core    = "0.12.736"  # the window code takes its Dock policy from app::dock (no tile under MARSPOT_TEST_NO_DOCK)
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)
