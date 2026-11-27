@@ -101,6 +101,7 @@ pub mod control_deny;
 #[cfg(test)]
 mod commands_layout_tests;
 pub mod font_cache;
+pub mod font_families;
 pub mod font_shape;
 pub mod font_trait;
 pub mod frame_build;

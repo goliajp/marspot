@@ -3,7 +3,7 @@
 //! reaches every control and does what a press does, and that a
 //! control scrolled out of sight answers nothing.
 
-use super::settings_view::{CHOOSE, SettingsRender, choice, chosen};
+use super::settings_view::{CHOOSE, PICKER_NEXT_ID, SettingsRender, choice, chosen};
 use crate::font_cache::FontCache;
 use crate::settings::Settings;
 use crate::ui::components::controls;
@@ -18,6 +18,7 @@ const TOP_INSET: f64 = 30.0;
 /// The panel in a `window`, laid out, scrolled as far as it goes when
 /// `to_end`.
 fn laid_out(font: &mut FontCache, window: (f64, f64), to_end: bool, s: Settings) -> SettingsRender {
+    crate::font_families::refresh_now();
     let (rect, scroll) = {
         let mut m = controls::font_measure(font);
         let rect = sm::panel_rect(window.0, window.1, &s, &mut m, TOP_INSET);
@@ -41,14 +42,16 @@ fn centre(r: Rect) -> (f64, f64) {
 }
 
 /// Every rectangle the walk gives a row, a card and a control is the
-/// rectangle of the node the surface made for it, at both scales.
+/// rectangle of the node the surface made for it, at both scales, and
+/// with a family name too long for its picker.
 #[test]
 fn the_surface_puts_rows_cards_and_controls_where_the_walk_does() {
-    for scale in [1.0, 2.0] {
+    let long = "A Monospaced Family Whose Name Runs Far Past Its Picker".to_string();
+    for (scale, family) in [(1.0, None), (2.0, None), (1.0, Some(long.clone())), (2.0, Some(long))] {
         at_scale(scale, || {
             let mut font = FontCache::build().expect("font");
-            let s = Settings::default();
-            let sp = laid_out(&mut font, (1000.0 * scale, 1592.0 * scale), false, s.clone());
+            let s = Settings { font_family: family.unwrap_or_else(|| "Monaco".into()), ..Settings::default() };
+            let sp = laid_out(&mut font, (1000.0 * scale, 1800.0 * scale), false, s.clone());
             let surface = sp.surface.borrow();
             let (tree, layout) = (surface.kept.surface.tree(), surface.kept.surface.layout());
             let rect_of = |i: usize| layout.rect(NodeId(i as u32));
@@ -77,7 +80,12 @@ fn the_surface_puts_rows_cards_and_controls_where_the_walk_does() {
                 Slot::Row { row, band, control, .. } => {
                     let got = rows.next().expect("a row node for every row");
                     assert!(same(got, band), "scale {scale}: {row:?} is at {got:?}, the walk has {band:?}");
-                    let got = controls_at.next().expect("a control node for every row");
+                    let mut got = controls_at.next().expect("a control node for every row");
+                    // a picker is its two buttons, the value between them
+                    if row.picker_arrows().is_some() {
+                        let last = controls_at.next().expect("a picker's second button");
+                        got = Rect { w: last.x + last.w - got.x, ..got };
+                    }
                     assert!(same(got, control), "scale {scale}: {row:?}'s control is at {got:?}, the walk has {control:?}");
                     n_rows += 1;
                 }
@@ -108,7 +116,7 @@ fn the_surface_puts_rows_cards_and_controls_where_the_walk_does() {
 fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
     let mut font = FontCache::build().expect("font");
     let s = Settings::default();
-    let sp = laid_out(&mut font, (1000.0, 1592.0), false, s.clone());
+    let sp = laid_out(&mut font, (1000.0, 1800.0), false, s.clone());
     let mut surface = sp.surface.borrow_mut();
     let surface = &mut surface.kept.surface;
     let press = |surface: &mut golia_ui_core::Surface<golia_ui_core::NoOut>, t: Target| {
@@ -158,6 +166,20 @@ fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
                 }
                 assert_eq!(surface.key(Key::Right), KeyResult::Handled, "past the last segment nothing is chosen");
             }
+            Control::Picker { .. } => {
+                // a stop for each button, the second its own widget
+                for (seg, id) in [(0, index as u32), (1, PICKER_NEXT_ID + index as u32)] {
+                    if seg == 1 {
+                        assert_eq!(surface.key(Key::Tab), KeyResult::Handled);
+                    }
+                    let at = surface.interaction.focused.expect("Tab focused something");
+                    assert_eq!(at.id, WidgetId(id), "{:?} button {seg}", spec.row);
+                    let want = Action::new(CHOOSE, choice(index, seg));
+                    assert_eq!(surface.key(Key::Space), KeyResult::Action(want));
+                    assert_eq!(press(surface, at), Some(want), "{:?} button {seg}: a press", spec.row);
+                    assert_eq!(chosen(want.arg), Some((spec.row, seg)));
+                }
+            }
         }
     }
     assert_eq!(surface.key(Key::Tab), KeyResult::Handled);
@@ -180,7 +202,7 @@ fn the_keyboard_reaches_every_control_and_does_what_a_press_does() {
 fn a_row_that_is_greyed_out_is_skipped_and_swallows_the_press() {
     let mut font = FontCache::build().expect("font");
     let s = Settings { reclaim_enabled: false, ..Default::default() };
-    let sp = laid_out(&mut font, (1000.0, 1592.0), false, s.clone());
+    let sp = laid_out(&mut font, (1000.0, 1800.0), false, s.clone());
     let mut surface = sp.surface.borrow_mut();
     let surface = &mut surface.kept.surface;
     let mut stops = Vec::new();
@@ -195,7 +217,8 @@ fn a_row_that_is_greyed_out_is_skipped_and_swallows_the_press() {
     let dimmed: Vec<usize> =
         sm::rows().enumerate().filter(|(_, r)| r.row.disabled_by(&s)).map(|(i, _)| i).collect();
     assert_eq!(dimmed.len(), 2);
-    assert_eq!(stops.len(), 1 + sm::rows().count() - dimmed.len(), "{stops:?}");
+    let pickers = sm::rows().filter(|r| matches!(r.row.control(&s), Control::Picker { .. })).count();
+    assert_eq!(stops.len(), 1 + sm::rows().count() - dimmed.len() + pickers, "{stops:?}");
     for i in dimmed {
         assert!(!stops.contains(&WidgetId(i as u32)));
         let node = surface.tree().nodes().iter().position(|n| n.widget == Some(WidgetId(i as u32))).unwrap();

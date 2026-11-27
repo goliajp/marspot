@@ -154,7 +154,7 @@ pub struct MetalRenderer {
     /// Shared font handling — same data the AppKit renderer uses.
     font: FontCache,
     /// The `ui::chrome_scale` the fonts above were built for.  A
-    /// display swap changes it; see `rebuild_fonts_if_scale_changed`.
+    /// display swap changes it; see `rebuild_fonts_if_stale`.
     fonts_built_at_scale: f64,
     /// Glyph atlas backing the FG pass.  Constructed in `new` /
     /// `new_headless`; grows lazily as cells reference new glyphs.
@@ -364,21 +364,24 @@ impl MetalRenderer {
         self.font.cell_dims()
     }
 
-    /// Re-derive the fonts for the display scale in force, if it has
-    /// changed since they were built.
+    /// Re-derive the fonts for the display scale and the font settings
+    /// in force, if either has changed since they were built.
     ///
     /// The terminal cell comes out of `FontCache::build`, which reads
-    /// `ui::chrome_scale` — so a window moved between displays of
-    /// different densities needs the cache rebuilt or the grid keeps
-    /// the old density's cell.  Returns whether anything changed, so
-    /// the caller only reflows when it must.
+    /// `ui::chrome_scale` and the settings' family and size — so a
+    /// window moved between displays of different densities, or a font
+    /// chosen in the settings, needs the cache rebuilt or the grid
+    /// keeps the old cell.  Returns whether anything changed, so the
+    /// caller only reflows when it must.
     ///
-    /// Cheap enough to call on every scale report and no cheaper: it
-    /// re-opens the font stack (~ms) and empties both atlases, which
-    /// the next frame re-fills for the glyphs actually on screen.
-    pub fn rebuild_fonts_if_scale_changed(&mut self) -> bool {
+    /// Cheap to call when nothing moved (a compare); a rebuild re-opens
+    /// the font stack (~ms) and empties both atlases, which the next
+    /// frame re-fills for the glyphs actually on screen.
+    pub fn rebuild_fonts_if_stale(&mut self) -> bool {
         let want = crate::ui::chrome_scale();
-        if (self.fonts_built_at_scale - want).abs() < 1e-9 {
+        let s = marspot_term::settings::get();
+        let (family, size) = &self.font.built_for;
+        if (self.fonts_built_at_scale - want).abs() < 1e-9 && *family == s.font_family && *size == s.font_size {
             return false;
         }
         let Ok(font) = FontCache::build() else {
@@ -467,6 +470,8 @@ mod scene_snapshot_tests;
 mod instance_buffer_tests;
 #[cfg(test)]
 mod glyph_tests;
+#[cfg(test)]
+mod font_settings_tests;
 #[cfg(test)]
 mod offscreen_tests;
 #[cfg(test)]

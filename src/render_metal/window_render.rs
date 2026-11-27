@@ -29,7 +29,7 @@ use crate::ui::components::chrome_target::ChromeTarget;
 ///   clear", which a resize of some other window must not satisfy.
 ///
 /// Note what is deliberately absent: a per-scale glyph atlas.  Glyphs
-/// are rasterised once at `FONT_POINT` and the atlas key carries the
+/// are rasterised once at the grid font's size and the atlas key carries the
 /// quantised size, so one atlas already serves windows on displays of
 /// different backing scales.
 /// Where one IOSurface frame spent its time.

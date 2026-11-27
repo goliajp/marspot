@@ -27,6 +27,9 @@ pub const SCROLL: u8 = 0;
 /// A control was pressed: the argument is [`choice`].
 pub const CHOOSE: u32 = 1;
 
+/// The widget a picker's second button is, offset from its row's.
+pub const PICKER_NEXT_ID: u32 = 0x100;
+
 /// Row `row`, segment `seg` (0 for a toggle), as an action's argument.
 pub fn choice(row: usize, seg: usize) -> u32 {
     ((row as u32) << 8) | seg as u32
@@ -102,6 +105,22 @@ fn row(ui: &mut Ui<'_>, m: Measure<'_>, index: usize, row_spec: &'static sm::Row
                     preset::segmented_with(ui, m, id, options, chosen, dim, |n| {
                         Action::new(CHOOSE, choice(index, n))
                     });
+                }
+                Control::Picker { value, arrows, prev, next } => {
+                    let step = |id: u32, seg: usize, enabled: bool| preset::Step {
+                        id: WidgetId(id),
+                        action: Action::new(CHOOSE, choice(index, seg)),
+                        enabled: enabled && !dim,
+                    };
+                    preset::picker(
+                        ui,
+                        step(index as u32, 0, prev),
+                        &value,
+                        metric::picker_value_w_pt(arrows),
+                        step(PICKER_NEXT_ID + index as u32, 1, next),
+                        arrows,
+                        font_of(metric::PICKER_VALUE),
+                    );
                 }
             }
         })

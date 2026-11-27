@@ -184,6 +184,10 @@ fn text(m: Msg) -> &'static str {
 
         Msg::Language => "语言",
         Msg::CostLanguage => "立即应用于 Marspot 的面板和菜单",
+        Msg::FontFamily => "字体",
+        Msg::CostFontFamily => "所有窗格按新的字符宽度重新换行，全屏程序会自行重绘",
+        Msg::FontSize => "字号",
+        Msg::CostFontSize => "字号越大越易读，但每个窗格能容纳的行数和列数越少",
         Msg::CostLanguageRelaunch => "系统提供的菜单项在重新启动 Marspot 后切换",
         Msg::LangEnglish => "English",
         Msg::LangJapanese => "日本語",

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.846"  # the strip lists every shadow pane under a pane, not only helpers
-core    = "0.12.746"  # the title's +N counts the open panes its strip lists
-session = "0.11.474"  # marspot-term strip rows gain a plain flag (not used by session)
+shell   = "0.7.848"  # marspot-term settings cap the font family name and drop its control characters (not used by shell)
+core    = "0.12.748"  # only a monospaced face of the chosen family is drawn; an open settings panel is redrawn once the families are listed
+session = "0.11.476"  # marspot-term settings cap the font family name and drop its control characters (not used by session)

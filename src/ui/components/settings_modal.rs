@@ -44,6 +44,16 @@ pub mod metric {
     pub const LABEL: PanelText = PanelText::Label;
     pub const DESC: PanelText = PanelText::Secondary;
     pub const FOOTER: PanelText = PanelText::Caption;
+    /// The text between a picker's buttons.
+    pub const PICKER_VALUE: PanelText = PanelText::Label;
+    /// Room for a font family's name between its row's buttons; a
+    /// longer name is cut short.
+    pub const FAMILY_W: f64 = 150.0;
+
+    /// The width of a picker's value: a family name, or a number.
+    pub fn picker_value_w_pt(arrows: bool) -> f64 {
+        if arrows { FAMILY_W } else { spec::control::STEPPER_VALUE_W }
+    }
 }
 
 /// A piece of the panel, with where it goes.  The walker emits these
@@ -235,9 +245,15 @@ pub fn max_scroll(rect: Rect, s: &Settings, m: Measure<'_>) -> f64 {
 
 /// `(width, height)` of this row's control, in physical px.
 pub fn control_size(row: Row, s: &Settings, m: Measure<'_>) -> (f64, f64) {
+    // a picker's size does not depend on its value, and building the
+    // value is an allocation this, which runs every frame, must not make
+    if let Some(arrows) = row.picker_arrows() {
+        return crate::ui::tree::preset::picker_size(metric::picker_value_w_pt(arrows));
+    }
     match row.control(s) {
         Control::Toggle(_) => controls::toggle_size(),
         Control::Segmented { options, .. } => controls::segmented_size(options, m),
+        Control::Picker { arrows, .. } => crate::ui::tree::preset::picker_size(metric::picker_value_w_pt(arrows)),
     }
 }
 
@@ -412,7 +428,7 @@ mod tests {
     fn rows_are_separated_and_nothing_overflows() {
         let _scale = scale_guard();
         let s = Settings::default();
-        let rect = test_rect(1800.0, 1592.0, &s);
+        let rect = test_rect(1800.0, 1900.0, &s);
         let slots = collect(rect, &s);
         let mut m = fake_measure();
         let px = crate::ui::core::ViewPainter::px_per_pt();

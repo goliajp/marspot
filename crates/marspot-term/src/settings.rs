@@ -41,6 +41,7 @@ use values::{fmt_f32, parse_bool, parse_f32, split_kv};
 
 mod agent_allocation;
 mod cc_model;
+pub mod font;
 mod rebalance;
 mod values;
 
@@ -172,6 +173,10 @@ pub struct Settings {
     /// The language the interface is in; `None` follows the system's
     /// language list.
     pub appearance_language: Option<LangId>,
+    /// The family the terminal grid is drawn in, by name; see [`font`].
+    pub font_family: String,
+    /// The grid's font size in points, before the display's scale.
+    pub font_size: f32,
 }
 
 impl Default for Settings {
@@ -195,6 +200,8 @@ impl Default for Settings {
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
             appearance_language: None,
+            font_family: font::DEFAULT_FAMILY.to_string(),
+            font_size: font::DEFAULT_SIZE,
         }
     }
 }
@@ -331,6 +338,8 @@ const KEYS: &[&str] = &[
     "reclaim.prefetch_on_return",
     "appearance.theme",
     "appearance.language",
+    "appearance.font_family",
+    "appearance.font_size",
     "appearance.circled_wide",
     "appearance.dim_scale",
     "appearance.helper_strip",
@@ -352,7 +361,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "appearance.helper_strip" => s.helper_strip.to_string(),
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
-        _ => agent_allocation::value_of(s, key).unwrap_or_default(),
+        _ => agent_allocation::value_of(s, key).or_else(|| font::value_of(s, key)).unwrap_or_default(),
     }
 }
 
@@ -383,6 +392,7 @@ pub fn parse(body: &str) -> Settings {
                 s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)
             }
             _ if agent_allocation::parse_key(&mut s, k, v) => {}
+            _ if font::parse_key(&mut s, k, v) => {}
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -622,7 +632,7 @@ mod tests {
 reclaim.idle_minutes = 15
 
 # a key from a newer build
-appearance.font_size = 13
+appearance.ligatures = true
 # and one an older build wrote
 developer.dev_panel = true
 reclaim.enabled = true
@@ -635,7 +645,7 @@ reclaim.enabled = true
 
         assert!(out.contains("# my own note"), "comment lost:\n{out}");
         assert!(
-            out.contains("appearance.font_size = 13"),
+            out.contains("appearance.ligatures = true"),
             "unknown key lost — a downgrade would eat it:\n{out}"
         );
         assert!(out.contains("developer.dev_panel = true"), "retired key lost:\n{out}");
@@ -644,7 +654,7 @@ reclaim.enabled = true
         // In place, not appended: the user's ordering is theirs.
         let i_note = out.find("# my own note").unwrap();
         let i_idle = out.find("reclaim.idle_minutes").unwrap();
-        let i_unknown = out.find("appearance.font_size").unwrap();
+        let i_unknown = out.find("appearance.ligatures").unwrap();
         assert!(i_note < i_idle && i_idle < i_unknown, "reordered:\n{out}");
         // A key the file lacked is appended, not dropped.
         assert!(out.contains("reclaim.prefetch_on_return = "), "{out}");

@@ -271,12 +271,19 @@ pub fn paint_stepper(
 
 /// One of a stepper's two buttons, in the box `rect`.
 pub fn paint_stepper_button(p: &mut ViewPainter, rect: Rect, part: StepperPart, enabled: bool, hovered: bool) {
+    paint_step(p, rect, part, false, enabled, hovered)
+}
+
+/// A stepper button: minus / plus, or previous / next when `arrows`.
+pub fn paint_step(p: &mut ViewPainter, rect: Rect, part: StepperPart, arrows: bool, enabled: bool, hovered: bool) {
     let base = palette::segment_bg();
     let bg = if enabled && hovered { palette::hover(base) } else { base };
     let fg = if enabled { palette::fg() } else { palette::disabled_fg() };
-    let glyph = match part {
-        StepperPart::Minus => "−",
-        StepperPart::Plus => "+",
+    let glyph = match (part, arrows) {
+        (StepperPart::Minus, false) => "−",
+        (StepperPart::Plus, false) => "+",
+        (StepperPart::Minus, true) => "‹",
+        (StepperPart::Plus, true) => "›",
     };
     fill(p, rect, bg, c::BUTTON_RADIUS);
     centred_text(p, rect, glyph, c::BUTTON_TEXT.pt(), c::BUTTON_TEXT.weight(), fg);

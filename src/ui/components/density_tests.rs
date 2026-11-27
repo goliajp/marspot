@@ -72,8 +72,8 @@ fn window_light() {
 }
 
 scenes_hold_at_both_scales! {
-    density_settings = panel::panel_snapshot_settings, 12;
-    density_settings_ja = settings_ja, 12;
+    density_settings = panel::panel_snapshot_settings, 14;
+    density_settings_ja = settings_ja, 14;
     density_shortcuts = panel::panel_snapshot_shortcuts, 21;
     density_layout = panel::panel_snapshot_layout, 7;
     density_layout_grid = panel::panel_snapshot_layout_grid, 13;
@@ -162,7 +162,7 @@ fn a_window_moved_between_densities_draws_as_one_made_there() {
     let mut wr = WindowRender::new();
     let mut moved_to = |scale: f64| {
         capture(scale, || {
-            renderer.rebuild_fonts_if_scale_changed();
+            renderer.rebuild_fonts_if_stale();
             chrome::window_on(&mut renderer, &mut wr, Some(ChromeTarget::Row(3)));
         })
         .expect("a frame")
@@ -184,8 +184,8 @@ fn a_panel_moved_between_densities_draws_as_one_made_there() {
     let mut wr = WindowRender::new();
     let mut moved_to = |scale: f64| {
         capture(scale, || {
-            renderer.rebuild_fonts_if_scale_changed();
-            panel::snapshot_on(&mut renderer, &mut wr, "settings", 1000, 1552, |renderer, layout| {
+            renderer.rebuild_fonts_if_stale();
+            panel::snapshot_on(&mut renderer, &mut wr, "settings", 1000, 1760, |renderer, layout| {
                 panel::open_settings(renderer, layout, None);
             });
         })
@@ -231,7 +231,7 @@ fn a_panel_dragged_and_scrolled_keeps_its_place_between_densities() {
         })
     };
     let draw = |renderer: &mut MetalRenderer, wr: &mut WindowRender, held: &Held| {
-        renderer.rebuild_fonts_if_scale_changed();
+        renderer.rebuild_fonts_if_stale();
         // too short to show the panel whole, so there is somewhere to scroll
         panel::snapshot_on(renderer, wr, "settings_moved", 1000, 520, |renderer, layout| {
             let sp = panel::open_settings(renderer, layout, None);

@@ -195,6 +195,10 @@ fn text(m: Msg) -> &'static str {
 
         Msg::Language => "言語",
         Msg::CostLanguage => "Marspotのパネルとメニューにすぐ反映されます",
+        Msg::FontFamily => "フォント",
+        Msg::CostFontFamily => "すべてのペインが新しい文字幅で折り返し直され、全画面のプログラムは描き直されます",
+        Msg::FontSize => "フォントサイズ",
+        Msg::CostFontSize => "大きいほど読みやすくなりますが、ペインに収まる行数と桁数が減ります",
         Msg::CostLanguageRelaunch => {
             "システムが提供するメニュー項目は、Marspotの再起動後に切り替わります"
         }

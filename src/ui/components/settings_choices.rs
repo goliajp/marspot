@@ -27,6 +27,11 @@ pub const THEME_LABELS: &[Msg] = &[Msg::ThemeSystem, Msg::ThemeDark, Msg::ThemeL
 pub const SCROLL_CHOICES: &[f32] = &[0.5, 1.0, 1.5, 2.5];
 pub const SCROLL_LABELS: &[Msg] = &[Msg::ScrollSlow, Msg::ScrollNormal, Msg::ScrollFast, Msg::ScrollFaster];
 
+/// The font sizes the size row steps through, in points.  Narrower
+/// than what the file accepts: below 9 and above 24 is a hand edit.
+pub const FONT_SIZE_MIN: f32 = 9.0;
+pub const FONT_SIZE_MAX: f32 = 24.0;
+
 /// The languages, with following the system first: `None` in the
 /// setting.  Each language is named in itself.
 pub const LANGUAGE_CHOICES: &[Option<LangId>] =

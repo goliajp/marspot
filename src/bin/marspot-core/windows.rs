@@ -300,7 +300,7 @@ impl CoreApp {
         // density.
         marspot::ui::set_chrome_scale(scale);
         win!(self, wi).scale = marspot::ui::chrome_scale();
-        self.adopt_display_scale();
+        self.adopt_fonts();
         self.rebuild_layout(wi);
         Some(wi)
     }
@@ -390,24 +390,29 @@ impl CoreApp {
         self.save_session_state();
     }
 
-    /// Re-derive everything that was sized for the old display.
+    /// Re-derive everything that was sized for the old display or the
+    /// old terminal font.
     ///
     /// A MacBook Pro and a 4K panel run without HiDPI are two
     /// densities, and a window gets dragged between them — so this is
-    /// a normal event, not a corner case.  The font cache holds the
-    /// terminal cell, so it is rebuilt first; then every window
-    /// relayouts, which resizes its panes, which is what tells each
-    /// PTY its new size.  No-op when the scale did not actually move,
-    /// which is the common case (this runs on every attach).
-    pub(super) fn adopt_display_scale(&mut self) {
-        if !self.renderer.rebuild_fonts_if_scale_changed() {
+    /// a normal event, not a corner case; a font chosen in the settings
+    /// is the same event.  The font cache holds the terminal cell, so
+    /// it is rebuilt first; then every window relayouts, which resizes
+    /// its panes, which is what tells each PTY its new size.  No-op
+    /// when neither moved, which is the common case (this runs on every
+    /// attach and every look at the settings).
+    pub(super) fn adopt_fonts(&mut self) {
+        if !self.renderer.rebuild_fonts_if_stale() {
             return;
         }
         let (cell_w, cell_h) = self.renderer.cell_dims();
+        let s = marspot::settings::get();
         lx_event!(
-            "DISPLAY_SCALE_ADOPTED",
-            "fonts rebuilt for a new display density; grids reflow",
+            "FONTS_ADOPTED",
+            "fonts rebuilt for the display density and font in force; grids reflow",
             chrome_scale = format!("{:.2}", marspot::ui::chrome_scale()),
+            family = s.font_family.as_str(),
+            size_pt = format!("{:.1}", s.font_size),
             cell_w = format!("{cell_w:.2}"),
             cell_h = format!("{cell_h:.2}"),
             windows = self.windows.len() as u64

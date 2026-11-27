@@ -80,15 +80,36 @@ function run(a) {
 }"""
 
 
+FONT_RS = os.path.join("crates", "marspot-term", "src", "settings", "font.rs")
+
+
+def marspot_font(root):
+    """the family and size the sandbox's settings file names, each key
+    the file leaves out taken from the defaults in the source"""
+    src = open(os.path.join(root, FONT_RS)).read()
+    name = re.search(r'^pub const DEFAULT_FAMILY: &str = "(.*)";', src, re.M).group(1)
+    point = float(re.search(r"^pub const DEFAULT_SIZE: f32 = (.*);", src, re.M).group(1))
+    origin = FONT_RS + " defaults"
+    path = os.path.join(os.environ["MARSPOT_STATE_DIR"], "settings.toml")
+    if os.path.exists(path):
+        for line in open(path):
+            k, eq, v = line.partition("=")
+            v = v.strip().strip('"')
+            if not eq or not v:
+                continue
+            if k.strip() == "appearance.font_family":
+                name, origin = v, path
+            elif k.strip() == "appearance.font_size":
+                point, origin = float(v), path
+    return name, point, origin
+
+
 def font_of(term, root):
     """the font a terminal draws its grid with, and its cell: AppKit's
     metrics times the terminal's own spacing"""
     hs = vs = 1.0
     if term == "marspot":
-        src = open(os.path.join(root, "src", "font_cache.rs")).read()
-        name = re.search(r'^pub const FONT_NAME: &str = "(.*)";', src, re.M).group(1)
-        point = float(re.search(r"^pub const FONT_POINT: f64 = (.*);", src, re.M).group(1))
-        origin = "src/font_cache.rs"
+        name, point, origin = marspot_font(root)
     else:
         p = subprocess.run(["defaults", "export", "com.googlecode.iterm2", "-"], capture_output=True)
         prefs = plistlib.loads(p.stdout) if p.returncode == 0 and p.stdout else {}

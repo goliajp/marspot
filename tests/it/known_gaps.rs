@@ -230,15 +230,15 @@ fn osc_7_none_133_no_jump_key_52_write_only() {
     );
 }
 
-/// The settings model is what the panel draws; it has the theme and
-/// the language and nothing for fonts or keys.
+/// The settings model is what the panel draws; it has the theme, the
+/// language and the terminal font, and nothing for keys.
 #[test]
-fn fonts_font_size_and_keys_are_not_settings() {
-    says("The settings panel offers the theme (dark, light, high contrast), the language");
-    says("Fonts, font size and key bindings are not configurable yet");
-    the_page_says("Fonts, font size and key bindings are not configurable yet");
+fn key_bindings_are_not_settings() {
+    says("The settings panel offers the theme (dark, light, high contrast), the language, the terminal font and its size");
+    says("Key bindings are not configurable yet");
+    the_page_says("Key bindings are not configurable yet");
     let keys = marspot::settings::render(&marspot::settings::Settings::default(), "");
-    for k in ["appearance.theme", "appearance.language"] {
+    for k in ["appearance.theme", "appearance.language", "appearance.font_family", "appearance.font_size"] {
         assert!(keys.contains(k), "settings.toml has no {k}");
     }
     let names: Vec<&str> = keys
@@ -252,7 +252,7 @@ fn fonts_font_size_and_keys_are_not_settings() {
     );
     for n in &names {
         let n = n.to_ascii_lowercase();
-        for word in ["font", "key", "bind", "shortcut", "size"] {
+        for word in ["key", "bind", "shortcut"] {
             assert!(
                 !n.contains(word),
                 "{}",
