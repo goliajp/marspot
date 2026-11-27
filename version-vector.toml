@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.841"  # a resident made within a second of its image keeps its Dock tile until the Dock dropped the one before
+shell   = "0.7.842"  # a resident replaced while it keeps its Dock tile hands the time it may leave to the next image
 core    = "0.12.744"  # app_delegate exposes whether a quit event says why (the resident asks it)
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

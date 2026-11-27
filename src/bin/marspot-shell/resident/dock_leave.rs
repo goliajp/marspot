@@ -15,11 +15,13 @@
 //! the app started.  So that image leaves the Dock no sooner than
 //! [`SETTLE`] after it started: by then the Dock has dropped the earlier
 //! tile.  Until then the resident keeps its tile and stays regular, and
-//! opening it again needs no new tile at all.
+//! opening it again needs no new tile at all.  A resident that replaces
+//! its image while it keeps the tile (a lost Apple event registration)
+//! hands the time it may leave to the image after it, which waits for
+//! it in turn.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use marspot::lx_event;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
@@ -28,20 +30,40 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 /// macOS 27.2) before it drops a tile that left.
 pub(crate) const SETTLE: Duration = Duration::from_millis(1_000);
 
-static IMAGE_START: OnceLock<Instant> = OnceLock::new();
+/// Carries, across a replacement of the resident's image, the time on
+/// [`now_ns`]'s clock before which the process may not leave the Dock.
+pub(super) const LEAVE_AT_ENV: &str = "MARSPOT_DOCK_LEAVE_AT";
+
+/// 0 until marked.
+static IMAGE_START_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Set while the resident keeps its tile, waiting to leave the Dock.
 static PENDING: AtomicBool = AtomicBool::new(false);
 
+/// When the held tile may leave, on [`now_ns`]'s clock.
+static LEAVE_AT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Time since boot that an exec does not restart, unlike `Instant`'s
+/// reference in a new image.
+fn now_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: fills the struct it is given; this clock always exists
+    unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
 /// Called first thing in `main`: when this image started.
 pub(crate) fn mark_image_start() {
-    let _ = IMAGE_START.set(Instant::now());
+    let _ = IMAGE_START_NS.compare_exchange(0, now_ns(), Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// How long this image has run; a start never marked counts as now,
 /// which only makes the wait longer.
 pub(super) fn image_age() -> Duration {
-    IMAGE_START.get().map_or(Duration::ZERO, Instant::elapsed)
+    match IMAGE_START_NS.load(Ordering::SeqCst) {
+        0 => Duration::ZERO,
+        start => Duration::from_nanos(now_ns().saturating_sub(start)),
+    }
 }
 
 /// How long an image of `age` waits before it leaves the Dock.
@@ -49,14 +71,38 @@ pub(super) fn delay(age: Duration) -> Duration {
     SETTLE.saturating_sub(age)
 }
 
-/// Note that the resident keeps its tile until [`leave_now`].
-pub(super) fn hold() {
+/// What is left at `now` of the wait an earlier image handed over as
+/// `carried`; nothing for a value that is not one.
+fn left_of(carried: Option<&str>, now: u64) -> Duration {
+    let at = carried.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    Duration::from_nanos(at.saturating_sub(now))
+}
+
+/// The wait an earlier image of this process handed over, if any.
+/// Consumes the mark.
+pub(super) fn take_carried() -> Duration {
+    let carried = std::env::var(LEAVE_AT_ENV).ok();
+    // SAFETY: startup path in main(), before any thread is spawned.
+    unsafe { std::env::remove_var(LEAVE_AT_ENV) };
+    left_of(carried.as_deref(), now_ns())
+}
+
+/// Note that the resident keeps its tile for `keep` more, until
+/// [`leave_now`].
+pub(super) fn hold(keep: Duration) {
+    LEAVE_AT_NS.store(now_ns().saturating_add(keep.as_nanos() as u64), Ordering::SeqCst);
     PENDING.store(true, Ordering::SeqCst);
 }
 
 /// Whether the resident still has its tile.
 pub(super) fn pending() -> bool {
     PENDING.load(Ordering::SeqCst)
+}
+
+/// For the image that replaces this one: when it may leave the Dock,
+/// while this one still has its tile.
+pub(super) fn carry() -> Option<String> {
+    pending().then(|| LEAVE_AT_NS.load(Ordering::SeqCst).to_string())
 }
 
 /// Take the tile out of the Dock.
@@ -114,10 +160,29 @@ mod tests {
     }
 
     #[test]
-    fn holding_and_leaving_set_the_pending_mark() {
-        hold();
+    fn a_carried_deadline_leaves_the_rest_of_its_wait() {
+        assert_eq!(left_of(Some("5000000000"), 4_300_000_000), Duration::from_millis(700));
+        assert_eq!(left_of(Some("5000000000"), 5_000_000_000), Duration::ZERO);
+        assert_eq!(left_of(Some("5000000000"), 9_000_000_000), Duration::ZERO);
+        assert_eq!(left_of(None, 1), Duration::ZERO);
+        assert_eq!(left_of(Some("soon"), 1), Duration::ZERO);
+    }
+
+    // the one test that touches the process-wide hold and the
+    // environment, so tests running beside it cannot disturb either
+    #[test]
+    fn a_held_tile_hands_its_deadline_to_the_next_image_through_the_environment() {
+        assert_eq!(carry(), None);
+        hold(Duration::from_millis(800));
         assert!(pending());
+        let carried = carry().expect("a held tile is carried");
+        // SAFETY: no other test reads or writes this variable
+        unsafe { std::env::set_var(LEAVE_AT_ENV, &carried) };
+        let left = take_carried();
+        assert!(left > Duration::from_millis(700) && left <= Duration::from_millis(800), "{left:?}");
+        assert!(std::env::var_os(LEAVE_AT_ENV).is_none());
+        assert_eq!(take_carried(), Duration::ZERO);
         PENDING.store(false, Ordering::SeqCst);
-        assert!(!pending());
+        assert_eq!(carry(), None);
     }
 }

@@ -285,6 +285,11 @@ pub(crate) fn is_resident() -> bool {
 /// Dock after `keep_tile`.
 fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker, keep_tile: std::time::Duration) -> ! {
     RESIDENT.store(true, std::sync::atomic::Ordering::SeqCst);
+    // held before anything can replace this image, so that the
+    // replacement is handed the wait
+    if !keep_tile.is_zero() {
+        dock_leave::hold(keep_tile);
+    }
     crate::apple_events::as_resident();
     crate::reclaim::watch();
     if let Err(e) = std::thread::Builder::new().name("l1-resident".into()).spawn(move || {
@@ -302,7 +307,6 @@ fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker, keep_til
     if keep_tile.is_zero() {
         dock_leave::leave_now(app);
     } else {
-        dock_leave::hold();
         // SAFETY: a one-shot on this run loop, to a method the delegate has
         // that takes one object argument
         let _: () = unsafe {
@@ -314,11 +318,13 @@ fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker, keep_til
 }
 
 /// Run as the resident in an image started for it: a shell a session
-/// started.  The instance lock is already held.
+/// started, or a resident replaced for a lost Apple event registration.
+/// The instance lock is already held.
 pub(crate) fn run() -> ! {
     let started_by_a_session = std::env::var_os(RESIDENT_ENV).is_some_and(|v| v == marspot_term::owner::RESIDENT_STARTED);
     // SAFETY: startup path in main(), before any thread is spawned.
     unsafe { std::env::remove_var(RESIDENT_ENV) };
+    let keep_tile = dock_leave::take_carried();
     let sessions = announce_and_list();
     let registered = !(started_by_a_session || crate::instance::is_heir())
         || crate::identity::take_coalition_as(&[(RESIDENT_ENV, "1")]);
@@ -334,8 +340,9 @@ pub(crate) fn run() -> ! {
         watch(sessions)
     }
     let mtm = MainThreadMarker::new().expect("the resident runs on the main thread");
-    // never regular: no tile of its own to wait on
-    wait(sessions, &NSApplication::sharedApplication(mtm), mtm, std::time::Duration::ZERO)
+    // a session's shell never had a tile; a replaced resident keeps the
+    // one it had until the wait its earlier image handed over is out
+    wait(sessions, &NSApplication::sharedApplication(mtm), mtm, keep_tile)
 }
 
 /// This process's physical footprint in KiB, as Activity Monitor counts it.
