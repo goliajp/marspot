@@ -107,21 +107,6 @@ may_be_unmeasured() {
   is_measurement "$1" || [[ $1 == soak-l3.sh ]]
 }
 
-# One tool does the copying, for every session and every repo: it takes
-# the exclude list from git itself, so a path this repo ignores is never
-# sent and never deleted on the far side -- which is how the remote
-# target/ survives a sync from a tree that has none.
-remote_sync() {
-  local tool
-  tool="$(command -v remote-sync || true)"
-  [[ -n $tool ]] || tool="$HOME/workspace/goliajp/golia-claude-configs/bin/remote-sync"
-  [[ -x $tool ]] || {
-    echo "remote-sync not found (looked on PATH and in $tool)" >&2
-    exit 1
-  }
-  "$tool" "$@"
-}
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-e2e-marspot}"
@@ -160,35 +145,11 @@ if ! mkdir "$LOCK_LOCAL" 2>/dev/null; then
 fi
 echo "$$" > "$LOCK_LOCAL/pid"
 
-# Anything that reaches the GUI session has to be asked for through
-# launchd; a plain ssh process is in another bootstrap namespace and
-# `NSApplication` there has no window server to talk to.
-remote_gui() {
-  remote_tracked "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$1")"
-}
+# shellcheck source=bin/_e2e-remote-lib.sh
+source "$ROOT/bin/_e2e-remote-lib.sh"
 
-# The ssh login shell leads a process group of its own, and everything
-# the command starts is in it unless it leaves on purpose.  Its pid is
-# written down for as long as the command runs, so an interrupted run
-# stops that group and nothing else on the host.
-remote_tracked() {
-  ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; $1; rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
-}
-
-stop_remote() {
-  ssh -o ConnectTimeout=5 "$HOST" "
-    if [ -f $REMOTE_PIDF ]; then
-      kill -TERM -- -\$(cat $REMOTE_PIDF) 2>/dev/null
-      rm -f $REMOTE_PIDF
-    fi" </dev/null >/dev/null 2>&1 || true
-}
-
-# Stops the processes the suite's sandbox recorded, and only those.
-reap_sandbox() {
-  ssh -o ConnectTimeout=5 "$HOST" \
-    "cd ~/$REMOTE_DIR && bin/kill-sandbox-marspot.sh --state-dir $1" </dev/null || true
-}
-
+# Told to stop (Ctrl-C, a TERM, the terminal or ssh going away): stop
+# the suite running now, clean its sandbox, and start no other.
 current_sd=""
 interrupted() {
   echo "==> interrupted; stopping the run on $HOST"
@@ -196,7 +157,7 @@ interrupted() {
   [[ -n $current_sd ]] && reap_sandbox "$current_sd"
   exit 130
 }
-trap interrupted INT TERM
+trap interrupted INT TERM HUP
 trap 'rm -rf "$LOCK_LOCAL"' EXIT
 
 # the remote copy has no .git; the binaries built there and a suite that
@@ -216,7 +177,8 @@ if [[ ${E2E_LOCK:-heavy} != bench ]]; then
     /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $UNTIL bin/_bounded.sh $BUILD_TIMEOUT \
     sh -c 'cargo build --release ${E2E_FEATURES:+--features $E2E_FEATURES} --bin marspot-shell --bin marspot-core --bin marspot-session \
       && cargo build --release -p marspot-peer'" \
-    2>&1 | tail -2 || { echo "FAIL: release build on $HOST" >&2; exit 1; }
+    >"$LOCK_LOCAL/build.log" 2>&1 || { tail -5 "$LOCK_LOCAL/build.log"; echo "FAIL: release build on $HOST" >&2; exit 1; }
+  tail -2 "$LOCK_LOCAL/build.log"
   # macOS assesses a freshly built executable on its first exec, for an
   # unbounded time on a busy host; pay that here, outside every suite's
   # stopwatch.
@@ -268,14 +230,13 @@ for suite in "${SUITES[@]}"; do
     remote_gui "cd ~/$REMOTE_DIR && bin/_active_iterm.sh close $current_sd/iterm.pids" || true
   fi
   reap_sandbox "$current_sd"
-  # nothing a suite opened may stay listed as an app (a Dock tile on a
-  # machine nobody is at); records go a moment after their process
-  left_ls="$(ssh -o ConnectTimeout=5 "$HOST" "cd ~/$REMOTE_DIR && for i in 1 2 3 4 5 6 7 8 9 10; do \
-    out=\$(bin/_ls-leftovers.sh \$HOME/$REMOTE_DIR/ /tmp/msp-) && break; sleep 1; done; echo \"\$out\"" </dev/null || true)"
-  if [[ $left_ls != *"left=0 "* && -n $left_ls ]]; then
-    echo "  LaunchServices still lists what $suite opened:"
+  # nothing a suite opened may stay listed as an app
+  left_rc=0
+  left_ls="$(check_leftovers)" || left_rc=$?
+  if (( left_rc != 0 )); then
+    echo "  LaunchServices after $suite:"
     printf '%s\n' "$left_ls" | sed 's/^/    /'
-    (( suite_rc == 0 )) && suite_rc=4
+    (( suite_rc == 0 )) && suite_rc=$left_rc
   fi
   # a suite that records readings leaves them in the remote tree, which
   # nothing else copies back
@@ -310,6 +271,7 @@ for suite in "${SUITES[@]}"; do
       124) why="timed out after ${SUITE_TIMEOUT}s" ;;
       75) why="could not get the host's lock within ${MAX_WAIT}s" ;;
       4) why="passed, but left apps listed in LaunchServices (Dock tiles)" ;;
+      5) why="passed, but what LaunchServices lists could not be read" ;;
       *) why="exit $suite_rc" ;;
     esac
     if is_measurement "$suite"; then
@@ -323,6 +285,11 @@ for suite in "${SUITES[@]}"; do
     rc=1
   fi
   current_sd=""
+  if stopped_from_outside "$suite_rc"; then
+    echo "==> $suite was stopped from outside (exit $suite_rc); starting no other suite" >&2
+    stop_remote
+    break
+  fi
 done
 
 echo

@@ -7,6 +7,9 @@
 # Prints one line per record ("<type> pid=<pid> <bundle or executable>")
 # and last "left=N tiles=T", T the Foreground ones.  Exit 0 when nothing
 # is left, 1 when something is, 2 when lsappinfo could not be read.
+# Run outside the console login session (a plain ssh), lsappinfo answers
+# with a list that has none of the login's apps and so none of ours
+# either: a list without the Dock is taken as unread.
 set -uo pipefail
 (( $# > 0 )) || { echo "usage: $0 PATH_PREFIX..." >&2; exit 2; }
 out="$(/usr/bin/lsappinfo list 2>/dev/null)" || exit 2
@@ -33,6 +36,10 @@ for line in sys.stdin:
     m = re.search(r"pid = (-?\d+)", line)
     if m:
         cur["pid"] = m.group(1)
+# by path: the names are in the login language
+if not any(p.startswith("/System/Library/CoreServices/Dock.app") for r in recs for p in r["paths"]):
+    print("lsappinfo does not list the Dock: not the list of the console login")
+    sys.exit(2)
 left = [r for r in recs if any(p.startswith(x) for p in r["paths"] for x in prefixes)]
 for r in left:
     print("%s pid=%s %s" % (r["type"], r["pid"], r["paths"][0]))
