@@ -280,16 +280,18 @@ record_result() {
 #     (test-multi-window.sh).
 # Their tiles are counted by the check in the hold (_e2e-suite-clean.sh),
 # and the walks among them quit only once the Dock dropped the app's
-# tile (_ownership-quit.sh).  test-reopen-after-quit.sh opens the app 0
-# to 3000 ms after a quit, before the Dock drops the tile on purpose: as
-# a regular app every such opening left a tile the Dock kept for good.
-# What it tests, the open being taken, does not depend on the tile.
-# test-quit-after-update.sh compares the shell's coalition as lsappinfo
-# lists it, which it lists for an accessory app as for a regular one.
+# tile (_ownership-quit.sh).  test-reopen-after-quit.sh switches the
+# resident from accessory back to regular, which is what a user's open
+# after a quit does; it quits only once the window is up and answered,
+# after the Dock dropped the last tile (on mini2 its inserts stayed at the
+# same index, two at most at once), and the probe after it says whether
+# one was left.  test-quit-after-update.sh compares the shell's
+# coalition as lsappinfo lists it, which it lists for an accessory app as
+# for a regular one.
 keeps_dock_tile() {
   case $1 in
     test-session-ownership.sh | test-one-app-record.sh | test-coalition-reclaim.sh | test-reseat-bound.sh \
-      | test-multi-window.sh) return 0 ;;
+      | test-reopen-after-quit.sh | test-multi-window.sh) return 0 ;;
     *) return 1 ;;
   esac
 }

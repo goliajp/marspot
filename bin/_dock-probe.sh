@@ -18,7 +18,7 @@
 #                          `unread=why` and returns 2
 #
 # The probe is told from every other app by loginwindow's line naming it
-# (its own path) just before the insert, and from a suite's tiles by
+# (its own path) nearest to the insert, and from a suite's tiles by
 # when it runs: alone, before the suite starts and after it was stopped.
 
 DOCK_PROBE_PRED='(process == "Dock" AND category == "dock-tiles") OR (process == "loginwindow" AND eventMessage CONTAINS "Got App URL")'
@@ -59,9 +59,10 @@ dock_probe() {
   dir="$(mktemp -d "${TMPDIR:-/tmp}/dockprobe.XXXXXX")" || { echo "unread=no scratch directory"; return 2; }
   # bounded on its own: it outlives nothing it was started for
   /usr/bin/perl -e 'alarm shift; exec @ARGV' 60 /usr/bin/log stream --style compact \
-    --predicate "$DOCK_PROBE_PRED" >"$dir/s" 2>/dev/null &
+    --predicate "$DOCK_PROBE_PRED" >"$dir/s" 2>"$dir/e" &
   spid=$!
-  if ! _dock_probe_py ready "$dir/s" 10; then
+  # the banner went to its output on macOS 27.2; either file is read
+  if ! _dock_probe_py ready 10 "$dir/s" "$dir/e"; then
     out="unread=the Dock's log stream did not start"
   else
     # attached a moment after it says so

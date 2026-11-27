@@ -18,7 +18,9 @@
 #         same Dock process: a larger index is a tile the suite left, also
 #         one the Dock kept after its app went, which is in no app list
 #         (when larger, it is read once more five seconds later, for a
-#         tile the Dock had not dropped yet); and the Dock held at most
+#         tile the Dock had not dropped yet).  Next to another job an
+#         equal index passes only when every insert in the suite is named
+#         for an app and the removals match the inserts; and the Dock held at most
 #         two tiles of the suite at once (its insert indexes in the suite
 #         against the probe's before it)
 #       - the Foreground count is what BEFORE says, and no kept or recent

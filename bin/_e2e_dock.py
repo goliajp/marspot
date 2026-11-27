@@ -21,8 +21,8 @@ INSERT, REMOVE, URL = "Inserting tile", "Removing tiles identical to", "Got App 
 # Dock still holds the last one
 MOST_AT_ONCE = 2
 # from loginwindow's line naming a launched app to the Dock's insert (up to
-# 59 ms on mini2, 2026-11-27): only used to allow a tile for each program
-# of the run that is not the app, never to excuse an insert
+# 59 ms on mini2, 2026-11-27): it tells the probe's inserts and a helper of
+# the run apart; an insert named for no app is never excused by it
 ATTRIBUTE_S = 0.2
 PROBE = "/marspot-dockprobe"
 
@@ -41,9 +41,11 @@ def dock_pid(line):
 
 
 def dock_count(lines):
-    """inserts and removal lines by reason, and removal events: a removal line right after
-    a removal line of another reason within a second is the same removal logged twice"""
-    ins, rem, events, prev = collections.Counter(), collections.Counter(), 0, None
+    """inserts and removal lines by reason, removal events (a removal line right after a
+    removal line of another reason within a second is the same removal logged twice), and
+    the lowest count of inserts less removal events at any point: below zero, a tile the
+    Dock held before the lines began went"""
+    ins, rem, events, prev, low = collections.Counter(), collections.Counter(), 0, None, 0
     for l in lines:
         m = re.search(r"for reason: (.*?)\s*$", l)
         reason = m.group(1) if m else "?"
@@ -58,24 +60,37 @@ def dock_count(lines):
             continue
         events += 1
         prev = (t, reason)
-    return ins, rem, events
+        low = min(low, sum(ins.values()) - events)
+    return ins, rem, events, low
+
+
+def strip_url(p):
+    p = re.sub(r"^file://", "", p.strip()).rstrip("/")
+    return p[len("/private"):] if p.startswith("/private/") else p
+
+
+def attributed(lines):
+    """(line number from 1, insert index, Dock pid, app) for each insert line: the app is the
+    one named by loginwindow's line nearest to the insert, before or after it, within
+    ATTRIBUTE_S, or None.  The name comes first nearly always (1 of 608 inserts on mini2,
+    2026-11-27 21:30-23:07, had it 5 ms after), and a program can be named again after its
+    insert (the ownership walk's probe is named three times per start)"""
+    urls = [(stamp(l), strip_url(l.split(URL, 1)[1])) for l in lines if URL in l]
+    out = []
+    for n, l in enumerate(lines, 1):
+        m = re.search(r"Inserting tile: .* at index: (\d+)", l)
+        if not m:
+            continue
+        t = stamp(l)
+        near = [(abs((t - ut).total_seconds()), u) for ut, u in urls]
+        near = [c for c in near if c[0] <= ATTRIBUTE_S]
+        out.append((n, int(m.group(1)), dock_pid(l), min(near)[1] if near else None))
+    return out
 
 
 def inserts(text):
-    """(insert index, the app loginwindow named just before it or None) for each insert"""
-    out, last = [], None
-    for l in (text or "").splitlines():
-        if URL in l:
-            u = l.split(URL, 1)[1].strip()
-            u = re.sub(r"^file://(/private)?", "", u).rstrip("/")
-            last = (stamp(l), u)
-        elif INSERT in l:
-            m = re.search(r"at index: (\d+)", l)
-            if not m:
-                continue
-            near = last and (stamp(l) - last[0]).total_seconds() <= ATTRIBUTE_S
-            out.append((int(m.group(1)), last[1] if near else None))
-    return out
+    """(insert index, the app loginwindow named next to it or None) for each insert"""
+    return [(i, u) for _, i, _, u in attributed((text or "").splitlines())]
 
 
 def by_reason(c):
@@ -100,14 +115,17 @@ def probe_snap(d, read):
 
 def at_once(text, base, ours, under):
     """the most tiles of the suite the Dock held at once and the limit, from the inserts after
-    the probe's: base is the probe's index before the suite, or the lowest insert when a tile
-    went during the suite (stricter).  A program of this run that is not the app (a helper
-    registering as a regular app) is the suite's subject and adds one to the limit"""
+    the probe's.  The count starts one above the probe's index before the suite: the Dock
+    logs a removal line once the probe is gone, but a removal line does not say which tile
+    went, so the probe's own tile may still hold its index when the suite's first tile comes.
+    An insert at or below the probe's index lowers the start to it (a tile went: stricter,
+    never laxer).  A program of this run that is not the app (a helper registering as a
+    regular app) is the suite's subject and adds one to the limit"""
     ins = [(i, u) for i, u in inserts(text) if not (u and u.endswith(PROBE))]
     if not ins:
         return 0, MOST_AT_ONCE, ""
     idx = [i for i, _ in ins]
-    low = min([base] + idx)
+    low = min([base + 1] + idx)
     helpers = {u for _, u in ins if u and (ours(u) or under(u)) and "marspot" not in u.lower()}
     span = "insert index %d..%d, %d before the suite" % (min(idx), max(idx), base)
     return max(idx) - low + 1, MOST_AT_ONCE + len(helpers), span
@@ -125,7 +143,7 @@ def log_check(d, b, read, ours, under, kind, left, unread):
     pid = b.get("probe_dock_pid")
     others = sorted({dock_pid(l) for l in lines} - {pid})
     try:
-        ins, rem, events = dock_count(lines)
+        ins, rem, events, _ = dock_count(lines)
         print("dock: inserts=%d removal_lines=%d removal_events=%d" % (sum(ins.values()), sum(rem.values()), events))
         print("dock: inserts by reason: " + by_reason(ins))
         print("dock: removals by reason: " + by_reason(rem))
@@ -145,6 +163,29 @@ def log_check(d, b, read, ours, under, kind, left, unread):
         # with another job on the host its tiles count too: whose cannot be told, so it is
         # neither passed nor blamed
         (left if kind == "alone" else unread).append(line + ("" if kind == "alone" else ", with another job on the host"))
+
+
+def balanced(text):
+    """why the Dock's lines in the suite do not account for every tile, or None: each insert
+    named for an app, as many removals as inserts, and no removal before an insert it can be
+    for.  Next to another job an index equal before and after can be a tile the suite left
+    behind one the other job's app, gone just before the snap, had still held: its removal
+    then has no insert in the window.  Removal lines name no tile, so one that comes after
+    a tile of the window that stays is not told from that tile's own"""
+    if text is None or not text.startswith("Timestamp"):
+        return "log show gave no output"
+    try:
+        unnamed = sum(1 for _, _, _, u in attributed(text.splitlines()) if u is None)
+        ins, _, events, low = dock_count(tile_lines(text))
+    except ValueError:
+        return "a tile line without a time"
+    if unnamed:
+        return "%d insert(s) named for no app" % unnamed
+    if low < 0:
+        return "a removal with no insert of the suite's window before it"
+    if sum(ins.values()) != events:
+        return "%d insert(s) against %d removal(s)" % (sum(ins.values()), events)
+    return None
 
 
 def probe_check(d, b, read, kind, fg_same, left, unread):
@@ -172,6 +213,11 @@ def probe_check(d, b, read, kind, fg_same, left, unread):
             left.append(line)
         else:
             unread.append(line + "; another job was on the host and the apps running changed, so whose cannot be told")
+    elif e == s and kind != "alone":
+        why = balanced(read(d, "dock.log"))
+        if why:
+            unread.append("dock probe: index %d before and after the suite next to another job, and the Dock's"
+                          " lines in the suite do not account for every tile (%s)" % (s, why))
     elif e < s:
         unread.append("dock: the probe's index fell from %d to %d: a tile went during the suite, and one the suite"
                       " left could be hidden behind it" % (s, e))

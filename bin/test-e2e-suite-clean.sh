@@ -175,9 +175,9 @@ expect left-wins 1 "unread: tcc log: log show did not finish"
 # another holder: the machine-wide counts are shown, not judged
 base shared
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared/in/status.txt"
-launch 06.000 >>"$T/shared/in/dock.log"
+{ opened "$APP_URL" 05.996; launch 06.000; remove 07.000; } >>"$T/shared/in/dock.log"
 printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/shared/in/tcc.ndjson"
-expect shared 0 "window: shared-window (holding at check: 5000)" "dock: inserts=2 removal_lines=1" \
+expect shared 0 "window: shared-window (holding at check: 5000)" "dock: inserts=2 removal_lines=2" \
   "info: tcc: kTCCServiceAppleEvents $BUILD"
 
 base shared-log

@@ -64,8 +64,7 @@ ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
 shells() { pgrep -x marspot-shell | while read -r p; do _dev_is_ours "$p" && echo "$p"; done | tr '\n' ' '; }
 answers() { local i; for (( i = 0; i < 200; i++ )); do "$SHELL_BIN" --panes >/dev/null 2>&1 && return 0; sleep 0.05; done; return 1; }
 app_env=(--env "MARSPOT_STATE_DIR=$MARSPOT_STATE_DIR" --env "MARSPOT_SESSION_BIN=$ROOT/target/release/marspot-session"
-  --env "MARSPOT_CORE_BIN=$ROOT/target/release/marspot-core" --env MARSPOT_DEV_SANDBOX=1 --env MARSPOT_MANUAL_UPDATE_ONLY=1
-  --env "MARSPOT_TEST_NO_DOCK=${MARSPOT_TEST_NO_DOCK:-}")
+  --env "MARSPOT_CORE_BIN=$ROOT/target/release/marspot-core" --env MARSPOT_DEV_SANDBOX=1 --env MARSPOT_MANUAL_UPDATE_ONLY=1)
 
 dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"

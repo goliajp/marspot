@@ -2,7 +2,8 @@
 # tile lines and loginwindow's "Got App URL" lines as it is written, for
 # bin/_dock-probe.sh:
 #
-#   ready FILE SECS                  the stream is attached
+#   ready SECS FILE...               the stream is attached: its banner is
+#                                    in one of FILEs (its output, its errors)
 #   insert FILE EXE DOCK_PID SECS    the Dock inserted EXE's tile: prints
 #                                    `index=N` and `line=K` (its line number)
 #   removed FILE FROM DOCK_PID SECS  the Dock logged a tile removal after
@@ -10,75 +11,56 @@
 #
 # Exit 0 when seen, 1 when not within SECS, 3 when a tile line comes from
 # a Dock other than DOCK_PID (it restarted: its indexes are not comparable).
-import re, sys, time
-from datetime import datetime
+# Which app an insert is for is decided as in the suite's check
+# (_e2e_dock.attributed).
+import sys, time
 
 sys.dont_write_bytecode = True
+import _e2e_dock as dock  # noqa: E402
 
-URL = "Got App URL: "
-# loginwindow names the app a few milliseconds before the Dock inserts its
-# tile (up to 59 ms on mini2, 2026-11-27); a tile inserted further than this
-# from the name is not taken for the probe's
-ATTRIBUTE_S = 0.2
-
-
-def stamp(line):
-    try:
-        return datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S.%f")
-    except ValueError:
-        return None
-
-
-def strip(p):
-    p = re.sub(r"^file://", "", p.strip()).rstrip("/")
-    return p[len("/private"):] if p.startswith("/private/") else p
-
-
-def dock_pid(line):
-    m = re.search(r" Dock\[(\d+):", line)
-    return m.group(1) if m else None
+TILES = "[com.apple.dock:dock-tiles]"
+BANNER = "Filtering the log data"
 
 
 def find_insert(lines, exe, pid):
-    """(index, line number) of the first tile the Dock pid inserted whose nearest naming line
-    of loginwindow, within ATTRIBUTE_S either side, names exe; "other" when another Dock
-    logged a tile line, or None.  The name comes first nearly always; 1 of 608 inserts on
-    mini2 (2026-11-27 21:30-23:07) had it 5 ms after"""
-    urls = [(stamp(l), strip(l.split(URL, 1)[1])) for l in lines if URL in l]
+    """(index, line number) of the first tile the Dock pid inserted that is named for exe;
+    "other" when another Dock logged a tile line before it, or None"""
+    named = {n: (i, u) for n, i, _, u in dock.attributed(lines)}
     for n, l in enumerate(lines, 1):
-        if "[com.apple.dock:dock-tiles]" not in l:
+        if TILES not in l:
             continue
-        if dock_pid(l) != pid:
+        if dock.dock_pid(l) != pid:
             return "other"
-        m = re.search(r"Inserting tile: .* at index: (\d+)", l)
-        t = stamp(l)
-        if not m or not t:
-            continue
-        near = [(abs((t - ut).total_seconds()), u) for ut, u in urls if ut]
-        near = [c for c in near if c[0] <= ATTRIBUTE_S]
-        if near and min(near)[1] == strip(exe):
-            return int(m.group(1)), n
+        if n in named and named[n][1] == dock.strip_url(exe):
+            return named[n][0], n
     return None
 
 
 def find_removal(lines, start, pid):
     for l in lines[start:]:
-        if "[com.apple.dock:dock-tiles]" not in l:
+        if TILES not in l:
             continue
-        if dock_pid(l) != pid:
+        if dock.dock_pid(l) != pid:
             return "other"
         if "Removing tiles" in l:
             return True
     return None
 
 
-def poll(path, secs, look):
+def read_lines(path):
+    with open(path, errors="replace") as f:
+        # a line still being written is left for the next look
+        return f.read().split("\n")[:-1]
+
+
+def poll(paths, secs, look):
     end = time.monotonic() + secs
     while True:
-        with open(path, errors="replace") as f:
-            # a line still being written is left for the next look
-            lines = f.read().split("\n")[:-1]
-        got = look(lines)
+        try:
+            got = look([l for p in paths for l in read_lines(p)])
+        except ValueError:
+            # a line with no time is not read; the wait ends unread
+            got = None
         if got is not None or time.monotonic() >= end:
             return got
         time.sleep(0.1)
@@ -86,10 +68,10 @@ def poll(path, secs, look):
 
 def main(a):
     if a[0] == "ready":
-        got = poll(a[1], float(a[2]), lambda ls: True if any("Filtering the log data" in l for l in ls) else None)
+        got = poll(a[2:], float(a[1]), lambda ls: True if any(BANNER in l for l in ls) else None)
         return 0 if got else 1
     if a[0] == "insert":
-        got = poll(a[1], float(a[4]), lambda ls: find_insert(ls, a[2], a[3]))
+        got = poll([a[1]], float(a[4]), lambda ls: find_insert(ls, a[2], a[3]))
         if got == "other":
             return 3
         if got is None:
@@ -97,7 +79,7 @@ def main(a):
         print("index=%d\nline=%d" % got)
         return 0
     if a[0] == "removed":
-        got = poll(a[1], float(a[4]), lambda ls: find_removal(ls, int(a[2]), a[3]))
+        got = poll([a[1]], float(a[4]), lambda ls: find_removal(ls, int(a[2]), a[3]))
         return 3 if got == "other" else 0 if got else 1
     return 2
 

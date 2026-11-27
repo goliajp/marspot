@@ -80,7 +80,7 @@ base() {
   printf '%s\n' "$DOCK" >"$d/in/lsappinfo.txt"
   tiles A B >"$d/in/persistent.txt"
   tiles C >"$d/in/recent.txt"
-  { echo "$HEADER"; launch 01.000; remove 05.000; } >"$d/in/dock.log"
+  { echo "$HEADER"; opened "$APP_URL" 00.996; launch 01.000; remove 05.000; } >"$d/in/dock.log"
   printf '%s\n{"count":2,"finished":1}\n' "$TCC_OTHER" >"$d/in/tcc.ndjson"
   printf '%s\n' "$ME" >"$d/in/status.txt"
   # our own take, logged a second before the snap

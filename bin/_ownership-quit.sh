@@ -37,6 +37,10 @@ dock_settled() {
     got="$(sed -n 's/^dock_pid=//p' <<<"$out"):$(sed -n 's/^index=//p' <<<"$out")"
     [[ ${got%%:*} == "${DOCK_BASE%%:*}" ]] || die "the Dock restarted during the walk (pid ${DOCK_BASE%%:*}, now ${got%%:*})"
     [[ $got == "$DOCK_BASE" ]] && return 0
+    # below where it was with none of ours: some other tile went, and one of ours could be
+    # hidden behind it; waiting cannot tell
+    (( ${got#*:} > ${DOCK_BASE#*:} )) \
+      || die "unreadable: the Dock probe after a quit at index ${got#*:}, below ${DOCK_BASE#*:} before the app was opened"
     (( SECONDS - start < DOCK_SETTLE_S )) \
       || die "the Dock still holds a tile ${DOCK_SETTLE_S}s after the quit: the probe at index ${got#*:}, ${DOCK_BASE#*:} before the app was opened"
     sleep 1

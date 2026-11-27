@@ -56,7 +56,37 @@ sed -i '' 's/^fg_set=.*/fg_set=["com.apple.finder", "com.x.other"]/' "$T/probe-s
 expect probe-shared-apps 1 "unread: dock: 1 tile(s) more after the suite than before (the probe's index 37, then 38);" \
   "another job was on the host" "left: foreground apps changed"
 
+# next to another job an equal index passes only when the Dock's lines account for every tile
+base shared-equal
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-equal/in/status.txt"
+expect shared-equal 0 "window: shared-window" "dock probe: index before=37 after=37"
+base shared-unnamed
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-unnamed/in/status.txt"
+{ echo "$HEADER"; opened "$APP_URL" 00.996; launch 01.000; launch 02.000; remove 05.000; remove 06.000; } \
+  >"$T/shared-unnamed/in/dock.log"
+expect shared-unnamed 2 "unread: dock probe: index 37 before and after the suite next to another job" "(1 insert(s) named for no app)"
+# another job's app quit just before the snap: its tile, counted in the probe's index, goes during the
+# suite, and a tile the suite left takes its place
+base shared-hidden
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-hidden/in/status.txt"
+{ echo "$HEADER"; remove 00.500; opened "$APP_URL" 00.996; launch 01.000; } >"$T/shared-hidden/in/dock.log"
+expect shared-hidden 2 "(a removal with no insert of the suite's window before it)"
+base shared-unbalanced
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-unbalanced/in/status.txt"
+{ echo "$HEADER"; opened "$APP_URL" 00.996; launch 01.000; opened "$APP_URL" 01.996; launch 02.000 38; remove 05.000; } \
+  >"$T/shared-unbalanced/in/dock.log"
+expect shared-unbalanced 2 "(2 insert(s) against 1 removal(s))"
+base shared-no-log
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-no-log/in/status.txt"
+rm "${T:?}/shared-no-log/in/dock.log"
+expect shared-no-log 2 "(log show gave no output)"
+
 echo "tiles at once, from the inserts against the probe's index before the suite"
+# the probe's tile still at its index when the suite's first tile comes: that one goes one above
+base probe-tile-stays
+{ echo "$HEADER"; opened "$APP_URL" 00.996; launch 01.000 38; opened "$APP_URL" 01.996; launch 02.000 39
+  remove 03.000; remove 04.000; } >"$T/probe-tile-stays/in/dock.log"
+expect probe-tile-stays 0 "dock: tiles at once=2 (most allowed 2, insert index 38..39, 37 before the suite)"
 # quit and opened again faster than the Dock drops the last tile (mini2, 2026-11-27 22:16:04):
 # a tile per opening, index 25 up to 41, all of them kept
 base quick-reopens
@@ -133,7 +163,11 @@ S="$T/stream"
   opened "$DOCKPROBE_URL" 02.000; opened /Applications/Other.app 02.001; launch 02.004 40
   opened "$DOCKPROBE_URL" 03.000; launch 03.004 41
   remove 03.500; } >"$S"
-reads ready 0 "" py ready "$S" 0
+reads ready 0 "" py ready 0 "$S"
+# the banner read from the stream's errors when its output has none yet
+: >"$S.out"
+echo 'Filtering the log data using "x"' >"$S.err"
+reads ready-on-errors 0 "" py ready 0 "$S.out" "$S.err"
 reads insert-named-last 0 $'index=41\nline=8' py insert "$S" "$EXE" 726 0
 reads removed-after 0 "" py removed "$S" 8 726 0
 reads removed-none 1 "" py removed "$S" 9 726 0
@@ -144,8 +178,13 @@ reads insert-too-late 1 "" py insert "$S.late" "$EXE" 726 0
 reads insert-named-after 0 $'index=40\nline=2' py insert "$S.after" "$EXE" 726 0
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.other"
 reads insert-other-dock 3 "" py insert "$S.other" "$EXE" 900 0
+# the nearest name on either side wins: another app named 100 ms before, the probe 10 ms after
+{ echo 'Filtering'; opened /Applications/Other.app 02.000; launch 02.100 40; opened "$DOCKPROBE_URL" 02.110; } >"$S.near"
+reads insert-nearest-after 0 $'index=40\nline=3' py insert "$S.near" "$EXE" 726 0
+{ echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.100 40; opened /Applications/Other.app 02.110; } >"$S.near2"
+reads insert-nearest-other 1 "" py insert "$S.near2" "$EXE" 726 0
 touch "$S.empty"
-reads not-attached 1 "" py ready "$S.empty" 0
+reads not-attached 1 "" py ready 0 "$S.empty"
 
 echo "the ownership walk's quit, paced on the probe"
 pace() { # name, expected exit, expected last line, then the probe's answers
@@ -167,6 +206,8 @@ pace() { # name, expected exit, expected last line, then the probe's answers
 }
 pace settled 0 settled 726:57 726:56
 pace kept-tile 1 "DIE: the Dock still holds a tile 1s after the quit: the probe at index 57, 56 before the app was opened" 726:57
+# below the baseline: another tile went, and waiting cannot tell; dies at the first reading
+pace below-base 1 "DIE: unreadable: the Dock probe after a quit at index 55, below 56 before the app was opened" 726:55 726:56
 pace restarted 1 "DIE: the Dock restarted during the walk (pid 726, now 900)" 900:56
 pace unread 1 "DIE: the Dock probe after a quit: the Dock logged no tile for the probe within 15 s" \
   "unread=the Dock logged no tile for the probe within 15 s"
