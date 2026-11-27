@@ -239,6 +239,11 @@ printf '1700000000\theavy\t0\ttook\tsh -c something else\t/w\n' >"$T/own-mismatc
 launch 06.000 >>"$T/own-mismatch/in/dock.log"
 expect own-mismatch 2 "our own lock take not found in the lock log" "unread: dock: 2 tile insert(s)"
 
+base own-too-early
+printf '1699999994\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-too-early/in/lock.log"
+launch 06.000 >>"$T/own-too-early/in/dock.log"
+expect own-too-early 2 "our own lock take not found in the lock log" "unread: dock: 2 tile insert(s)"
+
 base own-unknown
 printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-unknown/in/lock.log"
 rm "${T:?}/own-unknown/in/status.txt"
