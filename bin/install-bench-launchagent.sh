@@ -82,11 +82,14 @@ rm -f "$TRIG_DIR/result.json" "$TRIG_DIR/err.log" "$TRIG_DIR/done"
 # / Ghostty are all `auto_updates` casks, so brew upgrade is a no-op
 # when they're current — fast (a few seconds when nothing to do).
 # The bench host runs nothing outside its bench lock, this included.
+# The receiver runs on the runner on its own, so it writes the
+# "marspot-job KIND NAME" note of bin/_lock-mark.sh out in full.
 PATH="/opt/homebrew/bin:$PATH"
 LOCK=(/usr/local/bin/bench-lock bench --max-wait 1800)
 if command -v brew >/dev/null 2>&1; then
   echo "==> brew upgrade --cask iterm2 warp ghostty"
-  "${LOCK[@]}" brew upgrade --cask iterm2 warp ghostty 2>&1 | tail -5 || true
+  "${LOCK[@]}" --until "+10m marspot-job brew-upgrade bench-marspot" \
+    brew upgrade --cask iterm2 warp ghostty 2>&1 | tail -5 || true
 fi
 
 # Disable "Confirm Quit" prompts so AS quit in the close cycle isn't
@@ -106,7 +109,7 @@ unset SSH_CONNECTION || true
 # the copy bin/bench-remote.sh keeps; the product is built in the same
 # lock hold as the measurement
 cd "$HOME/work/bench-marspot"
-if "${LOCK[@]}" --until "+20m marspot terminal refresh" env MARSPOT_BENCH_LOCKED=1 sh -c \
+if "${LOCK[@]}" --until "+20m marspot-job terminal-refresh bench-marspot" env MARSPOT_BENCH_LOCKED=1 sh -c \
     '. "$HOME/.cargo/env" && export CARGO_TARGET_DIR="$PWD/target" \
       && cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
       && exec bash bin/_remote-measure-others-runner.sh' > "$TRIG_DIR/result.json" 2> "$TRIG_DIR/err.log"; then

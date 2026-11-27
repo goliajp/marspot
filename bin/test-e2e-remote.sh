@@ -13,7 +13,7 @@
 #   bin/test-e2e-remote.sh                       # every suite in DEFAULT_SUITES
 #   bin/test-e2e-remote.sh test-window-close-order.sh test-multi-window.sh
 #   E2E_SUITE_TIMEOUT=1800 bin/test-e2e-remote.sh test-multi-window.sh
-#   HOST=other-mini bin/test-e2e-remote.sh
+#   HOST=<host> bin/test-e2e-remote.sh
 #   E2E_ENV=NAME=value bin/test-e2e-remote.sh      # one more variable for every suite
 #   E2E_UNTIL=+40m bin/test-e2e-remote.sh          # how long each hold of the host's lock
 #                                                  # is expected to last, for whoever queues
