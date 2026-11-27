@@ -101,6 +101,9 @@ cycle() { # delay ms, how (path|app), label
   for (( i = 0; i < 600; i++ )); do (( $(count SHELL_AE_CHECKED) > checks )) && break; sleep 0.05; done
   (( $(count SHELL_AE_CHECKED) > checks )) || fail "[$3] the app came back and never reported its registration check"
   cycles=$((cycles + 1))
+  # nothing here waits on the Dock: it removes the tile a quit left about 0.5 s after the
+  # quit, and the next quit comes 2 s or more after that removal (mini2, 376 quits); the
+  # Dock probe after the suite tells whether a tile was left
   sleep 0.3
 }
 

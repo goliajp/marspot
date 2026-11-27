@@ -33,6 +33,9 @@ APP_URL=/private/tmp/msp-e2e-1-1-x/MarspotOwnershipTest.app
 PROBE_URL=/private/tmp/msp-e2e-1-1-x/ownprobe
 DOCKPROBE_URL=/private/tmp/msp-e2e-1-dockprobe/marspot-dockprobe
 remove() { echo "2026-11-27 10:00:$1 $TILE Removing tiles identical to: <private> for reason: ${2:-_emptyDeleteList()}"; }
+# the Dock probe's own lines in second SS, as a run logs them before and after the suite:
+# named, inserted at INDEX, its tile removed after it was stopped
+probe_tile() { opened "$DOCKPROBE_URL" "$1.000"; launch "$1.004" "${2:-37}"; remove "$1.500"; }
 TILE_REMOVED='-[DockBar handleDockEventTileRemoved:]'
 ndjson() { python3 -c 'import json,sys; [print(json.dumps({"eventMessage": m})) for m in sys.argv[1:]]' "$@"; }
 attribution() { # msgID, responsible path, accessing path

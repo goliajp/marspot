@@ -5,7 +5,8 @@
 #
 #   snap BEFORE [--lock-pid N] [--live CACHE] [--probe DIR]
 #       first the Dock probe (bin/_dock-probe.sh, built once in DIR): the
-#       index the Dock puts a new tile at, and the Dock's pid; then the
+#       index the Dock puts a new tile at, and the Dock's pid, a second
+#       after the Dock logged the probe's tile removed; then the
 #       Foreground record count, the Dock's kept and recent tiles, the
 #       marspot records already listed, the other holders of the lock
 #       and this holder's command (N is this suite's holder) and the start
@@ -87,6 +88,13 @@ run_probe() {
   dock_probe "$exe"
   return 0
 }
+# the probe's tile gone before the suite's first tile comes: dock_probe returns once the Dock
+# logged a removal line after it, and the suite starts a second after that (a suite tile
+# logged before that removal line makes the tiles-at-once count unread)
+start_probe() {
+  run_probe
+  sleep 1
+}
 # a tile of the suite the Dock had not dropped yet is gone five seconds later; a kept one is not
 end_probe() {
   local out first was
@@ -122,7 +130,7 @@ if [[ $mode == snap ]]; then
   done
   start_epoch=$(date +%s)
   # first: the probe's record is gone from the state read after it
-  grab probe-start.txt run_probe
+  grab probe-start.txt start_probe
   grab_state
   grab status.txt /usr/local/bin/bench-lock status
   cached=""

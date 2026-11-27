@@ -84,6 +84,7 @@ dock_probe() {
           *) out="unread=the Dock logged no tile removal within 15 s of the probe's exit" ;;
         esac ;;
       3) out="unread=the Dock restarted while the probe started" ;;
+      4) out="unread=a line of the Dock's log has no time: ${out#untimed=}" ;;
       *) out="unread=the Dock logged no tile for the probe within 15 s" ;;
     esac
   fi

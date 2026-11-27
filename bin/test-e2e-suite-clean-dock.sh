@@ -57,9 +57,23 @@ expect probe-shared-apps 1 "unread: dock: 1 tile(s) more after the suite than be
   "another job was on the host" "left: foreground apps changed"
 
 # next to another job an equal index passes only when the Dock's lines account for every tile
+# the window starts before the probe ahead of the suite and ends after the one behind it:
+# both probes' lines are in it, and balance
 base shared-equal
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-equal/in/status.txt"
-expect shared-equal 0 "window: shared-window" "dock probe: index before=37 after=37"
+{ echo "$HEADER"; probe_tile 00; opened "$APP_URL" 01.996; launch 02.000; remove 05.000; probe_tile 08; } \
+  >"$T/shared-equal/in/dock.log"
+expect shared-equal 0 "window: shared-window" "dock probe: index before=37 after=37" \
+  "dock: inserts=3 removal_lines=3 removal_events=3" \
+  "info: dock: removal lines with no matching insert (taken as the one before logged twice): none"
+# passed, with a removal line taken as the one before it logged twice: shown, since a second
+# removal there is not told from it
+base shared-equal-twice
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-equal-twice/in/status.txt"
+{ echo "$HEADER"; probe_tile 00; opened "$APP_URL" 01.996; launch 02.000; remove 05.000; remove 05.004 "$TILE_REMOVED"
+  probe_tile 08; } >"$T/shared-equal-twice/in/dock.log"
+expect shared-equal-twice 0 "dock: inserts=3 removal_lines=4 removal_events=3" \
+  "info: dock: removal lines with no matching insert (taken as the one before logged twice): 2026-11-27 10:00:05.004 $TILE_REMOVED"
 base shared-unnamed
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-unnamed/in/status.txt"
 { echo "$HEADER"; opened "$APP_URL" 00.996; launch 01.000; launch 02.000; remove 05.000; remove 06.000; } \
@@ -82,11 +96,20 @@ rm "${T:?}/shared-no-log/in/dock.log"
 expect shared-no-log 2 "(log show gave no output)"
 
 echo "tiles at once, from the inserts against the probe's index before the suite"
-# the probe's tile still at its index when the suite's first tile comes: that one goes one above
+# the probe's tile still at its index when the suite's first tile comes, after the removal line
+# that followed the probe: that one goes one above
 base probe-tile-stays
-{ echo "$HEADER"; opened "$APP_URL" 00.996; launch 01.000 38; opened "$APP_URL" 01.996; launch 02.000 39
+{ echo "$HEADER"; probe_tile 00; opened "$APP_URL" 00.996; launch 01.000 38; opened "$APP_URL" 01.996; launch 02.000 39
   remove 03.000; remove 04.000; } >"$T/probe-tile-stays/in/dock.log"
 expect probe-tile-stays 0 "dock: tiles at once=2 (most allowed 2, insert index 38..39, 37 before the suite)"
+# the suite's first tile before the removal line after the probe: A at 38 beside the probe's tile,
+# which then goes (A moves to 37), B at 38, C at 39.  Three held, two counted: not read
+base probe-went-late
+{ echo "$HEADER"; opened "$DOCKPROBE_URL" 00.000; launch 00.004 37; opened "$APP_URL" 00.200; launch 00.204 38
+  remove 00.600; opened "$APP_URL" 01.000; launch 01.004 38; opened "$APP_URL" 02.000; launch 02.004 39
+  remove 03.000; remove 04.000; remove 05.000; } >"$T/probe-went-late/in/dock.log"
+expect probe-went-late 2 "dock: tiles at once=2 (most allowed 2, insert index 38..39, 37 before the suite)" \
+  "unread: dock: tiles at once: the suite's tile at 2026-11-27 10:00:00.204 came before the Dock logged the probe's tile gone, so the count can be one low"
 # quit and opened again faster than the Dock drops the last tile (mini2, 2026-11-27 22:16:04):
 # a tile per opening, index 25 up to 41, all of them kept
 base quick-reopens
@@ -98,13 +121,18 @@ probed 42 >"$T/quick-reopens/in/probe-end.txt"
 expect quick-reopens 1 "left: dock: 17 tiles at once (insert index 25..41, 25 before the suite), more than 2" \
   "left: dock: 17 tile(s) more after the suite than before (the probe's index 25, then 42)" "$RESTORE"
 
-# each opening after the Dock dropped the last tile (22:58, 177 openings): two at once at most
+# test-reopen-after-quit.sh on mini2 (2026-11-27 22:29 and 22:58, both stopped by hand: 201 and
+# 177 of a full run's 221 openings): the Dock removes the tile a quit left 0.52-0.56 s after the
+# quit.  Opened 0-200 ms after the quit, the app's new tile goes in at 57 beside it and the old
+# one goes after; opened 500-3000 ms after, the old one went first and the new one goes in at 56.
+# The next quit comes 2 s or more after that removal, so no tile is kept: two at once at most
 base paced-reopens
 probe_before paced-reopens 56
 probed 56 >"$T/paced-reopens/in/probe-end.txt"
-{ echo "$HEADER"
-  for i in $(seq 10 3 40); do opened "$APP_URL" "$i.000"; launch "$i.004" 57; remove "$((i + 1)).000"; done
-  opened "$APP_URL" 45.000; launch 45.004 56; } >"$T/paced-reopens/in/dock.log"
+{ echo "$HEADER"; probe_tile 00 56; opened "$APP_URL" 10.000; launch 10.004 56
+  for i in 13 16 19; do opened "$APP_URL" "$i.000"; launch "$i.004" 57; remove "$i.500"; done
+  for i in 22 25 28; do remove "$i.000"; opened "$APP_URL" "$i.500"; launch "$i.504" 56; done
+  remove 31.000; probe_tile 40 56; } >"$T/paced-reopens/in/dock.log"
 expect paced-reopens 0 "dock: tiles at once=2 (most allowed 2, insert index 56..57, 56 before the suite)"
 
 # the suite's helper registering as a regular app is its subject: one more allowed
@@ -183,6 +211,11 @@ reads insert-other-dock 3 "" py insert "$S.other" "$EXE" 900 0
 reads insert-nearest-after 0 $'index=40\nline=3' py insert "$S.near" "$EXE" 726 0
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.100 40; opened /Applications/Other.app 02.110; } >"$S.near2"
 reads insert-nearest-other 1 "" py insert "$S.near2" "$EXE" 726 0
+# a line with no time is answered at once, not after the wait
+{ echo 'Filtering'; echo "garbled Got App URL: file://$DOCKPROBE_URL/"; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.untimed"
+t0=$SECONDS
+reads insert-untimed 4 "untimed=garbled Got App URL: file://$DOCKPROBE_URL/" py insert "$S.untimed" "$EXE" 726 20
+(( SECONDS - t0 < 5 )) || { echo "  FAIL  insert-untimed: answered after $((SECONDS - t0)) s, not at once"; failed=1; }
 touch "$S.empty"
 reads not-attached 1 "" py ready 0 "$S.empty"
 

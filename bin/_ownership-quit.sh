@@ -7,7 +7,7 @@
 #
 # The resident shell turns accessory on a quit and regular again when it
 # is opened, the same process each time.  The Dock drops the old tile
-# lazily; opened again before it has, the app leaves a tile the Dock
+# lazily; opened and quit again before it has, the app leaves a tile the Dock
 # keeps after the process is gone, one per opening (mini2, 2026-11-27: 46
 # of them over three runs of the twenty quits in test-session-ownership.sh).
 # So a quit returns only once the Dock probe (bin/_dock-probe.sh) lands

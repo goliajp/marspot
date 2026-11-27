@@ -10,7 +10,9 @@
 #                                    line FROM
 #
 # Exit 0 when seen, 1 when not within SECS, 3 when a tile line comes from
-# a Dock other than DOCK_PID (it restarted: its indexes are not comparable).
+# a Dock other than DOCK_PID (it restarted: its indexes are not comparable),
+# 4 at once when an insert or app line has no time it can be read by (printed
+# as `untimed=LINE`).
 # Which app an insert is for is decided as in the suite's check
 # (_e2e_dock.attributed).
 import sys, time
@@ -53,20 +55,44 @@ def read_lines(path):
         return f.read().split("\n")[:-1]
 
 
+class Untimed(Exception):
+    pass
+
+
+def untimed(lines):
+    for l in lines:
+        if dock.INSERT in l or dock.URL in l:
+            try:
+                dock.stamp(l)
+            except ValueError:
+                return l
+    return None
+
+
 def poll(paths, secs, look):
+    """look's answer once it has one, None at SECS; Untimed(line) at once when a line it reads
+    has no time: waiting does not give it one"""
     end = time.monotonic() + secs
     while True:
+        lines = [l for p in paths for l in read_lines(p)]
         try:
-            got = look([l for p in paths for l in read_lines(p)])
+            got = look(lines)
         except ValueError:
-            # a line with no time is not read; the wait ends unread
-            got = None
+            raise Untimed(untimed(lines))
         if got is not None or time.monotonic() >= end:
             return got
         time.sleep(0.1)
 
 
 def main(a):
+    try:
+        return answer(a)
+    except Untimed as e:
+        print("untimed=%s" % e.args[0])
+        return 4
+
+
+def answer(a):
     if a[0] == "ready":
         got = poll(a[2:], float(a[1]), lambda ls: True if any(BANNER in l for l in ls) else None)
         return 0 if got else 1

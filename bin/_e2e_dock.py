@@ -42,10 +42,10 @@ def dock_pid(line):
 
 def dock_count(lines):
     """inserts and removal lines by reason, removal events (a removal line right after a
-    removal line of another reason within a second is the same removal logged twice), and
-    the lowest count of inserts less removal events at any point: below zero, a tile the
-    Dock held before the lines began went"""
-    ins, rem, events, prev, low = collections.Counter(), collections.Counter(), 0, None, 0
+    removal line of another reason within a second is the same removal logged twice), the
+    lowest count of inserts less removal events at any point (below zero, a tile the Dock
+    held before the lines began went), and the removal lines taken as such a repeat"""
+    ins, rem, events, prev, low, twice = collections.Counter(), collections.Counter(), 0, None, 0, []
     for l in lines:
         m = re.search(r"for reason: (.*?)\s*$", l)
         reason = m.group(1) if m else "?"
@@ -57,11 +57,12 @@ def dock_count(lines):
         rem[reason] += 1
         if prev and prev[1] != reason and (t - prev[0]).total_seconds() <= 1.0:
             prev = None
+            twice.append(l)
             continue
         events += 1
         prev = (t, reason)
         low = min(low, sum(ins.values()) - events)
-    return ins, rem, events, low
+    return ins, rem, events, low, twice
 
 
 def strip_url(p):
@@ -120,7 +121,14 @@ def at_once(text, base, ours, under):
     went, so the probe's own tile may still hold its index when the suite's first tile comes.
     An insert at or below the probe's index lowers the start to it (a tile went: stricter,
     never laxer).  A program of this run that is not the app (a helper registering as a
-    regular app) is the suite's subject and adds one to the limit"""
+    regular app) is the suite's subject and adds one to the limit.
+
+    Counted from one above, the count is one low when the probe's tile goes after the
+    suite's first tile came: A goes in at base+1 beside the probe's tile, the probe's tile
+    goes and A moves down to base, B goes in at base+1 and C at base+2; three tiles of the
+    suite are held and base+2 - (base+1) + 1 = 2 is counted.  The probe before the suite
+    waits for the Dock's removal line after it and one second more, so that order does not
+    come in a run; when the log shows it anyway (probe_went_late) the count is not read"""
     ins = [(i, u) for i, u in inserts(text) if not (u and u.endswith(PROBE))]
     if not ins:
         return 0, MOST_AT_ONCE, ""
@@ -129,6 +137,19 @@ def at_once(text, base, ours, under):
     helpers = {u for _, u in ins if u and (ours(u) or under(u)) and "marspot" not in u.lower()}
     span = "insert index %d..%d, %d before the suite" % (min(idx), max(idx), base)
     return max(idx) - low + 1, MOST_AT_ONCE + len(helpers), span
+
+
+def probe_went_late(text):
+    """the time of the suite's first insert logged after the probe's first insert in the window
+    (the probe before the suite) and before the Dock's first removal line after it, or None"""
+    lines = (text or "").splitlines()
+    att = attributed(lines)
+    first = next((n for n, _, _, u in att if u and u.endswith(PROBE)), None)
+    if first is None:
+        return None
+    gone = next((n for n, l in enumerate(lines, 1) if n > first and REMOVE in l), len(lines) + 1)
+    early = [n for n, _, _, u in att if first < n < gone and not (u and u.endswith(PROBE))]
+    return lines[early[0] - 1][:23] if early else None
 
 
 def log_check(d, b, read, ours, under, kind, left, unread):
@@ -143,7 +164,7 @@ def log_check(d, b, read, ours, under, kind, left, unread):
     pid = b.get("probe_dock_pid")
     others = sorted({dock_pid(l) for l in lines} - {pid})
     try:
-        ins, rem, events, _ = dock_count(lines)
+        ins, rem, events, _, _ = dock_count(lines)
         print("dock: inserts=%d removal_lines=%d removal_events=%d" % (sum(ins.values()), sum(rem.values()), events))
         print("dock: inserts by reason: " + by_reason(ins))
         print("dock: removals by reason: " + by_reason(rem))
@@ -154,6 +175,7 @@ def log_check(d, b, read, ours, under, kind, left, unread):
             unread.append("dock: tiles at once: a Dock other than %s logged tiles in the suite (%s)" % (pid, " ".join(others)))
             return
         peak, most, span = at_once(dock, int(b["probe_index"]), ours, under)
+        late = probe_went_late(dock)
     except ValueError:
         unread.append("dock log: a tile line without a time")
         return
@@ -163,29 +185,34 @@ def log_check(d, b, read, ours, under, kind, left, unread):
         # with another job on the host its tiles count too: whose cannot be told, so it is
         # neither passed nor blamed
         (left if kind == "alone" else unread).append(line + ("" if kind == "alone" else ", with another job on the host"))
+    elif late:
+        unread.append("dock: tiles at once: the suite's tile at %s came before the Dock logged the probe's tile gone,"
+                      " so the count can be one low" % late)
 
 
 def balanced(text):
-    """why the Dock's lines in the suite do not account for every tile, or None: each insert
-    named for an app, as many removals as inserts, and no removal before an insert it can be
-    for.  Next to another job an index equal before and after can be a tile the suite left
-    behind one the other job's app, gone just before the snap, had still held: its removal
-    then has no insert in the window.  Removal lines name no tile, so one that comes after
-    a tile of the window that stays is not told from that tile's own"""
+    """(why the Dock's lines in the suite do not account for every tile or None, the removal
+    lines with no insert of their own): each insert named for an app, as many removals as
+    inserts, and no removal before an insert it can be for.  Next to another job an index
+    equal before and after can be a tile the suite left behind one the other job's app, gone
+    just before the snap, had still held: its removal then has no insert in the window.
+    Removal lines name no tile, so one that comes after a tile of the window that stays is not
+    told from that tile's own; nor is a removal line taken as the one before it logged twice
+    from a second removal (those are the lines returned)"""
     if text is None or not text.startswith("Timestamp"):
-        return "log show gave no output"
+        return "log show gave no output", []
     try:
         unnamed = sum(1 for _, _, _, u in attributed(text.splitlines()) if u is None)
-        ins, _, events, low = dock_count(tile_lines(text))
+        ins, _, events, low, twice = dock_count(tile_lines(text))
     except ValueError:
-        return "a tile line without a time"
+        return "a tile line without a time", []
     if unnamed:
-        return "%d insert(s) named for no app" % unnamed
+        return "%d insert(s) named for no app" % unnamed, twice
     if low < 0:
-        return "a removal with no insert of the suite's window before it"
+        return "a removal with no insert of the suite's window before it", twice
     if sum(ins.values()) != events:
-        return "%d insert(s) against %d removal(s)" % (sum(ins.values()), events)
-    return None
+        return "%d insert(s) against %d removal(s)" % (sum(ins.values()), events), twice
+    return None, twice
 
 
 def probe_check(d, b, read, kind, fg_same, left, unread):
@@ -214,10 +241,14 @@ def probe_check(d, b, read, kind, fg_same, left, unread):
         else:
             unread.append(line + "; another job was on the host and the apps running changed, so whose cannot be told")
     elif e == s and kind != "alone":
-        why = balanced(read(d, "dock.log"))
+        why, twice = balanced(read(d, "dock.log"))
         if why:
             unread.append("dock probe: index %d before and after the suite next to another job, and the Dock's"
                           " lines in the suite do not account for every tile (%s)" % (s, why))
+        else:
+            # passed; what is left that the lines cannot tell is shown
+            print("info: dock: removal lines with no matching insert (taken as the one before logged twice): "
+                  + ("; ".join("%s %s" % (l[:23], l.rsplit("for reason: ", 1)[-1].strip()) for l in twice) or "none"))
     elif e < s:
         unread.append("dock: the probe's index fell from %d to %d: a tile went during the suite, and one the suite"
                       " left could be hidden behind it" % (s, e))
