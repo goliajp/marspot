@@ -3,82 +3,140 @@
 # the runner?  Run inside the host's lock, in the console login session,
 # once before the suite and once after its sandbox was stopped.
 #
-#   snap BEFORE
+#   snap BEFORE [--lock-pid N] [--live CACHE]
 #       the Foreground record count, the Dock's kept and recent tile
-#       counts and the start time of the suite, written to BEFORE
-#   check BEFORE RESULT [--suite-rc N] [--known PID:PATH]... PREFIX...
+#       counts, the marspot records already listed, the other holders of
+#       the lock (N is this suite's holder) and the start time, written to
+#       BEFORE.  Also proves the Dock and tccd log queries still match
+#       anything (24 h back); a positive answer is kept in CACHE for the
+#       rest of the run.
+#   check BEFORE RESULT [--suite-rc N] [--lock-pid N] [--known PID:PATH]... PREFIX...
 #       after the suite, with records given up to ten seconds to go:
-#       - every Dock tile inserted for a launch was removed again
+#       - every Dock tile inserted was removed again
 #       - the Foreground, kept and recent counts are what BEFORE says
-#       - lsappinfo lists no marspot executable or bundle (but --known)
+#       - lsappinfo lists no marspot executable or bundle that was not
+#         there before (or --known)
 #       - bin/_ls-leftovers.sh finds nothing under the PREFIXes
 #       - tccd logged no request from a marspot build or msp- scratch
-#       RESULT gets the raw counts, what was found and a last line
+#       When another job held the lock at any time in the suite, only the
+#       conditions on this run's PREFIXes are judged; the rest is shown.
+#       RESULT gets suite_rc first (so a check stopped half way still
+#       says it), then the raw counts, what was found and a last line
 #       clean=0 (nothing left), 1 (something left) or 2 (could not read);
 #       the exit status is the same number.
 #
 # E2E_CLEAN_INPUTS=DIR reads saved inputs from DIR instead of the live
 # sources (lsappinfo.txt, persistent.txt, recent.txt, dock.log,
-# tcc.ndjson; a missing file is a source that could not be read).
+# tcc.ndjson, status.txt, lock.log, probe-dock.log, probe-tcc.ndjson; a
+# missing file is a source that could not be read).
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-mode=${1:?usage: snap BEFORE | check BEFORE RESULT ...}
+mode=${1:?usage: snap BEFORE ... | check BEFORE RESULT ...}
 before=${2:?before file}
+DOCK_PRED='process == "Dock" AND subsystem == "com.apple.dock" AND category == "dock-tiles"'
+TCC_PRED='process == "tccd" AND eventMessage BEGINSWITH "AUTHREQ_"'
+LOCK_LOG=/Users/Shared/bench-lock.log
 
-# writes a file only for a source that was read
-collect() {
-  local d=$1 start=${2:-} end
+# grab NAME CMD...: $w/NAME holds CMD's output, and is absent when CMD failed
+grab() {
+  local n=$1
+  shift
+  rm -f "${w:?}/${n:?}"
   if [[ -n ${E2E_CLEAN_INPUTS:-} ]]; then
-    cp "$E2E_CLEAN_INPUTS"/* "$d"/ 2>/dev/null
+    [[ ! -f $E2E_CLEAN_INPUTS/$n ]] || cp "$E2E_CLEAN_INPUTS/$n" "$w/$n"
     return 0
   fi
-  /usr/bin/lsappinfo list >"$d/lsappinfo.txt" 2>/dev/null || rm -f "$d/lsappinfo.txt"
-  # an absent key is an empty list; an unreadable domain is not read
-  if /usr/bin/defaults read com.apple.dock >/dev/null 2>&1; then
-    /usr/bin/defaults read com.apple.dock persistent-apps >"$d/persistent.txt" 2>/dev/null
-    /usr/bin/defaults read com.apple.dock recent-apps >"$d/recent.txt" 2>/dev/null
-  fi
-  [[ -n $start ]] || return 0
-  end="$(date -v+1S '+%Y-%m-%d %H:%M:%S')"
-  /usr/bin/log show --start "$start" --end "$end" --style compact --predicate \
-    'process == "Dock" AND subsystem == "com.apple.dock" AND category == "dock-tiles"' \
-    >"$d/dock.log" 2>/dev/null || rm -f "$d/dock.log"
-  /usr/bin/log show --start "$start" --end "$end" --style ndjson --predicate \
-    'process == "tccd" AND eventMessage BEGINSWITH "AUTHREQ_"' \
-    >"$d/tcc.ndjson" 2>/dev/null || rm -f "$d/tcc.ndjson"
+  "$@" >"$w/$n" 2>/dev/null || rm -f "${w:?}/${n:?}"
 }
-
+# an absent key is an empty list; an unreadable domain is not read
+dock_key() {
+  /usr/bin/defaults read com.apple.dock >/dev/null 2>&1 || return 1
+  /usr/bin/defaults read com.apple.dock "$1" 2>/dev/null
+  return 0
+}
+logwin() { /usr/bin/log show --start "$start" --end "$(date -v+1S '+%Y-%m-%d %H:%M:%S')" "$@"; }
+# empty output is a dead query, which the decision reads as such
+tcc_probe() { /usr/bin/log show --last 24h --style ndjson --predicate "$TCC_PRED" | head -n 200; return 0; }
+lock_lines() { /usr/bin/awk -F'\t' -v s="$start_epoch" '$1 > s' "$LOCK_LOG"; }
+grab_state() {
+  grab lsappinfo.txt /usr/bin/lsappinfo list
+  grab persistent.txt dock_key persistent-apps
+  grab recent.txt dock_key recent-apps
+}
+grab_lock() {
+  grab status.txt /usr/local/bin/bench-lock status
+  grab lock.log lock_lines
+}
 
 w="$(mktemp -d)"
 trap 'rm -rf "${w:?}"' EXIT
+lock_pid=""
+live=""
 if [[ $mode == snap ]]; then
-  start="$(date '+%Y-%m-%d %H:%M:%S')"
-  collect "$w"
-  { echo "start=$start"; /usr/bin/python3 "$here/_e2e-suite-clean.py" snap "$w"; } >"$before.tmp" && mv "$before.tmp" "$before"
+  shift 2
+  while [[ $# -ge 2 ]]; do
+    case $1 in --lock-pid) lock_pid=$2 ;; --live) live=$2 ;; *) break ;; esac
+    shift 2
+  done
+  start_epoch=$(date +%s)
+  grab_state
+  grab status.txt /usr/local/bin/bench-lock status
+  cached=""
+  if [[ -n $live && -f $live ]] && grep -qx dock_live=1 "$live" && grep -qx tcc_live=1 "$live"; then
+    cached="$(cat "$live")"
+  else
+    grab probe-dock.log /usr/bin/log show --last 24h --style compact --predicate "$DOCK_PRED"
+    grab probe-tcc.ndjson tcc_probe
+  fi
+  { echo "start=$(date -r "$start_epoch" '+%Y-%m-%d %H:%M:%S')"
+    echo "start_epoch=$start_epoch"
+    /usr/bin/python3 "$here/_e2e-suite-clean.py" snap "$w" "$lock_pid"
+    [[ -z $cached ]] || echo "$cached"; } >"$before.tmp" && mv "$before.tmp" "$before"
+  if [[ -n $live && -z $cached ]] && grep -qx dock_live=1 "$before" && grep -qx tcc_live=1 "$before"; then
+    grep -E '^(dock|tcc)_live=' "$before" >"$live.tmp" && mv "$live.tmp" "$live"
+  fi
   exit 0
 fi
 result=${3:?result file}
 shift 3
 suite_rc=""
-[[ ${1:-} == --suite-rc ]] && { suite_rc=$2; shift 2; }
 known=""
 kargs=()
-while [[ ${1:-} == --known && $# -ge 2 ]]; do known+="$2"$'\n'; kargs+=(--known "$2"); shift 2; done
+while [[ $# -ge 2 ]]; do
+  case $1 in
+    --suite-rc) suite_rc=$2 ;;
+    --lock-pid) lock_pid=$2 ;;
+    --known) kargs+=(--known "$2"); known+="$2"$'\n' ;;
+    *) break ;;
+  esac
+  shift 2
+done
+# the records listed before the suite: the decision reads them from BEFORE
+while IFS= read -r k; do kargs+=(--known "$k"); done < <(sed -n 's/^known=//p' "$before" 2>/dev/null)
+head=""
+[[ -z $suite_rc ]] || head="suite_rc=$suite_rc"$'\n'
+printf '%s' "$head" >"$result"
 start="$(sed -n 's/^start=//p' "$before" 2>/dev/null)"
+start_epoch="$(sed -n 's/^start_epoch=//p' "$before" 2>/dev/null)"
+
+grab_lock
 deadline=$((SECONDS + 10))
 while :; do
-  rm -f "$w"/*
-  collect "$w" "${start:-}"
+  grab_state
+  [[ -z $start ]] || grab dock.log logwin --style compact --predicate "$DOCK_PRED"
   lrc=0
   lout="$("$here/_ls-leftovers.sh" --from "$w/lsappinfo.txt" ${kargs[@]+"${kargs[@]}"} "$@" 2>&1)" || lrc=$?
-  out="$( { [[ -n $suite_rc ]] && echo "suite_rc=$suite_rc"
-    CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout"; } )"
-  clean=${out##*clean=}
-  # the decision itself failing proves nothing either way
-  case $clean in 0 | 1 | 2) ;; *) out+=$'\n'"unread: the check failed"$'\n'"clean=2"; clean=2 ;; esac
-  [[ $clean == 1 && -z ${E2E_CLEAN_INPUTS:-} && $SECONDS -lt $deadline ]] || break
+  out="$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout" "$lock_pid" "$@")"
+  [[ ${out##*clean=} == 1 && -z ${E2E_CLEAN_INPUTS:-} && $SECONDS -lt $deadline ]] || break
   sleep 1
 done
+# requests are not withdrawn and the lock is read once more: both only at the end
+[[ -z $start ]] || grab tcc.ndjson logwin --style ndjson --predicate "$TCC_PRED"
+grab_lock
+out="$head$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout" "$lock_pid" "$@")"
+clean=${out##*clean=}
+# the decision itself failing proves nothing either way
+case $clean in 0 | 1 | 2) ;; *) out+=$'\n'"unread: the check failed"$'\n'"clean=2"; clean=2 ;; esac
 printf '%s\n' "$out" >"$result.tmp" && mv "$result.tmp" "$result"
 printf '%s\n' "$out"
 exit "$clean"

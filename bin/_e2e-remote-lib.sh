@@ -134,7 +134,7 @@ check_leftovers() {
 # here, but no suite of this run made it: each suite's check leaves
 # those records (by pid and path) out.
 note_known_leftovers() {
-  local out rc=0 line n=0
+  local out rc=0 line rec n=0
   out="$(check_leftovers)" || rc=$?
   case $rc in
     0) return 0 ;;
@@ -147,7 +147,14 @@ note_known_leftovers() {
   esac
   while IFS= read -r line; do
     [[ $line =~ ^[^\ ]+\ pid=([^\ ]+)\ (.+)$ ]] || continue
-    KNOWN_ARGS+=" --known $(printf '%q' "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}")"
+    rec="${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"
+    # the arguments end up inside a single-quoted sh -c string, where a
+    # quote breaks the command and %q's $'...' means nothing to sh
+    if [[ $line == *"'"* || $line =~ [[:cntrl:]] ]]; then
+      echo "==> warning: not excluding a record whose path has a quote or control character: $line"
+      continue
+    fi
+    KNOWN_ARGS+=" --known $(printf '%q' "$rec")"
     n=$((n + 1))
   done <<<"$out"
   echo "==> warning: $HOST already lists $n app record(s) under ~/$REMOTE_DIR, left by an earlier run;" \
@@ -164,4 +171,81 @@ stopped_from_outside() {
     129 | 130 | 137 | 143 | 255) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# The command a suite runs on the far side, inside the host's lock:
+# locked_cmd STATE_DIR LOCK RUN PRE_CLEAN ENV.  The state dir is created
+# first so the sandbox helpers find it and give its sessions ids of their
+# own (see dev_seed_session_base).  What the suite left running is
+# stopped before the lock is let go, so nothing it opened outlives the
+# hold; the reap after it is for a stopped run.  Still inside the hold,
+# bin/_e2e-suite-clean.sh compares the runner with what it was before the
+# suite (Dock tiles, app records, TCC requests; $PPID is bench-lock, this
+# suite's holder) and writes STATE_DIR.clean; the command then gives 4
+# when something was left and 5 when that could not be read.
+# A stopped run signals the whole remote group, bench-lock and this sh
+# included: bench-lock lets go only once its command returns, so the sh
+# waits for _bounded.sh to stop what runs and still runs the cleanup, but
+# neither the suite (when the signal came during the snapshot) nor the
+# check.  Its output then goes nowhere, the ssh it wrote to being gone,
+# so the cleanup cannot die of SIGPIPE.
+locked_cmd() {
+  local sd=$1 lock=$2 run=$3 pre=$4 env=$5
+  printf '%s' "cd ~/$REMOTE_DIR && rm -rf $sd $sd.before $sd.clean && mkdir -p $sd && \
+    env MARSPOT_STATE_DIR=$sd$env /usr/local/bin/bench-lock $lock \
+    sh -c 'stopped=; trap \"stopped=1; exec >/dev/null 2>&1\" TERM INT HUP; \
+    bin/_bounded.sh 30 bin/_e2e-suite-clean.sh snap $sd.before --lock-pid \$PPID --live /tmp/msp-e2e-$RUN_ID-live; \
+    if [ -z \"\$stopped\" ]; then $run; rc=\$?; else rc=143; fi; $pre\
+    bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $sd; \
+    [ -n \"\$stopped\" ] && exit \$rc; \
+    bin/_bounded.sh 90 bin/_e2e-suite-clean.sh check $sd.before $sd.clean \
+      --suite-rc \$rc --lock-pid \$PPID$KNOWN_ARGS \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID- >/dev/null; \
+    case \$? in 0) exit \$rc ;; 1) exit 4 ;; *) exit 5 ;; esac'"
+}
+
+# The run's cached answer of whether the log queries still match anything.
+drop_run_files() {
+  ssh "${SSH_CLEANUP[@]}" "$HOST" "rm -f /tmp/msp-e2e-${RUN_ID:?}-live" </dev/null || true
+}
+
+# One suite's verdict from suite_rc and left_rc (with left_why): appended
+# to results, said at once (a run that is cut short prints no summary),
+# and rc / unmeasured set.  A passed or unmeasured suite's sandbox goes.
+record_result() {
+  local why
+  if (( suite_rc == 0 && left_rc == 0 )); then
+    drop_sandbox "$current_sd"
+    results+=("PASS  ${secs}s  $suite")
+    echo "==> PASS  ${secs}s  $suite"
+  elif (( suite_rc == 3 && left_rc == 0 )) && may_be_unmeasured "$suite"; then
+    drop_sandbox "$current_sd"
+    results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
+    echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"
+    unmeasured=1
+  elif (( suite_rc == 75 && left_rc == 0 )) && is_measurement "$suite"; then
+    # the exclusive hold waits for every other heavy job on the host;
+    # not getting it in time says the host was busy, not the suite failed
+    drop_sandbox "$current_sd"
+    results+=("BUSY  ${secs}s  $suite  (not measured: no exclusive hold of $HOST's lock within ${MAX_WAIT}s)")
+    echo "==> BUSY  ${secs}s  $suite: not measured, the exclusive lock was not free within ${MAX_WAIT}s;" \
+      "neither a pass nor a regression"
+    unmeasured=1
+  else
+    case $suite_rc in
+      0) why="passed" ;;
+      124) why="timed out after ${SUITE_TIMEOUT}s" ;;
+      75) why="could not get the host's lock within ${MAX_WAIT}s" ;;
+      *) why="exit $suite_rc" ;;
+    esac
+    if is_measurement "$suite"; then
+      case $suite_rc in
+        1) why="over budget, measured on a quiet host" ;;
+        2) why="no reading: the sandbox app did not come up as asked, or the instrument failed" ;;
+      esac
+    fi
+    [[ -n $left_why ]] && why+=", but $left_why"
+    echo "FAIL: $suite: $why (state dir kept: $HOST:$current_sd)" >&2
+    results+=("FAIL  ${secs}s  $suite  ($why)")
+    rc=1
+  fi
 }

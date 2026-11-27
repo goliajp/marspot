@@ -83,10 +83,14 @@ setup() {
   fi
   printf '#!/bin/bash\necho "kill-sandbox held=${STUB_LOCK_HELD:-0} $*" >>"%s/events"\n' "$S" \
     >"$R/bin/kill-sandbox-marspot.sh"
-  # the check finds a record left behind
+  # the check finds a record left behind; in "snap" the snapshot takes
+  # long enough to be stopped in
+  local slow=""
+  [[ $1 == snap ]] && slow="[[ \$1 == snap ]] && { echo \$\$ >\"$S/snap.pid\"; exec sleep 30; }"
   cat >"$R/bin/_e2e-suite-clean.sh" <<EOF
 #!/bin/bash
 echo "suite-clean \$1 held=\${STUB_LOCK_HELD:-0}" >>"$S/events"
+$slow
 [[ \$1 == check ]] || exit 0
 printf 'suite_rc=0\nleft: record: Foreground pid=1 /tmp/msp-e2e-x/Marspot.app\nclean=1\n' >"\$3"
 exit 1
@@ -195,6 +199,25 @@ check "the before snapshot was taken inside the lock" grep -q 'suite-clean snap 
 check "the stopped run skipped the check" bash -c "! grep -q 'suite-clean check' '$S/events'"
 check "the local lock was removed" test ! -e "$LOCK"
 ((failed)) && dump suite
+
+echo "snap: TERM while the before snapshot is taken"
+before_snap=$failed
+setup snap
+run_until_term snap snap.pid
+S="$T/snap"
+for ((i = 0; i < 150; i++)); do
+  grep -q 'bench-lock released' "$S/events" 2>/dev/null && break
+  sleep 0.1
+done
+check "exit 130 (got $rc)" test "$rc" -eq 130
+check "the snapshot was stopped" gone "$(cat "$S/snap.pid")"
+check "the suite was never started" test ! -e "$S/suite.pid"
+check "the sandbox was cleaned inside the lock" grep -q 'kill-sandbox held=1' "$S/events"
+check "bench-lock let go only after that cleanup" before "$S/events" 'kill-sandbox held=1' 'bench-lock released'
+check "the stopped run skipped the check" bash -c "! grep -q 'suite-clean check' '$S/events'"
+check "the second suite was never started" bash -c "! grep -q 'test-second.sh' '$S/ssh.log'"
+check "the local lock was removed" test ! -e "$LOCK"
+((failed > before_snap)) && dump snap
 
 echo "left: the first suite passes but leaves a record"
 before_left=$failed
