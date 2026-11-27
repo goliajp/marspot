@@ -70,6 +70,7 @@ DEFAULT_SUITES=(
   test-pane-new-window.sh
   test-commands.sh
   test-theme-switch.sh
+  test-font-switch.sh
   test-language-switch.sh
   test-bundle-lander.sh
   test-single-instance.sh
