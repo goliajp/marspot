@@ -38,7 +38,7 @@ pub const FLOOR: f64 = 1e-4;
 pub const HELPER_FLOOR_S: u32 = 600;
 
 /// One class of the fleet.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Fleet {
     /// The 24-hour mean of the hourly roll-up.
     pub level: Option<f64>,
@@ -46,6 +46,8 @@ pub struct Fleet {
     pub band: Band,
     /// The highest six-hour bucket of the last seven days.
     pub a_hi: Option<f64>,
+    /// Every whole six-hour bucket of the last seven days, oldest first.
+    pub buckets: Vec<f64>,
     pub time_of_day: TimeOfDay,
 }
 
@@ -87,6 +89,7 @@ pub fn build(f: &Facts, now: i64, live: &[u64]) -> Forecast {
         level: level::fleet_level(f, c, now),
         band: band::measure(&mut fleet_r[c], default_band(c), known_hours >= MEASURED_AFTER_H),
         a_hi: level::a_hi(f, c, now),
+        buckets: level::buckets(f, c, now),
         time_of_day: level::time_of_day(f, c),
     });
     let oldest = f.panes.values().filter_map(|p| p.hours.keys().next()).min().copied();

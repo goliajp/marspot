@@ -28,13 +28,14 @@ pub(super) struct Forecasting {
     /// The hour the forecast was last built in.
     built: Option<i64>,
     said: String,
+    last: Option<forecast::Forecast>,
 }
 
 impl Forecasting {
     pub(super) fn new(state_root: &Path) -> Self {
         let hours_dir = events_dir(state_root).with_file_name("alloc_hours");
         let helpers_log = state_root.join("helpers").join("events.log");
-        Forecasting { facts: Facts::default(), tail: Tail::default(), started: false, hours_dir, helpers_log, helpers_len: None, built: None, said: String::new() }
+        Forecasting { facts: Facts::default(), tail: Tail::default(), started: false, hours_dir, helpers_log, helpers_len: None, built: None, said: String::new(), last: None }
     }
 
     /// One scan: fold the new facts; at the first scan of an hour build
@@ -59,11 +60,18 @@ impl Forecasting {
         self.facts.prune(now);
         self.facts.set_hours(allocation_hours::read_rows(&self.hours_dir));
         self.read_helpers();
-        let line = forecast::build(&self.facts, now, live).line();
+        let built = forecast::build(&self.facts, now, live);
+        let line = built.line();
+        self.last = Some(built);
         (line != self.said).then(|| {
             self.said = line.clone();
             line
         })
+    }
+
+    /// The forecast last built.
+    pub(super) fn last(&self) -> Option<&forecast::Forecast> {
+        self.last.as_ref()
     }
 
     fn read_helpers(&mut self) {

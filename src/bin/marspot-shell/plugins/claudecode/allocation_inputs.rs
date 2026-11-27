@@ -44,14 +44,18 @@ impl AccountIn {
     /// The core's view as of `now`, the reading pushed forward by
     /// `rate_since` (weeks an hour) when it is old.
     pub(super) fn quant(&self, now: i64, rate_since: f64) -> Quant {
+        with_supply(&self.reading(now, rate_since), &Load { restricted: 0.0, plain: rate_since }, KAPPA_FABLE, &self.supply)
+    }
+
+    /// The same with no stored reset counted in.
+    pub(super) fn reading(&self, now: i64, rate_since: f64) -> Quant {
         let age = now - self.measured_at;
         let stale = age > STALE_ACCOUNT_S;
         let w = if stale { self.week_used + rate_since * age as f64 / 3600.0 } else { self.week_used };
         let f = if self.fable_known { KAPPA_FABLE * (1.0 - self.fable_used.unwrap_or(0.0)).max(0.0) } else { 0.0 };
         let r = (1.0 - w).max(0.0);
         let hours = |at: i64| (at - now) as f64 / 3600.0;
-        let q = Quant { id: self.profile, r, f, t: hours(self.week_renews), tf: hours(self.fable_renews), open: self.open, stale };
-        with_supply(&q, &Load { restricted: 0.0, plain: rate_since }, KAPPA_FABLE, &self.supply)
+        Quant { id: self.profile, r, f, t: hours(self.week_renews), tf: hours(self.fable_renews), open: self.open, stale }
     }
 }
 
