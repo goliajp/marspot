@@ -66,6 +66,11 @@ impl Frames {
         }
     }
 
+    /// The offset the view is published at.
+    pub(crate) fn view_offset(&self) -> u16 {
+        self.view_offset
+    }
+
     pub(crate) fn shm(&mut self) -> &mut GridShmWriter {
         &mut self.shm
     }
