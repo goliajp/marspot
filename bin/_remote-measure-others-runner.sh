@@ -20,8 +20,8 @@ cd "$ROOT"
 source "$ROOT/bin/_lib.sh"   # LIVE_MIN_BYTES + write_live_matrix_script
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 TRIALS=3
-# Console mode drives all four terminals. ssh mode falls back to
-# ghostty-only (see ASUSER block below). Terminal.app onboarding is
+# Console mode drives all four terminals. ssh mode drives what it can
+# reach (see the ssh block below). Terminal.app onboarding is
 # the one-time Automation grant during install-bench-launchagent.sh
 # first-fire, after which subsequent LaunchAgent-spawned runs reuse
 # the cached TCC scope.
@@ -54,46 +54,17 @@ MARKER_TIMEOUT_S=${MEASURE_MARKER_TIMEOUT_S:-120}
 # to settle to ~5 % run-to-run.
 COOLDOWN_S=3
 
-# ssh→GUI bridge. Direct ssh dispatch can't reach Aqua / WindowServer.
-# After exhaustive testing on macOS 26.5 / iTerm 3.6.11 / Ghostty 1.3.1
-# the only terminal we can drive automatically via ssh is **Ghostty**,
-# using `sudo -n launchctl asuser <uid>` to inject the spawn into the
-# user's GUI launchd domain so NSApp init + Metal surface bootstrap.
-# Requires a one-time NOPASSWD sudoers entry:
-#   <user> ALL=(root) NOPASSWD: /bin/launchctl asuser <uid> *
-#
-# Why the other terminals can't be driven from ssh:
-#  * iTerm 3.6.11 AppleScript dispatch fails under both `launchctl
-#    bsexec gui/<uid>` (-1728 "Can't get application iTerm" — iTerm's
-#    AE entry is session-scoped, ssh-launched instances don't register
-#    where bsexec-spawned osascript can find them) and `sudo -n
-#    launchctl asuser` (-1712 timeout — root osascript needs a separate
-#    TCC Automation grant that can't be granted non-interactively).
-#  * Warp's driver depends on `tell application "System Events" to
-#    keystroke`. SE keystroke is a TCC Accessibility-gated path that
-#    is unreachable from any ssh-spawned osascript regardless of
-#    bridge (-1712 in both).
-#
-# Result: iTerm / Warp / Terminal.app are refreshed from the console
-# session (no SSH_CONNECTION); an ssh run that has no entry for them
-# leaves their snapshot from the same host as it was.
-ASUSER=""
+# From ssh.  The ssh login of the console user reaches the console
+# session's window server, so Ghostty and the product are started from
+# this shell as they are, as this user.  The AppleScript-driven three
+# answer only while they already run in the console session (asked per
+# round below), and Warp's keystroke path needs an Accessibility grant
+# for whoever sends it; an ssh run that cannot reach one leaves its
+# snapshot from the same host as it was.
 SSH_MODE=0
 if [[ -n "${SSH_CONNECTION:-}" ]]; then
   SSH_MODE=1
-  uid="$(id -u)"
-  # into the GUI session, and back to this user: a terminal started as
-  # root is not the terminal anyone runs, and its files and processes
-  # are out of this script's reach afterwards
-  if sudo -n launchctl asuser "$uid" /usr/bin/true 2>/dev/null; then
-    ASUSER="sudo -n launchctl asuser $uid sudo -u $(id -un)"
-  fi
-  if [[ -z "$ASUSER" ]]; then
-    echo "==> ssh mode: NOPASSWD launchctl asuser not configured — even Ghostty will fail. Add to /etc/sudoers.d/marspot-bench:" >&2
-    echo "    $(id -un) ALL=(root) NOPASSWD: /bin/launchctl asuser $uid *" >&2
-  else
-    echo "==> ssh mode: ASUSER=on. Driving Ghostty only; iTerm/Warp/Terminal need console refresh." >&2
-  fi
+  echo "==> ssh mode: Ghostty and the product start from this login; iTerm/Warp/Terminal only when they answer" >&2
 fi
 
 # Make sure scenarios are present. gen-scenarios.sh writes the .bin
@@ -243,16 +214,6 @@ quit_app_if_we_spawned() {
     # does). Match the binary path to avoid friendly fire on similarly-
     # named user processes.
     pkill -f "$pat" 2>/dev/null || true
-    # In ssh mode the app was spawned through `sudo -n launchctl asuser`
-    # and therefore runs as ROOT — a plain pkill from this shell cannot
-    # touch it, so this cleanup silently left every Ghostty it started
-    # alive (found 2026-08-18: four of them, plus their wrapper scripts,
-    # surviving several runs).  Retry through the same privilege the
-    # spawn used.  Harmless when $ASUSER is empty.
-    if [[ -n "${ASUSER:-}" ]] && pgrep -f "$pat" >/dev/null 2>&1; then
-      # shellcheck disable=SC2086
-      $ASUSER /usr/bin/pkill -9 -f "$pat" 2>/dev/null || true
-    fi
     echo "==> cleanup: quit $name (we spawned it)" >&2
   else
     echo "==> cleanup: leaving $name running (was up before this run)" >&2
@@ -291,16 +252,7 @@ cleanup() {
 
   rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
   rm -f /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
-  # Same story as the processes: anything a root-spawned terminal wrote
-  # (wrappers, markers) is root-owned, and /tmp is sticky — this shell
-  # can neither delete nor overwrite it, and a stale root-owned marker
-  # blocks the NEXT run rather than this one.
-  if [[ -n "${ASUSER:-}" ]]; then
-    # shellcheck disable=SC2086
-    $ASUSER /bin/rm -f /tmp/measure-*-all.txt /tmp/ghostty-wrapper-* \
-                        /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
-  fi
-  rm -f /tmp/measure-*-all.txt 2>/dev/null || sudo -n rm -f /tmp/measure-*-all.txt 2>/dev/null || true
+  rm -f /tmp/measure-*-all.txt 2>/dev/null || true
   rm -rf "$SESSION_DIR" 2>/dev/null || true
   bench_run_end
   echo "==> cleanup done (script rc=$rc)" >&2
@@ -373,8 +325,7 @@ probe_grid() {
   local out="$SESSION_DIR/grid" probe="$MARSPOT_BENCH_RUN_DIR/grid-probe.sh"
   printf '#!/bin/sh\nstty size > %s.tmp < /dev/tty\nmv %s.tmp %s\n' "$out" "$out" "$out" > "$probe"
   chmod 0755 "$probe"
-  # shellcheck disable=SC2086
-  $ASUSER bin/drivers/marspot.sh run-app "$probe" >&2 || return 0
+  bin/drivers/marspot.sh run-app "$probe" >&2 || return 0
   local i
   for ((i = 0; i < 100; i++)); do
     [[ -s $out ]] && break
@@ -408,8 +359,8 @@ echo "==> load1 $(load1) before the first round" >&2
 # per-cell CPU / IO contention is zero.
 for ((round = 1; round <= ROUNDS; round++)); do
 for t in "${TERMS[@]}"; do
-  # Ghostty and marspot are started through `sudo asuser` and always
-  # work from ssh.  The AppleScript-driven three are reachable only
+  # Ghostty and marspot are started from this login and work from
+  # ssh.  The AppleScript-driven three are reachable only
   # while the app is already running in the user's GUI session
   # (verified 2026-08-19: `tell application "iTerm" to count windows`
   # answered from a plain ssh shell).  So ask instead of assuming: one
@@ -434,7 +385,8 @@ for t in "${TERMS[@]}"; do
   fi
 
   marker="/tmp/measure-${t}-r${round}-all.txt"
-  rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
+  # a marker that cannot be removed would be read as this round's
+  rm -f "$marker"
   cmd="$(build_one_cmd "$marker" "${t}-r${round}")"
 
   load_start="$(load1)"
@@ -444,8 +396,8 @@ for t in "${TERMS[@]}"; do
   # shellcheck disable=SC2086
   case "$t" in
     iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
-    warp)     $ASUSER bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" "$cmd" || launch_rc=$? ;;
-    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single --pid-file "$GHOSTTY_PIDS" "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
+    warp)     bin/drivers/warp.sh "${MEASURE_WARP_VIA:-run-single}" "$cmd" || launch_rc=$? ;;
+    ghostty)  bin/drivers/ghostty.sh run-single --pid-file "$GHOSTTY_PIDS" "$cmd" $GRID_COLS $GRID_ROWS || launch_rc=$? ;;
     terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
     marspot)
       # the pane's shell is a wrapper around the same command every
@@ -453,9 +405,7 @@ for t in "${TERMS[@]}"; do
       wrapper="$MARSPOT_BENCH_RUN_DIR/wrapper-$t-r$round"
       printf '#!/bin/bash\n%s\n' "$cmd" > "$wrapper"
       chmod 0755 "$wrapper"
-      # sudo drops the environment: the bin dir is passed by hand
-      $ASUSER env MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" \
-        bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
+      bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
       ;;
   esac
 
@@ -490,9 +440,7 @@ done
 # LaunchAgent receiver, set -e from a driver, marker-wait timeout,
 # anything). Don't duplicate cleanup here.
 
-# Parse markers → JSON on stdout. Markers may be root-owned (when the
-# surface ran under sudo asuser); they're mode 0644 world-readable so
-# this user-mode parse can still read them.
+# Parse markers → JSON on stdout.
 LIVE_MIN_BYTES="$LIVE_MIN_BYTES" LIVE_SENTINEL_CPR="$LIVE_SENTINEL_CPR" MEASURE_ROUNDS="$ROUNDS" \
   python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys, datetime, subprocess, platform
@@ -658,7 +606,7 @@ for t in TERMS:
     rec["method"] = os.environ.get("MEASURE_METHOD") or (
                      "ssh→LaunchAgent (com.marspot.bench-trigger)"
                      if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.marspot")
-                     else "ssh, started in the GUI session" if os.environ.get("SSH_CONNECTION")
+                     else "ssh login of the console user" if os.environ.get("SSH_CONNECTION")
                      else "console / Screen Sharing")
     if grid:
         rec["grid"] = grid

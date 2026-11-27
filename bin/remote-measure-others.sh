@@ -140,17 +140,9 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
       env MARSPOT_BENCH_LOCKED=1 caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
       'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
         && exec bash bin/_remote-measure-others-runner.sh'"
-  # The whole run inside the console user's GUI session when the host
-  # allows it: every terminal, the product included, is then started
-  # the same way, and the AppleScript-driven ones are reachable.
-  GUI_UID="${GUI_UID:-501}"
-  if ssh "$HOST" "sudo -n launchctl asuser $GUI_UID /usr/bin/true" </dev/null 2>/dev/null; then
-    INNER="export MEASURE_METHOD='ssh, run inside the GUI session'; $INNER"
-    ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$INNER")" \
-      </dev/null > "$MEAS_JSON"
-  else
-    ssh "$HOST" "$INNER" </dev/null > "$MEAS_JSON"
-  fi
+  # The ssh login of the console user reaches its GUI session: every
+  # terminal, the product included, is started from it the same way.
+  ssh "$HOST" "/bin/bash -lc $(printf '%q' "$INNER")" </dev/null > "$MEAS_JSON"
 else
   echo "==> using pre-captured $MEAS_JSON (manual workflow)"
 fi

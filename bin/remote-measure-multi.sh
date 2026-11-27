@@ -34,7 +34,6 @@ HOST="${HOST:-$(marspot_host bench)}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 REMOTE_DIR="work/$REMOTE_NAME"
 OUT_DIR="$ROOT/bench/remote-runs/multi-$(date -u +%Y%m%dT%H%M%SZ)"
-GUI_UID="${GUI_UID:-501}"
 (( $# > 0 )) || { sed -n '2,14p' "$0"; exit 2; }
 for n in "$@"; do
   [[ $n =~ ^[1-9][0-9]?$ ]] || { echo "a window count, not '$n'" >&2; exit 2; }
@@ -60,8 +59,8 @@ for n in "$@"; do
       'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
         && exec bash bin/_remote-measure-multi-runner.sh'"
   echo "==> $n windows on $HOST" >&2
-  # inside the GUI session, as the user: the windows need it
-  ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$INNER")" \
+  # the ssh login of the console user reaches its GUI session, which the windows need
+  ssh "$HOST" "/bin/bash -lc $(printf '%q' "$INNER")" \
     </dev/null > "$OUT_DIR/windows-$n.json"
   jq empty "$OUT_DIR/windows-$n.json" 2>/dev/null || {
     echo "the host produced no result for $n windows:" >&2

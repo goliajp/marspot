@@ -4,9 +4,8 @@
 # Ghostty 1.3.x has no public AppleScript dictionary, but the binary
 # accepts `-e <executable>` (xterm-style) to spawn a fresh surface that
 # runs the given command and dies. That's the cleanest path for bench:
-# no AppleScript, no System Events keystroke (SE is blocked under
-# launchctl-asuser / bsexec ssh sessions anyway — TCC Accessibility
-# boundary).
+# no AppleScript, no System Events keystroke (that one needs a TCC
+# Accessibility grant for whoever sends it).
 #
 # Usage:
 #   bin/drivers/ghostty.sh run-single [--pid-file <file>] <cmd> [cols rows]
@@ -22,12 +21,9 @@
 #
 #   bin/drivers/ghostty.sh quit (refuses)
 #
-# Note on ssh+ssh-driven runs: the caller (e.g.
-# bin/_remote-measure-others-runner.sh) wraps this driver in
-# `sudo -n launchctl asuser <uid>` so the spawned ghostty lives in the
-# user's GUI launchd domain. Without that, ssh-spawned ghostty has no
-# Aqua bootstrap and its surface never materializes. The wrapper is
-# transparent to this driver.
+# Over ssh the caller (e.g. bin/_remote-measure-others-runner.sh) runs
+# this from the ssh login of the console user, which reaches that
+# session's window server; a login of anyone else gets no surface.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

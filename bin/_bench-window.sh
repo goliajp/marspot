@@ -11,20 +11,18 @@
 # shows it at the next composite.  The `seen` scene's window captures
 # would add that last step, but they load the window server while the
 # frame is on its way, so they are not the latency of the product.
-# Windows need the GUI login session; over ssh that is reached through
-# `launchctl asuser`, as bin/_remote-measure-others-runner.sh does.
+# Windows need the GUI login session, which an ssh login of the console
+# user reaches as it is.
 measure_key_latency() {
-  local sd="/tmp/msp-lat-$$" dir="$CUR_DIR/lat-bins" gui=() b rc=0
+  local sd="/tmp/msp-lat-$$" dir="$CUR_DIR/lat-bins" b rc=0
   rm -rf "${CUR_DIR:?}/latency" && mkdir -p "$dir" "$CUR_DIR/latency"
   for b in marspot-shell marspot-core; do cp "$LAT_TARGET/release/$b" "$dir/$b"; done
   cp "$(marspot_bin marspot-session)" "$dir/marspot-session"
-  [[ -n ${SSH_CONNECTION:-} ]] && gui=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
   rm -rf "${sd:?}" && mkdir -p "$sd"
-  # sudo drops the environment: the run dir is passed by name, so the
-  # pane script lands in it too
-  ${gui[@]+"${gui[@]}"} /bin/bash -c "cd $(printf '%q' "$ROOT") && env MARSPOT_STATE_DIR=$sd \
-    MARSPOT_BENCH_RUN_DIR=$MARSPOT_BENCH_RUN_DIR LAT_SIDES=ship=$dir LAT_SCENES=type-1 LAT_ROUNDS=${LAT_GATE_ROUNDS:-4} LAT_OUT=$CUR_DIR/latency \
-    bin/_bounded.sh 900 bin/measure-latency.sh" > "$CUR_DIR/measure-latency.log" 2>&1 || rc=$?
+  # the run dir is in the environment, so the pane script lands in it too
+  (cd "$ROOT" && env MARSPOT_STATE_DIR="$sd" LAT_SIDES="ship=$dir" LAT_SCENES=type-1 \
+    LAT_ROUNDS="${LAT_GATE_ROUNDS:-4}" LAT_OUT="$CUR_DIR/latency" \
+    bin/_bounded.sh 900 bin/measure-latency.sh) > "$CUR_DIR/measure-latency.log" 2>&1 || rc=$?
   # a run that stopped part way leaves fewer reports: the rows read this
   echo "${rc:-0} ${LAT_GATE_ROUNDS:-4}" > "$CUR_DIR/latency.rc"
   "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" >/dev/null 2>&1 || true
@@ -46,20 +44,17 @@ bench_key_latency() {
 }
 
 bench_window_gauges() {
-  local GUI=() gauge name script outvar sd
+  local gauge name script outvar sd
   # The shipped app in a window: its memory with 12 panes open, and how
   # long it takes to show a pane's output after launch.  A window needs
-  # the console session; a run that came in over ssh reaches it through
-  # launchctl asuser, as bin/_remote-measure-others-runner.sh does.
-  [[ -z ${SSH_CONNECTION:-} ]] || GUI=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
+  # the console session, which an ssh login of the console user reaches.
   for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT \
       panectl:measure-pane-control.sh:PANECTL_OUT; do
     IFS=: read -r name script outvar <<<"$gauge"
     sd="/tmp/msp-gauge-$$-$name"
     echo "==> $script (a sandbox window)"
     rm -rf "${sd:?}" && mkdir -p "$sd"
-    ${GUI[@]+"${GUI[@]}"} env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
-      MARSPOT_BENCH_RUN_DIR="$MARSPOT_BENCH_RUN_DIR" MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" \
+    env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
       /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
     grep -E '^(footprint12|startup|pane-control) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
     "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true

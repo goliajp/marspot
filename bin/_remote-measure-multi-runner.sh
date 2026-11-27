@@ -50,17 +50,6 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
 
-ASUSER=""
-if [[ -n "${SSH_CONNECTION:-}" ]]; then
-  uid="$(id -u)"
-  if sudo -n launchctl asuser "$uid" /usr/bin/true 2>/dev/null; then
-    ASUSER="sudo -n launchctl asuser $uid sudo -u $(id -un)"
-  else
-    echo "==> no way into the GUI session from ssh (launchctl asuser is not allowed)" >&2
-    exit 1
-  fi
-fi
-
 SESSION_DIR="/tmp/marspot-multi-$$"
 mkdir -p "$SESSION_DIR"
 chmod 0755 "$SESSION_DIR"
@@ -195,13 +184,11 @@ for t in "${TERMS[@]}"; do
   echo "==> [$t r$round] launch $N (load1 $load_start)" >&2
   case "$t" in
     marspot)
-      # shellcheck disable=SC2086
-      $ASUSER env MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" bin/drivers/marspot.sh run-app "$wrapper" "$N" >&2
+      bin/drivers/marspot.sh run-app "$wrapper" "$N" >&2
       ;;
     ghostty)
       for ((i = 0; i < N; i++)); do
-        # shellcheck disable=SC2086
-        $ASUSER bin/drivers/ghostty.sh run-recorded "$GHOSTTY_PIDS" "$wrapper" >&2
+        bin/drivers/ghostty.sh run-recorded "$GHOSTTY_PIDS" "$wrapper" >&2
       done
       ;;
     *) echo "no way to open $N windows of $t" >&2; exit 2 ;;

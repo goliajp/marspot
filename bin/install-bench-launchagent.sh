@@ -9,7 +9,7 @@
 # iTerm/Warp/Terminal and launch Ghostty. Result lands at
 # ~/.marspot-bench-trigger/result.json with a done sentinel.
 #
-# Why a LaunchAgent and not ssh + asuser: macOS 26.5 TCC + SIP scope
+# Why a LaunchAgent and not a plain ssh run: macOS 26.5 TCC + SIP scope
 # AppleEvent Automation to (osascript, target-app) pairs evaluated
 # against the responsible process. ssh-spawned osascript has launchd
 # (or a non-aqua bash) as its responsible process and TCC prompts
