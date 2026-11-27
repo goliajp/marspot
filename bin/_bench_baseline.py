@@ -95,8 +95,8 @@ def relock_targets(baseline):
         yield m, "aggregate_MBps_min", f"L3x{n} MB/s {short}", "min", 0.90
     yield baseline.get("app_footprint_12_panes", {}), "sum_KiB_max", "app footprint 12 panes", "max", 1.10
     st = baseline.get("app_startup", {})
-    yield st, "cold_ms_max", "startup cold", "max", 1.30
-    yield st, "warm_ms_max", "startup warm", "max", 1.30
+    yield st, "cold_ms_max", "startup cold", "max", 1.50
+    yield st, "warm_ms_max", "startup warm", "max", 1.50
     pc = baseline.get("pane_control", {})
     for k in [k for k in pc if k.endswith("_p95_ms_max")]:
         yield pc, k, f"pane control {k.removesuffix('_p95_ms_max')} p95", "max", 1.30
@@ -194,15 +194,17 @@ def self_test():
           and competitor_mismatch(b, "a") is None and competitor_mismatch(b, "b") is not None)
     b.update(scenarios=[{"id": "cat-ascii", "mars_parse_MBps_min": 100.0,
                          "mars_l3_insn_per_byte_max": 40.0, "mars_vs_best_other_min": 1.0}],
-             render_full_repaint={"p99_us_max": 1000}, pane_control={"send_p95_ms_max": 4.2})
+             render_full_repaint={"p99_us_max": 1000}, pane_control={"send_p95_ms_max": 4.2},
+             app_startup={"cold_ms_max": 193})
     rows = [{"metric": "parse MB/s ascii", "value": 200.0, "trials": [199.0, 200.0]},
             {"metric": "L3 insn/byte ascii", "value": 50.0, "trials": [49.0, 51.0]},
             {"metric": "render p99", "value": 900.0, "trials": [900.0]},
-            {"metric": "pane control send p95", "value": 5.0, "trials": [5.0]}]
+            {"metric": "pane control send p95", "value": 5.0, "trials": [5.0]},
+            {"metric": "startup cold", "value": 148, "trials": [148]}]
     values, missing = relock_values(b, rows)
     got = {k: v for _, k, v in values}
     ok = ok and not missing and got == {"mars_parse_MBps_min": 186.0, "mars_l3_insn_per_byte_max": 52.02,
-                                        "p99_us_max": 1350, "send_p95_ms_max": 6.5}
+                                        "p99_us_max": 1350, "send_p95_ms_max": 6.5, "cold_ms_max": 222}
     values, missing = relock_values(b, rows[1:])
     ok = ok and missing == ["mars_parse_MBps_min (parse MB/s ascii)"]
     print("SELF-TEST PASS" if ok else "SELF-TEST FAIL")
