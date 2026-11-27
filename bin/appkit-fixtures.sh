@@ -35,6 +35,8 @@ recorded="$ROOT/tests/fixtures/appkit/RECORDED"
 # gui_cmd, check_console and remote_sync
 # shellcheck source=bin/_e2e-remote-lib.sh
 source "$ROOT/bin/_e2e-remote-lib.sh"
+# shellcheck source=bin/_lock-mark.sh
+source "$ROOT/bin/_lock-mark.sh"
 
 # the sync runs in its own process group, which a Ctrl-C to this script
 # would not reach
@@ -56,7 +58,7 @@ fi
 env_write=""
 (( write )) && env_write="MARSPOT_TEST_WRITE_APPKIT_FIXTURES=1"
 ssh "$HOST" "$(gui_cmd "source ~/.cargo/env && cd ~/work/$REMOTE_NAME && $env_write \
-  /usr/local/bin/bench-lock heavy --max-wait 3600 bin/_bounded.sh 1800 \
+  /usr/local/bin/bench-lock heavy --max-wait 3600 $(lock_until 1800 appkit "$REMOTE_NAME") bin/_bounded.sh 1800 \
   bin/test.sh --run-ignored only -E 'test(live_appkit)'")" </dev/null
 
 if (( write )); then

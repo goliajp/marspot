@@ -50,7 +50,7 @@ setup() {
   local S="$T/$1" R="$T/$1/home/work/$NAME"
   mkdir -p "$S/root/bin" "$S/stubs" "$S/tmp" "$R/bin"
   cp "$ROOT/bin/test-e2e-remote.sh" "$ROOT/bin/_e2e-remote-lib.sh" "$ROOT/bin/_e2e-suites.sh" \
-    "$ROOT/bin/_e2e-host-share.sh" "$ROOT/bin/_git-sha.sh" "$S/root/bin/"
+    "$ROOT/bin/_e2e-host-share.sh" "$ROOT/bin/_lock-mark.sh" "$ROOT/bin/_git-sha.sh" "$S/root/bin/"
   : >"$S/root/bin/test-first.sh"
   [[ $1 != malformed ]] || echo '# e2e-dock-tiles-max: x' >"$S/root/bin/test-first.sh"
   : >"$S/root/bin/test-second.sh"

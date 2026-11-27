@@ -50,5 +50,9 @@ run_held() {
     remote_gui "$1" || suite_rc=$?
     ((suite_rc == OWN_JOB_RC)) || return 0
     echo "==> a job of ours took $HOST's lock first; waiting for it"
+    # of two window runs' holds the later yields (bin/_e2e-own-jobs.py);
+    # a few random seconds keep two that yielded from asking again as one
+    sleep $((1 + RANDOM % 8)) &
+    wait $!
   done
 }

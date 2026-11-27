@@ -48,6 +48,8 @@ remote_sync() {
 }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=bin/_lock-mark.sh
+source "$ROOT/bin/_lock-mark.sh"
 HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
@@ -191,11 +193,11 @@ MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
 # alongside other heavy work rather than holding everyone out.
 LOCK_MODE=bench
 case " $* " in
-  *" --size-tables "*) BENCH_UNTIL_DEFAULT="+40m marspot size tables"; LOCK_MODE=heavy ;;
-  *" --full "*) BENCH_UNTIL_DEFAULT="+20m marspot full bench" ;;
-  *) BENCH_UNTIL_DEFAULT="+10m marspot bench" ;;
+  *" --size-tables "*) BENCH_UNTIL_DEFAULT="+40m"; BENCH_KIND=size-tables; LOCK_MODE=heavy ;;
+  *" --full "*) BENCH_UNTIL_DEFAULT="+20m"; BENCH_KIND=full-bench ;;
+  *) BENCH_UNTIL_DEFAULT="+10m"; BENCH_KIND=bench ;;
 esac
-UNTIL=" --until $(printf '%q' "${MARSPOT_BENCH_UNTIL:-$BENCH_UNTIL_DEFAULT}")"
+UNTIL=" $(lock_until "${MARSPOT_BENCH_UNTIL:-$BENCH_UNTIL_DEFAULT}" "$BENCH_KIND" "$REMOTE_NAME")"
 LOCK_CMD="/usr/local/bin/bench-lock $LOCK_MODE --max-wait $MAX_WAIT$UNTIL"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2

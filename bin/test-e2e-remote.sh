@@ -108,9 +108,6 @@ REMOTE_DIR="work/$REMOTE_NAME"
 SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-900}"
 BUILD_TIMEOUT="${E2E_BUILD_TIMEOUT:-1800}"
 MAX_WAIT="${E2E_MAX_WAIT:-3600}"
-# what each hold of the lock says about itself in `bench-lock status`
-UNTIL=""
-[[ -n ${E2E_UNTIL:-} ]] && UNTIL="--until $(printf '%q' "$E2E_UNTIL marspot e2e $REMOTE_NAME")"
 RUN_ID="$(date +%H%M%S)$$"
 # Names the remote process group of whatever is running right now, so
 # an interrupted run can stop exactly that and nothing else.
@@ -119,14 +116,18 @@ REMOTE_PIDF="/tmp/marspot-e2e-$RUN_ID.pgid"
 LOCK_LOCAL="/tmp/marspot-e2e-remote.$REMOTE_NAME.lock.d"
 
 SUITES=("$@")
-if [[ ${#SUITES[@]} -eq 0 ]]; then
-  SUITES=("${DEFAULT_SUITES[@]}")
-fi
+(( ${#SUITES[@]} )) || SUITES=("${DEFAULT_SUITES[@]}")
 # shellcheck source=bin/_e2e-suites.sh
 source "$ROOT/bin/_e2e-suites.sh"
+# shellcheck source=bin/_lock-mark.sh
+source "$ROOT/bin/_lock-mark.sh"
+# a hold's note in `bench-lock status`: ours, lasting E2E_UNTIL or its limit
+until_for() { lock_until "${E2E_UNTIL:-$1}" e2e "$REMOTE_NAME"; }
+MOST=() # each suite's Dock tile maximum, read only here, before the copy
 for suite in "${SUITES[@]}"; do
   [[ -f "$ROOT/bin/$suite" ]] || { echo "no such suite: bin/$suite" >&2; exit 2; }
-  dock_tiles_max "$ROOT/bin/$suite" >/dev/null || { echo "refusing to run bin/$suite" >&2; exit 2; }
+  most="$(dock_tiles_max "$ROOT/bin/$suite")" || { echo "refusing to run bin/$suite" >&2; exit 2; }
+  MOST+=("$most")
 done
 
 if ! mkdir "$LOCK_LOCAL" 2>/dev/null; then
@@ -171,7 +172,7 @@ commit="$("$ROOT/bin/_git-sha.sh" "$commit")"
 if [[ ${E2E_LOCK:-heavy} != bench ]]; then
   echo "==> building release on $HOST"
   remote_tracked "source ~/.cargo/env && cd ~/$REMOTE_DIR && export MARSPOT_GIT_SHA=$commit && \
-    /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $UNTIL bin/_bounded.sh $BUILD_TIMEOUT \
+    /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $(until_for "$BUILD_TIMEOUT") bin/_bounded.sh $BUILD_TIMEOUT \
     sh -c 'cargo build --release ${E2E_FEATURES:+--features $E2E_FEATURES} --bin marspot-shell --bin marspot-core --bin marspot-session \
       && cargo build --release -p marspot-peer'" \
     >"$LOCK_LOCAL/build.log" 2>&1 || { tail -5 "$LOCK_LOCAL/build.log"; echo "FAIL: release build on $HOST" >&2; exit 1; }
@@ -205,15 +206,15 @@ for suite in "${SUITES[@]}"; do
   echo
   echo "════ $suite on $HOST ════"
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
-    lock="bench --max-wait $MAX_WAIT $UNTIL"
+    lock="bench --max-wait $MAX_WAIT $(until_for $((BUILD_TIMEOUT + SUITE_TIMEOUT)))"
     run="bin/_build_then.sh $BUILD_TIMEOUT $SUITE_TIMEOUT ${E2E_FEATURES:--} $suite"
   elif is_measurement "$suite"; then
     # built above already; a reading taken next to other heavy work
     # would only ever come back busy
-    lock="bench --max-wait $MAX_WAIT $UNTIL"
+    lock="bench --max-wait $MAX_WAIT $(until_for "$SUITE_TIMEOUT")"
     run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   else
-    lock="heavy --max-wait $MAX_WAIT $UNTIL"
+    lock="heavy --max-wait $MAX_WAIT $(until_for "$SUITE_TIMEOUT")"
     run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   fi
   # Short: the session sockets live under it and sun_path is 104 bytes.
@@ -233,10 +234,9 @@ for suite in "${SUITES[@]}"; do
   pre_clean=""
   [[ $suite == measure-active.sh ]] && pre_clean="bin/_active_iterm.sh close $current_sd/iterm.pids; "
   start=$(date +%s)
-  most="$(dock_tiles_max "$ROOT/bin/$suite")" || { rc=1; results+=("FAIL  $suite  (its Dock tile maximum)"); break; }
   # the suite, its cleanup and the leftover check, all in one hold, taken
   # only while no other job of ours holds the lock (sets suite_rc)
-  run_held "$(locked_cmd "$current_sd" "$lock" "$run" "$pre_clean" "$suite_env$fwd" "$most")"
+  run_held "$(locked_cmd "$current_sd" "$lock" "$run" "$pre_clean" "$suite_env$fwd" "${MOST[i - 1]}")"
   if (( suite_rc == OWN_JOB_RC )); then
     echo "FAIL: $suite not started: a job of ours held $HOST's lock for ${MAX_WAIT}s; starting no other suite" >&2
     results+=("FAIL  $suite  (not started: a job of ours held $HOST's lock)")

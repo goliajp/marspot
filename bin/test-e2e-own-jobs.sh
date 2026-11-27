@@ -4,9 +4,12 @@
 # declares:
 #
 #   jobs      : bin/_e2e-own-jobs.py tells our holders of the lock (by the
-#               run's prefix, a remote copy under ~/work named for marspot
-#               in the command, a run's note, or the lock log's directory
-#               of that take) from other projects' and from the asking one
+#               note bin/_lock-mark.sh gives, a run's scratch, a remote
+#               copy under ~/work named for marspot in the command, or the
+#               lock log's directory of that take) from other projects' and
+#               from the asking one; with the log unread, a holder it
+#               cannot tell is not passed; of two window suites' holds the
+#               later yields
 #   own-wait  : a job of ours holds the lock all along: the driver waits
 #               up to E2E_MAX_WAIT, starts no suite and says why
 #   own-gone  : a job of ours holds it at first, then only another
@@ -66,8 +69,25 @@ jobs stopped 1 "ours: pid=9999" "$OURS [stopped]"
 jobs foreign 0 "" "$FOREIGN"$'\n'$'5555\theavy\twaiting since '"$SINCE"$'\tsh -c /tmp/msp-e2e-2-1'
 printf '%s\n' "$(( AT - 60 ))"$'\theavy\t0\ttook\tbin/_bounded.sh 600 bin/test.sh -E x\t/Users/u/work/test-marspot' >"$J/lock.log"
 jobs take-at-another-time 0 "" "$OURS"
-LOG="$J/none" jobs log-unread 0 "" "$OURS"
-LOG="$J/none" jobs log-unread-said 0 "note: lock log $J/none unread" "$OURS"
+# with the log unread, a holder whose line says nothing is not passed as
+# another project's
+LOG="$J/none" jobs log-unread 2 "unread: pid=9999" "$OURS"
+LOG="$J/none" jobs log-unread-said 2 "note: lock log $J/none unread" "$OURS"
+LOG="$J/none" jobs log-unread-foreign 2 "unread: pid=8888" "$FOREIGN"
+LOG="$J/none" jobs log-unread-mark 1 "ours: pid=7774" \
+  $'7774\theavy\tholding since '"$SINCE"', until 2026-11-28 10:30 marspot-job test test-marspot'$'\tbin/_bounded.sh 1800 sh -c x'
+LOG="$J/none" jobs log-unread-tmp 1 "ours: pid=7773" $'7773\theavy\tholding since '"$SINCE"$'\t/bin/bash -s -- /tmp/marspot-fresh-1-2.dmg'
+# of two window suites' holds the later yields: the earlier leaves it out
+LATER=$'7772\theavy\tholding since 2026-11-28 10:00:05\tsh -c x; bin/_e2e-own-jobs.py --self $PPID; y /tmp/msp-e2e-3-1'
+EARLIER=$'7771\theavy\tholding since '"$SINCE"$'\tsh -c x; bin/_e2e-own-jobs.py --self $PPID; y /tmp/msp-e2e-2-1'
+jobs earlier-goes-on 0 "" "$EARLIER"$'\n'"$LATER" --self 7771
+jobs later-yields 1 "ours: pid=7771" "$EARLIER"$'\n'"$LATER" --self 7772
+SAME=$'7779\theavy\tholding since '"$SINCE"$'\tsh -c x; bin/_e2e-own-jobs.py --self $PPID; y /tmp/msp-e2e-4-1'
+jobs same-second-lower-pid 0 "" "$EARLIER"$'\n'"$SAME" --self 7771
+jobs same-second-higher-pid 1 "ours: pid=7771" "$EARLIER"$'\n'"$SAME" --self 7779
+jobs later-build-not-left-out 1 "ours: pid=7770" \
+  "$EARLIER"$'\n7770\theavy\tholding since 2026-11-28 10:00:05, until 2026-11-28 10:30 marspot-job e2e x\tbin/_bounded.sh 1800 sh -c cargo' \
+  --self 7771
 : >"$J/fail"
 jobs status-unread 2 "unread: bench-lock status exited 1" "$OURS"
 
@@ -110,6 +130,7 @@ check "then the suite ran in its hold" grep -q 'suite-clean check held=1' "$S/ev
 check "the hold looked once more (status read $(cat "$S/status.n") times)" test "$(cat "$S/status.n")" -ge 3
 # (the command reaches ssh quoted for bash -lc: spaces escaped)
 check "the check got the declared maximum" grep -qE -- '--dock-max(\\)? 4(\\)? --suite-rc' "$S/ssh.log"
+check "the hold says it is ours" grep -qE -- "--until[^-]*marspot-job[^a-z]+e2e[^a-z]+$NAME" "$S/ssh.log"
 ((failed > before_case)) && dump own-gone
 
 echo "own-inlock: ours takes the lock between the driver's look and the hold"
