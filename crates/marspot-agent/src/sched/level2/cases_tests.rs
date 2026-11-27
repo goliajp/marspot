@@ -1,6 +1,6 @@
 //! The simulation cases that need no executor.
 
-use super::grid::{Grid, lasts_high};
+use super::grid::{DRAIN_PACE, Grid, drain_at, lasts_high};
 use super::standing::{Standing, Verdict};
 use super::tests::{acct, input, pane};
 use super::trigger::{Now, Triggers};
@@ -83,6 +83,44 @@ fn sched_level2_week_that_would_lapse_at_a_renewal_is_used_up_before_it() {
 }
 
 #[test]
+fn sched_level2_a_move_off_an_emptying_account_onto_one_renewing_opens_when_planned() {
+    // the herd off P1.  With the targets renewing past the horizon each
+    // move opens a clean rest's lead before P1's deadline; with P2
+    // renewing in 10 h, after the deadline, a move onto it opens when
+    // planned and still closes by the deadline
+    let (mut a, p) = herd();
+    let lead = -(1.0 - super::window::CLEAN_CHANCE).ln() / p[0].clean_per_h;
+    let far = plan(&input(&a, &p), None);
+    assert!(!far.switches.is_empty() && far.switches.iter().all(|s| s.t_dead - s.t_open <= lead + 1e-6), "{:?}", far.switches);
+    let deadline = far.switches.iter().map(|s| s.t_dead).fold(0.0, f64::max);
+    a[1] = acct(2, a[1].q.r, 0.0, 10.0);
+    let near = plan(&input(&a, &p), None);
+    let onto: Vec<_> = near.switches.iter().filter(|s| s.to == 2).collect();
+    assert!(!onto.is_empty() && onto.iter().all(|s| s.t_dead <= deadline + 1e-6 && s.t_dead - s.t_open > lead + 1e-6), "{:?}", near.switches);
+}
+
+#[test]
+fn sched_level2_drain_time_is_found_only_for_week_that_would_lapse_inside_the_horizon() {
+    let a = [acct(1, 0.03, 0.0, 10.0), acct(2, 0.05, 0.0, 30.0), acct(3, 0.04, 0.0, 10.0)];
+    let p = [pane(10, 3, false, 0.0, 0.004)];
+    let i = input(&a, &p);
+    let load = [0.0, 0.0, 0.004];
+    // P1: three points left, at half of 0.01 an hour used up in the 6 h
+    // before its renewal
+    let t = drain_at(&i, &load, 0, 0.01).expect("P1 drains");
+    assert!((t - (10.0 - 0.03 / (0.01 * DRAIN_PACE))).abs() < 1e-9, "{t}");
+    // P2 renews past the horizon; P3's own pane uses its week up by then
+    assert_eq!(drain_at(&i, &load, 1, 0.01), None);
+    assert_eq!(drain_at(&i, &load, 2, 0.01), None);
+    // a pane with no speed never drains anything
+    assert_eq!(drain_at(&i, &load, 0, 0.0), None);
+    // no panes at all: no drain cut, and the grid still builds
+    let none = input(&a, &[]);
+    let g = Grid::new(&none);
+    assert_eq!(g.cuts, vec![0.0, 6.0, 10.0, 12.0, 18.0, 24.0]);
+}
+
+#[test]
 fn sched_level2_churn_of_helpers_changes_no_structure() {
     // twenty helpers of three minutes each over an hour count only in
     // fleet demand: passes every 2 s, at most one full search a minute
@@ -145,3 +183,4 @@ fn sched_level2_a_band_twice_as_wide_flips_few_decisions() {
     println!("band × 2: {flips} of {decisions} first switches differ");
     assert!(flips * 10 <= decisions * 3, "{flips} of {decisions}");
 }
+

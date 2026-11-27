@@ -22,7 +22,7 @@ const BUCKET_H: f64 = 6.0;
 /// ran at this share of its level: what is left there lapses whole when
 /// the pane runs slower than its level, while an account it empties
 /// early costs one refusal and a move on.
-const DRAIN_PACE: f64 = 0.5;
+pub(super) const DRAIN_PACE: f64 = 0.5;
 const SAME_H: f64 = 1e-6;
 
 /// Where accounts and panes are, by index.
@@ -203,7 +203,7 @@ impl Grid {
 /// When a pane using `h` weeks an hour joining account `k` uses up what
 /// the panes there leave at its renewal inside the horizon, just by then
 /// at `DRAIN_PACE` of that speed.
-fn drain_at(input: &Input, load: &[f64], k: usize, h: f64) -> Option<f64> {
+pub(super) fn drain_at(input: &Input, load: &[f64], k: usize, h: f64) -> Option<f64> {
     let h = h * DRAIN_PACE;
     let q = &input.accounts[k].q;
     let left = q.r - load[k] * q.t;
