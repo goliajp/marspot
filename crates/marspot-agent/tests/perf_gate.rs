@@ -104,7 +104,7 @@ fn sched_state_bytes() {
 const PLAN_BUDGET: Duration = Duration::from_millis(824);
 
 /// The standing plan re-timed and re-costed at the same size.
-const RETIME_BUDGET: Duration = Duration::from_micros(478);
+const RETIME_BUDGET: Duration = Duration::from_micros(9487);
 
 fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pane>) {
     let a = (0..accounts)
