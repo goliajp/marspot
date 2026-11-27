@@ -65,8 +65,8 @@ remote_tracked() {
 }
 
 stop_remote() {
-  [[ -n $SYNC_PGID ]] && kill -TERM -- "-$SYNC_PGID" 2>/dev/null
-  [[ -n $SSH_PID ]] && kill -TERM "$SSH_PID" 2>/dev/null
+  [[ -n $SYNC_PGID ]] && kill -TERM -- "-$SYNC_PGID" 2>/dev/null || true
+  [[ -n $SSH_PID ]] && kill -TERM "$SSH_PID" 2>/dev/null || true
   ssh "${SSH_CLEANUP[@]}" "$HOST" "
     if [ -f $REMOTE_PIDF ]; then
       kill -TERM -- -\$(cat $REMOTE_PIDF) 2>/dev/null
@@ -82,8 +82,10 @@ reap_sandbox() {
 
 # A suite's state dir and its scratch (dev_tmp, under the same prefix),
 # removed once it passed or was not measured; a failed one is kept.
+# sh expands the glob: the runner's login zsh would refuse the whole rm
+# when no scratch matches
 drop_sandbox() {
-  ssh "${SSH_CLEANUP[@]}" "$HOST" "rm -rf ${1:?} ${1:?}-*" </dev/null || true
+  ssh "${SSH_CLEANUP[@]}" "$HOST" "sh -c 'rm -rf \"\${1:?}\" \"\${1:?}\"-*' _ ${1:?}" </dev/null || true
 }
 
 # What LaunchServices still lists of what a suite opened (a Dock tile on

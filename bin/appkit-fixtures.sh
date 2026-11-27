@@ -37,6 +37,9 @@ recorded="$ROOT/tests/fixtures/appkit/RECORDED"
 # shellcheck source=bin/_e2e-remote-lib.sh
 source "$ROOT/bin/_e2e-remote-lib.sh"
 
+# the sync runs in its own process group, which a Ctrl-C to this script
+# would not reach
+trap '[[ -n $SYNC_PGID ]] && kill -TERM -- "-$SYNC_PGID" 2>/dev/null; exit 130' INT TERM HUP
 remote_sync "$HOST" --name "$REMOTE_NAME"
 trap 'remote_sync "$HOST" --name "$REMOTE_NAME" --forget || true' EXIT
 
