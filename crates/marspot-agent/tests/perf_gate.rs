@@ -1,5 +1,6 @@
 //! What the scheduler costs, held to the budgets in `BUDGETS.md`: each
-//! budget is three times the largest P95 of three runs on mini2.
+//! budget is three times the largest P95 of nine runs on mini2, three
+//! of them alone and six beside the other jobs it shares with.
 
 use marspot_agent::quota::choose::Mover;
 use marspot_agent::quota::replay::{Inputs, Kind, Rule};
@@ -12,11 +13,11 @@ use std::time::{Duration, Instant};
 
 /// One scan's decisions: 64 panes, 16 accounts priced, 8 candidates
 /// each.  Budget per decision.
-const DECIDE_BUDGET: Duration = Duration::from_nanos(2_406);
+const DECIDE_BUDGET: Duration = Duration::from_nanos(5_985);
 
 /// The candidates of one resting pane's account decision built from
 /// the objective in force over 16 accounts.  Budget per decision.
-const ALLOC_BUDGET: Duration = Duration::from_nanos(28_875);
+const ALLOC_BUDGET: Duration = Duration::from_nanos(62_751);
 
 /// What the scheduler remembers may not grow past this.
 const STATE_CAP: usize = 64 * 1024;
@@ -112,14 +113,14 @@ fn sched_state_bytes() {
 
 /// One full search of the pane plan at 64 panes × 16 accounts, some of
 /// them running out inside the day.  Budget per search.
-const PLAN_BUDGET: Duration = Duration::from_micros(207_076);
+const PLAN_BUDGET: Duration = Duration::from_micros(305_804);
 
 /// The standing plan re-timed and re-costed at the same size.
-const RETIME_BUDGET: Duration = Duration::from_micros(1_557);
+const RETIME_BUDGET: Duration = Duration::from_micros(3_755);
 
 /// One full search whose exhaustive pass enumerates the most joint
 /// choices it allows.
-const EXACT_BUDGET: Duration = Duration::from_micros(14_230);
+const EXACT_BUDGET: Duration = Duration::from_micros(36_066);
 
 fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pane>) {
     let a = (0..accounts)
