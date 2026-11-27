@@ -20,7 +20,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use marspot_agent::sched::calib::Calib;
+use marspot_agent::quota::Quant;
+use marspot_agent::sched::calib::{Calib, Closed};
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level1::Level1;
 use marspot_agent::sched::level2::line::Said;
@@ -45,6 +46,8 @@ pub(super) struct PanePlan {
     triggers: Triggers,
     /// The pane speeds checked against what the accounts measure.
     calib: Calib,
+    calib_q: Vec<Quant>,
+    calib_asked: Vec<f64>,
     /// Refusals of the last day: when, and whether the plan foresaw it.
     refusals: VecDeque<(i64, bool)>,
     refused_seen: HashMap<u64, i64>,
@@ -65,6 +68,8 @@ impl PanePlan {
             standing: Standing::default(),
             triggers: Triggers::default(),
             calib: Calib::default(),
+            calib_q: Vec::new(),
+            calib_asked: Vec::new(),
             refusals: VecDeque::new(),
             refused_seen: HashMap::new(),
             foreseen: Vec::new(),
@@ -78,17 +83,20 @@ impl PanePlan {
     }
 
     /// Checks the pane speeds against the accounts' readings and scales
-    /// them by the factor in force; a window that moves the ratio is
-    /// logged as `sched.calib`.
+    /// them by the factor in force.  Each window that closes with a ratio,
+    /// or while a factor other than 1 is in force, is logged as
+    /// `sched.calib` with each counted account's loss and ask in points.
     fn calibrate(&mut self, b: &mut Built, now: i64, log: &mut Vec<(&'static str, String)>) {
-        let quants: Vec<_> = b.accounts.iter().map(|x| x.q.clone()).collect();
-        let asked: Vec<f64> = quants.iter().map(|q| b.panes.iter().filter(|p| p.on == q.id).map(|p| p.speed[0] + p.speed[1]).sum()).collect();
-        let was = self.calib.ratio;
-        self.calib.observe(now, &quants, &asked);
-        if let Some(r) = self.calib.ratio.filter(|r| Some(*r) != was) {
-            log.push(("sched.calib", format!("ratio={r:.3} factor={:.3}", self.calib.factor())));
-        }
+        let (quants, asked) = (&mut self.calib_q, &mut self.calib_asked);
+        quants.clear();
+        quants.extend(b.accounts.iter().map(|x| x.q.clone()));
+        asked.clear();
+        asked.extend(quants.iter().map(|q| b.panes.iter().filter(|p| p.on == q.id).map(|p| p.speed[0] + p.speed[1]).sum::<f64>()));
+        let closed = self.calib.observe(now, quants, asked, b.stale_feed);
         let f = self.calib.factor();
+        if closed && (self.calib.closed.ratio.is_some() || f != 1.0) {
+            log.push(("sched.calib", calib_line(&self.calib.closed, f)));
+        }
         for p in &mut b.panes {
             p.speed = p.speed.map(|x| x * f);
             p.high = p.high.map(|x| x * f);
@@ -235,6 +243,17 @@ fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)
+}
+
+/// A closed calibration window for the log: the ratio, the factor in
+/// force, and each counted account's loss / ask in points.
+fn calib_line(c: &Closed, factor: f64) -> String {
+    let ratio = c.ratio.map_or("-".to_string(), |r| format!("{r:.3}"));
+    let mut s = format!("ratio={ratio} factor={factor:.3} used={:.1} want={:.1}", 100.0 * c.used, 100.0 * c.want);
+    for (id, used, want) in &c.accounts {
+        s.push_str(&format!(" P{id}={:.1}/{:.1}", 100.0 * used, 100.0 * want));
+    }
+    s
 }
 
 #[cfg(test)]

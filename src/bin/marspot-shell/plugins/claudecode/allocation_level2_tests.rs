@@ -121,18 +121,31 @@ fn allocation_level2_checks_the_pane_speeds_against_the_account_readings() {
     let asked: f64 = b.panes.iter().filter(|p| p.on == b.accounts[0].q.id).map(|p| p.speed[0] + p.speed[1]).sum();
     let mut pp = PanePlan::new(&r);
     pp.scan(&mut a, &snap, &view, Some(&fc), cp.last());
-    // eight hours on, P3 lost a third of what its panes' speeds put on it
+    // read every ten minutes for six hours, P3 losing three times what
+    // its panes' speeds put on it: under ten points asked, but the loss
+    // is over ten
+    let mut lines = Vec::new();
     let mut later = snap.clone();
-    later.now = NOW + 8 * 3600;
-    later.feed_at = Some(later.now - 60);
-    later.accounts[0].week_used = 0.5 + asked * 8.0 / 3.0;
-    for acc in &mut later.accounts {
-        acc.measured_at = later.now - 60;
+    for k in 1..=36 {
+        later.now = NOW + k * 600;
+        later.feed_at = Some(later.now - 60);
+        later.accounts[0].week_used = 0.5 + asked * (k * 600) as f64 / 3600.0 * 3.0;
+        for acc in &mut later.accounts {
+            acc.measured_at = later.now - 60;
+        }
+        cp.scan(&later.accounts, &view, Some(&fc), 0.0, later.now);
+        lines.extend(pp.scan(&mut a, &later, &view, Some(&fc), cp.last()).into_iter().filter(|l| l.0 == "sched.calib").map(|l| l.1));
     }
-    cp.scan(&later.accounts, &view, Some(&fc), 0.0, later.now);
-    let log = pp.scan(&mut a, &later, &view, Some(&fc), cp.last());
-    let line = log.iter().find(|l| l.0 == "sched.calib").map(|l| l.1.clone()).unwrap_or_else(|| panic!("no calib line: {log:?}"));
-    assert_eq!(line, "ratio=0.333 factor=0.333");
+    let want = 100.0 * asked * 6.0;
+    assert_eq!(lines, vec![format!("ratio=3.000 factor=3.000 used={:.1} want={want:.1} P3={:.1}/{want:.1} P7=0.0/0.0", want * 3.0, want * 3.0)]);
+    // with the feed stale for the next six hours no window closes
+    for k in 37..=72 {
+        later.now = NOW + k * 600;
+        later.feed_at = Some(NOW + 36 * 600);
+        cp.scan(&later.accounts, &view, Some(&fc), 0.0, later.now);
+        let log = pp.scan(&mut a, &later, &view, Some(&fc), cp.last());
+        assert!(log.iter().all(|l| l.0 != "sched.calib"), "{log:?}");
+    }
     let _ = fs::remove_dir_all(&r);
 }
 

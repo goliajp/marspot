@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.859"  # a pane plan moves a pane onto an account before its renewal, early enough to use up what would lapse there
+shell   = "0.7.860"  # the pane plan's speed check counts only fresh readings, restarts after a gap, holds its factor near the band edge and logs each account
 core    = "0.12.758"  # font family matching never waits on a font macOS has not downloaded
 session = "0.11.482"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp

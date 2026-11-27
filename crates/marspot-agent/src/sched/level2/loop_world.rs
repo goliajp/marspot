@@ -26,9 +26,10 @@
 //! Both policies read each account's week and restricted window with a
 //! reading error of up to one point either way, drawn afresh every
 //! reading from a stream of its own, so both see the same readings; an
-//! account with nothing left reads empty.
+//! account with nothing left reads empty.  Now and then the feed goes
+//! out and both read the accounts as the shell does then.
 
-use super::loop_plan::{Driver, Read};
+use super::loop_plan::{Driver, Feed, Read};
 use super::oracle_tests::Rng;
 use super::standing::Standing;
 use super::tests::KAPPA;
@@ -116,6 +117,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
     }
     let mut w = Week::default();
     let mut drv = Driver::default();
+    let mut feed = Feed::new(seed);
     // the last moment demand went unmet; a renewal lapses as waste when
     // demand went unmet in the week before it
     let mut last_unmet: Option<i64> = None;
@@ -145,10 +147,11 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         for e in &mut err {
             *e = [READ_ERR * (2.0 * noise.next() - 1.0), READ_ERR * (2.0 * noise.next() - 1.0)];
         }
-        drv.step(policy, &Read { acc: &acc, err: &err }, &panes, now, false);
+        feed.step(&acc, &err, &panes, now, STEP);
+        drv.step(policy, &Read { acc: &acc, err: &err, feed: &feed, now }, &panes, now, false);
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
             if rng.next() < 1.0 - (-rate / 12.0).exp() {
-                rest(&Read { acc: &acc, err: &err }, &mut panes, k, now, policy, &drv.st, &mut w);
+                rest(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, policy, &drv.st, &mut w);
             }
         }
         let mut refused = false;
@@ -182,11 +185,11 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         }
         for k in 0..panes.len() {
             if panes[k].stalled {
-                refuse(&Read { acc: &acc, err: &err }, &mut panes, k, now, &mut w);
+                refuse(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, &mut w);
             }
         }
         if refused {
-            drv.step(policy, &Read { acc: &acc, err: &err }, &panes, now, true);
+            drv.step(policy, &Read { acc: &acc, err: &err, feed: &feed, now }, &panes, now, true);
         }
     }
     w
@@ -258,7 +261,7 @@ fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &S
                 left: p.left.map(|(id, at)| (id, (now - at) as f64 / 3600.0)).into_iter().collect(),
                 band_last_hour: 0,
                 demand: 0.0,
-                stale_feed: false,
+                stale_feed: read.stale_feed(),
                 speed_known: true,
                 keeps_restricted: false,
                 moves_week: p.planned.iter().filter(|at| now - **at < WEEK).count(),
