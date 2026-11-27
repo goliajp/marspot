@@ -22,17 +22,20 @@
 //! switch (`fit`).
 
 use super::exact;
+use super::fit::{fit, prune};
 use super::grid::Grid;
 use super::moves;
 use super::propose::{key, proposals, score};
-use super::sim::{Ctx, Sim, Totals};
-use super::{EXEMPT_H, H2, Input, MIN_GAIN, MIN_GAIN_EFF, Mode, Plan, Sched, TIE};
+use super::ctx::Ctx;
+use super::sim::Sim;
+use super::tally::{Stage, Tally};
+use super::{EXEMPT_H, H2, Input, MIN_GAIN, MIN_GAIN_EFF, Mode, Plan, Sched, TIE, Totals};
 
 const ROUNDS: usize = 4;
 const KEEP: usize = 2;
 /// A proposal is simulated only when its linear score beats staying by this.
 const SCREEN: f64 = 1e-7;
-const NOISE: f64 = 1e-9;
+pub(super) const NOISE: f64 = 1e-9;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Cost {
@@ -49,6 +52,7 @@ pub(super) struct Eval<'a, 'b> {
     pub ctx: Ctx<'a, 'b>,
     pub sim: Sim,
     pub charge: f64,
+    pub tally: Tally,
 }
 
 impl<'a, 'b> Eval<'a, 'b> {
@@ -58,6 +62,11 @@ impl<'a, 'b> Eval<'a, 'b> {
 
     pub fn grid(&self) -> &'a Grid {
         self.ctx.grid
+    }
+
+    /// The simulations since the last mark were run for `stage`.
+    pub fn mark(&mut self, stage: Stage) {
+        self.tally.mark(stage, self.sim.runs);
     }
 
     pub fn cost(&mut self, s: &[Sched]) -> Cost {
@@ -115,7 +124,7 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     let g = Grid::new(input);
     let ctx = Ctx::new(input, &g);
     let sim = Sim::new(&ctx);
-    let mut e = Eval { ctx, sim, charge: 0.0 };
+    let mut e = Eval { ctx, sim, charge: 0.0, tally: Tally::default() };
     let n = input.panes.len();
     let idle = vec![Sched::STAY; n];
     let mut start: Vec<Sched> = start.filter(|s| s.len() == n).map(<[Sched]>::to_vec).unwrap_or_else(|| idle.clone());
@@ -131,6 +140,7 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     let charge = e.charge;
     e.charge = 0.0;
     prune(&mut e, &mut best);
+    e.mark(Stage::Prune);
     let idle_cost = e.cost(&idle);
     let c = e.cost(&best);
     let gains = idle_cost.money - c.money >= MIN_GAIN || (c.money <= idle_cost.money + NOISE && idle_cost.eff - c.eff >= MIN_GAIN_EFF);
@@ -140,67 +150,16 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     super::finish::plan(&mut e, &best, mode, active, charge, idle_cost.totals)
 }
 
-/// The plan that fits the fleet's day and the notices an hour.  The
-/// charge per counted switch is the gain of the dearest pane left out:
-/// each pane's switches are worth what the plan loses without them, the
-/// panes of least gain per counted switch are left out until the plan
-/// fits, and the search runs once more from there at that charge, so a
-/// switch comes back only if it gains more than the charge.  With
-/// separable gains this is the charge bisection would settle on.
-fn fit(e: &mut Eval, over: Vec<Sched>, mode: Mode) -> (Vec<Sched>, Mode) {
-    let base = e.cost(&over).money;
-    let mut gains: Vec<(f64, usize)> = Vec::new();
-    for p in 0..over.len() {
-        let counted = (0..over[p].n as usize).filter(|&h| !e.exempt(p, &over[p], h)).count();
-        if counted == 0 {
-            continue;
-        }
-        let mut t = over.clone();
-        t[p] = Sched::STAY;
-        gains.push(((e.cost(&t).money - base) / counted as f64, p));
-    }
-    gains.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    let mut trimmed = over;
-    let mut charge = 0.0_f64;
-    for (g, p) in gains {
-        if e.fits(&trimmed) {
-            break;
-        }
-        trimmed[p] = Sched::STAY;
-        charge = charge.max(g);
-    }
-    e.charge = charge.max(0.0) + NOISE;
-    let (s, m, _) = solve(e, &trimmed);
-    if e.fits(&s) { (s, m) } else { (moves::trim(e, trimmed), mode) }
-}
-
-/// A pane whose switches the plan does no worse without stays: a chain
-/// or a swap can leave a switch that no longer gains anything.
-fn prune(e: &mut Eval, best: &mut [Sched]) {
-    let mut cur = e.cost(best);
-    for p in 0..best.len() {
-        if best[p].n == 0 {
-            continue;
-        }
-        let was = best[p];
-        best[p] = Sched::STAY;
-        let c = e.cost(best);
-        if better(&cur, &c) {
-            best[p] = was;
-        } else {
-            cur = c;
-        }
-    }
-}
-
 /// The best schedules from `start` at the charge in force.
-fn solve(e: &mut Eval, start: &[Sched]) -> (Vec<Sched>, Mode, usize) {
+pub(super) fn solve(e: &mut Eval, start: &[Sched]) -> (Vec<Sched>, Mode, usize) {
     let mut cur = start.to_vec();
     let mut cost = e.cost(&cur);
     let active = active(e, &cur);
     let movable: Vec<usize> = (0..cur.len()).filter(|&p| e.grid().movable(e.input(), p)).collect();
+    e.mark(Stage::Base);
     if let Some(found) = exact::run(e, &cur, &movable) {
         let c = e.cost(&found);
+        e.mark(Stage::Exact);
         if better(&c, &cost) {
             cur = found;
         }
@@ -208,37 +167,48 @@ fn solve(e: &mut Eval, start: &[Sched]) -> (Vec<Sched>, Mode, usize) {
     }
     if let Some(found) = exact::run(e, &cur, &active) {
         let c = e.cost(&found);
+        e.mark(Stage::Exact);
         if better(&c, &cost) {
             cur = found;
         }
         return (cur, Mode::Active, active.len());
     }
     for _ in 0..ROUNDS {
-        let mut kept = false;
         let order = by_stay_cost(e, &cur, &active);
-        // proposals are priced off the last run, which may be a trial
-        // that differs from `cur` in one pane: close enough to rank by
-        for &p in &order {
-            let here = score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]);
-            let mut props = proposals(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, KEEP);
-            if cur[p] != Sched::STAY {
-                props.push((score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &Sched::STAY), Sched::STAY));
-            }
-            for (sc, s) in props {
-                if sc < here - SCREEN {
-                    kept |= e.try_pane(&mut cur, &mut cost, p, s);
-                }
-            }
-        }
+        e.mark(Stage::Base);
+        let mut kept = sweep(e, &mut cur, &mut cost, &order);
+        e.mark(Stage::Try);
         if !kept {
             let dear: Vec<usize> = order.iter().copied().take(8).collect();
             kept = moves::pairs_and_chains(e, &mut cur, &mut cost, &dear);
+            e.mark(Stage::Moves);
         }
         if !kept {
             break;
         }
     }
     (cur, Mode::Search, active.len())
+}
+
+/// One sweep over `order`: each pane's best proposals that beat staying
+/// at linear prices, each kept only if the simulated cost falls.
+fn sweep(e: &mut Eval, cur: &mut [Sched], cost: &mut Cost, order: &[usize]) -> bool {
+    let mut kept = false;
+    // proposals are priced off the last run, which may be a trial
+    // that differs from `cur` in one pane: close enough to rank by
+    for &p in order {
+        let here = score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]);
+        let mut props = proposals(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, KEEP);
+        if cur[p] != Sched::STAY {
+            props.push((score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &Sched::STAY), Sched::STAY));
+        }
+        for (sc, s) in props {
+            if sc < here - SCREEN {
+                kept |= e.try_pane(cur, cost, p, s);
+            }
+        }
+    }
+    kept
 }
 
 /// Panes dearest to keep where they are first: their linear score.
@@ -278,7 +248,8 @@ pub(super) fn evaluate(input: &Input, scheds: &[Sched]) -> Plan {
 pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched]) -> Plan {
     let ctx = Ctx::new(input, g);
     let sim = Sim::new(&ctx);
-    let mut e = Eval { ctx, sim, charge: 0.0 };
+    let mut e = Eval { ctx, sim, charge: 0.0, tally: Tally::default() };
     let idle = e.cost(&vec![Sched::STAY; input.panes.len()]).totals;
     super::finish::plan(&mut e, scheds, Mode::Search, 0, 0.0, idle)
 }
+

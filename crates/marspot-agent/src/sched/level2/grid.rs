@@ -10,7 +10,9 @@
 //! not barred, not just left, not this pane's account, and lasting the
 //! pane six hours at the high band with the panes already there.
 
-use super::sim::Ctx;
+use std::cell::OnceCell;
+
+use super::ctx::Ctx;
 use super::window::dead_by_exhaustion;
 use super::{Account, H2, Input, LASTS_H, Pane};
 use crate::quota::EPS;
@@ -43,6 +45,8 @@ pub struct Grid {
     /// one point of reading error at its high-band load; the horizon for
     /// the others.
     pub dead: Vec<f64>,
+    /// Each pane's targets, worked out when first asked for.
+    targets: Vec<OnceCell<Vec<usize>>>,
 }
 
 fn index(accounts: &[Account], id: u8) -> Option<usize> {
@@ -104,7 +108,8 @@ impl Grid {
         let late = vec![None; input.accounts.len()];
         let deadline = vec![H2; input.accounts.len()];
         let dead = deadline.clone();
-        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead }
+        let targets = vec![OnceCell::new(); input.panes.len()];
+        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead, targets }
     }
 
     pub fn segs(&self) -> usize {
@@ -142,8 +147,8 @@ impl Grid {
     }
 
     /// Every target of pane `p`, ascending by index.
-    pub fn targets(&self, input: &Input, p: usize) -> Vec<usize> {
-        (0..input.accounts.len()).filter(|&j| self.target(input, p, j)).collect()
+    pub fn targets(&self, input: &Input, p: usize) -> &[usize] {
+        self.targets[p].get_or_init(|| (0..input.accounts.len()).filter(|&j| self.target(input, p, j)).collect())
     }
 
     /// The pane may hold a planned switch at all.

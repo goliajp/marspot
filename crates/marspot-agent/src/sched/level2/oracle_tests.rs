@@ -10,7 +10,8 @@
 use super::grid::Grid;
 use super::propose::{allowed, candidates};
 use super::search::{Cost, better};
-use super::sim::{Ctx, Sim};
+use super::ctx::Ctx;
+use super::sim::Sim;
 use super::tests::{KAPPA, acct, input, pane};
 use super::*;
 use crate::sched::level1::{self, World};

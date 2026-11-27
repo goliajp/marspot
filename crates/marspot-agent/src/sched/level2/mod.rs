@@ -20,21 +20,25 @@
 //!
 //! Units: weeks (`0.01` is a point), hours from now.
 
+mod ctx;
 mod exact;
 mod finish;
+mod fit;
 mod grid;
 pub mod line;
 mod moves;
 pub mod pass;
+mod placed;
 mod propose;
 mod search;
 mod sim;
+mod tally;
 pub mod standing;
 pub mod trigger;
 mod window;
 
 pub use grid::Grid;
-pub use sim::Totals;
+pub use tally::{Stage, Tally};
 pub use window::Kind;
 
 use crate::quota::Quant;
@@ -64,6 +68,28 @@ pub const NOTICES_PER_HOUR: usize = 4;
 pub const EXEMPT_H: f64 = 2.0;
 /// A target must last a newcomer this long at the high band.
 pub const LASTS_H: f64 = 6.0;
+
+/// What a set of schedules costs, weeks and stall hours.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Totals {
+    pub lapsed: f64,
+    /// Week left at the end that the loads then do not use up before
+    /// the account's renewal after the horizon.
+    pub lapse_after: f64,
+    /// Plain use beyond each account's spare, before `pi`.
+    pub reserve_taken: f64,
+    pub rewrites: f64,
+    pub lost_work: f64,
+    /// Rewrites paid at refusals.
+    pub refused: f64,
+    /// What is left at the end, at level 1's prices.
+    pub left_value: f64,
+    pub unserved: f64,
+    pub money: f64,
+    pub eff: f64,
+    pub refusals: u16,
+    pub switches: u16,
+}
 
 /// One account as level 2 sees it.
 #[derive(Clone, Debug, PartialEq)]
@@ -184,6 +210,8 @@ pub struct Plan {
     /// Panes searched, simulations run, the charge per switch.
     pub active: usize,
     pub sims: usize,
+    /// The simulations by what each was run for.
+    pub tally: Tally,
     pub charge: f64,
     pub cuts: Vec<f64>,
 }
