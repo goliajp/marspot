@@ -41,6 +41,10 @@ use marspot::ui::strings::{t, Msg};
 pub(super) const UNSENT_STANDS: Duration = Duration::from_secs(3);
 pub(super) const UNSENT_CAP: usize = 16;
 
+/// How soon after the composition that answered the guard ends its
+/// commit arrives: both come from one call of the input method.
+const COMMIT_FOLLOWS: Duration = Duration::from_millis(500);
+
 /// The refusal a program is given.
 pub(super) const REFUSED: &str = "refused: this would send /model to Claude Code, which changes the default \
      model of every account sharing its settings; only the keyboard can confirm it (claude.model = managed)";
@@ -76,15 +80,6 @@ impl CoreApp {
     /// A key for the focused slot of window `wi`: whether the guard took it.
     pub(super) fn model_guard_key(&mut self, wi: usize, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
         let window_id = self.windows[wi].window_id;
-        if event.state == KeyState::Pressed && self.notices.composed_yes.is_some_and(|c| c.0 == window_id) {
-            self.notices.composed_yes = None;
-            // the commit of the composition that answered: it is not for the box
-            if event.logical == LogicalKey::Other && event.text.is_some() {
-                self.pane_control.shadows.peeks.held.swallowed(&event.logical);
-                lx_event!("MODEL_GUARD_COMMIT_DROPPED", "what the composition that answered the guard committed was dropped");
-                return true;
-            }
-        }
         let shown = self.focused_shown(wi).and_then(Pane::shelld_session_id);
         if let Some(held) = self.notices.guard.as_ref().filter(|h| h.window_id == window_id) {
             if Some(held.sid) == shown && !self.strip_has_keys(window_id) {
@@ -133,6 +128,28 @@ impl CoreApp {
         true
     }
 
+    /// Any key event for window `wi`, ahead of everything else that may
+    /// take it: whether it is the commit of the composition that
+    /// answered the guard, to be dropped.  The input method sends that
+    /// commit in the same call that ends the composition, so only the
+    /// key right after the end, and only within `COMMIT_FOLLOWS`, is it;
+    /// any other key (a release, a cancel, a shortcut) means the
+    /// composition was cancelled and the next text is the user's.
+    pub(super) fn model_guard_drops_commit(&mut self, wi: usize, event: &MarspotKeyEvent) -> bool {
+        let Some((window_id, Some(ended))) = self.notices.composed_yes else { return false };
+        self.notices.composed_yes = None;
+        let commit = window_id == self.windows[wi].window_id
+            && event.state == KeyState::Pressed
+            && event.logical == LogicalKey::Other
+            && event.text.is_some()
+            && ended.elapsed() < COMMIT_FOLLOWS;
+        if commit {
+            self.pane_control.shadows.peeks.held.swallowed(&event.logical);
+            lx_event!("MODEL_GUARD_COMMIT_DROPPED", "what the composition that answered the guard committed was dropped");
+        }
+        commit
+    }
+
     /// Whether the guard holds an Enter for session `sid`.
     pub(super) fn model_guard_holds(&self, sid: u64) -> bool {
         self.notices.guard.as_ref().is_some_and(|h| h.sid == sid)
@@ -143,16 +160,19 @@ impl CoreApp {
     /// without this a y typed through an input method left it waiting.
     pub(super) fn model_guard_preedit(&mut self, wi: usize, text: &str) -> bool {
         let window_id = self.windows[wi].window_id;
-        if let Some((_, composing)) = self.notices.composed_yes.filter(|c| c.0 == window_id) {
+        if let Some((_, ended)) = self.notices.composed_yes.filter(|c| c.0 == window_id) {
             if text.is_empty() {
-                self.notices.composed_yes = Some((window_id, false));
+                self.notices.composed_yes = Some((window_id, Some(ended.unwrap_or_else(Instant::now))));
                 return true;
             }
-            if composing {
+            if ended.is_none() {
                 return true;
             }
             // a composition started after the answered one ended is the user's
             self.notices.composed_yes = None;
+        }
+        if self.notices.guard.as_ref().is_none_or(|h| h.window_id != window_id) {
+            return false;
         }
         let shown = self.focused_shown(wi).and_then(Pane::shelld_session_id);
         let asking = self.notices.guard.as_ref().is_some_and(|h| h.window_id == window_id && Some(h.sid) == shown);
@@ -165,7 +185,7 @@ impl CoreApp {
         }
         if is_yes(text) {
             self.confirm_guard();
-            self.notices.composed_yes = Some((window_id, true));
+            self.notices.composed_yes = Some((window_id, None));
         }
         true
     }

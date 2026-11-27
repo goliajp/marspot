@@ -207,6 +207,8 @@ fn a_y_composed_by_an_input_method_answers_and_its_commit_is_dropped() {
     let (mut app, mut s) = showing(&sb, "/model", CcModel::Managed);
     key(&mut app, ENTER);
     for other in ["n", "x"] {
+        // as if a composition had been shown before the question went up
+        app.windows[0].ime_preedit = "zh".into();
         app.preedit(0, other.into());
         assert!(app.windows[0].ime_preedit.is_empty(), "{other:?} is swallowed and not shown");
         assert!(app.notices.guard.is_some(), "{other:?} leaves it asking");
@@ -261,4 +263,78 @@ fn esc_drops_it_after_a_swallowed_composition_and_programs_wait_on_it() {
     assert_eq!(s.keys(&app.windows[0].panes[0]), 0);
     app.preedit(0, "y".into());
     assert_eq!(app.windows[0].ime_preedit, "y", "with nothing held a composition is shown");
+}
+
+/// Answered with a composed y, then the composition cancelled.
+fn answered_then_cancelled(sb: &Sandbox) -> (CoreApp, Session) {
+    let (mut app, mut s) = showing(sb, "/model", CcModel::Managed);
+    key(&mut app, ENTER);
+    app.preedit(0, "y".into());
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 2);
+    // Esc or Backspace ends the composition with nothing committed
+    app.preedit(0, String::new());
+    (app, s)
+}
+
+#[test]
+fn a_cancelled_answering_composition_does_not_eat_the_next_text() {
+    let sb = Sandbox::new();
+    let (mut app, mut s) = answered_then_cancelled(&sb);
+    let esc_up = MarspotKeyEvent { state: KeyState::Released, logical: ESC, ..Default::default() };
+    app.key(0, esc_up, Modifiers::default());
+    app.preedit(0, String::new());
+    commit(&mut app, "，");
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 1, "the comma is typed into the pane");
+    assert!(app.notices.composed_yes.is_none());
+
+    let (mut app, mut s) = answered_then_cancelled(&sb);
+    let cmd = Modifiers { super_: true, ..Default::default() };
+    app.key(0, MarspotKeyEvent { state: KeyState::Pressed, logical: LogicalKey::Char('b'), ..Default::default() }, cmd);
+    commit(&mut app, "a");
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 1, "a shortcut in between ends it too");
+
+    let (mut app, mut s) = answered_then_cancelled(&sb);
+    app.notices.composed_yes = app.notices.composed_yes.map(|(w, _)| (w, Some(Instant::now() - Duration::from_secs(5))));
+    commit(&mut app, "a");
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 1, "a commit long after the end is the user's");
+}
+
+#[test]
+fn a_plain_committed_y_answers() {
+    // with a plain keyboard layout a y arrives as committed text, not as a key of its own
+    let sb = Sandbox::new();
+    let (mut app, mut s) = showing(&sb, "/model", CcModel::Managed);
+    key(&mut app, ENTER);
+    commit(&mut app, "y");
+    assert!(app.notices.guard.is_none());
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 2, "the held Enter only");
+    assert_eq!(confirmed(&mut app), [s.sid]);
+}
+
+#[test]
+fn a_paste_and_a_file_drop_wait_while_it_asks() {
+    let sb = Sandbox::new();
+    let (mut app, mut s) = showing(&sb, "/model", CcModel::Managed);
+    key(&mut app, ENTER);
+    app.forward_pane_paste(s.sid, "more");
+    app.file_drop(0, 1.0, 1.0, &["/tmp/a b".to_string()]);
+    assert_eq!(s.sent(&app.windows[0].panes[0], MsgType::Paste), 0, "neither reaches the pane");
+    assert!(app.notices.guard.is_some(), "and the question stays up");
+    key(&mut app, ESC);
+    app.forward_pane_paste(s.sid, "more");
+    app.file_drop(0, 1.0, 1.0, &["/tmp/a".to_string()]);
+    assert_eq!(s.sent(&app.windows[0].panes[0], MsgType::Paste), 2, "after it both are pasted");
+}
+
+#[test]
+fn another_window_composes_while_it_asks_in_the_first() {
+    let sb = Sandbox::new();
+    let (mut app, _s) = showing(&sb, "/model", CcModel::Managed);
+    key(&mut app, ENTER);
+    app.windows.push(crate::window_state_tests::win(2, vec![Pane::new_vacant(1, 60, 16)]));
+    app.rebuild_layout(1);
+    app.preedit(1, "y".into());
+    assert_eq!(app.windows[1].ime_preedit, "y", "the other window shows its composition");
+    assert!(app.notices.guard.is_some(), "and does not answer the first's question");
+    assert!(app.notices.composed_yes.is_none());
 }

@@ -122,8 +122,11 @@ impl CoreApp {
 
     /// Pass pasted text down to the pane's own L3.
     pub(super) fn forward_pane_paste(&mut self, shelld_session_id: u64, text: &str) {
-        // a paste does not send; it is remembered for the Enter that may follow
-        self.model_guard_refuses(shelld_session_id, text, true, false, "paste");
+        // a paste does not send; it is remembered for the Enter that may
+        // follow, and waits while a /model in the box waits on the keyboard
+        if self.model_guard_refuses(shelld_session_id, text, true, false, "paste") {
+            return;
+        }
         if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
             pane.session_mut().forward_paste(text);
         }

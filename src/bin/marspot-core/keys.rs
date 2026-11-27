@@ -23,6 +23,9 @@ impl CoreApp {
 
     pub(super) fn key(&mut self, wi: usize, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
+        if self.model_guard_drops_commit(wi, &event) {
+            return;
+        }
         let pressed = event.state == KeyState::Pressed;
         if !pressed && self.release_follows_press(&event, modifiers) {
             return;
