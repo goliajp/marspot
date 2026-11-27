@@ -25,7 +25,7 @@ def records(text):
     for line in text.splitlines():
         m = re.match(r'\s*\d+\) "(.*)" ASN:', line)
         if m:
-            cur = {"name": m.group(1), "type": "?", "pid": "?", "paths": []}
+            cur = {"name": m.group(1), "type": "?", "pid": "?", "paths": [], "bundle": ""}
             recs.append(cur)
             continue
         if cur is None:
@@ -34,6 +34,9 @@ def records(text):
             p = re.search(k + r'="([^"]*)"', line)
             if p:
                 cur["paths"].append(strip(p.group(1)))
+        b = re.search(r'bundleID="([^"]*)"', line)
+        if b:
+            cur["bundle"] = b.group(1)
         t = re.search(r'type="(\w+)"', line)
         if t:
             cur["type"] = t.group(1)
@@ -80,6 +83,8 @@ def state(d):
         recs = None
     else:
         c["fg"] = sum(r["type"] == "Foreground" for r in recs)
+        # a running app's Dock tile exists only for a regular (Foreground) app
+        c["fg_set"] = sorted(r["bundle"] or (r["paths"] or [r["name"]])[0] for r in recs if r["type"] == "Foreground")
     for k, n in (("persistent", "persistent.txt"), ("recent", "recent.txt")):
         t = read(d, n)
         if t is None:
@@ -160,7 +165,7 @@ def self_cmd(text, me):
 
 def snap(d, me):
     c, recs, why = state(d)
-    out = ["fg=%d" % c["fg"]] if "fg" in c else []
+    out = ["fg=%d" % c["fg"], "fg_set=" + json.dumps(c["fg_set"])] if "fg" in c else []
     for k in ("persistent", "recent"):
         if k in c:
             out += ["%s=%d" % (k, len(c[k])), "%s_entries=%s" % (k, json.dumps(c[k]))]
@@ -223,8 +228,12 @@ def dock_check(d, b, wide, wide_unread):
     print("dock: inserts=%d removal_lines=%d removal_events=%d" % (sum(ins.values()), sum(rem.values()), events))
     print("dock: inserts by reason: " + by_reason(ins))
     print("dock: removals by reason: " + by_reason(rem))
+    idx = [int(i) for i in re.findall(r"at index: (\d+)", "\n".join(lines))]
+    print("dock: max insert index=%s" % (max(idx) if idx else "none"))
+    # one "Removing tiles identical to" line can take several tiles away, so more inserts than
+    # removal lines is information; the Foreground set and the tile lists are the hard checks
     if sum(ins.values()) > events:
-        wide.append("dock: %d tile insert(s), %d removal(s)" % (sum(ins.values()), events))
+        print("info: dock: %d tile insert(s), %d removal(s)" % (sum(ins.values()), events))
 
 
 def window(d, b, me):
@@ -288,12 +297,11 @@ def tiles_check(b, c, under, left, wide, wide_unread):
         shown = {ident(e): e for e in c[k]}
         for i in now - was:
             e = shown[i]
-            mine = any(p and (under(p) or ours(p)) for p in e)
-            (left if mine else wide).append("%s tile added: %s %s" % (k, i, " ".join(e[1:])))
+            left.append("%s tile added: %s %s" % (k, i, " ".join(e[1:])))
         for i in was - now:
             line = "%s tile gone: %s" % (k, i)
             if k == "persistent":
-                wide.append(line)
+                left.append(line)
             else:
                 print("dock: " + line)
 
@@ -350,18 +358,21 @@ def check(d, before, lrc, lout, me, prefixes):
     print("before: fg=%s persistent=%s recent=%s start=%s" % tuple(b.get(k, "?") for k in ("fg", "persistent", "recent", "start")))
     n = lambda k: len(c[k]) if k in c else "?"
     print("after:  fg=%s persistent=%s recent=%s" % (c.get("fg", "?"), n("persistent"), n("recent")))
-    if "fg" not in b:
-        wide_unread.append("fg count not read before the suite")
-    elif "fg" in c and int(b["fg"]) != c["fg"]:
-        wide.append("fg count changed: %s before, %s after" % (b["fg"], c["fg"]))
+    if "fg_set" not in b:
+        unread.append("foreground apps not read before the suite")
+    elif "fg_set" in c:
+        was, now = collections.Counter(json.loads(b["fg_set"])), collections.Counter(c["fg_set"])
+        if was != now:
+            left.append("foreground apps changed: added %s, gone %s" % (
+                sorted((now - was).elements()), sorted((was - now).elements())))
     under = lambda p: any(strip(p).startswith(x) for x in prefixes)
-    tiles_check(b, c, under, left, wide, wide_unread)
+    tiles_check(b, c, under, left, wide, unread)
     dock_check(d, b, wide, wide_unread)
     for r in recs or []:
         if key(r) in known:
             known.remove(key(r))
         elif any(ours(p) for p in r["paths"] + [r["name"]]):
-            wide.append("record: %s pid=%s %s" % (r["type"], r["pid"], (r["paths"] or [r["name"]])[0]))
+            left.append("record: %s pid=%s %s" % (r["type"], r["pid"], (r["paths"] or [r["name"]])[0]))
     if lrc == 1:
         left += ["leftover: " + l for l in lout.splitlines()]
     elif lrc != 0:

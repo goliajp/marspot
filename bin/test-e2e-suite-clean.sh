@@ -67,6 +67,7 @@ base() {
   local d="$T/$1"
   mkdir -p "$d/in"
   printf 'start=2026-11-27 10:00:00\nstart_epoch=1700000000\nfg=1\npersistent=2\nrecent=1\nothers_snap=\ndock_live=1\ntcc_live=1\n' >"$d/before"
+  echo 'fg_set=["/System/Library/CoreServices/Finder.app"]' >>"$d/before"
   echo "persistent_entries=$(entries A B)" >>"$d/before"
   echo "recent_entries=$(entries C)" >>"$d/before"
   printf '%s\n' "$DOCK" >"$d/in/lsappinfo.txt"
@@ -109,12 +110,12 @@ expect tile-removed 0 "dock: removals by reason: 1 $TILE_REMOVED"
 
 base insert
 launch 06.000 >>"$T/insert/in/dock.log"
-expect insert 1 "left: dock: 2 tile insert(s), 1 removal(s)"
+expect insert 0 "info: dock: 2 tile insert(s), 1 removal(s)" "dock: max insert index=37"
 
 # one removal logged under both reasons is one removal
 base logged-twice
 { echo "$HEADER"; launch 01.000; launch 02.000; remove 05.000; remove 05.004 "$TILE_REMOVED"; } >"$T/logged-twice/in/dock.log"
-expect logged-twice 1 "dock: inserts=2 removal_lines=2 removal_events=1" "left: dock: 2 tile insert(s), 1 removal(s)"
+expect logged-twice 0 "dock: inserts=2 removal_lines=2 removal_events=1" "info: dock: 2 tile insert(s), 1 removal(s)"
 
 base two-removals
 { echo "$HEADER"; launch 01.000; launch 02.000; remove 05.000; remove 05.104; } >"$T/two-removals/in/dock.log"
@@ -169,7 +170,13 @@ expect listed-before 0 "clean=0"
 
 base foreground
 printf '%s\n%s\n' "$DOCK" "${MARSPOT//BackgroundOnly/Foreground}" >"$T/foreground/in/lsappinfo.txt"
-expect foreground 1 "left: fg count changed: 1 before, 2 after"
+expect foreground 1 "left: foreground apps changed: added ['/tmp/msp-e2e-1-1-lander/Marspot.app'], gone []"
+
+# same count, another app: the set is compared, not the count
+base foreground-swap
+printf '%s\n%s\n' "${DOCK//type=\"Foreground\"/type=\"BackgroundOnly\"}" "${MARSPOT//BackgroundOnly/Foreground}" \
+  >"$T/foreground-swap/in/lsappinfo.txt"
+expect foreground-swap 1 "left: foreground apps changed: added ['/tmp/msp-e2e-1-1-lander/Marspot.app'], gone ['/System/Library/CoreServices/Finder.app']"
 
 base tcc
 printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/tcc/in/tcc.ndjson"
@@ -248,7 +255,7 @@ expect unread-ls 2 "unread: lsappinfo: no list of the console login (no Dock in 
 
 base left-wins
 rm "${T:?}/left-wins/in/tcc.ndjson"
-launch 06.000 >>"$T/left-wins/in/dock.log"
+tiles A B Other >"$T/left-wins/in/persistent.txt"
 expect left-wins 1 "unread: tcc log: log show did not finish"
 
 # another holder: the machine-wide counts are shown, not judged
@@ -276,18 +283,18 @@ base shared-tile
 printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-tile/in/status.txt"
 tiles A B Other "Foo /private/tmp/msp-e2e-1-2-x/Foo.app" >"$T/shared-tile/in/persistent.txt"
 expect shared-tile 1 "window: shared-window (holding at check: 5000)" \
-  "left: persistent tile added: /tmp/msp-e2e-1-2-x/Foo.app/" "info: persistent tile added: /Applications/Other.app/"
+  "left: persistent tile added: /tmp/msp-e2e-1-2-x/Foo.app/" "left: persistent tile added: /Applications/Other.app/"
 
 # no other holder seen but a lock source unread: the machine-wide findings are not judged either way
 base status-unread
 rm "${T:?}/status-unread/in/status.txt"
-launch 06.000 >>"$T/status-unread/in/dock.log"
-expect status-unread 2 "window: unknown (lock status at check unread)" "unread: dock: 2 tile insert(s), 1 removal(s)"
+printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/status-unread/in/tcc.ndjson"
+expect status-unread 2 "window: unknown (lock status at check unread)" "unread: tcc: kTCCServiceAppleEvents"
 
 base log-unread
 rm "${T:?}/log-unread/in/lock.log"
-launch 06.000 >>"$T/log-unread/in/dock.log"
-expect log-unread 2 "window: unknown (lock log unread)" "unread: dock: 2 tile insert(s), 1 removal(s)"
+printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/log-unread/in/tcc.ndjson"
+expect log-unread 2 "window: unknown (lock log unread)" "unread: tcc: kTCCServiceAppleEvents"
 
 # our own took line can fall in the snap's second; the log has no pid, so it is told by the command
 base own-took
@@ -301,19 +308,19 @@ expect other-same-second 0 "window: shared-window (1 lock take/release in the wi
 
 base own-mismatch
 printf '1700000000\theavy\t0\ttook\tsh -c something else\t/w\n' >"$T/own-mismatch/in/lock.log"
-launch 06.000 >>"$T/own-mismatch/in/dock.log"
-expect own-mismatch 2 "our own lock take not found in the lock log" "unread: dock: 2 tile insert(s)"
+printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/own-mismatch/in/tcc.ndjson"
+expect own-mismatch 2 "our own lock take not found in the lock log" "unread: tcc: kTCCServiceAppleEvents"
 
 base own-too-early
 printf '1699999994\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-too-early/in/lock.log"
-launch 06.000 >>"$T/own-too-early/in/dock.log"
-expect own-too-early 2 "our own lock take not found in the lock log" "unread: dock: 2 tile insert(s)"
+printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/own-too-early/in/tcc.ndjson"
+expect own-too-early 2 "our own lock take not found in the lock log" "unread: tcc: kTCCServiceAppleEvents"
 
 base own-unknown
 printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-unknown/in/lock.log"
 rm "${T:?}/own-unknown/in/status.txt"
-launch 06.000 >>"$T/own-unknown/in/dock.log"
-expect own-unknown 2 "1 lock take in the start second, not told apart from ours" "unread: dock: 2 tile insert(s)"
+printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_OURS" >"$T/own-unknown/in/tcc.ndjson"
+expect own-unknown 2 "1 lock take in the start second, not told apart from ours" "unread: tcc: kTCCServiceAppleEvents"
 
 # snap: the before state, the probes' answer kept for the run, then reused
 d="$T/snap"
