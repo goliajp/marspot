@@ -8,7 +8,7 @@ use super::{L3Conn, Pane, PaneBackend};
 use crate::render::HighlightSpan;
 use crate::shell_proto::{
     encode_prompt_jump, encode_search_cancel, encode_search_more, encode_search_scrollback, Frame, MsgType,
-    PromptDir,
+    PromptDir, PromptJump,
 };
 
 /// How long the row a jump put on top stays marked.
@@ -51,7 +51,7 @@ impl PaneBackend {
 impl L3Conn {
     /// Ask the session to move the view to the prompt `dir` of it.
     fn forward_prompt_jump(&mut self, dir: PromptDir) {
-        let _ = self.control.send_with(MsgType::PromptJump, |out| encode_prompt_jump(dir, out));
+        let _ = self.control.send_with(MsgType::PromptJump, |out| encode_prompt_jump(PromptJump { dir, seq: 0 }, out));
     }
 }
 

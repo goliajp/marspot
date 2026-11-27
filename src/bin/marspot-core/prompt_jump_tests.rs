@@ -21,7 +21,7 @@ fn pump(pane: &mut Pane, rx: &Receiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
         if let CoreEvent::L3Says(_, frame) = ev {
             if frame.msg_type == MsgType::PromptJumped {
-                pane.prompt_jumped(decode_prompt_jumped(&frame.payload).unwrap(), Instant::now());
+                pane.prompt_jumped(decode_prompt_jumped(&frame.payload).unwrap().view_offset, Instant::now());
             } else {
                 pane.session_mut().l3_session_says(&frame);
             }

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.852"  # marspot-term keeps prompt marks through a width change
-core    = "0.12.752"  # marspot-term keeps prompt marks through a width change
-session = "0.11.479"  # prompt marks survive a width change, in memory and in the history file
+shell   = "0.7.853"  # PromptJump carries a count, PromptJumped the prompt row and that count
+core    = "0.12.753"  # PromptJump carries a count, PromptJumped the prompt row and that count
+session = "0.11.480"  # a prompt jump answers with the prompt row and the jump it answers

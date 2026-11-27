@@ -105,7 +105,7 @@ impl CoreApp {
     fn prompt_jumped(&mut self, sid: u64, payload: &[u8]) {
         let Ok(said) = marspot::shell_proto::decode_prompt_jumped(payload) else { return };
         let Some(pane) = self.pane_by_sid_mut(sid) else { return };
-        pane.prompt_jumped(said, Instant::now());
+        pane.prompt_jumped(said.view_offset, Instant::now());
         if let Some((wi, _)) = self.slot_showing(sid) {
             win!(self, wi).needs_render = true;
         }

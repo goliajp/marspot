@@ -48,8 +48,8 @@ pub(super) fn dispatch(
             }
         }
         MsgType::PromptJump => {
-            if let Ok(dir) = decode_prompt_jump(payload)
-                && tx.send(SessionEvent::PromptJump(dir)).is_err()
+            if let Ok(jump) = decode_prompt_jump(payload)
+                && tx.send(SessionEvent::PromptJump(jump)).is_err()
             {
                 return false;
             }
