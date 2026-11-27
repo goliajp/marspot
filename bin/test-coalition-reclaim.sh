@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-dock-tiles-max: 3  app 2 (its tile, and the next one while the Dock still holds the last) + ownprobe run as a regular app, from a pane or from outside 1
+# e2e-dock-tiles-max: 3  making the state: the killed shell's tile the Dock still holds 1 + the open -n --ls-refresh instance 1 + ownprobe started in pane 1 1; opened in it: that ownprobe 1 + the shell LaunchServices starts 1 + the one that takes its place 1; later ownprobe run from outside, or by check_stranger, beside the app 1
 #
 # The app takes the sessions' coalition back from a program that was
 # given it.

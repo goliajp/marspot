@@ -49,9 +49,12 @@ keeps_dock_tile() {
 
 # dock_tiles_max FILE: the most tiles of its own the Dock may hold at once
 # while the suite in FILE runs, from its one line
-#   # e2e-dock-tiles-max: N  why N (the programs it opens on purpose)
+#   # e2e-dock-tiles-max: N  why N
 # and 2 when it has none: the app's tile, and its next image's while the
-# Dock still holds the last one.  The number is reviewed with the suite;
+# Dock still holds the last one.  N is the most tiles of the suite's
+# regular apps present at one moment by design, a gone program's tile
+# counted until the Dock drops it; the reason names that moment and each
+# program in it.  The number is reviewed with the suite;
 # nothing at run time raises it.  A line that names the key but is not of
 # that form, or a second one, is refused rather than read as the default
 DOCK_TILES_KEY="e2e-dock-tiles-max"

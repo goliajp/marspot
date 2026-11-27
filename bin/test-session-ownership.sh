@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-dock-tiles-max: 4  app 2 (its tile, and the next one while the Dock still holds the last) + ownprobe run as a regular app in pane 1 1 + the instance opened outside the sessions' coalition 1
+# e2e-dock-tiles-max: 4  opened from outside the sessions' coalition: the killed shell's tile the Dock still holds 1 + the instance LaunchServices starts outside the coalition 1 + the shell it hands over to 1 + ownprobe, opened as a regular app in pane 1 by check_stranger 1
 #
 # Every session is in a coalition the app answers for, in every state
 # the app can be in.

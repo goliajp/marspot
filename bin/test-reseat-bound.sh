@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-dock-tiles-max: 3  app 2 (its tile, and the next one while the Dock still holds the last) + one program opened beside it at a time (ownother, or the open -n --ls-refresh instance) 1
+# e2e-dock-tiles-max: 3  opened in the kept state: the shell LaunchServices starts 1 + the one that takes its place 1 + the shell that one asks for, refused, leaving with no window 1; elsewhere the app 1 + ownother, or ownprobe opened as a regular app by check_stranger, 1 + a tile the Dock still holds 1
 #
 # A coalition kept by a record that LaunchServices no longer lists does
 # not send the app round and round.

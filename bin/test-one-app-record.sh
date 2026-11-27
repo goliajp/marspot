@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# e2e-dock-tiles-max: 3  app 2 (its tile, and the next one while the Dock still holds the last) + the instance opened beside it with open -n (a second instance asked for, --ls-refresh) 1
+# e2e-dock-tiles-max: 3  S1 opened through LaunchServices: the killed shell's tile the Dock still holds 1 + the shell a session started from the copy outside the bundle 1 + the bundle started beside it 1; elsewhere the app 1 + the open -n instance (a second instance, --ls-refresh) 1 + ownprobe, opened as a regular app in pane 1 by check_stranger 1
 #
 # The app is one record in LaunchServices, under the bundle, alive, in
 # every state -- and an update makes it so where it is not.
