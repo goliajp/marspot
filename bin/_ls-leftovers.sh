@@ -11,9 +11,9 @@
 # taken earlier) is not listed and counts in K instead, once per time it
 # was given.  Exit 0 when nothing else is left, 1 when something is, 2
 # when lsappinfo could not be read.
-# Run outside the console login session (a plain ssh), lsappinfo answers
-# with a list that has none of the login's apps and so none of ours
-# either: a list without the Dock is taken as unread.
+# From a login that cannot see the console session, lsappinfo answers
+# with a list that has none of the console login's apps and so none of
+# ours either: a list without the Dock is taken as unread.
 set -uo pipefail
 from=""
 if [[ ${1:-} == --from && $# -ge 2 ]]; then

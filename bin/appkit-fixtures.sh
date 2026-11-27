@@ -28,18 +28,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-appkit-fixtures-marspot}"
-GUI_UID="${GUI_UID:-501}"
 write=0
 [[ ${1:-} == --write ]] && write=1
 recorded="$ROOT/tests/fixtures/appkit/RECORDED"
 
-# gui_cmd and remote_sync
+# gui_cmd, check_console and remote_sync
 # shellcheck source=bin/_e2e-remote-lib.sh
 source "$ROOT/bin/_e2e-remote-lib.sh"
 
 # the sync runs in its own process group, which a Ctrl-C to this script
 # would not reach
 trap '[[ -n $SYNC_PGID ]] && kill -TERM -- "-$SYNC_PGID" 2>/dev/null; exit 130' INT TERM HUP
+check_console || exit 1
 remote_sync "$HOST" --name "$REMOTE_NAME"
 trap 'remote_sync "$HOST" --name "$REMOTE_NAME" --forget || true' EXIT
 
@@ -50,9 +50,9 @@ if (( ! write )); then
   ssh -n "$HOST" 'printf "host: %s\n" "$(hostname -s)"; sw_vers' | sed 's/^/    /'
 fi
 
-# in the console login session: over a plain ssh the Text Input Sources
-# list and LaunchServices may be empty, and the check would compare the
-# files with nothing
+# through gui_cmd, whose reach check_console proved: without the console
+# session the Text Input Sources list and LaunchServices may be empty,
+# and the check would compare the files with nothing
 env_write=""
 (( write )) && env_write="MARSPOT_TEST_WRITE_APPKIT_FIXTURES=1"
 ssh "$HOST" "$(gui_cmd "source ~/.cargo/env && cd ~/work/$REMOTE_NAME && $env_write \

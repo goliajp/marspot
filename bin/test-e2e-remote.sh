@@ -35,9 +35,10 @@
 #   - bounded             : each suite is stopped after E2E_SUITE_TIMEOUT
 #                           seconds (default 900); the build after
 #                           E2E_BUILD_TIMEOUT (default 1800)
-#   - GUI                 : runs inside the console login session
-#                           (`launchctl asuser`), or windows cannot be
-#                           created at all
+#   - GUI                 : runs in the ssh login of the console user,
+#                           which reaches the console session; checked
+#                           before the copy (check_console), or windows
+#                           cannot be created at all
 #   - its own sandbox     : each suite gets a state dir of its own, and
 #                           the cleanup stops the processes recorded
 #                           there and nothing else on the host
@@ -113,7 +114,6 @@ REMOTE_NAME="${REMOTE_NAME:-e2e-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
 REMOTE_DIR="work/$REMOTE_NAME"
-GUI_UID="${GUI_UID:-501}"
 SUITE_TIMEOUT="${E2E_SUITE_TIMEOUT:-900}"
 BUILD_TIMEOUT="${E2E_BUILD_TIMEOUT:-1800}"
 MAX_WAIT="${E2E_MAX_WAIT:-3600}"
@@ -164,6 +164,7 @@ trap 'rm -rf "$LOCK_LOCAL"' EXIT
 # the remote copy has no .git; the binaries built there and a suite that
 # records readings name the commit by this, read before and after the sync
 commit="$("$ROOT/bin/_git-sha.sh")"
+check_console || exit 1
 remote_sync "$HOST" --name "$REMOTE_NAME"
 commit="$("$ROOT/bin/_git-sha.sh" "$commit")"
 

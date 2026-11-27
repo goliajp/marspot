@@ -29,7 +29,6 @@ set -euo pipefail
 
 DMG="${1:?usage: $0 <Marspot.dmg>}"
 HOST="${HOST:-mini}"
-GUI_UID="${GUI_UID:-501}"
 WAIT="${FRESH_WAIT:-420}"
 RUN_ID="fresh-$$-$(date +%s)"
 REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"
@@ -37,7 +36,7 @@ REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"
 scp -q "$DMG" "$HOST:$REMOTE_DMG"
 scp -q "$(dirname "$0")/_tcc-prompts.sh" "$HOST:/tmp/marspot-$RUN_ID-tcc.sh"
 
-ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT ${FRESH_ENV:-}" <<'REMOTE'
+ssh "$HOST" "/usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE_DMG $RUN_ID $WAIT ${FRESH_ENV:-}" <<'REMOTE'
 set -uo pipefail
 DMG="$1"; RUN_ID="$2"; WAIT="$3"
 # one more NAME=value for the app

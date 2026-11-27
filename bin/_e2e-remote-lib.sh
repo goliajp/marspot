@@ -1,6 +1,6 @@
 # bin/_e2e-remote-lib.sh — what bin/test-e2e-remote.sh does on the far
-# side, sourced by it after HOST, REMOTE_DIR, REMOTE_PIDF, GUI_UID and
-# RUN_ID are set.
+# side, sourced by it after HOST, REMOTE_DIR, REMOTE_PIDF and RUN_ID
+# are set.
 
 # For the cleanup calls, which run while the run is stopping: a runner
 # that went away is noticed within ten seconds instead of when TCP
@@ -33,11 +33,28 @@ remote_sync() {
   return $rc
 }
 
-# The command in the console login session: a plain ssh process is in
-# another bootstrap namespace, where `NSApplication` has no window
-# server to talk to and `lsappinfo` lists none of the login's apps.
+# The command for the console login, run straight in the ssh login of
+# the same user: that login reaches the console session's window server
+# and LaunchServices (`open`, `lsappinfo`, NSRunningApplication) with no
+# prompt.  It is the only way in that a runner allows, so check_console
+# proves it before the first suite and nothing falls back to another.
 gui_cmd() {
-  printf 'sudo -n launchctl asuser %s sudo -u $(id -un %s) /bin/bash -lc %q' "$GUI_UID" "$GUI_UID" "$1"
+  printf '/bin/bash -lc %q' "$1"
+}
+
+# Before anything is copied: a plain ssh login that cannot see the
+# console session (lsappinfo lists no Dock) can open no window and read
+# no leftover, so the run stops here and says what it read.
+check_console() {
+  local out rc=0
+  out="$(ssh "${SSH_CLEANUP[@]}" "$HOST" \
+    "perl -e 'alarm shift; exec @ARGV' 20 /usr/bin/lsappinfo list" </dev/null 2>&1)" || rc=$?
+  grep -q 'path="/System/Library/CoreServices/Dock.app' <<<"$out" && return 0
+  echo "FAIL: the ssh login on $HOST does not see the console session:" \
+    "\`/usr/bin/lsappinfo list\` (exit $rc) lists no Dock; is the same user logged in" \
+    "at the console? What it printed:" >&2
+  printf '%s\n' "$out" | head -20 | sed 's/^/    /' >&2
+  return 1
 }
 
 remote_gui() {
@@ -105,7 +122,7 @@ read_clean() {
 
 # What LaunchServices lists under this run's paths, before the first
 # suite (each suite's own check runs inside its hold, see read_clean),
-# read in the console session; records go a
+# read through gui_cmd; records go a
 # moment after their process, so it is looked at for up to ten seconds.
 # Only this run's paths count: its remote tree, and the state dirs and
 # scratch under /tmp/msp-e2e-<run>- (what another run on the host left

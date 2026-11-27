@@ -11,10 +11,12 @@
 #
 # and, not told to stop, that a suite whose check inside the lock finds
 # something left fails, prints what was found and starts no other suite
-# (left).  A stopped run skips that check but not the cleanup.
+# (left).  A stopped run skips that check but not the cleanup.  A host
+# whose ssh login cannot see the console session stops the run before
+# the copy, with what lsappinfo printed (noconsole).
 #
 # Runs on this machine in a few seconds and reaches no runner: ssh, scp,
-# sudo, remote-sync and bench-lock are stand-ins.  The ssh stand-in runs
+# remote-sync and bench-lock are stand-ins.  The ssh stand-in runs
 # the suite's command and the stop command locally, each in a process
 # group of its own as sshd would, with the "remote" tree under a scratch
 # HOME and /tmp/ moved into the scratch directory; every other remote
@@ -102,7 +104,14 @@ printf '%s\n' "\$*" >>"$S/ssh.log"
 cmd="\${!#}"
 cmd="\${cmd//\/tmp\//$S/tmp/}"
 cmd="\${cmd//\/usr\/local\/bin\/bench-lock/$S/stubs/bench-lock}"
+# the login shell's profile is this machine's, not the far side's
+cmd="\${cmd//\/bin\/bash -lc/bash -c}"
 case "\$cmd" in
+  *"lsappinfo list"*)
+    [[ -e "$S/noconsole" ]] && { echo 'no console here'; exit 0; }
+    echo '1) "Dock" ASN:0x0-0x1:'
+    echo '    bundle path="/System/Library/CoreServices/Dock.app"'
+    exit 0 ;;
   *bench-lock*bin/test-first.sh*)
     exec env HOME="$S/home" perl -e 'setpgrp(0, 0); exec @ARGV or die' bash -c "\$cmd" ;;
   *"kill -TERM -- -"*)
@@ -111,13 +120,6 @@ case "\$cmd" in
     exec env HOME="$S/home" bash -c "\$cmd" ;;
 esac
 exit 0
-EOF
-  # sudo -n launchctl asuser UID sudo -u USER /bin/bash -lc CMD: run CMD,
-  # without the login shell's profile
-  cat >"$S/stubs/sudo" <<'EOF'
-#!/bin/bash
-while [[ $# -gt 0 && $1 != /bin/bash ]]; do shift; done
-exec bash -c "$3"
 EOF
   cat >"$S/stubs/bench-lock" <<EOF
 #!/bin/bash
@@ -245,6 +247,23 @@ check "the sync tool was stopped" gone "$(cat "$S/sync.pid")"
 check "what the sync tool started was stopped" gone "$(cat "$S/sync-child.pid")"
 check "the local lock was removed" test ! -e "$LOCK"
 ((failed > before_sync)) && dump sync
+
+echo "noconsole: the ssh login does not see the console session"
+before_nc=$failed
+setup noconsole
+S="$T/noconsole"
+: >"$S/noconsole"
+printf "#!/bin/bash\ntouch %s/synced\n" "$S" >"$S/stubs/remote-sync"
+rc=0
+PATH="$S/stubs:$PATH" HOST=stub.invalid REMOTE_NAME="$NAME" timeout 60 \
+  "$S/root/bin/test-e2e-remote.sh" test-first.sh >"$S/driver.log" 2>&1 || rc=$?
+check "exit 1 (got $rc)" test "$rc" -eq 1
+check "it names the command and what it printed" \
+  bash -c "grep -q 'lsappinfo list.*lists no Dock' '$S/driver.log' && grep -q 'no console here' '$S/driver.log'"
+check "nothing was copied" test ! -e "$S/synced"
+check "no suite was started" bash -c "! grep -q bench-lock '$S/ssh.log'"
+check "the local lock was removed" test ! -e "$LOCK"
+((failed > before_nc)) && dump noconsole
 
 if ((failed)); then
   exit 1
