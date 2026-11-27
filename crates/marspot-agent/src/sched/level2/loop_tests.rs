@@ -6,7 +6,8 @@
 //! the restricted panes' in brackets.
 //!
 //! The bar asserted is that no pane is switched twice by plan inside
-//! six hours.  Money and refusals no higher than today's rule are
+//! six hours.  Twenty weeks on seeds the planner was never tuned on are
+//! printed next to them and assert nothing.  Money and refusals no higher than today's rule are
 //! printed, not asserted: over the twenty weeks the planner refuses
 //! fewer panes but lapses more week at renewals than today's rule, which
 //! drains every account to its renewal however far off that is, while
@@ -23,6 +24,11 @@ fn sum(v: &[Week], f: impl Fn(&Week) -> f64) -> f64 {
 }
 
 fn compare(what: &str, seeds: std::ops::Range<u64>, bias: f64) {
+    let planner = print(what, seeds, bias);
+    assert!(planner.iter().all(|w| w.double == 0), "{what}: a pane switched twice by plan inside six hours");
+}
+
+fn print(what: &str, seeds: std::ops::Range<u64>, bias: f64) -> Vec<Week> {
     assert_eq!(hours().len(), 49, "the recorded hours read wrong");
     let today = weeks(seeds.clone(), Policy::Today);
     let planner = weeks(seeds, Policy::Planner { bias });
@@ -53,7 +59,7 @@ fn compare(what: &str, seeds: std::ops::Range<u64>, bias: f64) {
         today.iter().map(|w| w.switches).sum::<usize>(),
         planner.iter().map(|w| w.switches).sum::<usize>(),
     );
-    assert!(planner.iter().all(|w| w.double == 0), "{what}: a pane switched twice by plan inside six hours");
+    planner
 }
 
 #[test]
@@ -94,4 +100,24 @@ fn sched_level2_closed_loop_with_the_forecast_three_times_low_1_to_4() {
 #[test]
 fn sched_level2_closed_loop_with_the_forecast_three_times_low_5_to_8() {
     compare("forecast ÷ 3, weeks 5-8", 1004..1008, 1.0 / 3.0);
+}
+
+#[test]
+fn sched_level2_closed_loop_hold_out_weeks_1_to_5() {
+    print("hold-out weeks 1-5", 7000..7005, 1.0);
+}
+
+#[test]
+fn sched_level2_closed_loop_hold_out_weeks_6_to_10() {
+    print("hold-out weeks 6-10", 7005..7010, 1.0);
+}
+
+#[test]
+fn sched_level2_closed_loop_hold_out_weeks_11_to_15() {
+    print("hold-out weeks 11-15", 7010..7015, 1.0);
+}
+
+#[test]
+fn sched_level2_closed_loop_hold_out_weeks_16_to_20() {
+    print("hold-out weeks 16-20", 7015..7020, 1.0);
 }
