@@ -24,6 +24,17 @@ pub fn starts_external(name: &str) -> bool {
     name.get(..PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(PREFIX))
 }
 
+/// The name a session or pane `name` is shown and sends under.  It is
+/// cleaned as the message header will clean it, and if what is left
+/// starts with [`PREFIX`] it gets `session-` in front: only [`send`]
+/// speaks as `external:`.  Every path that names a session to a
+/// recipient goes through this, so a leading space, a control
+/// character or an angle bracket cannot slip the prefix past the check.
+pub fn session_name(name: &str) -> String {
+    let clean = crate::envelope::clean_name(name);
+    if starts_external(&clean) { format!("session-{clean}") } else { name.to_string() }
+}
+
 /// Whether `e` is the record [`send`] stands an outside sender on: pid 0,
 /// which no live session has, under a name behind [`PREFIX`].
 pub fn is_outside(e: &Entry) -> bool {
@@ -113,12 +124,28 @@ pub fn send(name: &str, around: Option<String>, entries: &[Entry], panes: &[Pane
 /// binds it either; a Codex recipient forwards no answer to an
 /// `external:` sender.
 fn reply_socket(name: &str) -> Result<String, String> {
-    let dir = user_temp_dir()?;
-    let path = format!("{}/marspot-external-{name}.sock", dir.trim_end_matches('/'));
+    reply_path(&user_temp_dir()?, name)
+}
+
+/// Longest socket path the system takes, nul included (`sun_path`).
+const SUN_PATH: usize = 104;
+
+/// The reply address for `name` in `dir`.  The file is named by a hash
+/// of the name, so every allowed name fits beside a temporary directory
+/// of the usual length; a directory too long for that is refused.
+fn reply_path(dir: &str, name: &str) -> Result<String, String> {
+    let path = format!("{}/marspot-external-{:016x}.sock", dir.trim_end_matches('/'), fnv1a(name.as_bytes()));
+    if path.len() >= SUN_PATH {
+        return Err(format!("the reply address {path:?} is longer than a socket path may be ({} bytes or more); nothing was sent", SUN_PATH));
+    }
     if !crate::envelope::is_address(&format!("uds:{path}")) {
         return Err(format!("this user's temporary directory {dir:?} cannot be written into a reply address; nothing was sent"));
     }
     Ok(path)
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
 /// The per-user temporary directory (mode 0700), asked of the system

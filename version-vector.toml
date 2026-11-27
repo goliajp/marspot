@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.830"  # an external: sender gets no forwarded answer, its reply address is per-user, and no session can pose as one
+shell   = "0.7.831"  # an external: name is checked after the header's cleaning, on every path that names a session, and every reply address fits a socket path
 core    = "0.12.743"  # the /model guard judges only program input, and a box only while claude is in front
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

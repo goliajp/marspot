@@ -168,7 +168,7 @@ pub fn display_name(e: &Entry, panes: &[Pane]) -> String {
         .map(|p| p.name.clone())
         .or_else(|| e.name.clone())
         .unwrap_or_else(|| "?".into());
-    if crate::external::starts_external(&name) && !crate::external::is_outside(e) { format!("session-{name}") } else { name }
+    if crate::external::is_outside(e) { name } else { crate::external::session_name(&name) }
 }
 
 /// The session list: one row per peer with the name to send to, the

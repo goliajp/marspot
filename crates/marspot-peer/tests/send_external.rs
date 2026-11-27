@@ -140,7 +140,7 @@ fn external_send_reaches_claude_and_codex_panes_as_external() {
         // the reply address sits in this user's own 0700 directory, never in /tmp
         let reply = h.from.as_deref().and_then(|f| f.strip_prefix("uds:")).unwrap_or_else(|| panic!("{to}: no address"));
         let dir = std::path::Path::new(reply).parent().unwrap();
-        assert!(reply.ends_with("/marspot-external-devops-cron.sock") && !reply.starts_with("/tmp/"), "{to}: {reply}");
+        assert!(reply.contains("/marspot-external-") && reply.ends_with(".sock") && reply.len() < 104 && !reply.starts_with("/tmp/"), "{to}: {reply}");
         let meta = std::fs::metadata(dir).unwrap();
         assert_eq!((meta.mode() & 0o777, meta.uid()), (0o700, unsafe { libc::getuid() }), "{to}: {}", dir.display());
         assert_eq!(h.body, "runner report", "{to}");

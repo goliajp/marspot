@@ -56,7 +56,7 @@ fn external_is_refused_inside_any_session() {
 /// nothing else, with an address and the bypass class.
 #[test]
 fn external_header_says_external() {
-    let me = sender("devops-cron", &reply_socket("devops-cron").unwrap());
+    let me = sender("devops-cron", "/var/folders/ab/cdefghijklmnopqrstuvwxyz0123/T/x.sock");
     assert_eq!(peers::display_name(&me, &[pane("x", 1, "x", 1)]), "external:devops-cron");
     let from = format!("uds:{}", me.socket.as_deref().unwrap());
     assert!(envelope::is_address(&from));
@@ -76,6 +76,34 @@ fn a_session_named_like_an_outside_sender_is_marked() {
     let h = envelope::Header { from: "uds:/tmp/cc-socks/901.sock".into(), from_name: Some(peers::display_name(&posing, &[])), from_mode: None };
     let p = envelope::parse(&envelope::encode(&h, "hi")).unwrap();
     assert!(!starts_external(p.from_name.as_deref().unwrap()));
+}
+
+/// The cleaning the header does cannot carry the prefix past the check:
+/// a leading space, a control character or an angle bracket in front of
+/// `external:` is marked like the bare prefix.
+#[test]
+fn a_name_that_cleans_to_external_is_marked() {
+    for name in [" external:x", "\x01external:x", "<external:x", "\"external:x\""] {
+        let shown = peers::display_name(&entry(903, name), &[]);
+        let h = envelope::Header { from: "uds:/tmp/cc-socks/903.sock".into(), from_name: Some(shown.clone()), from_mode: None };
+        let got = envelope::parse(&envelope::encode(&h, "hi")).unwrap().from_name.unwrap();
+        assert_eq!(got, "session-external:x", "{name:?} shown as {shown:?}");
+    }
+    assert_eq!(session_name("proj \"a\""), "proj \"a\"", "a name without the prefix is left as it is");
+}
+
+/// Every allowed name fits a socket path beside a temporary directory of
+/// the usual length (macOS: 49 bytes); a directory too long is refused.
+#[test]
+fn reply_address_fits_a_socket_path() {
+    let dir = "/var/folders/ab/cdefghijklmnopqrstuvwxyz0123/T/";
+    let long = "a".repeat(MAX_NAME);
+    let path = reply_path(dir, &long).unwrap();
+    assert!(path.len() < SUN_PATH && path.starts_with(dir) && path.ends_with(".sock"), "{path}");
+    assert_ne!(path, reply_path(dir, "b").unwrap(), "names get different addresses");
+    assert_eq!(path, reply_path(dir, &long).unwrap(), "the same name gets the same address");
+    let deep = format!("/{}/T", "d".repeat(80));
+    assert!(reply_path(&deep, "x").unwrap_err().contains("longer than a socket path"));
 }
 
 #[test]

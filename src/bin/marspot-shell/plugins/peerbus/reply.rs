@@ -161,10 +161,16 @@ pub(super) fn envelope(from: &marspot_peer::envelope::Header, answer: &str) -> S
     marspot_peer::envelope::encode_from_plugin(from, Some(RELAY_PLUGIN), &body(answer))
 }
 
+/// The header a relayed answer goes under: the pane's name, marked as
+/// any session's is when it starts with `external:`.
+fn relay_header(from: String, name: &str, class: marspot_peer::envelope::Mode) -> marspot_peer::envelope::Header {
+    marspot_peer::envelope::Header { from, from_name: Some(marspot_peer::external::session_name(name)), from_mode: Some(class) }
+}
+
 /// Send each asker the answer the turn gave, as this session.
 pub(super) fn relay(b: &super::worker::Binding, sid: u64, owed: Vec<(Asker, String)>) {
     let from = format!("uds:{}", b.inbox.path.display());
-    let header = marspot_peer::envelope::Header { from: from.clone(), from_name: Some(b.record.name.clone()), from_mode: Some(b.class) };
+    let header = relay_header(from.clone(), &b.record.name, b.class);
     for (asker, answer) in owed {
         let content = envelope(&header, &answer);
         let line = marspot_peer::frame::user_line(&content, &from, marspot_peer::frame::Priority::Next, &marspot_peer::rand::uuid_v4());
@@ -294,6 +300,21 @@ mod tests {
         }
         let marked = encode(&Header { from: from.into(), from_name: Some("session-external:x".into()), from_mode: None }, "q");
         assert!(super::asker(&marked, from.into()).is_some());
+    }
+
+    /// A Codex pane named like an outside sender relays its answers as
+    /// `session-external:...`, never as the outside sender.
+    #[test]
+    fn a_relayed_answer_from_a_pane_named_external_is_marked() {
+        use marspot_peer::envelope::{parse, Mode};
+        for name in ["external:x", " external:x", "\u{1}external:x", "<external:x", "EXTERNAL:x"] {
+            let h = relay_header("uds:/tmp/cc-socks/b.sock".into(), name, Mode::Bypass);
+            let p = parse(&envelope(&h, "42")).unwrap();
+            let shown = p.from_name.unwrap();
+            assert!(shown.starts_with("session-") && !marspot_peer::external::starts_external(&shown), "{name:?}: {shown}");
+        }
+        let h = relay_header("uds:/tmp/cc-socks/b.sock".into(), "proj#1002", Mode::Bypass);
+        assert_eq!(parse(&envelope(&h, "42")).unwrap().from_name.as_deref(), Some("proj#1002"));
     }
 
     fn asker_of(content: &str, reply_to: &str) -> Asker {
