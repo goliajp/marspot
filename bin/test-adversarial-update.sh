@@ -37,7 +37,7 @@ TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG="$(dev_run_log test-adversarial)"
 PORT="$(dev_free_port)"
 ASSET=marspot-aarch64-apple-darwin.tar.gz
-SERVE_DIR=$(mktemp -d /tmp/marspot-advfeed.XXXXXX)
+SERVE_DIR=$(mktemp -d "$(dev_tmp marspot-advfeed).XXXXXX")
 ACCESS_LOG="$SERVE_DIR/access.log"
 HTTP_PID=
 

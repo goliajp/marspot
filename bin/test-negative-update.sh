@@ -35,7 +35,7 @@ TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG="$(dev_run_log test-negative-update)"
 PORT="$(dev_free_port)"
 ASSET=marspot-aarch64-apple-darwin.tar.gz
-SERVE_DIR=$(mktemp -d /tmp/marspot-negfeed.XXXXXX)
+SERVE_DIR=$(mktemp -d "$(dev_tmp marspot-negfeed).XXXXXX")
 HTTP_PID=
 
 fail() {

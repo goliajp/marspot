@@ -54,6 +54,10 @@ impl pty_op::PtyIo for ShelldClient {
             )),
         }
     }
+    fn program_input(&self, _: u64, _: pty_op::Typed<'_>) -> std::io::Result<()> {
+        // this plugin's scripts are marspot's own; programs come through the op queue
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no program input through the claudecode client"))
+    }
     fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()> {
         match self.host_inject.as_ref() {
             Some(p) => p.reset_mouse_reporting(sid),

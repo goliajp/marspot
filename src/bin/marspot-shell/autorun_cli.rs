@@ -175,6 +175,7 @@ impl ShellApp {
             ));
         }
         let mut op = plugins::pty_op::PtyOp::new("autorun")
+            .typed_for_program()
             // A delivery, not a takeover: the pane is not frozen and
             // the keyboard is not locked, so a person who walks up
             // mid-sequence keeps control of their own session.

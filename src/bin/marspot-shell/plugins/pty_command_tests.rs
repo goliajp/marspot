@@ -95,6 +95,9 @@ impl PtyIo for Io {
     fn paste(&self, _sid: u64, text: &str) -> std::io::Result<()> {
         self.0.write_shared(text.as_bytes()).map(|_| ())
     }
+    fn program_input(&self, _sid: u64, _: crate::plugins::pty_op::Typed<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
     fn reset_mouse_reporting(&self, _sid: u64) -> std::io::Result<()> {
         Ok(())
     }

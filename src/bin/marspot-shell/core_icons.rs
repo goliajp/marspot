@@ -86,9 +86,35 @@ impl CoreIcons {
     }
 }
 
+/// The masks of `batch`: those in the file of recorded masks a test or
+/// the sandbox names (read only in a sandbox), and the rest from a
+/// drawer.  Each drawer is one more app registration, and the runner
+/// starts the app hundreds of times a day.
+fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
+    let recorded = marspot::ui::system::macos::icons::recorded_file();
+    let (mut drawn, rest) = from_recorded(&recorded, batch);
+    if !rest.is_empty() {
+        drawn.extend(draw_with(drawer, &rest));
+    }
+    drawn
+}
+
+/// `(found, not found)` for `batch` in a file of recorded masks.
+fn from_recorded(file: &[u8], batch: &[(u16, u16)]) -> (Vec<Drawn>, Vec<(u16, u16)>) {
+    let mut found = Vec::new();
+    let mut rest = Vec::new();
+    for &(symbol, point_px) in batch {
+        match marspot::ui::system::macos::icons::find_recorded(file, symbol, point_px) {
+            Some((side, mask)) => found.push((symbol, point_px, side, mask.to_vec())),
+            None => rest.push((symbol, point_px)),
+        }
+    }
+    (found, rest)
+}
+
 /// Run `drawer --draw-icons` for `batch` and read what it wrote: each
 /// mask as a length and an `IconMask` payload.
-fn run_drawer(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
+fn draw_with(drawer: &std::path::Path, batch: &[(u16, u16)]) -> Vec<Drawn> {
     let list: Vec<String> = batch.iter().map(|(s, p)| format!("{s}:{p}")).collect();
     let started = std::time::Instant::now();
     let out = match std::process::Command::new(drawer)
@@ -166,6 +192,17 @@ mod tests {
         out.truncate(out.len() - 1);
         assert_eq!(read_masks(&out), vec![a]);
         assert!(read_masks(&[]).is_empty());
+    }
+
+    #[test]
+    fn recorded_masks_are_served_and_the_rest_left_to_a_drawer() {
+        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/appkit/icon-masks.bin")).unwrap();
+        let (found, rest) = from_recorded(&file, &[(5, 26), (5, 99)]);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].0, found[0].1, found[0].2), (5, 26, 46));
+        assert!(found[0].3.iter().any(|&a| a > 0), "a recorded mask has ink");
+        assert_eq!(rest, vec![(5, 99)]);
+        assert_eq!(from_recorded(&file[..10], &[(0, 13)]), (Vec::new(), vec![(0, 13)]), "a torn file serves nothing");
     }
 
     #[test]

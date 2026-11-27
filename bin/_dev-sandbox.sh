@@ -37,6 +37,35 @@ export MARSPOT_STATE_DIR="${MARSPOT_STATE_DIR:-/tmp/marspot-dev}"
 # sandbox.
 export MARSPOT_DEV_SANDBOX=1
 
+# A gauge or benchmark opens the app's windows on a machine nobody is
+# at.  As a regular app each start put a tile in the Dock and asked to
+# come to the front, which the system refused; the tiles of images that
+# replaced themselves stayed behind (hundreds of them on the runner).
+# A measuring script calls this before it launches the app: the shell
+# then runs as an accessory app, its windows drawn as before.  Window
+# tests that check focus or activation do not.
+dev_no_dock() {
+  export MARSPOT_TEST_NO_DOCK=1
+}
+
+# MARSPOT_TEST_ICON_MASKS (recorded toolbar icons served instead of
+# starting a drawer) is not set here: a gauge or benchmark sourcing this
+# measures the app as it ships, drawer included.  bin/test.sh sets it
+# for the unit tests and bin/test-e2e-remote.sh for the window suites.
+
+# A path for a suite's scratch directory, not created.  Under the e2e
+# runner it is under the run's prefix (E2E_TMP, /tmp/msp-e2e-<run>-<n>-),
+# so what a run leaves behind, LaunchServices records included, is told
+# apart from every other run on the host; the name is dropped there to
+# keep socket paths under it within sun_path's 104 bytes.
+dev_tmp() {
+  if [[ -n ${E2E_TMP:-} ]]; then
+    echo "${E2E_TMP}$$"
+  else
+    echo "/tmp/$1.$$"
+  fi
+}
+
 DEV_TARGET="$ROOT/target/release"
 
 # Where a suite keeps the output of what it launches: inside its state

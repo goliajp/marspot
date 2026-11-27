@@ -86,7 +86,7 @@ fn badge_after_click_on_bg_held_session(tag: &str, status: &str) -> String {
 #[test]
 fn a_click_on_a_busy_bg_held_session_refuses_instead_of_cycling() {
     let badge = badge_after_click_on_bg_held_session("busy", "busy");
-    // A running step gets a spinner frame appended — kept, because
+    // A running step gets a working mark appended — kept, because
     // it is what says the click was received at all.
     assert!(
         badge.starts_with("⚠ held by bg job"),

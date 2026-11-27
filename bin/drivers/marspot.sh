@@ -34,6 +34,7 @@ app_sandbox() {
   esac
   # shellcheck source=/dev/null
   source "$ROOT/bin/_dev-sandbox.sh"
+  dev_no_dock
 }
 
 case "$cmd" in

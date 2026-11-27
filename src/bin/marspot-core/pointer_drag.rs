@@ -43,6 +43,9 @@ impl CoreApp {
             text.push_str(&marspot_term::input_core::shell_quote_path(p));
             text.push(' ');
         }
+        if self.shown(wi, idx).shelld_session_id().is_some_and(|sid| self.model_guard_holds(sid)) {
+            return;
+        }
         self.shown_mut(wi, idx).session_mut().forward_paste(&text);
         if let Some(sid) = win!(self, wi).panes[idx].shelld_session_id() {
             self.strips.typed(sid);

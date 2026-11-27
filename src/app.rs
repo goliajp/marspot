@@ -43,11 +43,11 @@ use core_foundation::runloop::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy,
+    NSApplication,
     NSBackingStoreType, NSColor, NSDragOperation, NSDraggingInfo,
-    NSEvent, NSImage, NSPasteboardTypeFileURL, NSTextInputClient,
+    NSEvent, NSPasteboardTypeFileURL, NSTextInputClient,
     NSTitlebarSeparatorStyle, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
     NSWindowTitleVisibility,
 };
@@ -60,6 +60,7 @@ use objc2_foundation::{
 use crate::app_keys::{nsevent_modifiers, nsevent_to_mars_key, selector_named_key};
 
 mod caret_probe;
+pub mod dock;
 pub(crate) mod key_script;
 use caret_probe::caret_probe;
 use crate::input::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers};
@@ -1340,49 +1341,6 @@ fn post_dummy_event(nsapp: &NSApplication) {
     }
 }
 
-/// Read `Resources/AppIcon.icns` off our bundle and force the Dock /
-/// app-switcher to redraw with it.  macOS otherwise caches the icon
-/// at first-launch and won't pick up post-install changes until cold
-/// re-launch — for marspot's silent-update + self-execv design that
-/// means the user sees stale icons after every brand refresh.  Reading
-/// the .icns from disk every startup is cheap (~74 KB) and the install
-/// path keeps it in lockstep with the codebase.
-fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
-    use objc2::rc::Retained;
-    use std::path::PathBuf;
-    // Try multiple candidate paths.  First-launch we run as
-    // `<bundle>/Contents/MacOS/marspot-shell` and 2 parents up resolves
-    // to `<bundle>/Contents/`.  After L1 self-execv we run as
-    // `~/Library/Caches/marspot/binaries/current/marspot-shell` and
-    // that walk leads to `~/Library/Caches/marspot/binaries/` — no
-    // Resources there;  fall through to the known install path so
-    // post-execv L1 still updates the Dock.
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(macos_dir) = exe.parent()
-            && let Some(contents) = macos_dir.parent() {
-                candidates.push(contents.join("Resources").join("AppIcon.icns"));
-            }
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".local/Marspot.app/Contents/Resources/AppIcon.icns"),
-        );
-    }
-    let icon_path = match candidates.into_iter().find(|p| p.exists()) {
-        Some(p) => p,
-        None => return,
-    };
-    let path_str = match icon_path.to_str() { Some(s) => s, None => return };
-    let ns_path = NSString::from_str(path_str);
-    let img: Option<Retained<NSImage>> = {
-        NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_path)
-    };
-    if let Some(img) = img {
-        unsafe { nsapp.setApplicationIconImage(Some(&img)) };
-    }
-}
-
 // ---------------------------------------------------------------------------
 // run_app
 // ---------------------------------------------------------------------------
@@ -1632,9 +1590,7 @@ fn drain_pending_windows() {
                     // ordering animation, and that animation is what
                     // the 2026-07-28 crash died inside.
                     if let Some(mtm) = MainThreadMarker::new() {
-                        let nsapp = NSApplication::sharedApplication(mtm);
-                        #[allow(deprecated)]
-                        nsapp.activateIgnoringOtherApps(true);
+                        dock::activate_over_others(&NSApplication::sharedApplication(mtm));
                     }
                     w.makeKeyAndOrderFront(None);
                     w.performClose(None);
@@ -1730,15 +1686,8 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     // rest; they take ids from the same monotonic source.
     let window_id = marspot_term::shell_proto::FIRST_WINDOW_ID;
     let nsapp = NSApplication::sharedApplication(mtm);
-    nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    // Force-refresh the Dock icon from the bundle's `Resources/AppIcon
-    // .icns`.  Without this, a running marspot session shows whichever
-    // icon was cached at first launch — even after `bin/install-local
-    // .sh` lands a new .icns, the live Dock still draws the old one
-    // until next cold launch.  Reading from disk each startup is cheap
-    // (~74 KB) and self-update keeps the icon in lockstep with the
-    // codebase.
-    set_dock_icon_from_bundle(&nsapp);
+    nsapp.setActivationPolicy(dock::policy());
+    dock::set_icon_from_bundle(&nsapp);
     crate::app_menu::install(&nsapp, mtm);
 
     let (window, view, delegate) = build_window(mtm, window_id, &attrs);
@@ -1783,9 +1732,8 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         window.center();
     }
 
-    // Show + focus + activate.  `activate()` replaces the deprecated
-    // `activateIgnoringOtherApps(true)`; macOS 15+ is our target floor.
-    nsapp.activate();
+    // show + focus + activate
+    dock::activate(&nsapp);
     window.makeKeyAndOrderFront(None);
 
     // Hand control to the app's resumed handler.  Borrow the cell as

@@ -42,6 +42,7 @@ trap 'exit 1' HUP INT TERM
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+dev_no_dock
 
 SIDES="${LAT_SIDES:-head=$ROOT/target/release}"
 ROUNDS="${LAT_ROUNDS:-4}"

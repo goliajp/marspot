@@ -59,7 +59,7 @@ APPLOG="$HOME/Library/Logs/Marspot/marspot.log"
 [[ -x "$PEER" ]] || { echo "no $PEER: run bin/install-local.sh first" >&2; exit 2; }
 [[ -S "$STATE/control.sock" ]] || { echo "the installed app is not running ($STATE/control.sock)" >&2; exit 2; }
 
-OWN="$(mktemp -d /tmp/marspot-helpers-real.XXXXXX)" || exit 1
+OWN="$(mktemp -d "${E2E_TMP:-/tmp/marspot-helpers-real.}XXXXXX")" || exit 1
 [[ -n "$CWD" ]] || { CWD="$OWN/work"; mkdir -p "$CWD"; }
 CWD="$(cd "$CWD" && pwd -P)"
 failures=0

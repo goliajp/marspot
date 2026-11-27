@@ -9,7 +9,10 @@
 //! A mask is rasterised on its first use at a size and never on a
 //! frame after that.
 
+mod fixture;
 mod raster;
+
+pub use fixture::{find as find_recorded, recorded_file};
 
 use marspot_term::layout::Rect;
 
@@ -169,8 +172,20 @@ pub fn draw_for_core(symbol: u16, point_px: u16) -> Option<(u16, Vec<u8>)> {
     }
     let side = mask_side(point_px as u32);
     let mut mask = vec![0u8; (side * side) as usize];
-    raster::rasterise(symbol.name(), point_px as u32, side, &mut mask);
+    draw(symbol, point_px as u32, side, &mut mask);
     Some((side as u16, mask))
+}
+
+/// Draw `symbol` at `point_px` into `mask`, `side` × `side`: AppKit's
+/// drawing, or the same recorded where a test or the sandbox has a
+/// file of it (see `fixture`).
+fn draw(symbol: Symbol, point_px: u32, side: u32, mask: &mut [u8]) {
+    #[cfg(not(test))]
+    if !fixture::draw_recorded(symbol as u16, point_px, side, mask) {
+        raster::rasterise(symbol.name(), point_px, side, mask);
+    }
+    #[cfg(test)]
+    fixture::draw(symbol, point_px, side, mask);
 }
 
 /// Have AppKit load the symbol set, on a thread of its own.
@@ -193,7 +208,7 @@ pub fn warm() {
             let side = mask_side(POINT_PX);
             let mut mask = [0u8; 24 * 24];
             for symbol in Symbol::ALL {
-                raster::rasterise(symbol.name(), POINT_PX, side, &mut mask);
+                draw(symbol, POINT_PX, side, &mut mask);
             }
         });
     });
@@ -225,7 +240,7 @@ pub fn paint(p: &mut ViewPainter, symbol: Symbol, rect: Rect, point_px: f64, col
     };
     let Some(entry) = p.atlas.get_or_insert_custom_raster(key, side, side, 0, 1, |mask| match &shell_drew {
         Some(drawn) => mask.copy_from_slice(drawn),
-        None => raster::rasterise(symbol.name(), point_px, side, mask),
+        None => draw(symbol, point_px, side, mask),
     }) else {
         return;
     };
@@ -277,7 +292,7 @@ mod tests {
     fn mask(symbol: Symbol, point_px: u32) -> (Vec<u8>, usize) {
         let side = mask_side(point_px);
         let mut mask = vec![0u8; (side * side) as usize];
-        raster::rasterise(symbol.name(), point_px, side, &mut mask);
+        draw(symbol, point_px, side, &mut mask);
         (mask, side as usize)
     }
 

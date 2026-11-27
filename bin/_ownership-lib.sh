@@ -14,12 +14,11 @@ APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 SESSION_BIN="$ROOT/target/release/marspot-session"
-SB="$(mktemp -d "/tmp/$OWN_SCRATCH.XXXXXX")"
+SB="$(mktemp -d "$(dev_tmp "$OWN_SCRATCH").XXXXXX")"
 APP="$SB/Marspot.app"
 PROBE="$SB/ownprobe"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-FAILED=()
-STRANGERS=()
+FAILED=() STRANGERS=()
 
 die() {
   echo "FAIL: $*"
@@ -180,21 +179,8 @@ open_app() { # extra `open` flags...
   done
   die "the app never came up"
 }
-quit_app() {
-  local cleanups answered i
-  cleanups=$(count SHELL_QUIT_CLEANUP)
-  # the app answers on its command socket before it takes events:
-  # a quit sent in that moment is not taken
-  for (( i = 0; i < 10; i++ )); do
-    answered="$(osascript -l JavaScript -e "ObjC.import('AppKit');
-      \$.NSRunningApplication.runningApplicationWithProcessIdentifier($L1).terminate" 2>&1)"
-    [[ $answered == true ]] && break
-    sleep 0.5
-  done
-  [[ $answered == true ]] || die "the quit request was not delivered: $answered"
-  (( i == 0 )) || echo "    (the quit request was refused $i time(s) first)"
-  wait_count SHELL_QUIT_CLEANUP $((cleanups + 1)) 10 || die "the app did not act on the quit"
-}
+# shellcheck source=bin/_ownership-quit.sh
+source "$ROOT/bin/_ownership-quit.sh"
 
 # After a quit with sessions kept: the same process, with no window.
 expect_resident() { # how many SHELL_RESIDENT lines there were before
@@ -293,7 +279,7 @@ start_walk() {
   rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
   mkfifo "$SB/go" && [[ -p $SB/go ]] || die "could not make the launcher's fifo"
   # a second window, so a second pane, on this first launch only
-  open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
+  dock_baseline; open_app --env MARSPOT_DEV_EXTRA_WINDOWS=1
   wait_count L3_SPAWNED 1 90 || die "no pane session was ever spawned"
   two_panes
   FIRST="$L1"; C0="$(coalition "$L1")"

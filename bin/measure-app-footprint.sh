@@ -20,6 +20,7 @@ trap 'exit 1' HUP INT TERM
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+dev_no_dock
 
 ROUNDS="${FP_ROUNDS:-3}"
 OUT="${FP_OUT:-$ROOT/build/app-footprint.json}"

@@ -26,6 +26,8 @@ remote_sync() {
 }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=bin/_lock-mark.sh
+source "$ROOT/bin/_lock-mark.sh"
 HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 REMOTE_DIR="work/$REMOTE_NAME"
@@ -51,6 +53,7 @@ for n in "$@"; do
   done
   INNER="source ~/.cargo/env; cd ~/$REMOTE_DIR && export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target; $FWD
     /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} \
+      $(lock_until "${MARSPOT_MEASURE_TIMEOUT:-1500}" measure-multi "$REMOTE_NAME") \
       caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-1500} sh -c \
       'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
         && exec bash bin/_remote-measure-multi-mini.sh'"

@@ -1748,11 +1748,11 @@ enum CoreEvent {
     PaneSessionBegin(u64, u32),
     /// Shell → core: plugin released the pane back to live mode.
     PaneSessionEnd(u64),
-    /// Shell → core: cc plugin asked to push raw bytes into the PTY
-    /// behind the given shelld session id.  L2 finds the matching L3
-    /// pane and forwards via the existing control channel as an
-    /// InjectInput frame.
+    /// Shell → core: marspot's own raw bytes for the PTY behind the
+    /// given shelld session id, forwarded to its L3 as they are.
     InjectInput(u64, Vec<u8>),
+    /// Shell → core: input a program outside marspot asked for, judged by the /model guard.
+    ProgramInput(marspot::shell_proto::ProgramInput),
     /// L1 asks a pane to hold (or release) its picture.  Forwarded
     /// straight to the pane's L3 — the hold lives there so it survives
     /// this process being replaced by a silent update.
@@ -3402,12 +3402,9 @@ fn main() {
                 CoreEvent::PaneTitle(sid, text) => app.set_pane_title(sid, text),
                 CoreEvent::PaneSessionBegin(sid, caps) => app.pane_session_begin(sid, caps),
                 CoreEvent::PaneSessionEnd(sid) => app.pane_session_end(sid),
-                CoreEvent::InjectInput(sid, bytes) => {
-                    app.inject_input(sid, &bytes);
-                }
-                CoreEvent::PaneHoldGrid(sid, on) => {
-                    app.forward_pane_hold_grid(sid, on);
-                }
+                CoreEvent::InjectInput(sid, bytes) => app.inject_input(sid, &bytes),
+                CoreEvent::ProgramInput(input) => app.program_input(input),
+                CoreEvent::PaneHoldGrid(sid, on) => app.forward_pane_hold_grid(sid, on),
                 CoreEvent::PaneAgentTui(sid, on) => {
                     // Re-issued every tick; only a change is worth a
                     // repaint.
@@ -3418,15 +3415,9 @@ fn main() {
                         }
                     }
                 }
-                CoreEvent::PaneRenderMarkup(sid, on) => {
-                    app.forward_pane_render_markup(sid, on);
-                }
-                CoreEvent::PaneInjectPaste(sid, text) => {
-                    app.forward_pane_paste(sid, &text);
-                }
-                CoreEvent::PaneResetMouseReporting(sid) => {
-                    app.forward_pane_reset_mouse_reporting(sid);
-                }
+                CoreEvent::PaneRenderMarkup(sid, on) => app.forward_pane_render_markup(sid, on),
+                CoreEvent::PaneInjectPaste(sid, text) => app.forward_pane_paste(sid, &text),
+                CoreEvent::PaneResetMouseReporting(sid) => app.forward_pane_reset_mouse_reporting(sid),
 
                 CoreEvent::SearchResults(sid, qid, has_more, _total_seen, hits) => {
                     app.apply_search_results(sid, qid, has_more, hits);

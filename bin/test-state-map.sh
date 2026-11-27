@@ -22,7 +22,7 @@ RUNLOG="$(dev_run_log test-state-map)"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 export MARSPOT_SESSION_BIN="$ROOT/target/release/marspot-session" MARSPOT_CORE_BIN="$ROOT/target/release/marspot-core"
-BEFORE="$(mktemp -d /tmp/msp-state-map.XXXXXX)"
+BEFORE="$(mktemp -d "$(dev_tmp msp-state-map).XXXXXX")"
 
 cleanup() {
   dev_kill_shell_core

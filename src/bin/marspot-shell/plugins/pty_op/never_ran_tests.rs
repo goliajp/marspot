@@ -17,6 +17,9 @@ impl PtyIo for NullIo {
     fn paste(&self, _: u64, _: &str) -> std::io::Result<()> {
         Ok(())
     }
+    fn program_input(&self, _: u64, _: Typed<'_>) -> std::io::Result<()> {
+        Ok(())
+    }
     fn reset_mouse_reporting(&self, _: u64) -> std::io::Result<()> {
         Ok(())
     }

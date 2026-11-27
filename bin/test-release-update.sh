@@ -18,9 +18,10 @@ set -euo pipefail
 DMG="${1:?usage: $0 <older Marspot.dmg> <rehearsal dir>}"
 REL="${2:?usage: $0 <older Marspot.dmg> <rehearsal dir>}"
 HOST="${HOST:-mini}"
-GUI_UID="${GUI_UID:-501}"
 RUN_ID="relupd-$$-$(date +%s)"
 REMOTE="/tmp/marspot-$RUN_ID"
+# shellcheck source=bin/_lock-mark.sh
+source "$(dirname "$0")/_lock-mark.sh"
 TAR="marspot-aarch64-apple-darwin.tar.gz"
 
 for f in "$REL/$TAR" "$REL/$TAR.sig" "$REL/feed.json"; do
@@ -32,7 +33,7 @@ ssh "$HOST" "mkdir -p $REMOTE/serve"
 scp -q "$DMG" "$HOST:$REMOTE/old.dmg"
 scp -q "$REL/$TAR" "$REL/$TAR.sig" "$HOST:$REMOTE/serve/"
 
-ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /usr/local/bin/bench-lock heavy --max-wait 1800 /bin/bash -s -- $REMOTE $TAG $TAR" <<'REMOTE_SCRIPT'
+ssh "$HOST" "/usr/local/bin/bench-lock heavy --max-wait 1800 $(lock_until 1800 release-update "$RUN_ID") /bin/bash -s -- $REMOTE $TAG $TAR" <<'REMOTE_SCRIPT'
 set -uo pipefail
 REMOTE="$1"; TAG="$2"; TAR="$3"
 FRESH="$REMOTE/home"

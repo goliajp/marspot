@@ -77,6 +77,12 @@ cargo build -p marspot-peer --bin marspot-peer
 # panel with the whole suite passing.  A machine with no GPU skips the
 # render itself; that is the test's own business, not this flag's.
 export MARSPOT_FONT_SNAPSHOT="${MARSPOT_FONT_SNAPSHOT:-check}"
+# Loading a system symbol registers the process with LaunchServices, and
+# a test that renders the chrome outside the lib's own unit tests (a
+# core binary's tests, a core a test starts) would draw them live: one
+# app registration on the runner per such process.  The masks AppKit
+# drew, recorded (bin/appkit-fixtures.sh checks them against it).
+export MARSPOT_TEST_ICON_MASKS="$ROOT/tests/fixtures/appkit/icon-masks.bin"
 cargo nextest run --workspace --all-targets --all-features \
   --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@" || exit $?
 

@@ -109,23 +109,33 @@ impl CoreApp {
             })
     }
 
-    /// the pane may well be in one that is not focused.
+    /// Marspot's own bytes for session `sid`, wherever its pane is: the
+    /// /model guard does not judge them.
     pub(super) fn inject_input(&mut self, shelld_session_id: u64, bytes: &[u8]) {
-        let text = String::from_utf8_lossy(bytes);
-        if self.model_guard_refuses(shelld_session_id, &text, false, false, "inject_input") {
-            return;
-        }
         if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
             pane.session_mut().forward_inject_input(bytes);
         }
     }
 
-    /// Pass pasted text down to the pane's own L3.
+    /// Marspot's own paste for session `sid`, passed to its pane's L3.
     pub(super) fn forward_pane_paste(&mut self, shelld_session_id: u64, text: &str) {
-        // a paste does not send; it is remembered for the Enter that may follow
-        self.model_guard_refuses(shelld_session_id, text, true, false, "paste");
         if let Some(pane) = self.pane_by_sid_mut(shelld_session_id) {
             pane.session_mut().forward_paste(text);
+        }
+    }
+
+    /// Input a program outside marspot asked for: the /model guard
+    /// judges it first.  A paste does not send; it is remembered for the
+    /// Enter that may follow, and waits while a /model waits on the keyboard.
+    pub(super) fn program_input(&mut self, input: marspot::shell_proto::ProgramInput) {
+        let text = String::from_utf8_lossy(&input.bytes);
+        if self.model_guard_refuses(input.session_id, &text, input.paste, false, "program_input") {
+            return;
+        }
+        if input.paste {
+            self.forward_pane_paste(input.session_id, &text);
+        } else {
+            self.inject_input(input.session_id, &input.bytes);
         }
     }
 

@@ -29,7 +29,7 @@ TARGET=aarch64-apple-darwin
 # has to fit in 104 bytes
 # A scratch directory of this run's own, removed when the run passes:
 # the fixed name was shared by every run of the suite on the machine.
-SB=/tmp/marspot-cxr.$$
+SB="$(dev_tmp marspot-cxr)"
 RUNLOG=$SB/run.log
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"

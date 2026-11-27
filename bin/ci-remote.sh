@@ -18,6 +18,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=bin/_lock-mark.sh
+source "$ROOT/bin/_lock-mark.sh"
 
 # The jobs themselves, run on the far side from the synced tree.
 job_mac() {
@@ -181,7 +183,7 @@ if (( clean )) && [[ "$GIT_SHA" == *-dirty ]]; then moved=1; clean=0; fi
 
 echo "==> macOS job on $MAC, Linux job on $LINUX"
 run_job "$MAC" mac 'export PATH=$HOME/.cargo/bin:/usr/local/bin:$PATH' \
-  "/usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT" > "$LOGS/mac.log" 2>&1 &
+  "/usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $(lock_until "$TIMEOUT" ci "$NAME")" > "$LOGS/mac.log" 2>&1 &
 mac=$!
 run_job "$LINUX" linux 'source ~/.cargo/env' "nice -n 10" > "$LOGS/linux.log" 2>&1 &
 linux=$!

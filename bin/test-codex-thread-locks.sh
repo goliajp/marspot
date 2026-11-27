@@ -23,7 +23,7 @@ PROFILES="$ROOT/assets/skills/marspot-profiles/profiles.sh"
 CODEX="$(command -v codex)" || { echo "no codex on PATH"; exit 2; }
 [[ -x "$SHELL_BIN" ]] || { echo "no $SHELL_BIN: build marspot-shell or set MARSPOT_SHELL_BIN"; exit 2; }
 
-SB="$(cd "$(mktemp -d /tmp/marspot-cxlocks.XXXXXX)" && pwd -P)"
+SB="$(cd "$(mktemp -d "${E2E_TMP:-/tmp/marspot-cxlocks.}XXXXXX")" && pwd -P)"
 PIDS="$SB/pids"
 REAL_HOME="$HOME"
 export HOME="$SB/home"

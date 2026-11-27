@@ -6,12 +6,22 @@
 //!   held, and a notice over the pane says what it does.  `y` sends the
 //!   held key and tells the shell, which then keeps the settings file's
 //!   next change of model; Esc drops it and leaves the box as it was.
-//!   Any other key is swallowed while the question is up.
-//! * Input from programs (typing, pastes, injected bytes) that would
-//!   send `/model` from such a box is refused: only the keyboard can
-//!   confirm.  What one program call leaves unsent in the box is
-//!   remembered for a few seconds, so `/model` in one call and the
-//!   Enter in the next is refused before the screen shows the first.
+//!   Any other key is swallowed while the question is up.  An input
+//!   method's y counts too: a composition of exactly y (half or full
+//!   width) answers as the key would, and what that composition later
+//!   commits is dropped; any other composition is swallowed.  Pastes and
+//!   file drops into the pane wait until it is answered.
+//! * Input from programs outside marspot (pane control's typing, a
+//!   `--send`, an autorun) that would send `/model` from such a box is
+//!   refused: only the keyboard can confirm.  What one program call
+//!   leaves unsent in the box is remembered for a few seconds, so
+//!   `/model` in one call and the Enter in the next is refused before
+//!   the screen shows the first.  Marspot's own typing, such as the
+//!   command line an account switch types at the shell, is not judged.
+//!
+//! A box counts only while Claude Code is the program in front of the
+//! pane's terminal: the last box it drew stays on the screen above the
+//! shell's prompt after it exits.
 //!
 //! The check runs only on Enter and Tab, and reads cells until it finds
 //! Claude Code's prompt; any other key costs one comparison.  It
@@ -37,6 +47,10 @@ use marspot::ui::strings::{t, Msg};
 pub(super) const UNSENT_STANDS: Duration = Duration::from_secs(3);
 pub(super) const UNSENT_CAP: usize = 16;
 
+/// How soon after the composition that answered the guard ends its
+/// commit arrives: both come from one call of the input method.
+const COMMIT_FOLLOWS: Duration = Duration::from_millis(500);
+
 /// The refusal a program is given.
 pub(super) const REFUSED: &str = "refused: this would send /model to Claude Code, which changes the default \
      model of every account sharing its settings; only the keyboard can confirm it (claude.model = managed)";
@@ -55,6 +69,11 @@ fn managed() -> bool {
 
 fn plain(m: Modifiers) -> bool {
     !(m.shift || m.control || m.alt || m.super_)
+}
+
+/// What an input method composes or commits for y, half or full width.
+fn is_yes(text: &str) -> bool {
+    matches!(text, "y" | "Y" | "\u{FF59}" | "\u{FF39}")
 }
 
 /// What Claude Code's box in `pane` holds, when `pane` shows one live.
@@ -87,7 +106,7 @@ impl CoreApp {
         let Some((sid, text)) = self.focused_shown(wi).and_then(|p| Some((p.shelld_session_id()?, box_in(p)?))) else {
             return false;
         };
-        if !is_model_command(&text) {
+        if !is_model_command(&text) || !self.claude_in_front(sid) {
             return false;
         }
         self.notices.guard = Some(Held { window_id, sid, enter: event.clone(), mods });
@@ -104,10 +123,75 @@ impl CoreApp {
             return true;
         }
         self.pane_control.shadows.peeks.held.swallowed(&event.logical);
+        // committed input-method text has no key of its own: its text is the answer
+        let yes = (event.logical == LogicalKey::Char('y') && plain(mods))
+            || (!(mods.control || mods.alt) && event.text.as_deref().is_some_and(is_yes));
         match event.logical {
-            LogicalKey::Char('y') if plain(mods) => self.confirm_guard(),
+            _ if yes => self.confirm_guard(),
             LogicalKey::Named(NamedKey::Escape) => self.drop_guard("escape"),
             _ => {}
+        }
+        true
+    }
+
+    /// Any key event for window `wi`, ahead of everything else that may
+    /// take it: whether it is the commit of the composition that
+    /// answered the guard, to be dropped.  The input method sends that
+    /// commit in the same call that ends the composition, so only the
+    /// key right after the end, and only within `COMMIT_FOLLOWS`, is it;
+    /// any other key (a release, a cancel, a shortcut) means the
+    /// composition was cancelled and the next text is the user's.
+    pub(super) fn model_guard_drops_commit(&mut self, wi: usize, event: &MarspotKeyEvent) -> bool {
+        let Some((window_id, Some(ended))) = self.notices.composed_yes else { return false };
+        self.notices.composed_yes = None;
+        let commit = window_id == self.windows[wi].window_id
+            && event.state == KeyState::Pressed
+            && event.logical == LogicalKey::Other
+            && event.text.is_some()
+            && ended.elapsed() < COMMIT_FOLLOWS;
+        if commit {
+            self.pane_control.shadows.peeks.held.swallowed(&event.logical);
+            lx_event!("MODEL_GUARD_COMMIT_DROPPED", "what the composition that answered the guard committed was dropped");
+        }
+        commit
+    }
+
+    /// Whether the guard holds an Enter for session `sid`.
+    pub(super) fn model_guard_holds(&self, sid: u64) -> bool {
+        self.notices.guard.as_ref().is_some_and(|h| h.sid == sid)
+    }
+
+    /// An input method's composition `text` for window `wi`: whether the
+    /// guard took it.  A composition never reaches the guard as a key, so
+    /// without this a y typed through an input method left it waiting.
+    pub(super) fn model_guard_preedit(&mut self, wi: usize, text: &str) -> bool {
+        let window_id = self.windows[wi].window_id;
+        if let Some((_, ended)) = self.notices.composed_yes.filter(|c| c.0 == window_id) {
+            if text.is_empty() {
+                self.notices.composed_yes = Some((window_id, Some(ended.unwrap_or_else(Instant::now))));
+                return true;
+            }
+            if ended.is_none() {
+                return true;
+            }
+            // a composition started after the answered one ended is the user's
+            self.notices.composed_yes = None;
+        }
+        if self.notices.guard.as_ref().is_none_or(|h| h.window_id != window_id) {
+            return false;
+        }
+        let shown = self.focused_shown(wi).and_then(Pane::shelld_session_id);
+        let asking = self.notices.guard.as_ref().is_some_and(|h| h.window_id == window_id && Some(h.sid) == shown);
+        if !asking || self.strip_has_keys(window_id) {
+            return false;
+        }
+        if !self.windows[wi].ime_preedit.is_empty() {
+            self.windows[wi].ime_preedit.clear();
+            self.windows[wi].needs_render = true;
+        }
+        if is_yes(text) {
+            self.confirm_guard();
+            self.notices.composed_yes = Some((window_id, None));
         }
         true
     }
@@ -138,7 +222,15 @@ impl CoreApp {
         if !managed() {
             return false;
         }
+        if self.model_guard_holds(sid) {
+            lx_event!("MODEL_GUARD_REFUSED", "a program's input reached a box whose /model waits on the keyboard", session = sid, from = from);
+            self.show_notice(t(Msg::ModelSendRefused).to_string());
+            return true;
+        }
         let Some(held) = self.pane_by_sid_mut(sid).and_then(|p| box_in(p)) else { return false };
+        if !self.claude_in_front(sid) {
+            return false;
+        }
         let now = Instant::now();
         let unsent = &mut self.notices.unsent;
         unsent.retain(|u| now < u.2);
@@ -159,6 +251,15 @@ impl CoreApp {
             self.show_notice(t(Msg::ModelSendRefused).to_string());
         }
         refuse
+    }
+
+    /// Whether Claude Code is in front of session `sid`'s terminal.  A
+    /// box on the screen is judged only then: the one it drew last stays
+    /// above the shell's prompt after it exits.  Asked only once a box
+    /// is found, so other panes' keys cost no process lookup.
+    fn claude_in_front(&self, sid: u64) -> bool {
+        let shell = self.shell_child_pids.get(&sid).copied().or_else(|| read_shell_child_pid(sid));
+        shell.is_some_and(marspot::pidtree::claude_in_front)
     }
 }
 

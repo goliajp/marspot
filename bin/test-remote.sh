@@ -45,6 +45,8 @@ remote_sync() {
 }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=bin/_lock-mark.sh
+source "$ROOT/bin/_lock-mark.sh"
 HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-test-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
@@ -122,7 +124,7 @@ ssh "$HOST" "echo \$\$ > $REMOTE_PIDF; cd ~/$REMOTE_DIR && \
   ${MARSPOT_TEST_JOBS:+MARSPOT_TEST_JOBS=$(printf '%q' "$MARSPOT_TEST_JOBS")} \
   ${MARSPOT_FONT_SNAPSHOT:+MARSPOT_FONT_SNAPSHOT=$(printf '%q' "$MARSPOT_FONT_SNAPSHOT")} \
   MARSPOT_GIT_SHA=$GIT_SHA \
-  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT bin/_bounded.sh $TIMEOUT \
+  /usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $(lock_until "$TIMEOUT" test "$REMOTE_NAME") bin/_bounded.sh $TIMEOUT \
   sh -c 'MARSPOT_TEST_JOBS=\${MARSPOT_TEST_JOBS:-\$(bin/_runner-jobs.sh)} exec bin/test.sh \"\$@\"' sh$args; \
   rc=\$?; rm -f $REMOTE_PIDF; exit \$rc" </dev/null
 rc=$?

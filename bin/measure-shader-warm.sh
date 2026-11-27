@@ -29,6 +29,7 @@ trap 'exit 1' HUP INT TERM
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+dev_no_dock
 SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 A="${WARM_FRESH_A:?a never-run marspot-core}"

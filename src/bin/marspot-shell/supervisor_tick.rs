@@ -248,6 +248,10 @@ impl ShellApp {
                             &text,
                         ),
                     ),
+                    plugins::host::InjectWhat::Program { paste, bytes } => conn.send(
+                        MsgType::ProgramInput,
+                        &marspot::shell_proto::encode_program_input(req.session_id, paste, &bytes),
+                    ),
                     plugins::host::InjectWhat::ResetMouseReporting => conn.send(
                         MsgType::PaneResetMouseReporting,
                         &marspot::shell_proto::encode_pane_reset_mouse_reporting(

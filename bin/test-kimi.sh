@@ -47,7 +47,7 @@ KIMI_CACHE="$HOME/.cache/marspot-e2e/kimi"
 
 # A scratch directory of this run's own, removed when the run passes:
 # the fixed name was shared by every run of the suite on the machine.
-SB=/tmp/marspot-kimi.$$
+SB="$(dev_tmp marspot-kimi)"
 RUNLOG=$SB/run.log
 REGISTRY="$SB/home/.claude"/sessions
 export PEERBUS_REGISTRY="$REGISTRY"

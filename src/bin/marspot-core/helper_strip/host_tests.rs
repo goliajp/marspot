@@ -72,13 +72,18 @@ impl Session {
 
     /// The keys the core sent the session since the last look.
     pub(crate) fn keys(&mut self, pane: &Pane) -> usize {
+        self.sent(pane, MsgType::KeyEvent)
+    }
+
+    /// The frames of type `t` the core sent the session since the last look.
+    pub(crate) fn sent(&mut self, pane: &Pane, t: MsgType) -> usize {
         pane.session().send_pane_control(Frame::new(MsgType::Ping, encode_ping(0)));
         self.control.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut n = 0;
         loop {
             match Frame::read_next(&mut self.control).expect("a frame").expect("the core still there") {
                 Next::Frame(f) if f.msg_type == MsgType::Ping => return n,
-                Next::Frame(f) if f.msg_type == MsgType::KeyEvent => n += 1,
+                Next::Frame(f) if f.msg_type == t => n += 1,
                 _ => {}
             }
         }

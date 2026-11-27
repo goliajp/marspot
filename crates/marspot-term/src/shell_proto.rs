@@ -600,7 +600,7 @@ pub enum MsgType {
     /// L1 → L2: the icon asked for.  `symbol u16, point_px u16,
     /// side u16`, then `side * side` bytes of coverage.
     IconMask = 87,
-    // ── pane control (130..=148): payloads and directions in `pane_control` ──
+    // ── pane control (130..=149): payloads and directions in `pane_control` ──
     PaneSpawn = 130,
     PaneSpawned = 131,
     PaneRetire = 132,
@@ -623,6 +623,10 @@ pub enum MsgType {
     ModelConfirmed = 147,
     /// L2 → L1: a reset claim the user confirmed on the accounts panel; see `reset_panel`.
     ResetPanelAct = 148,
+    /// L1 → L2: input a program outside marspot asked for (a `--send`,
+    /// an autorun), as bytes or as a paste; see `program_input`.
+    /// `InjectInput` and `PaneInjectPaste` from L1 are marspot's own.
+    ProgramInput = 149,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -730,6 +734,7 @@ impl MsgType {
             146 => MsgType::Notice,
             147 => MsgType::ModelConfirmed,
             148 => MsgType::ResetPanelAct,
+            149 => MsgType::ProgramInput,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -743,7 +748,10 @@ mod frame_write;
 pub use frame_write::{frame_header, write_frame};
 pub use handshake::*;
 mod inject;
-pub use inject::{decode_inject_input, encode_inject_input};
+pub use inject::{
+    decode_inject_input, decode_pane_inject_paste, decode_program_input, encode_inject_input, encode_pane_inject_paste,
+    encode_program_input, ProgramInput,
+};
 
 mod pane_events;
 pub use pane_events::*;
@@ -1376,36 +1384,6 @@ pub fn decode_pane_reset_attrs(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
-}
-
-/// PaneInjectPaste payload: `session_id u64 LE, len u32 LE, utf8`.
-pub fn encode_pane_inject_paste(session_id: u64, text: &str) -> Vec<u8> {
-    let mut v = Vec::with_capacity(12 + text.len());
-    v.extend_from_slice(&session_id.to_le_bytes());
-    v.extend_from_slice(&(text.len() as u32).to_le_bytes());
-    v.extend_from_slice(text.as_bytes());
-    v
-}
-
-pub fn decode_pane_inject_paste(payload: &[u8]) -> io::Result<(u64, String)> {
-    if payload.len() < 12 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "PaneInjectPaste payload too short",
-        ));
-    }
-    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let n = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
-    if payload.len() < 12 + n {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "PaneInjectPaste payload truncated before body",
-        ));
-    }
-    Ok((
-        sid,
-        String::from_utf8_lossy(&payload[12..12 + n]).into_owned(),
-    ))
 }
 
 /// CliSendText payload: `target len u32 + utf8, text len u32 + utf8`.
