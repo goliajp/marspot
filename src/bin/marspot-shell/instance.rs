@@ -317,8 +317,8 @@ pub(crate) fn answer_front() {
     {
         w.deminiaturize(None);
     }
-    #[allow(deprecated)] // `activate()` only asks; the launch that stood aside was the active app
-    app.activateIgnoringOtherApps(true);
+    // `activate()` only asks; the launch that stood aside was the active app
+    marspot::app::dock::activate_over_others(&app);
 }
 
 #[cfg(test)]

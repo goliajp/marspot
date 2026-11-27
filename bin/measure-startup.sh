@@ -28,6 +28,7 @@ trap 'exit 1' HUP INT TERM
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+dev_no_dock
 
 TRIALS="${STARTUP_TRIALS:-5}"
 OUT="${STARTUP_OUT:-$ROOT/build/startup.json}"

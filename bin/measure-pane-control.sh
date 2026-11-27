@@ -17,6 +17,7 @@ trap 'exit 1' HUP INT TERM
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+dev_no_dock
 
 OUT="${PANECTL_OUT:-$ROOT/build/pane-control.json}"
 BIN="$ROOT/target/release"

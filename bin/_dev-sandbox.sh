@@ -37,6 +37,17 @@ export MARSPOT_STATE_DIR="${MARSPOT_STATE_DIR:-/tmp/marspot-dev}"
 # sandbox.
 export MARSPOT_DEV_SANDBOX=1
 
+# A gauge or benchmark opens the app's windows on a machine nobody is
+# at.  As a regular app each start put a tile in the Dock and asked to
+# come to the front, which the system refused; the tiles of images that
+# replaced themselves stayed behind (hundreds of them on the runner).
+# A measuring script calls this before it launches the app: the shell
+# then runs as an accessory app, its windows drawn as before.  Window
+# tests that check focus or activation do not.
+dev_no_dock() {
+  export MARSPOT_TEST_NO_DOCK=1
+}
+
 DEV_TARGET="$ROOT/target/release"
 
 # Where a suite keeps the output of what it launches: inside its state
