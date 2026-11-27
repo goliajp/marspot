@@ -91,6 +91,10 @@ trap cleanup EXIT INT TERM
 # bench lock, which is what keeps every other measurement and heavy job
 # off the machine while it runs.
 ssh -o ConnectTimeout=5 "$HOST" "mkdir -p ~/$REMOTE_DIR" </dev/null
+# every terminal is started from the ssh login: it has to see the console
+# shellcheck source=bin/_console.sh
+source "$ROOT/bin/_console.sh"
+console_check "the ssh login on $HOST" ssh -o ConnectTimeout=5 "$HOST" "$CONSOLE_LIST" || exit 1
 
 # ---- health-check: can the ssh-spawned shell dispatch AppleEvents? ---
 # We try a trivial no-op AppleEvent with a 3 s timeout. If it returns

@@ -3,6 +3,15 @@
 # frame latency and the window gauges.  Sourced by bin/bench.sh after the
 # run dir exists; reads CUR_DIR, LAT_TARGET and run_block from it.
 
+# shellcheck source=bin/_console.sh
+source "$ROOT/bin/_console.sh"
+# From ssh a window needs the console session: stop the run when this
+# login cannot see it, before any minutes go into measuring.
+bench_console_check() {
+  [[ -n ${SSH_CONNECTION:-} ]] || return 0
+  console_check "the ssh login on $(hostname -s)" /bin/sh -c "$CONSOLE_LIST" || exit 1
+}
+
 # ---- key-to-frame latency ---------------------------------------------
 # One pane in one window, LAT_GATE_ROUNDS sandbox apps one after
 # another, each typing 200 keys (bin/measure-latency.sh, scene type-1).
@@ -29,6 +38,7 @@ measure_key_latency() {
   rm -rf "${sd:?}"
 }
 bench_key_latency() {
+  bench_console_check
   # the rows can fail and can refuse a broken run, checked before minutes are spent measuring
   python3 "$ROOT/bin/_bench_latency.py" --self-test > "$CUR_DIR/latency-selftest.txt" \
     || { cat "$CUR_DIR/latency-selftest.txt"; echo "bin/_bench_latency.py --self-test failed" >&2; exit 1; }
@@ -45,6 +55,7 @@ bench_key_latency() {
 
 bench_window_gauges() {
   local gauge name script outvar sd
+  bench_console_check
   # The shipped app in a window: its memory with 12 panes open, and how
   # long it takes to show a pane's output after launch.  A window needs
   # the console session, which an ssh login of the console user reaches.

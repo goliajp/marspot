@@ -39,6 +39,11 @@ for n in "$@"; do
   [[ $n =~ ^[1-9][0-9]?$ ]] || { echo "a window count, not '$n'" >&2; exit 2; }
 done
 
+# the windows are started from the ssh login: it has to see the console
+# shellcheck source=bin/_console.sh
+source "$ROOT/bin/_console.sh"
+console_check "the ssh login on $HOST" ssh -o ConnectTimeout=5 "$HOST" "$CONSOLE_LIST" || exit 1
+
 GIT_SHA="$("$ROOT/bin/_git-sha.sh")"
 remote_sync "$HOST" --name "$REMOTE_NAME"
 # read again after the sync: a checkout that moved in between is dirty
