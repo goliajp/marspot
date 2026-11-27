@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.857"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
-core    = "0.12.757"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
+core    = "0.12.758"  # font family matching never waits on a font macOS has not downloaded
 session = "0.11.482"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
