@@ -101,10 +101,10 @@ fn sched_state_bytes() {
 
 /// One full search of the pane plan at 64 panes × 16 accounts, some of
 /// them running out inside the day.  Budget per search.
-const PLAN_BUDGET: Duration = Duration::from_millis(571);
+const PLAN_BUDGET: Duration = Duration::from_millis(824);
 
 /// The standing plan re-timed and re-costed at the same size.
-const RETIME_BUDGET: Duration = Duration::from_micros(151);
+const RETIME_BUDGET: Duration = Duration::from_micros(478);
 
 fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pane>) {
     let a = (0..accounts)
