@@ -6,7 +6,11 @@
 //!   held, and a notice over the pane says what it does.  `y` sends the
 //!   held key and tells the shell, which then keeps the settings file's
 //!   next change of model; Esc drops it and leaves the box as it was.
-//!   Any other key is swallowed while the question is up.
+//!   Any other key is swallowed while the question is up.  An input
+//!   method's y counts too: a composition of exactly y (half or full
+//!   width) answers as the key would, and what that composition later
+//!   commits is dropped; any other composition is swallowed.  Pastes and
+//!   file drops into the pane wait until it is answered.
 //! * Input from programs (typing, pastes, injected bytes) that would
 //!   send `/model` from such a box is refused: only the keyboard can
 //!   confirm.  What one program call leaves unsent in the box is
@@ -57,6 +61,11 @@ fn plain(m: Modifiers) -> bool {
     !(m.shift || m.control || m.alt || m.super_)
 }
 
+/// What an input method composes or commits for y, half or full width.
+fn is_yes(text: &str) -> bool {
+    matches!(text, "y" | "Y" | "\u{FF59}" | "\u{FF39}")
+}
+
 /// What Claude Code's box in `pane` holds, when `pane` shows one live.
 fn box_in(pane: &Pane) -> Option<String> {
     let grid = pane.session().grid();
@@ -67,6 +76,15 @@ impl CoreApp {
     /// A key for the focused slot of window `wi`: whether the guard took it.
     pub(super) fn model_guard_key(&mut self, wi: usize, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
         let window_id = self.windows[wi].window_id;
+        if event.state == KeyState::Pressed && self.notices.composed_yes.is_some_and(|c| c.0 == window_id) {
+            self.notices.composed_yes = None;
+            // the commit of the composition that answered: it is not for the box
+            if event.logical == LogicalKey::Other && event.text.is_some() {
+                self.pane_control.shadows.peeks.held.swallowed(&event.logical);
+                lx_event!("MODEL_GUARD_COMMIT_DROPPED", "what the composition that answered the guard committed was dropped");
+                return true;
+            }
+        }
         let shown = self.focused_shown(wi).and_then(Pane::shelld_session_id);
         if let Some(held) = self.notices.guard.as_ref().filter(|h| h.window_id == window_id) {
             if Some(held.sid) == shown && !self.strip_has_keys(window_id) {
@@ -104,10 +122,50 @@ impl CoreApp {
             return true;
         }
         self.pane_control.shadows.peeks.held.swallowed(&event.logical);
+        // committed input-method text has no key of its own: its text is the answer
+        let yes = (event.logical == LogicalKey::Char('y') && plain(mods))
+            || (!(mods.control || mods.alt) && event.text.as_deref().is_some_and(is_yes));
         match event.logical {
-            LogicalKey::Char('y') if plain(mods) => self.confirm_guard(),
+            _ if yes => self.confirm_guard(),
             LogicalKey::Named(NamedKey::Escape) => self.drop_guard("escape"),
             _ => {}
+        }
+        true
+    }
+
+    /// Whether the guard holds an Enter for session `sid`.
+    pub(super) fn model_guard_holds(&self, sid: u64) -> bool {
+        self.notices.guard.as_ref().is_some_and(|h| h.sid == sid)
+    }
+
+    /// An input method's composition `text` for window `wi`: whether the
+    /// guard took it.  A composition never reaches the guard as a key, so
+    /// without this a y typed through an input method left it waiting.
+    pub(super) fn model_guard_preedit(&mut self, wi: usize, text: &str) -> bool {
+        let window_id = self.windows[wi].window_id;
+        if let Some((_, composing)) = self.notices.composed_yes.filter(|c| c.0 == window_id) {
+            if text.is_empty() {
+                self.notices.composed_yes = Some((window_id, false));
+                return true;
+            }
+            if composing {
+                return true;
+            }
+            // a composition started after the answered one ended is the user's
+            self.notices.composed_yes = None;
+        }
+        let shown = self.focused_shown(wi).and_then(Pane::shelld_session_id);
+        let asking = self.notices.guard.as_ref().is_some_and(|h| h.window_id == window_id && Some(h.sid) == shown);
+        if !asking || self.strip_has_keys(window_id) {
+            return false;
+        }
+        if !self.windows[wi].ime_preedit.is_empty() {
+            self.windows[wi].ime_preedit.clear();
+            self.windows[wi].needs_render = true;
+        }
+        if is_yes(text) {
+            self.confirm_guard();
+            self.notices.composed_yes = Some((window_id, true));
         }
         true
     }
@@ -137,6 +195,11 @@ impl CoreApp {
     pub(super) fn model_guard_refuses(&mut self, sid: u64, typed: &str, paste: bool, enter: bool, from: &str) -> bool {
         if !managed() {
             return false;
+        }
+        if self.model_guard_holds(sid) {
+            lx_event!("MODEL_GUARD_REFUSED", "a program's input reached a box whose /model waits on the keyboard", session = sid, from = from);
+            self.show_notice(t(Msg::ModelSendRefused).to_string());
+            return true;
         }
         let Some(held) = self.pane_by_sid_mut(sid).and_then(|p| box_in(p)) else { return false };
         let now = Instant::now();

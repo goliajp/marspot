@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.825"  # recorded icon masks are served only with a sandbox state dir set
-core    = "0.12.739"  # recorded icon masks are served only with a sandbox state dir set
+core    = "0.12.740"  # a /model guard is answered by a y composed or committed through an input method
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

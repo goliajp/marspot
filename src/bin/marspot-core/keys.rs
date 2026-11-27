@@ -7,6 +7,9 @@ use super::*;
 
 impl CoreApp {
     pub(super) fn preedit(&mut self, wi: usize, text: String) {
+        if self.model_guard_preedit(wi, &text) {
+            return;
+        }
         if !text.is_empty() {
             self.typed_before_view(wi);
             self.strip_keys_interrupted();
@@ -203,6 +206,9 @@ impl CoreApp {
     /// and sent to it; the session wraps it for a program that asked
     /// for bracketed paste and writes the PTY.
     fn paste_into_focused_pane(&mut self, wi: usize) -> bool {
+        if self.focused_shown(wi).and_then(Pane::shelld_session_id).is_some_and(|sid| self.model_guard_holds(sid)) {
+            return true;
+        }
         let Some(pane) = self.focused_shown_mut(wi) else { return true };
         // A key into an exited pane revives it, and an in-process pane
         // pastes in its own encoder: both are the key path's.

@@ -15,6 +15,10 @@ pub(super) const SHOWN_FOR: Duration = Duration::from_secs(12);
 pub(super) struct Notices {
     shell: Option<(String, Instant)>,
     pub(super) guard: Option<super::model_guard::Held>,
+    /// The window whose input-method composition of y answered the
+    /// guard, and whether that composition is still up: until it ends
+    /// and the next key arrives, what it shows and commits is dropped.
+    pub(super) composed_yes: Option<(u32, bool)>,
     /// What programs' input left unsent in a Claude Code box, by
     /// session, until the moment it no longer stands for what the box
     /// holds (`model_guard::UNSENT_STANDS`); at most `UNSENT_CAP`.

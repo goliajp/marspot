@@ -195,3 +195,70 @@ fn the_windows_shortcuts_pass_while_it_asks() {
     assert!(!app.model_guard_key(0, &w, cmd), "a Cmd shortcut is not the question's");
     assert!(app.notices.guard.is_some(), "and the question stays up");
 }
+
+fn commit(app: &mut CoreApp, text: &str) {
+    let ev = MarspotKeyEvent { state: KeyState::Pressed, logical: LogicalKey::Other, text: Some(text.into()), ..Default::default() };
+    app.key(0, ev, Modifiers::default());
+}
+
+#[test]
+fn a_y_composed_by_an_input_method_answers_and_its_commit_is_dropped() {
+    let sb = Sandbox::new();
+    let (mut app, mut s) = showing(&sb, "/model", CcModel::Managed);
+    key(&mut app, ENTER);
+    for other in ["n", "x"] {
+        app.preedit(0, other.into());
+        assert!(app.windows[0].ime_preedit.is_empty(), "{other:?} is swallowed and not shown");
+        assert!(app.notices.guard.is_some(), "{other:?} leaves it asking");
+    }
+    app.preedit(0, String::new());
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 0);
+    app.preedit(0, "y".into());
+    assert!(app.notices.guard.is_none());
+    assert!(app.windows[0].ime_preedit.is_empty(), "the composition is not shown");
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 2, "only the held Enter, pressed and let go");
+    assert_eq!(confirmed(&mut app), [s.sid]);
+    // the input method still holds its y: more of it, its end and its commit reach nobody
+    app.preedit(0, "ye".into());
+    app.preedit(0, String::new());
+    commit(&mut app, "也");
+    assert!(app.windows[0].ime_preedit.is_empty());
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 0, "nothing typed into the box");
+    // the next composition is the user's again
+    app.preedit(0, "n".into());
+    assert_eq!(app.windows[0].ime_preedit, "n");
+    app.preedit(0, String::new());
+    commit(&mut app, "你");
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 1, "a commit after the answered one is typed");
+}
+
+#[test]
+fn committed_full_width_y_answers_and_other_text_does_not() {
+    let sb = Sandbox::new();
+    for yes in ["\u{FF59}", "\u{FF39}", "Y"] {
+        let (mut app, mut s) = showing(&sb, "/model", CcModel::Managed);
+        key(&mut app, ENTER);
+        commit(&mut app, "好");
+        assert!(app.notices.guard.is_some(), "other committed text is swallowed");
+        assert_eq!(s.keys(&app.windows[0].panes[0]), 0);
+        commit(&mut app, yes);
+        assert!(app.notices.guard.is_none(), "{yes:?}");
+        assert_eq!(s.keys(&app.windows[0].panes[0]), 2, "{yes:?}: the held Enter only");
+        assert_eq!(confirmed(&mut app), [s.sid]);
+    }
+}
+
+#[test]
+fn esc_drops_it_after_a_swallowed_composition_and_programs_wait_on_it() {
+    let sb = Sandbox::new();
+    let (mut app, mut s) = showing(&sb, "/model", CcModel::Managed);
+    key(&mut app, ENTER);
+    assert!(app.model_guard_refuses(s.sid, "more", true, false, "test"), "a program cannot type under the question");
+    app.preedit(0, "n".into());
+    app.preedit(0, String::new());
+    key(&mut app, ESC);
+    assert!(app.notices.guard.is_none() && confirmed(&mut app).is_empty());
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 0);
+    app.preedit(0, "y".into());
+    assert_eq!(app.windows[0].ime_preedit, "y", "with nothing held a composition is shown");
+}
