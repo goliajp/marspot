@@ -11,7 +11,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const TIMEOUT_SECS: &str = "20";
+pub(super) const TIMEOUT_SECS: &str = "20";
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Response {

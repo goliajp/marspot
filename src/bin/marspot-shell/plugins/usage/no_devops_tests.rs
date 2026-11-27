@@ -31,9 +31,14 @@ fn without_devops_marspot_collects_reads_its_own_feeds_and_says_so_once() {
     let sources = Sources { claude: cc_usage::feed_path(), codex: cc_usage::codex_feed_path() };
     assert!(sources.claude.starts_with(&home) && !sources.claude.exists() && !sources.codex.exists());
     let mut c = Collector::new(sources, cc_usage::own_feed_path(), cc_usage::own_codex_feed_path());
+    let started = std::time::Instant::now();
     for n in 0..3 {
         c.pass(&home, NOW + n * 300);
     }
+    // a tenth of the shortest wait a pass may hold: one request or app-server left to time out fails it
+    let http_wait = Duration::from_secs(http::TIMEOUT_SECS.parse().unwrap());
+    let bound = http_wait.min(codex::ANSWER_WITHIN) / 10;
+    assert!(started.elapsed() < bound, "three passes waited on nothing: {:?} >= {bound:?}", started.elapsed());
 
     // the body `cc_usage::read` and `read_codex` parse: no account here, so the parse itself says none
     for (devops, own) in [
