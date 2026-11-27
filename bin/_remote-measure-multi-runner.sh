@@ -97,6 +97,9 @@ cleanup() {
 }
 trap cleanup EXIT
 bench_run_begin   # the product runs from the run dir's copies
+# and so do the scripts its panes run; the markers stay in SESSION_DIR
+SCRIPT_DIR="$MARSPOT_BENCH_RUN_DIR/multi"
+mkdir -p "$SCRIPT_DIR"
 
 # The script every window of one terminal and round runs.
 write_multi_script() {
@@ -181,9 +184,9 @@ for ((round = 1; round <= ROUNDS; round++)); do
 for t in "${TERMS[@]}"; do
   prefix="$SESSION_DIR/m-$t-r$round"
   start_file="$SESSION_DIR/start-$t-r$round"
-  script="$SESSION_DIR/trial-$t-r$round.sh"
+  script="$SCRIPT_DIR/trial-$t-r$round.sh"
   write_multi_script "$script" "$prefix" "$start_file"
-  wrapper="$SESSION_DIR/wrapper-$t-r$round"
+  wrapper="$SCRIPT_DIR/wrapper-$t-r$round"
   printf '#!/bin/bash\n%s; exit\n' "$script" > "$wrapper"
   chmod 0755 "$wrapper"
   load_start="$(load1)"

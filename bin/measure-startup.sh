@@ -51,7 +51,7 @@ for b in marspot-shell marspot-core marspot-session; do
 done
 mkdir -p "$MARSPOT_STATE_DIR" "$(dirname "$OUT")"
 
-PANE_SH="$MARSPOT_STATE_DIR/startup-pane.sh"
+PANE_SH="${MARSPOT_BENCH_RUN_DIR:-$MARSPOT_STATE_DIR}/startup-pane.sh"
 cat > "$PANE_SH" <<'EOF'
 #!/bin/sh
 echo "marspot startup gauge"

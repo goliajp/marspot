@@ -126,8 +126,13 @@ TARGET_MIB="${TARGET_MIB:-128}"
 # Build session bin + probe together (version-skew guard: a stale probe
 # would create a grid_shm region an updated marspot-session refuses).
 # The build's exit code decides, not whether a binary is lying in target/.
-dev_require_probe l3_throughput || fail "could not build the probe"
-dev_require_bin marspot-session || fail "could not build marspot-session"
+# Inside a bench run the two are the run dir's copies of what bin/bench.sh
+# built before the measurement: building here would change target/ and
+# not the copies, and compile in the middle of the measurement.
+if [[ -z "${MARSPOT_BENCH_RUN_DIR:-}" ]]; then
+  dev_require_probe l3_throughput || fail "could not build the probe"
+  dev_require_bin marspot-session || fail "could not build marspot-session"
+fi
 [[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
 

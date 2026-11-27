@@ -67,8 +67,9 @@ mkdir -p "$OUT"
 echo "==> $(sw_vers -productVersion) $(sw_vers -buildVersion), $(sysctl -n machdep.cpu.brand_string), load1 $(sysctl -n vm.loadavg | awk '{print $2}')"
 
 # What a pane runs: a screen of text, then a prompt (or a flood first).
-PANE_SH="$MARSPOT_STATE_DIR/lat-pane.sh"
-mkdir -p "$MARSPOT_STATE_DIR"
+# inside a bench run every script a pane runs belongs in the run dir
+PANE_SH="${MARSPOT_BENCH_RUN_DIR:-$MARSPOT_STATE_DIR}/lat-pane.sh"
+mkdir -p "$MARSPOT_STATE_DIR" "$(dirname "$PANE_SH")"
 FLOOD_FILE="$MARSPOT_STATE_DIR/lat-flood.txt"
 python3 - "$FLOOD_FILE" <<'PY'
 import sys

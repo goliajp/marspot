@@ -16,7 +16,9 @@
 #   bin/bench.sh --ssim    add the Phase 9 SSIM gate (font rendering);
 #                          implied by --full.
 #   bin/bench.sh --update-baseline   rewrite the floors in
-#       bench/baseline.json from this run (never a size budget).
+#       bench/baseline.json from this run (never a size budget).  On
+#       a machine other than the floors' it re-locks every limit and
+#       needs --full.
 #   bin/bench.sh --size-tables   link the four binaries with a map
 #       and write raw module tables to bench/results/size-tables/
 #       instead of measuring (bin/_size_budget.py says what for).
@@ -27,7 +29,8 @@
 # host's load while it was measured; a one-line summary at the end says
 # GATE PASSED, GATE FAILED or GATE INCONCLUSIVE for perf, plus SSIM GATE
 # PASSED / FAILED when --ssim is on.  Exit 4, before anything is built:
-# the floors were locked on another machine (bin/_bench_baseline.py).
+# the floors were locked on another machine, or a re-lock there was asked
+# for without --full (bin/_bench_baseline.py).
 #
 # Every run leaves bench/results/gate-record.json and appends each row to
 # bench/results/history/<metric>.jsonl (`bin/_bench_record.py show`).
@@ -42,6 +45,8 @@ unset MARSPOT_SESSION_ID
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"   # marspot_bin resolves CARGO_TARGET_DIR
+# shellcheck source=bin/_bench-window.sh
+source "$ROOT/bin/_bench-window.sh"
 # BASELINE is overridable via env so tests can point at synthesised
 # fixture baselines without touching the real one.
 BASELINE="${BASELINE:-$ROOT/bench/baseline.json}"
@@ -66,7 +71,7 @@ for arg in "$@"; do
     --build-only)        DO_MEASURE=0 ;;
     --no-build)          DO_BUILD=0 ;;
     --help|-h)
-      sed -n '2,22p' "$0"; exit 0 ;;
+      sed -n '2,24p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -90,7 +95,7 @@ if (( SIZE_TABLES )); then
 fi
 # floors are only compared on the machine they were locked on; checked
 # before the build, so a refused run costs nothing
-python3 "$ROOT/bin/_bench_baseline.py" check "$BASELINE" "$UPDATE" || exit 4
+python3 "$ROOT/bin/_bench_baseline.py" check "$BASELINE" "$UPDATE" "$MODE" || exit 4
 
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).
 #
@@ -112,9 +117,15 @@ done
 # once one existed: on the bench host the gate measured a Jun 6 build for
 # a month of runs (caught 2026-07-11 via byte-identical size numbers
 # across an objc2 major upgrade).
+#
+# The l3_throughput example too: the measurement runs the run dir's copy
+# of it (bin/_lib.sh bench_run_begin), and a probe from an earlier build
+# would drive this build's marspot-session over a frame layout it may
+# no longer share.
 if (( DO_BUILD )); then
   echo "==> building marspot (release)"
   ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
+  ( cd "$ROOT" && cargo build --release -p marspot-session --bin marspot-session --example l3_throughput 2>&1 | tail -3 )
 fi
 
 # ---- key-to-frame latency: the timed build ------------------------------
@@ -146,7 +157,9 @@ bench_settle "$BENCH_SETTLE_S"
 # the run's copies of the binaries, and its scratch, live in the run dir
 LOAD_SAMPLER=""
 trap '[[ -z $LOAD_SAMPLER ]] || kill "$LOAD_SAMPLER" 2>/dev/null; bench_run_end' EXIT
-trap 'exit 143' TERM INT HUP
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 bench_run_begin
 echo "==> run dir $MARSPOT_BENCH_RUN_DIR"
 CUR_DIR="$MARSPOT_BENCH_RUN_DIR/cur"
@@ -359,63 +372,9 @@ if [[ $MODE == "full" ]]; then
     cp "$ROOT/bench/results/l3-multi.json" "$CUR_DIR/l3-multi.json" || true
   fi
 
-  # ---- key-to-frame latency: the measurement ----------------------------
-  # One pane in one window, LAT_GATE_ROUNDS sandbox apps one after
-  # another, each typing 200 keys (bin/measure-latency.sh, scene type-1).
-  # Read from the key event's timestamp to the shell's present call
-  # returning: the frame is in the layer then, and the window server
-  # shows it at the next composite.  The `seen` scene's window captures
-  # would add that last step, but they load the window server while the
-  # frame is on its way, so they are not the latency of the product.
-  # Windows need the GUI login session; over ssh that is reached through
-  # `launchctl asuser`, as for the product's window above.
-  measure_key_latency() {
-    local sd="/tmp/msp-lat-$$" dir="$CUR_DIR/lat-bins" gui=() b rc=0
-    rm -rf "${CUR_DIR:?}/latency" && mkdir -p "$dir" "$CUR_DIR/latency"
-    for b in marspot-shell marspot-core; do cp "$LAT_TARGET/release/$b" "$dir/$b"; done
-    cp "$(marspot_bin marspot-session)" "$dir/marspot-session"
-    [[ -n ${SSH_CONNECTION:-} ]] && gui=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
-    rm -rf "${sd:?}" && mkdir -p "$sd"
-    ${gui[@]+"${gui[@]}"} /bin/bash -c "cd $(printf '%q' "$ROOT") && env MARSPOT_STATE_DIR=$sd \
-      LAT_SIDES=ship=$dir LAT_SCENES=type-1 LAT_ROUNDS=${LAT_GATE_ROUNDS:-4} LAT_OUT=$CUR_DIR/latency \
-      bin/_bounded.sh 900 bin/measure-latency.sh" > "$CUR_DIR/measure-latency.log" 2>&1 || rc=$?
-    # a run that stopped part way leaves fewer reports: the rows read this
-    echo "${rc:-0} ${LAT_GATE_ROUNDS:-4}" > "$CUR_DIR/latency.rc"
-    "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" >/dev/null 2>&1 || true
-    rm -rf "${sd:?}"
-  }
-  # the rows can fail and can refuse a broken run, checked before minutes are spent measuring
-  python3 "$ROOT/bin/_bench_latency.py" --self-test > "$CUR_DIR/latency-selftest.txt" \
-    || { cat "$CUR_DIR/latency-selftest.txt"; echo "bin/_bench_latency.py --self-test failed" >&2; exit 1; }
-  tail -1 "$CUR_DIR/latency-selftest.txt"
-  echo "==> key press to frame, one pane (${LAT_GATE_ROUNDS:-4} runs of 200 keys)"
-  run_block latency measure_key_latency
-  grep -E '^(== |FAIL)' "$CUR_DIR/measure-latency.log" | sed 's/^/    /' || true
-  # kept with the run's results, so the verdict can be read again later
-  rm -rf "$ROOT/bench/results/latency"
-  cp -R "$CUR_DIR/latency" "$ROOT/bench/results/latency"
-  cp "$CUR_DIR/measure-latency.log" "$CUR_DIR/latency.host" "$CUR_DIR/latency.rc" \
-    "$ROOT/bench/results/latency/" 2>/dev/null || true
+  bench_key_latency
 
-  # The shipped app in a window: its memory with 12 panes open, and how
-  # long it takes to show a pane's output after launch.  A window needs
-  # the console session; a run that came in over ssh reaches it through
-  # launchctl asuser, as bin/_remote-measure-others-runner.sh does.
-  GUI=()
-  [[ -z ${SSH_CONNECTION:-} ]] || GUI=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
-  for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT \
-      panectl:measure-pane-control.sh:PANECTL_OUT; do
-    IFS=: read -r name script outvar <<<"$gauge"
-    sd="/tmp/msp-gauge-$$-$name"
-    echo "==> $script (a sandbox window)"
-    rm -rf "${sd:?}" && mkdir -p "$sd"
-    ${GUI[@]+"${GUI[@]}"} env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
-      MARSPOT_BENCH_RUN_DIR="$MARSPOT_BENCH_RUN_DIR" MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" \
-      /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
-    grep -E '^(footprint12|startup|pane-control) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
-    "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true
-    rm -rf "${sd:?}"
-  done
+  bench_window_gauges
 fi
 
 # ---- gate evaluation ---------------------------------------------------

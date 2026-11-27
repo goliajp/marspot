@@ -41,7 +41,8 @@ for b in marspot-shell marspot-core marspot-session; do
 done
 mkdir -p "$MARSPOT_STATE_DIR" "$(dirname "$OUT")"
 
-PANE_SH="$MARSPOT_STATE_DIR/fp-pane.sh"
+# inside a bench run every script a pane runs belongs in the run dir
+PANE_SH="${MARSPOT_BENCH_RUN_DIR:-$MARSPOT_STATE_DIR}/fp-pane.sh"
 cat > "$PANE_SH" <<'EOF'
 #!/bin/bash
 for i in $(seq 1 40); do printf '%03d the quick brown fox jumps over the lazy dog 0123456789\n' "$i"; done

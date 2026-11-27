@@ -15,7 +15,8 @@
 #   - exclusive : a local mkdir lock against another bench-remote from
 #                 this machine, and the host's bench lock, taken as
 #                 `bench`, against everything else using the machine
-#                 (`heavy` for --size-tables, which times nothing)
+#                 (--size-tables too: the bench host runs nothing
+#                 outside that lock)
 #   - clean     : dedicated CARGO_TARGET_DIR, caffeinate -dims
 #   - bounded   : the build + measurement is stopped after
 #                 MARSPOT_BENCH_TIMEOUT seconds (default 5400); cargo
@@ -25,7 +26,10 @@
 #                 building when the baseline was locked elsewhere
 #   - terminating: trap on EXIT/INT/TERM kills the remote process group,
 #                  and with it the bench's own marspot children
-#   - retrievable: bench/results/ rsync'd back to bench/remote-runs/<ts>/
+#   - retrievable: bench/results/ rsync'd back to bench/remote-runs/<ts>/;
+#                  with --update-baseline the host's bench/baseline.json
+#                  replaces the local one (the diff is printed), since
+#                  the next sync would otherwise overwrite it
 #
 # The remote shell pid is captured into $REMOTE_PIDF; SSH-spawned shells
 # are session/PG leaders so $$ == PGID, which lets `kill -- -PGID` collect
@@ -194,16 +198,18 @@ MAX_WAIT="${MARSPOT_BENCH_MAX_WAIT:-1200}"
 # A round says when it expects to be done, for whoever queues behind
 # it.  The full tier has held the lock 8 to 15 minutes once it has it,
 # the fast one a few; MARSPOT_BENCH_UNTIL="+90m what" overrides.
-# Size tables time nothing: a cold fat-LTO build is heavy work, run
-# alongside other heavy work rather than holding everyone out.
-LOCK_MODE=bench
+# Size tables time nothing, but the bench host runs nothing outside its
+# bench lock: a fat-LTO build next to another session's measurement would
+# spoil it, and that host has no other work to share a heavy hold with.
 case " $* " in
-  *" --size-tables "*) BENCH_UNTIL_DEFAULT="+40m"; BENCH_KIND=size-tables; LOCK_MODE=heavy ;;
+  *" --size-tables "*) BENCH_UNTIL_DEFAULT="+40m"; BENCH_KIND=size-tables ;;
   *" --full "*) BENCH_UNTIL_DEFAULT="+20m"; BENCH_KIND=full-bench ;;
   *) BENCH_UNTIL_DEFAULT="+10m"; BENCH_KIND=bench ;;
 esac
 UNTIL=" $(lock_until "${MARSPOT_BENCH_UNTIL:-$BENCH_UNTIL_DEFAULT}" "$BENCH_KIND" "$REMOTE_NAME")"
-LOCK_CMD="/usr/local/bin/bench-lock $LOCK_MODE --max-wait $MAX_WAIT$UNTIL"
+# MARSPOT_BENCH_LOCKED tells the run it holds the lock, which is what
+# lets it remove run dirs an earlier killed run left (bin/_lib.sh)
+LOCK_CMD="/usr/local/bin/bench-lock bench --max-wait $MAX_WAIT$UNTIL env MARSPOT_BENCH_LOCKED=1"
 if [[ "${MARSPOT_BENCH_NO_LOCK:-}" == "1" ]]; then
   echo "==> MARSPOT_BENCH_NO_LOCK=1 — measuring without the host lock" >&2
   LOCK_CMD=""
@@ -270,6 +276,23 @@ if [[ -f "$OUT_DIR/gate-record.json" ]] \
    && [[ "$OUT_DIR/gate-record.json" -nt "$LOCK_LOCAL/pid" ]]; then
   python3 "$ROOT/bin/_bench_record.py" append "$OUT_DIR/gate-record.json"
 fi
+
+# A re-locked baseline exists only on the host until it is fetched: the
+# next sync sends the local file over it.
+case " $* " in
+  *" --update-baseline "*)
+    if scp -q "$HOST:$REMOTE_DIR/bench/baseline.json" "$OUT_DIR/baseline.json"; then
+      if diff -u "$ROOT/bench/baseline.json" "$OUT_DIR/baseline.json"; then
+        echo "==> bench/baseline.json unchanged on $HOST"
+      else
+        cp "$OUT_DIR/baseline.json" "$ROOT/bench/baseline.json"
+        echo "==> bench/baseline.json updated from $HOST (diff above); commit it"
+      fi
+    else
+      echo "==> could not fetch bench/baseline.json from $HOST; the local one is unchanged" >&2
+    fi
+    ;;
+esac
 
 echo "==> done (bench exit $REMOTE_RC), results in $OUT_DIR"
 exit $REMOTE_RC

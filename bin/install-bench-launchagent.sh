@@ -106,7 +106,7 @@ unset SSH_CONNECTION || true
 # the copy bin/bench-remote.sh keeps; the product is built in the same
 # lock hold as the measurement
 cd "$HOME/work/bench-marspot"
-if "${LOCK[@]}" --until "+20m marspot terminal refresh" sh -c \
+if "${LOCK[@]}" --until "+20m marspot terminal refresh" env MARSPOT_BENCH_LOCKED=1 sh -c \
     '. "$HOME/.cargo/env" && export CARGO_TARGET_DIR="$PWD/target" \
       && cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
       && exec bash bin/_remote-measure-others-runner.sh' > "$TRIG_DIR/result.json" 2> "$TRIG_DIR/err.log"; then

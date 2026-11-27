@@ -129,12 +129,11 @@ build_one_cmd() {
   #     PTY, not that the terminal processed them; a terminal that
   #     drops under pressure finishes early and wins.
   #
-  # write_live_matrix_script (bin/_lib.sh) fixes both and hands every
+  # write_live_matrix_script (bin/_lib-live.sh) fixes both and hands every
   # terminal the same file to run.
   local marker=$1
-  # one script per terminal and round: a slow terminal can still be
-  # reading its script when the next one's is written
-  local script="/tmp/marspot-live-matrix-$$-$2.sh"
+  # per terminal and round (a slow one may still read its own); run dir only
+  local script="$MARSPOT_BENCH_RUN_DIR/live-matrix-$2.sh"
   local paths=()
   local s
   for s in "${SCENARIOS[@]}"; do
@@ -371,7 +370,7 @@ close_one() {
 GRID_COLS=""
 GRID_ROWS=""
 probe_grid() {
-  local out="$SESSION_DIR/grid" probe="$SESSION_DIR/grid-probe.sh"
+  local out="$SESSION_DIR/grid" probe="$MARSPOT_BENCH_RUN_DIR/grid-probe.sh"
   printf '#!/bin/sh\nstty size > %s.tmp < /dev/tty\nmv %s.tmp %s\n' "$out" "$out" "$out" > "$probe"
   chmod 0755 "$probe"
   # shellcheck disable=SC2086
@@ -607,7 +606,7 @@ def read_marker(path):
     return by_scn, grid, load, dropped
 
 ROOT = os.environ.get("PWD", os.getcwd())
-# Mirrors LIVE_MIN_BYTES in bin/_lib.sh — passed through the
+# Mirrors LIVE_MIN_BYTES in bin/_lib-live.sh — passed through the
 # environment by the shell half so the two cannot drift apart.
 LIVE_MIN_BYTES = int(os.environ.get("LIVE_MIN_BYTES", 32 * 1024 * 1024))
 SENTINEL = os.environ["LIVE_SENTINEL_CPR"]

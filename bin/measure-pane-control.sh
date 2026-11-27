@@ -40,7 +40,8 @@ dev_kill_shell_core
 dev_wipe_state
 rm -rf "$SD/sessions" "$SD/retired"
 mkdir -p "$SD/logs"
-PANE_SH="$SD/pane.sh"
+# inside a bench run every script a pane runs belongs in the run dir
+PANE_SH="${MARSPOT_BENCH_RUN_DIR:-$SD}/panectl-pane.sh"
 printf '#!/bin/sh\nPS1="$ " exec /bin/sh\n' > "$PANE_SH"
 chmod +x "$PANE_SH"
 python3 - "$SD" <<'PY' || fail "could not write the layout"

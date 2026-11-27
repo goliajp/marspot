@@ -137,7 +137,7 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
   INNER="source ~/.cargo/env; cd ~/$REMOTE_DIR && export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target; $FWD
     /usr/local/bin/bench-lock bench --max-wait ${MARSPOT_BENCH_MAX_WAIT:-1200} \
       $(lock_until "${MARSPOT_MEASURE_TIMEOUT:-3000}" measure-others "$REMOTE_NAME") \
-      caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
+      env MARSPOT_BENCH_LOCKED=1 caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
       'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
         && exec bash bin/_remote-measure-others-runner.sh'"
   # The whole run inside the console user's GUI session when the host

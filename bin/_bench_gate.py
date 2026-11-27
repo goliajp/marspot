@@ -439,5 +439,5 @@ print(f"==> {record_path}; {_bench_record.append(record_path, hist)} readings ap
 
 # ---- --update-baseline -----------------------------------------------------
 if do_update:
-    sys.exit(_bench_baseline.update(baseline, baseline_path, rows, rc, record["runner"]))
+    sys.exit(_bench_baseline.update(baseline, baseline_path, rows, rc, record["runner"], mode))
 sys.exit(rc)
