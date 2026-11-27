@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.820"  # a pane plan window never closes before it opens, keeps the whole dwell, and leaving a joined account counts the pane
-core    = "0.12.734"  # the accounts panel's tests move to a file of their own
+core    = "0.12.735"  # the unit tests draw icons and read keyboard layouts from recorded AppKit answers
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

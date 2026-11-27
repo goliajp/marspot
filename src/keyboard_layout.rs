@@ -97,8 +97,20 @@ pub fn chord_char(cmd_level: Option<char>, shift: bool, shifted: impl FnOnce() -
 }
 
 /// What this physical key types under the layout in use right now
-/// with `modifiers` held.
+/// with `modifiers` held.  The unit tests read a recorded US layout
+/// instead: asking for the current one registers the process with
+/// LaunchServices (see `installed`).
+#[cfg(not(test))]
 pub fn typed_now(key_code: u16, modifiers: u32) -> Option<char> {
+    typed_live(key_code, modifiers)
+}
+
+#[cfg(test)]
+pub fn typed_now(key_code: u16, modifiers: u32) -> Option<char> {
+    installed::typed("com.apple.keylayout.US", installed::ANSI, key_code, modifiers)
+}
+
+fn typed_live(key_code: u16, modifiers: u32) -> Option<char> {
     /// See the module docs: concurrent Carbon calls here abort.
     static CARBON: Mutex<()> = Mutex::new(());
     // A poisoned lock would mean a previous caller panicked between
@@ -122,24 +134,38 @@ pub fn typed_now(key_code: u16, modifiers: u32) -> Option<char> {
     }
 }
 
+/// The `uchr` table of `source`, or null for a source without one
+/// (a handwriting or voice source).
+///
+/// SAFETY: `source` must be a live TIS input source; the bytes are
+/// borrowed from it.
+unsafe fn layout_of(source: *mut c_void) -> *const u8 {
+    // SAFETY: the property is a borrowed CFDataRef owned by `source`
+    unsafe {
+        let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
+        if data.is_null() { std::ptr::null() } else { CFDataGetBytePtr(data.cast()) }
+    }
+}
+
 /// What `key_code` types under `source` with `modifiers` held (Carbon's
 /// modifier bits, shifted down a byte) on a keyboard of `kbd_type`.
 ///
 /// SAFETY: `source` must be a live TIS input source.
 unsafe fn typed_from_source(source: *mut c_void, key_code: u16, modifiers: u32, kbd_type: u32) -> Option<char> {
-    // SAFETY: the property is a borrowed CFDataRef owned by `source`;
-    // its bytes stay valid for as long as the caller holds `source`.
+    // SAFETY: the table is used while the caller holds `source`
+    unsafe { typed_from_layout(layout_of(source), key_code, modifiers, kbd_type) }
+}
+
+/// [`typed_from_source`] on a `uchr` table.
+///
+/// SAFETY: `layout` is null or a whole `uchr` table, 4-byte aligned,
+/// alive for the call.
+unsafe fn typed_from_layout(layout: *const u8, key_code: u16, modifiers: u32, kbd_type: u32) -> Option<char> {
+    if layout.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's promise about `layout`
     unsafe {
-        let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
-        if data.is_null() {
-            // Some input sources (a handwriting or voice source) have
-            // no layout data at all.  Nothing to report.
-            return None;
-        }
-        let layout = CFDataGetBytePtr(data.cast());
-        if layout.is_null() {
-            return None;
-        }
         let mut dead_state: u32 = 0;
         let mut len: usize = 0;
         let mut buf = [0u16; 8];
@@ -233,55 +259,8 @@ pub const fn us_layout_char(key_code: u16) -> Option<char> {
     })
 }
 
-/// The layouts Apple ships, read by name: what a key types under one
-/// of them, whatever layout the machine running the tests is set to.
 #[cfg(test)]
-pub(crate) mod installed {
-    use core_foundation::base::TCFType;
-    use core_foundation::dictionary::CFDictionary;
-    use core_foundation::string::CFString;
-
-    use super::*;
-
-    #[link(name = "Carbon", kind = "framework")]
-    unsafe extern "C" {
-        fn TISCreateInputSourceList(properties: *const c_void, include_all_installed: u8) -> *const c_void;
-        static kTISPropertyInputSourceID: *const c_void;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFArrayGetCount(array: *const c_void) -> isize;
-        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
-    }
-
-    /// Carbon's Cmd, as `UCKeyTranslate` takes it.
-    pub const CMD: u32 = 1;
-    /// `LMGetKbdType` values of Apple's ANSI, ISO and JIS keyboards.
-    pub const ANSI: u32 = 40;
-    pub const ISO: u32 = 41;
-    pub const JIS: u32 = 42;
-
-    /// What `key_code` types under the layout `source_id` with
-    /// `modifiers` held.  Panics when the layout is not installed.
-    pub fn typed(source_id: &str, kbd_type: u32, key_code: u16, modifiers: u32) -> Option<char> {
-        static CARBON: Mutex<()> = Mutex::new(());
-        let _guard = CARBON.lock().unwrap_or_else(|e| e.into_inner());
-        let id = CFString::new(source_id);
-        // SAFETY: the list is a +1 array released below; the source is
-        // borrowed from it and used only while it is alive.
-        unsafe {
-            let key = CFString::wrap_under_get_rule(kTISPropertyInputSourceID.cast());
-            let filter = CFDictionary::from_CFType_pairs(&[(key, id)]);
-            let list = TISCreateInputSourceList(filter.as_concrete_TypeRef().cast(), 1);
-            assert!(!list.is_null() && CFArrayGetCount(list) > 0, "layout {source_id} is not installed");
-            let source = CFArrayGetValueAtIndex(list, 0) as *mut c_void;
-            let out = typed_from_source(source, key_code, modifiers, kbd_type);
-            CFRelease(list);
-            out
-        }
-    }
-}
+pub(crate) mod installed;
 
 #[cfg(test)]
 mod tests {
@@ -300,24 +279,6 @@ mod tests {
             }
         }
         assert_eq!(n, 48, "expected 47 ANSI keys + space, got {n}");
-    }
-
-    #[test]
-    fn the_lookup_survives_being_called_from_everywhere_at_once() {
-        // The regression this guards: without the lock, this aborts
-        // the process rather than failing a test.
-        let hands: Vec<_> = (0..8)
-            .map(|_| {
-                std::thread::spawn(|| {
-                    for code in 0u16..0x33 {
-                        let _ = unshifted_char(code);
-                    }
-                })
-            })
-            .collect();
-        for h in hands {
-            h.join().expect("no thread died");
-        }
     }
 
     #[test]
