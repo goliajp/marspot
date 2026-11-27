@@ -5,6 +5,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use super::allocation_adapter::{Allocation, events_dir};
 use super::allocation_forecast::Forecasting;
 use super::allocation_inputs::{MarksFile, snapshot};
+use super::allocation_level1::ClassPlan;
 use super::allocation_more::Hold;
 use super::*;
 
@@ -19,6 +20,7 @@ pub(super) fn worker_main(
     let state = marspot::paths::state_root();
     let mut allocation = Allocation::new(events_dir(&state));
     let mut forecast = Forecasting::new(&state);
+    let mut class_plan = ClassPlan::default();
     let mut marks = MarksFile::new(state.join("plugins").join("claudecode"));
     while let Ok(focus) = req_rx.recv() {
         // Deliberately outside `scan_once`: this one reaches out of
@@ -39,6 +41,11 @@ pub(super) fn worker_main(
         }
         if let Some(line) = forecast.scan(&allocation.events, &snap.live, now) {
             marspot::lx_info!("sched.forecast", &line);
+        }
+        if let Some(view) = allocation.view.as_ref()
+            && let Some(line) = class_plan.scan(&snap.accounts, view, forecast.last(), allocation.slope_f(), now)
+        {
+            marspot::lx_info!("sched.level1", &line);
         }
         result.alloc = allocation.view.take();
         if res_tx.send(result).is_err() {

@@ -61,6 +61,7 @@ pub(crate) mod allocation_events;
 mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
+mod allocation_level1;
 mod allocation_line;
 mod allocation_more;
 mod allocation_prices;

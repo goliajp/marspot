@@ -106,6 +106,13 @@ pub(super) fn decide(a: &mut Allocation, snap: &Snapshot, log: &mut Vec<(&'stati
     Some(s.view)
 }
 
+impl Allocation {
+    /// The Fable use the accounts' readings show, weeks an hour.
+    pub(super) fn slope_f(&self) -> f64 {
+        self.slopes.values().filter_map(|s| s.1.rate()).map(|r| r.max(0.0) * KAPPA_FABLE).sum()
+    }
+}
+
 fn scene<'a>(a: &Allocation, snap: &'a Snapshot, stale_feed: bool) -> Scene<'a> {
     let now = snap.now;
     let panes: Vec<Pane> = snap
@@ -118,8 +125,7 @@ fn scene<'a>(a: &Allocation, snap: &'a Snapshot, stale_feed: bool) -> Scene<'a> 
         })
         .collect();
     let rates: Vec<(f64, f64)> = panes.iter().map(|x| (x.f, x.n)).collect();
-    let slope_f: f64 = a.slopes.values().filter_map(|s| s.1.rate()).map(|r| r.max(0.0) * KAPPA_FABLE).sum();
-    let mut view = View::from_rates(snap, &rates, slope_f);
+    let mut view = View::from_rates(snap, &rates, a.slope_f());
     view.tokens = panes.iter().filter_map(|x| Some((x.p.sid, x.tokens?))).collect();
     let plan = crate::plugins::allocation::plan::plan(&view.accounts, view.b_f, view.b_n, Some(KAPPA_FABLE));
     let table = panes.iter().map(|x| (Some(x.p.profile), x.class, x.rate())).collect();

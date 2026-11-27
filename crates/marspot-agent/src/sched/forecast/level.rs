@@ -98,20 +98,23 @@ pub fn fleet_level(f: &Facts, class: usize, now: i64) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
-/// The highest mean of a whole six-hour bucket (from 00, 06, 12, 18
-/// UTC) in the seven days before `now`, every hour known.
-pub fn a_hi(f: &Facts, class: usize, now: i64) -> Option<f64> {
+/// The mean of each whole six-hour bucket (from 00, 06, 12, 18 UTC) in
+/// the seven days before `now` whose every hour is known, oldest first.
+pub fn buckets(f: &Facts, class: usize, now: i64) -> Vec<f64> {
     let width = HORIZON_H * HOUR;
     let done = now.div_euclid(width) * width;
     let mut t = done - 7 * 24 * HOUR;
-    let mut best: Option<f64> = None;
+    let mut out = Vec::new();
     while t + width <= done {
-        if let Some(m) = fleet_mean(f, class, t, HORIZON_H) {
-            best = Some(best.map_or(m, |b| b.max(m)));
-        }
+        out.extend(fleet_mean(f, class, t, HORIZON_H));
         t += width;
     }
-    best
+    out
+}
+
+/// The highest of [`buckets`].
+pub fn a_hi(f: &Facts, class: usize, now: i64) -> Option<f64> {
+    buckets(f, class, now).into_iter().reduce(f64::max)
 }
 
 /// The time-of-day test of one class: mean absolute error of the
