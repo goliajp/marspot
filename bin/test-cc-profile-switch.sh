@@ -38,7 +38,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 
 # A scratch directory of this run's own, removed when the run passes:
 # the fixed name was shared by every run of the suite on the machine.
-SB=/tmp/marspot-cc-switch.$$
+SB="$(dev_tmp marspot-cc-switch)"
 RUNLOG=$SB/run.log
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 CLAUDE_LOG=$SB/claude-invocations.log

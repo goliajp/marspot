@@ -16,7 +16,7 @@
 # and asserts it in both directions, plus that landing is one-shot.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SB="$(mktemp -d)"; trap 'rm -rf "$SB"' EXIT
+SB="$(mktemp -d "${E2E_TMP:-/tmp/marspot-lander.}XXXXXX")"; trap 'rm -rf "$SB"' EXIT
 fail=0
 ok()   { echo "  ✓ $1"; }
 bad()  { echo "  ✗ $1"; fail=1; }

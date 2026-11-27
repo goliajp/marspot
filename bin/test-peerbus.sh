@@ -51,7 +51,7 @@ CODEX_CACHE="$HOME/.cache/marspot-e2e/codex-$CODEX_VERSION"
 # socket path has to fit in 104 bytes.
 # A scratch directory of this run's own, removed when the run passes:
 # the fixed name was shared by every run of the suite on the machine.
-SB=/tmp/marspot-peerbus.$$
+SB="$(dev_tmp marspot-peerbus)"
 RUNLOG=$SB/run.log
 # the Claude Code registry, under this test's HOME
 REGISTRY="$SB/home/.claude"/sessions

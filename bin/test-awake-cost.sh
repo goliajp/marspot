@@ -57,7 +57,7 @@ BUDGETS="${AWAKE_BUDGETS-1:18,4:41,12:115}"
 CPU_BUDGETS="${AWAKE_CPU_BUDGETS-1:0.8,4:1.65,12:4.5}"
 SETTLE="${AWAKE_SETTLE:-15}"
 WINDOW="${AWAKE_WINDOW:-25}"
-work="$(mktemp -d /tmp/marspot-awake.XXXXXX)"
+work="$(mktemp -d "${E2E_TMP:-/tmp/marspot-awake.}XXXXXX")"
 trap 'rm -rf "${work:?}"' EXIT
 
 rc=0

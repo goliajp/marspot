@@ -48,10 +48,23 @@ dev_no_dock() {
   export MARSPOT_TEST_NO_DOCK=1
 }
 
-# The toolbar icons AppKit drew, recorded: the sandbox's shell serves
-# them from here instead of starting a drawer, one app registration less
-# per launch.  A suite that tests the drawer unsets it.
-export MARSPOT_TEST_ICON_MASKS="${MARSPOT_TEST_ICON_MASKS:-$ROOT/tests/fixtures/appkit/icon-masks.bin}"
+# MARSPOT_TEST_ICON_MASKS (recorded toolbar icons served instead of
+# starting a drawer) is not set here: a gauge or benchmark sourcing this
+# measures the app as it ships, drawer included.  bin/test.sh sets it
+# for the unit tests and bin/test-e2e-remote.sh for the window suites.
+
+# A path for a suite's scratch directory, not created.  Under the e2e
+# runner it is under the run's prefix (E2E_TMP, /tmp/msp-e2e-<run>-<n>-),
+# so what a run leaves behind, LaunchServices records included, is told
+# apart from every other run on the host; the name is dropped there to
+# keep socket paths under it within sun_path's 104 bytes.
+dev_tmp() {
+  if [[ -n ${E2E_TMP:-} ]]; then
+    echo "${E2E_TMP}$$"
+  else
+    echo "/tmp/$1.$$"
+  fi
+}
 
 DEV_TARGET="$ROOT/target/release"
 

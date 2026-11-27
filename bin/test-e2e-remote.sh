@@ -215,12 +215,21 @@ for suite in "${SUITES[@]}"; do
   fi
   # Short: the session sockets live under it and sun_path is 104 bytes.
   current_sd="/tmp/msp-e2e-$RUN_ID-$i"
+  # the suite's scratch goes under the same prefix (dev_tmp), which is
+  # all check_leftovers looks at besides the remote tree
+  suite_env=" E2E_TMP=$current_sd-"
+  # A window suite serves the recorded toolbar icons instead of starting
+  # a drawer (one app registration less per launch); a measurement reads
+  # the app as it ships.
+  if [[ $suite == test-* ]] && ! is_measurement "$suite"; then
+    suite_env+=" MARSPOT_TEST_ICON_MASKS=\$PWD/tests/fixtures/appkit/icon-masks.bin"
+  fi
   start=$(date +%s)
   set +e
   # created here so the sandbox helpers find it and give its sessions
   # ids of their own (see dev_seed_session_base)
-  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && env MARSPOT_STATE_DIR=$current_sd$fwd \
-    /usr/local/bin/bench-lock $lock $run"
+  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && \
+    env MARSPOT_STATE_DIR=$current_sd$suite_env$fwd /usr/local/bin/bench-lock $lock $run"
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))
@@ -233,10 +242,14 @@ for suite in "${SUITES[@]}"; do
   # nothing a suite opened may stay listed as an app
   left_rc=0
   left_ls="$(check_leftovers)" || left_rc=$?
+  left_why=""
   if (( left_rc != 0 )); then
     echo "  LaunchServices after $suite:"
     printf '%s\n' "$left_ls" | sed 's/^/    /'
-    (( suite_rc == 0 )) && suite_rc=$left_rc
+    case $left_rc in
+      4) left_why="left apps listed in LaunchServices (Dock tiles)" ;;
+      *) left_why="what LaunchServices lists could not be read" ;;
+    esac
   fi
   # a suite that records readings leaves them in the remote tree, which
   # nothing else copies back
@@ -248,17 +261,17 @@ for suite in "${SUITES[@]}"; do
     mkdir -p "$ROOT/bench/results"
     scp -q "${HOST}:${REMOTE_DIR}/bench/results/active-*.json" "$ROOT/bench/results/" </dev/null || true
   fi
-  if (( suite_rc == 0 )); then
-    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+  if (( suite_rc == 0 && left_rc == 0 )); then
+    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd $current_sd-*" </dev/null || true
     results+=("PASS  ${secs}s  $suite")
     # said now as well: a run that is cut short prints no summary
     echo "==> PASS  ${secs}s  $suite"
-  elif (( suite_rc == 3 )) && may_be_unmeasured "$suite"; then
+  elif (( suite_rc == 3 && left_rc == 0 )) && may_be_unmeasured "$suite"; then
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
     results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
     echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"
     unmeasured=1
-  elif (( suite_rc == 75 )) && is_measurement "$suite"; then
+  elif (( suite_rc == 75 && left_rc == 0 )) && is_measurement "$suite"; then
     # the exclusive hold waits for every other heavy job on the host;
     # not getting it in time says the host was busy, not the suite failed
     ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
@@ -268,10 +281,9 @@ for suite in "${SUITES[@]}"; do
     unmeasured=1
   else
     case $suite_rc in
+      0) why="passed" ;;
       124) why="timed out after ${SUITE_TIMEOUT}s" ;;
       75) why="could not get the host's lock within ${MAX_WAIT}s" ;;
-      4) why="passed, but left apps listed in LaunchServices (Dock tiles)" ;;
-      5) why="passed, but what LaunchServices lists could not be read" ;;
       *) why="exit $suite_rc" ;;
     esac
     if is_measurement "$suite"; then
@@ -280,6 +292,7 @@ for suite in "${SUITES[@]}"; do
         2) why="no reading: the sandbox app did not come up as asked, or the instrument failed" ;;
       esac
     fi
+    [[ -n $left_why ]] && why+=", but $left_why"
     echo "FAIL: $suite: $why (state dir kept: $HOST:$current_sd)" >&2
     results+=("FAIL  ${secs}s  $suite  ($why)")
     rc=1

@@ -28,7 +28,7 @@ TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG="$(dev_run_log test-real-update)"
 PORT="$(dev_free_port)"
 ASSET=marspot-aarch64-apple-darwin.tar.gz
-SERVE_DIR=$(mktemp -d /tmp/marspot-feed.XXXXXX)
+SERVE_DIR=$(mktemp -d "$(dev_tmp marspot-feed).XXXXXX")
 HTTP_PID=
 
 fail() {

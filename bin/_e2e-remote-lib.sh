@@ -1,6 +1,11 @@
 # bin/_e2e-remote-lib.sh — what bin/test-e2e-remote.sh does on the far
-# side, sourced by it after HOST, REMOTE_DIR, REMOTE_PIDF and GUI_UID
-# are set.
+# side, sourced by it after HOST, REMOTE_DIR, REMOTE_PIDF, GUI_UID and
+# RUN_ID are set.
+
+# For the cleanup calls, which run while the run is stopping: a runner
+# that went away is noticed within ten seconds instead of when TCP
+# gives up, and each remote command is under bin/_bounded.sh.
+SSH_CLEANUP=(-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
 
 # One tool does the copying, for every session and every repo: it takes
 # the exclude list from git itself, so a path this repo ignores is never
@@ -50,7 +55,7 @@ remote_tracked() {
 
 stop_remote() {
   [[ -n $SSH_PID ]] && kill -TERM "$SSH_PID" 2>/dev/null
-  ssh -o ConnectTimeout=5 "$HOST" "
+  ssh "${SSH_CLEANUP[@]}" "$HOST" "
     if [ -f $REMOTE_PIDF ]; then
       kill -TERM -- -\$(cat $REMOTE_PIDF) 2>/dev/null
       rm -f $REMOTE_PIDF
@@ -59,19 +64,23 @@ stop_remote() {
 
 # Stops the processes the suite's sandbox recorded, and only those.
 reap_sandbox() {
-  ssh -o ConnectTimeout=5 "$HOST" \
-    "cd ~/$REMOTE_DIR && bin/kill-sandbox-marspot.sh --state-dir $1" </dev/null || true
+  ssh "${SSH_CLEANUP[@]}" "$HOST" \
+    "cd ~/$REMOTE_DIR && bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $1" </dev/null || true
 }
 
 # What LaunchServices still lists of what a suite opened (a Dock tile on
 # a machine nobody is at), read in the console session; records go a
 # moment after their process, so it is looked at for up to ten seconds.
-# Prints bin/_ls-leftovers.sh's lines.  0: nothing left; 4: something
-# left; 5: the list could not be read, which proves nothing either way.
+# Only this run's paths count: its remote tree, and the state dirs and
+# scratch under /tmp/msp-e2e-<run>- (what another run on the host left
+# is not this one's).  Prints bin/_ls-leftovers.sh's lines.  0: nothing
+# left; 4: something left; 5: the list could not be read, which proves
+# nothing either way.
 check_leftovers() {
   local out rc
-  out="$(ssh -o ConnectTimeout=5 "$HOST" "$(gui_cmd "cd ~/$REMOTE_DIR && for i in 1 2 3 4 5 6 7 8 9 10; do \
-    out=\$(bin/_ls-leftovers.sh \$HOME/$REMOTE_DIR/ /tmp/msp- /tmp/marspot-); rc=\$?; \
+  out="$(ssh "${SSH_CLEANUP[@]}" "$HOST" "cd ~/$REMOTE_DIR && bin/_bounded.sh 30 $(gui_cmd "cd ~/$REMOTE_DIR && \
+    for i in 1 2 3 4 5 6 7 8 9 10; do \
+    out=\$(bin/_ls-leftovers.sh \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID-); rc=\$?; \
     [ \$rc -eq 1 ] || break; sleep 1; done; echo \"\$out\"; exit \$rc")" </dev/null 2>&1)"
   rc=$?
   printf '%s\n' "$out"
