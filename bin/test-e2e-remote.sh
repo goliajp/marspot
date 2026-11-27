@@ -268,6 +268,15 @@ for suite in "${SUITES[@]}"; do
     remote_gui "cd ~/$REMOTE_DIR && bin/_active_iterm.sh close $current_sd/iterm.pids" || true
   fi
   reap_sandbox "$current_sd"
+  # nothing a suite opened may stay listed as an app (a Dock tile on a
+  # machine nobody is at); records go a moment after their process
+  left_ls="$(ssh -o ConnectTimeout=5 "$HOST" "cd ~/$REMOTE_DIR && for i in 1 2 3 4 5 6 7 8 9 10; do \
+    out=\$(bin/_ls-leftovers.sh \$HOME/$REMOTE_DIR/ /tmp/msp-) && break; sleep 1; done; echo \"\$out\"" </dev/null || true)"
+  if [[ $left_ls != *"left=0 "* && -n $left_ls ]]; then
+    echo "  LaunchServices still lists what $suite opened:"
+    printf '%s\n' "$left_ls" | sed 's/^/    /'
+    (( suite_rc == 0 )) && suite_rc=4
+  fi
   # a suite that records readings leaves them in the remote tree, which
   # nothing else copies back
   if [[ $suite == test-awake-cost.sh ]]; then
@@ -300,6 +309,7 @@ for suite in "${SUITES[@]}"; do
     case $suite_rc in
       124) why="timed out after ${SUITE_TIMEOUT}s" ;;
       75) why="could not get the host's lock within ${MAX_WAIT}s" ;;
+      4) why="passed, but left apps listed in LaunchServices (Dock tiles)" ;;
       *) why="exit $suite_rc" ;;
     esac
     if is_measurement "$suite"; then
