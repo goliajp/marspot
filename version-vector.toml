@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.867"  # marspot-term: frames carry the number of the last view ask applied
-core    = "0.12.759"  # marspot-term: frames carry the number of the last view ask applied
+core    = "0.12.760"  # a pane in history follows the offset its session publishes once no scroll is in flight
 session = "0.11.484"  # a scroll or prompt jump applied is published as its number beside the offset

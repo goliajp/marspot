@@ -121,3 +121,39 @@ fn a_key_after_a_jump_wins_over_the_jumps_late_answer() {
     wait(&mut pane, &rx, "a scroll to where the jump went was not shown", |p| top_row(p) == "$ cmd3");
     std::mem::forget(pane);
 }
+
+/// The program prints while the person sits in history: the session
+/// keeps the same lines in view by raising its offset, the pane takes
+/// that offset, and the next wheel step moves one line from there
+/// instead of jumping by everything printed meanwhile.
+#[test]
+fn sitting_in_history_while_the_program_prints_keeps_both_offsets_equal() {
+    let _sb = Sandbox::new();
+    let (tx, rx) = marspot_term::mailbox::channel();
+    let sid = reg::allocate_next_session_id().unwrap();
+    let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
+    pane.session_mut().forward_inject_input(b"clear; for i in $(seq 100 299); do echo old$i; done\r");
+    wait(&mut pane, &rx, "the history was never printed", |p| p.screen_rows().iter().any(|r| r.text.trim_end() == "old299"));
+
+    pane.scroll_own_view(50);
+    wait(&mut pane, &rx, "the scroll was never applied", |p| p.session().l3_settled_view() == Some(50));
+    let top = top_row(&pane);
+    assert!(top.starts_with("old"), "the top row is {top:?}");
+
+    pane.session_mut().forward_inject_input(b"for i in $(seq 1 30); do echo new$i; done\r");
+    wait(&mut pane, &rx, "the session never raised its offset", |p| p.view_offset() >= 80);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut answers = 0;
+    pump(&mut pane, &rx, &mut answers);
+    assert_eq!(pane.session().l3_settled_view(), Some(pane.view_offset()), "the pane and its session disagree");
+    assert_eq!(top_row(&pane), top, "the lines in view moved");
+
+    let n: u32 = top["old".len()..].parse().unwrap();
+    pane.scroll_own_view(-1);
+    let next = format!("old{}", n + 1);
+    wait(&mut pane, &rx, &format!("one wheel step down did not put {next} on top"), |p| {
+        p.session().l3_settled_view() == Some(p.view_offset()) && top_row(p) != top
+    });
+    assert_eq!(top_row(&pane), next);
+    std::mem::forget(pane);
+}
