@@ -15,9 +15,9 @@ use marspot::zombie::probe::Live;
 
 /// One zombie-watch check over 50 claude panes with 10 tasks each and a
 /// 200 MB transcript each, every task long silent so that every check
-/// samples every task's CPU.  P95 2.35 ms on mini2 2026-11-28 (11.5 ms
-/// on mini 2026-11-26).
-const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_micros(7_043);
+/// samples every task's CPU.  P95 2.31 to 5.80 ms over nine runs on mini2
+/// 2026-11-28, load1 4.9 to 6.9 from other jobs (11.5 ms on mini 2026-11-26).
+const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_micros(17_401);
 /// One check of four panes whose transcripts each grew by [`APPENDED`]
 /// since the last check, all of it read and folded, as a multiple of the
 /// floor: reading the same appended bytes once and counting their lines,
