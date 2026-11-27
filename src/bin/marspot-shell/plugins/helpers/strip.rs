@@ -1,5 +1,6 @@
 //! What the strip under a pane lists: one record for each pane with
-//! helpers below it, at whatever depth, for the core to draw.
+//! helpers or other shadow panes below it, at whatever depth, for the
+//! core to draw.  The title's `+N` is counted from the same records.
 //!
 //! Composed on the main loop when what it is made of changed, and sent
 //! only when a record differs from what the core has.  How long a
@@ -23,6 +24,7 @@ use crate::plugins::claudecode::with_helpers::turns::{self, Look};
 
 pub(super) mod batch;
 pub(super) mod clock;
+mod plain;
 mod rows;
 pub(in crate::plugins) mod used;
 #[cfg(test)]
@@ -38,6 +40,7 @@ mod helper_strip_row_tests;
 #[path = "strip/helper_strip_idle_tests.rs"]
 mod helper_strip_idle_tests;
 
+use plain::Panes;
 use rows::Live;
 
 /// What the records were last made from, and what is remembered of the
@@ -102,32 +105,35 @@ pub(crate) fn parents() -> Vec<(u64, u64)> {
     SHARED.get().map_or_else(Vec::new, |s| s.table().map.iter().map(|(sid, h)| (*sid, h.started.parent)).collect())
 }
 
-/// True once everything there is to say was declared.
-pub(crate) fn declare(decls: &mut PaneDecls<HelperStrip>) -> bool {
+/// True once everything there is to say was declared.  `host` has the
+/// state of each pane.
+pub(crate) fn declare(decls: &mut PaneDecls<HelperStrip>, host: &dyn crate::plugins::PluginHost) -> bool {
     let Some(s) = SHARED.get() else { return false };
     let mut memory = MEMORY.lock().unwrap_or_else(|p| p.into_inner());
     let m = memory.get_or_insert_default();
-    declare_in(decls, s, m, &|| crate::observe::shared().latest(), &|sid| marspot_term::pane_code::code_for(sid).ok());
+    let status = |sid| host.pane_status(sid).ok().flatten().map(|v| v.status);
+    let panes = Panes { status: &status, title: &super::titles::plugin_title };
+    declare_in(decls, s, m, &|| crate::observe::shared().latest(), &|sid| marspot_term::pane_code::code_for(sid).ok(), &panes);
     true
 }
 
-/// `obs` is asked only while something may be listed: an observation
-/// that is read is kept up to date.
-fn declare_in(decls: &mut PaneDecls<HelperStrip>, s: &Shared, m: &mut Memory, obs: &dyn Fn() -> Arc<Observation>, number: &dyn Fn(u64) -> Option<u16>) {
+/// With no helpers nothing is composed until a shadow pane is open.
+fn declare_in(decls: &mut PaneDecls<HelperStrip>, s: &Shared, m: &mut Memory, obs: &dyn Fn() -> Arc<Observation>, number: &dyn Fn(u64) -> Option<u16>, panes: &Panes) {
     let generation = s.strip_gen.load(Ordering::Acquire);
     let table = s.table();
     let same = m.from.as_ref().is_some_and(|(t, g, _)| Arc::ptr_eq(t, &table) && *g == generation);
     let none = table.map.is_empty() && m.roots.is_empty();
-    if none && (same || s.lock().batches.open().is_empty()) {
+    let obs = obs();
+    if none && (same || s.lock().batches.open().is_empty()) && !plain::any(&obs) {
         m.from = Some((table, generation, None));
         return;
     }
-    let obs = obs();
     if same && m.from.as_ref().is_some_and(|(_, _, o)| o.as_ref().is_some_and(|o| Arc::ptr_eq(o, &obs))) {
         return;
     }
-    ask_numbers(m, &table, &obs, number);
-    let (strips, facts) = compose(&mut s.lock(), &obs, m, records::now_ms());
+    let others = plain::sids(&s.lock(), &obs);
+    ask_numbers(m, &table, &obs, number, &others);
+    let (strips, facts) = compose(&mut s.lock(), &obs, m, records::now_ms(), panes);
     // a write to the log is the worker's
     for (sid, at_ms, ev) in facts {
         let word = ev.word();
@@ -149,8 +155,9 @@ fn declare_in(decls: &mut PaneDecls<HelperStrip>, s: &Shared, m: &mut Memory, ob
 
 /// Ask the codes of panes that are open: one is made for a pane that
 /// has none, and the file may be locked for a moment.
-fn ask_numbers(m: &mut Memory, table: &Table, obs: &Observation, number: &dyn Fn(u64) -> Option<u16>) {
-    for sid in table.map.values().filter(|h| batch::listed(h)).map(|h| h.sid) {
+fn ask_numbers(m: &mut Memory, table: &Table, obs: &Observation, number: &dyn Fn(u64) -> Option<u16>, others: &[u64]) {
+    let helpers = table.map.values().filter(|h| batch::listed(h)).map(|h| h.sid);
+    for sid in helpers.chain(others.iter().copied()) {
         if !m.numbers.contains_key(&sid) && obs.session(sid).is_some_and(|x| x.live) {
             m.numbers.insert(sid, number(sid));
         }
@@ -208,14 +215,15 @@ fn live_of<'a>(turns: &HashMap<u64, Turn>, turned: &HashSet<u64>, at_work: &Hash
 
 /// The record of every pane with something to list, and the facts found
 /// on the way.
-fn compose(st: &mut State, obs: &Observation, m: &mut Memory, now_ms: u64) -> (Vec<HelperStrip>, Vec<Fact>) {
+fn compose(st: &mut State, obs: &Observation, m: &mut Memory, now_ms: u64, panes: &Panes) -> (Vec<HelperStrip>, Vec<Fact>) {
     if m.began_ms != st.began_ms {
         m.began_ms = st.began_ms;
         m.looked.clear();
     }
     let facts = bring_up(st, obs, m, now_ms);
     let listed: HashSet<u64> = st.table.map.keys().copied().chain(st.batches.ended().iter().map(|e| e.helper.sid)).collect();
-    m.numbers.retain(|sid, _| listed.contains(sid));
+    let others = plain::sids(st, obs);
+    m.numbers.retain(|sid, _| listed.contains(sid) || others.contains(sid));
     st.used.retain(|sid, _| listed.contains(sid));
     m.looked.clone_from(&listed);
     let of = |sid: u64| (m.numbers.get(&sid).copied().flatten(), st.used.get(&sid).map_or_else(used::Used::default, |k| k.used));
@@ -232,7 +240,11 @@ fn compose(st: &mut State, obs: &Observation, m: &mut Memory, now_ms: u64) -> (V
             rows.push(rows::ended_row(e, number, used));
         }
         let parent_agent = agent_at(obs, *root);
-        out.push(HelperStrip { batch: batch.number, parent_agent, rows: in_order(rows), ..HelperStrip::empty(*root) });
+        out.push(HelperStrip { batch: batch.number, parent_agent, rows, ..HelperStrip::empty(*root) });
+    }
+    plain::add(st, obs, m, panes, &mut out);
+    for x in &mut out {
+        x.rows = in_order(std::mem::take(&mut x.rows));
     }
     out.sort_unstable_by_key(|x| x.root_sid);
     (out, facts)

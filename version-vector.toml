@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.845"  # a strip row can say it is a plain shadow pane
+shell   = "0.7.846"  # the strip lists every shadow pane under a pane, not only helpers
 core    = "0.12.746"  # the title's +N counts the open panes its strip lists
 session = "0.11.474"  # marspot-term strip rows gain a plain flag (not used by session)
