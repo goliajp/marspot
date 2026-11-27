@@ -25,6 +25,7 @@ pub mod bound;
 pub mod claude_hook;
 pub mod control;
 pub mod envelope;
+pub mod external;
 pub mod frame;
 pub mod gemini_hook;
 pub mod inbox;
