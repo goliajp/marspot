@@ -114,6 +114,10 @@ def tcc_requests(text):
     return reqs
 
 
+# seconds before the snap in which our own take of the lock may be logged
+LOOKBACK = 5
+
+
 def holders(text, me):
     return [m.group(1) for m in re.finditer(r"(?m)^(\d+)\t(?:heavy|bench)\tholding", text) if m.group(1) != me]
 
@@ -125,7 +129,7 @@ def self_cmd(text, me):
         f = line.split("\t", 3)
         if me and len(f) == 4 and f[0] == me and f[2].startswith("holding"):
             cmd = f[3][: -len(" [stopped]")] if f[3].endswith(" [stopped]") else f[3]
-            return cmd[:200]
+            return cmd.replace("\t", " ").replace("\n", " ")[:200]
     return None
 
 
@@ -216,24 +220,30 @@ def window(d, b, me):
         unread.append("lock log unread")
     else:
         start, own = int(b["start_epoch"]), b.get("self_cmd") or self_cmd(st, me)
+        lines = [f for f in (l.split("\t") for l in log.splitlines())
+                 if len(f) > 4 and f[0].isdigit() and f[3] in ("took", "released")]
+        # our own took line comes before the snap: in its second or a few before
+        mine = next((i for i, f in enumerate(lines) if own is not None and f[3] == "took"
+                     and f[4] == own and start - LOOKBACK <= int(f[0]) <= start), None)
+        found = own is None or mine is not None
         n, odd = 0, 0
-        for l in log.splitlines():
-            f = l.split("\t")
-            if not (len(f) > 4 and f[0].isdigit() and int(f[0]) >= start and f[3] in ("took", "released")):
+        for i, f in enumerate(lines):
+            t = int(f[0])
+            if i == mine or t < start:
                 continue
-            # our own took line comes before the snap, at the latest in its second
-            if int(f[0]) == start and f[3] == "took":
-                if own is None:
-                    odd += 1
-                    continue
-                if f[4] == own:
-                    own = ""
-                    continue
+            # a take in the start second that is not known to be ours may be ours
+            if t == start and f[3] == "took" and not (own is not None and found):
+                odd += 1
+                continue
             n += 1
         if n:
             seen.append("%d lock take/release in the window" % n)
         if odd:
-            unread.append("%d lock take in the start second, ours not known to tell it apart" % odd)
+            unread.append("%d lock take in the start second, not told apart from ours" % odd)
+        if not found:
+            # a take we cannot tell from ours may be ours: counting it as another
+            # holder would make the window shared and the machine-wide checks info
+            unread.append("our own lock take not found in the lock log")
     if seen:
         return "shared", seen + unread
     return ("unknown", unread) if unread else ("alone", [])

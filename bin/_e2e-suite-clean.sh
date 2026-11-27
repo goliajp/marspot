@@ -60,7 +60,8 @@ dock_key() {
 logwin() { /usr/bin/log show --start "$start" --end "$(date -v+1S '+%Y-%m-%d %H:%M:%S')" "$@"; }
 # empty output is a dead query, which the decision reads as such
 tcc_probe() { /usr/bin/log show --last 24h --style ndjson --predicate "$TCC_PRED" | head -n 200; return 0; }
-lock_lines() { /usr/bin/awk -F'\t' -v s="$start_epoch" '$1 >= s' "$LOCK_LOG"; }
+# from a few seconds before the snap: our own take is logged just before it
+lock_lines() { /usr/bin/awk -F'\t' -v s="$start_epoch" '$1 >= s - 5' "$LOCK_LOG"; }
 grab_state() {
   grab lsappinfo.txt /usr/bin/lsappinfo list
   grab persistent.txt dock_key persistent-apps

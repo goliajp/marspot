@@ -69,7 +69,8 @@ base() {
   { echo "$HEADER"; launch 01.000; remove 05.000; } >"$d/in/dock.log"
   printf '%s\n{"count":2,"finished":1}\n' "$TCC_OTHER" >"$d/in/tcc.ndjson"
   printf '%s\n' "$ME" >"$d/in/status.txt"
-  : >"$d/in/lock.log"
+  # our own take, logged a second before the snap
+  printf '1699999999\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$d/in/lock.log"
 }
 
 # $1 name, $2 expected exit, then lines the result must have, then -- and
@@ -194,7 +195,7 @@ expect shared 0 "window: shared-window (holding at check: 5000)" "info: dock: 2 
   "info: tcc: kTCCServiceAppleEvents $BUILD"
 
 base shared-log
-printf '1699999990\theavy\t0\ttook\told\t/\n1700000100\theavy\t3\ttook\tcargo build\t/\n' >"$T/shared-log/in/lock.log"
+printf '1699999990\theavy\t0\ttook\told\t/\n1699999999\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n1700000100\theavy\t3\ttook\tcargo build\t/\n' >"$T/shared-log/in/lock.log"
 rm "${T:?}/shared-log/in/persistent.txt"
 expect shared-log 0 "window: shared-window (1 lock take/release in the window)" "info: defaults: com.apple.dock persistent"
 
@@ -233,11 +234,16 @@ printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n1700000000\theavy\t
   >"$T/other-same-second/in/lock.log"
 expect other-same-second 0 "window: shared-window (1 lock take/release in the window)"
 
+base own-mismatch
+printf '1700000000\theavy\t0\ttook\tsh -c something else\t/w\n' >"$T/own-mismatch/in/lock.log"
+launch 06.000 >>"$T/own-mismatch/in/dock.log"
+expect own-mismatch 2 "our own lock take not found in the lock log" "unread: dock: 2 tile insert(s)"
+
 base own-unknown
 printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-unknown/in/lock.log"
 rm "${T:?}/own-unknown/in/status.txt"
 launch 06.000 >>"$T/own-unknown/in/dock.log"
-expect own-unknown 2 "1 lock take in the start second, ours not known to tell it apart" "unread: dock: 2 tile insert(s)"
+expect own-unknown 2 "1 lock take in the start second, not told apart from ours" "unread: dock: 2 tile insert(s)"
 
 # snap: the before state, the probes' answer kept for the run, then reused
 d="$T/snap"
