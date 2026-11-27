@@ -1,6 +1,6 @@
 //! Cost gates: the time hot or recurring work takes.  Each budget is 3x
-//! the P95 measured on the reference machine (Apple silicon Mac mini,
-//! debug test build) and is widened only after measuring again.
+//! the P95 measured on the reference machine (mini2, Apple silicon Mac
+//! mini, debug test build) and is widened only after measuring again.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -15,8 +15,9 @@ use marspot::zombie::probe::Live;
 
 /// One zombie-watch check over 50 claude panes with 10 tasks each and a
 /// 200 MB transcript each, every task long silent so that every check
-/// samples every task's CPU.  P95 11.5 ms measured 2026-11-26.
-const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_millis(35);
+/// samples every task's CPU.  P95 2.35 ms on mini2 2026-11-28 (11.5 ms
+/// on mini 2026-11-26).
+const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_micros(7_043);
 /// One check of four panes whose transcripts each grew by [`APPENDED`]
 /// since the last check, all of it read and folded, as a multiple of the
 /// floor: reading the same appended bytes once and counting their lines,
@@ -147,7 +148,11 @@ fn zombie_check_perf_gate() {
     println!("zombie check: first {first:?}, p50 {:?}, p95 {p95:?}, max {:?}; {hits} hits; {read} transcript bytes read; {} syscalls", times[49], times[99], probe.calls);
     assert!(read <= (PANES as u64) * 64 * 1024, "only each transcript's last 64 KiB is ever read: {read}");
     assert_eq!(hits, PANES * (TASKS - 1), "every older copy of a pane's identical command");
-    assert!(p95 < ZOMBIE_CHECK_P95_BUDGET, "p95 {p95:?} over the budget {ZOMBIE_CHECK_P95_BUDGET:?}");
+    // a hosted CI runner (`CI` set) is shared and of unknown speed: the
+    // time is printed there and the read bytes and hits still hold
+    if std::env::var_os("CI").is_none() {
+        assert!(p95 < ZOMBIE_CHECK_P95_BUDGET, "p95 {p95:?} over the budget {ZOMBIE_CHECK_P95_BUDGET:?}");
+    }
     drop(procs);
 }
 
