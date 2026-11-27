@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.857"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp
+shell   = "0.7.858"  # the pane plan scales pane speeds by what the accounts measure when they differ by more than ordinary error
 core    = "0.12.758"  # font family matching never waits on a font macOS has not downloaded
 session = "0.11.482"  # marspot-term: a fingerprint read from a file needs both a sha and a timestamp

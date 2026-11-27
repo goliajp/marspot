@@ -12,7 +12,9 @@
 //! against today's rule on the same wrong speeds, so the two sides see
 //! the same information.  Panes whose three-hour speed is outside the
 //! band around their level are handed to the triggers as the shell
-//! hands them; no offers are modelled.
+//! hands them; no offers are modelled.  As in the shell, the speeds are
+//! checked against what the accounts read (`calib`) and scaled by the
+//! factor in force.
 
 use super::loop_world::{P, Policy, RESTS, WEEK, hours, speeds};
 use super::standing::Standing;
@@ -62,15 +64,23 @@ pub(super) struct Driver {
     tr: Triggers,
     ended: bool,
     planned_once: bool,
+    calib: crate::sched::calib::Calib,
 }
 
 impl Driver {
     /// A reading at `now`; `refused`: a pane was refused since the last.
     pub(super) fn step(&mut self, policy: Policy, read: &Read, panes: &[P], now: i64, refused: bool) {
+        if let Policy::Planner { bias, short, .. } = policy {
+            let q = read.quants();
+            let sp = handed(panes, now, [bias, short]);
+            let asked: Vec<f64> = q.iter().map(|x| panes.iter().zip(&sp).filter(|(p, _)| p.on == x.id).map(|(_, s)| s[0] + s[1]).sum()).collect();
+            self.calib.observe(now, &q, &asked);
+        }
+        let f = self.calib.factor();
         match policy {
-            Policy::Planner { bias, short, shell: true } => self.pass(read, panes, now, [bias, short], refused),
+            Policy::Planner { bias, short, shell: true } => self.pass(read, panes, now, [bias, short], f, refused),
             Policy::Planner { bias, shell: false, .. } if refused || now % 3600 == 0 || !self.planned_once => {
-                with_input(read, panes, now, [bias, bias], |i, _| {
+                with_input(read, panes, now, [bias, bias], f, |i, _| {
                     pass::full(&mut self.st, i, now as u64, now);
                 });
                 self.planned_once = true;
@@ -79,8 +89,8 @@ impl Driver {
         }
     }
 
-    fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: [f64; 2], refused: bool) {
-        with_input(read, panes, now, bias, |i, outside| {
+    fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: f64, refused: bool) {
+        with_input(read, panes, now, bias, f, |i, outside| {
             let quants: Vec<_> = i.accounts.iter().map(|x| x.q.clone()).collect();
             let high: Vec<f64> = i.accounts.iter().map(|x| i.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
             let counted: Vec<u64> = i.panes.iter().map(|p| p.sid).collect();
@@ -106,10 +116,23 @@ const BAND_HI: [f64; 2] = [2.5, 1.5];
 /// speed the measured speed times `bias[1]`, and a pane is planned as
 /// the shell plans it (`planned_speed`); `f` also gets the panes whose
 /// three-hour speed is outside the band around their level.
-fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: impl FnOnce(&Input, &[u64])) {
+/// Each pane's planned speed as the shell would hand it, before the
+/// calibration factor.
+fn handed(panes: &[P], now: i64, bias: [f64; 2]) -> Vec<[f64; 2]> {
+    panes
+        .iter()
+        .map(|p| {
+            let (fa, na) = speeds(p, now);
+            let m = [fa, na];
+            let (day, short) = (m.map(|x| x * bias[0]), m.map(|x| x * bias[1]));
+            [0, 1].map(|c| planned_speed(day[c], short[c], BAND_LO[c], BAND_HI[c]))
+        })
+        .collect()
+}
+
+fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, f: impl FnOnce(&Input, &[u64])) {
     let q = read.quants();
     let mut outside = Vec::new();
-    let mut sp: Vec<[f64; 2]> = Vec::with_capacity(panes.len());
     for (k, p) in panes.iter().enumerate() {
         let (fa, na) = speeds(p, now);
         let m = [fa, na];
@@ -117,8 +140,8 @@ fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: impl FnOnce
         if (0..2).any(|c| day[c] > 0.0 && (short[c] > day[c] * BAND_HI[c] || short[c] < day[c] * BAND_LO[c])) {
             outside.push(k as u64);
         }
-        sp.push([0, 1].map(|c| planned_speed(day[c], short[c], BAND_LO[c], BAND_HI[c])));
     }
+    let sp: Vec<[f64; 2]> = handed(panes, now, bias).into_iter().map(|s| s.map(|x| x * factor)).collect();
     let demand = [sp.iter().map(|x| x[0]).sum(), sp.iter().map(|x| x[1]).sum()];
     let b = buckets();
     let a_hi = b.iter().copied().fold(0.0, f64::max);

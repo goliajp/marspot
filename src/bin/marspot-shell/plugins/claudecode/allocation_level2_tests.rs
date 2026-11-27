@@ -110,6 +110,33 @@ fn allocation_level2_plans_a_pane_at_its_three_hour_speed_when_that_is_off_the_b
 }
 
 #[test]
+fn allocation_level2_checks_the_pane_speeds_against_the_account_readings() {
+    let r = root("calib");
+    let mut a = Allocation::new(events_dir(&r));
+    let (mut snap, view, fc) = scene();
+    snap.accounts[0].week_used = 0.5;
+    let mut cp = ClassPlan::default();
+    cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
+    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default());
+    let asked: f64 = b.panes.iter().filter(|p| p.on == b.accounts[0].q.id).map(|p| p.speed[0] + p.speed[1]).sum();
+    let mut pp = PanePlan::new(&r);
+    pp.scan(&mut a, &snap, &view, Some(&fc), cp.last());
+    // eight hours on, P3 lost a third of what its panes' speeds put on it
+    let mut later = snap.clone();
+    later.now = NOW + 8 * 3600;
+    later.feed_at = Some(later.now - 60);
+    later.accounts[0].week_used = 0.5 + asked * 8.0 / 3.0;
+    for acc in &mut later.accounts {
+        acc.measured_at = later.now - 60;
+    }
+    cp.scan(&later.accounts, &view, Some(&fc), 0.0, later.now);
+    let log = pp.scan(&mut a, &later, &view, Some(&fc), cp.last());
+    let line = log.iter().find(|l| l.0 == "sched.calib").map(|l| l.1.clone()).unwrap_or_else(|| panic!("no calib line: {log:?}"));
+    assert_eq!(line, "ratio=0.333 factor=0.333");
+    let _ = fs::remove_dir_all(&r);
+}
+
+#[test]
 fn allocation_level2_plans_a_pane_idle_for_three_hours_at_the_bottom_of_its_band() {
     let r = root("idle");
     let a = Allocation::new(events_dir(&r));
