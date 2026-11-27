@@ -17,7 +17,9 @@
 #   2. font_size 12 -> 24: the core logs FONTS_ADOPTED with size_pt=24.0
 #      within 2 s of the write, and the program's columns and rows drop
 #      to about half.
-#   3. font_family Menlo: FONTS_ADOPTED family=Menlo within 2 s.
+#   3. font_family Menlo (size back to 12): FONTS_ADOPTED family=Menlo
+#      within 2 s, and the program reads more rows, Menlo's line being
+#      shorter than Monaco's.
 #   4. A family this Mac does not have: logged as chosen, drawn in the
 #      default, and the grid comes back to the size it had at start.
 #   5. Back to the defaults: the program reads exactly the size it had
@@ -173,6 +175,8 @@ echo "==> size 24 adopted in $took; the program reads $(last_size)"
 after=$(log_lines); since=$(now_ms)
 set_settings 'appearance.font_family = Menlo'
 took="$(wait_adopted family Menlo "$after" "$since" 2)" || fail "Menlo: the core did not adopt it ($took)"
+# back at 12 points, and Menlo's line is shorter than Monaco's
+wait_size "rows > $rows0" 5 || fail "Menlo: the program reads $(last_size), not more rows than $rows0"
 echo "==> Menlo adopted in $took; the program reads $(last_size)"
 
 # --- 4. a family this Mac does not have ---------------------------------
