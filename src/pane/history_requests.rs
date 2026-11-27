@@ -1,14 +1,14 @@
 //! What a pane asks of its session's history beyond a scroll: a search
-//! of it, and a jump to the prompt before or after the view, which is
-//! then marked for a moment on the row it put on top.
+//! of it, and a jump to the prompt before or after the view, whose row
+//! is then marked for a moment.
 
 use std::time::{Duration, Instant};
 
 use super::{L3Conn, Pane, PaneBackend};
 use crate::render::HighlightSpan;
 use crate::shell_proto::{
-    encode_prompt_jump, encode_search_cancel, encode_search_more, encode_search_scrollback, Frame, MsgType,
-    PromptDir, PromptJump,
+    encode_grid_scroll, encode_prompt_jump, encode_search_cancel, encode_search_more, encode_search_scrollback,
+    Frame, MsgType, PromptDir, PromptJump, PromptJumped,
 };
 
 /// How long the row a jump put on top stays marked.
@@ -49,9 +49,27 @@ impl PaneBackend {
 }
 
 impl L3Conn {
-    /// Ask the session to move the view to the prompt `dir` of it.
+    /// Ask L3 to publish the window at `view_offset` rows up from live
+    /// (dedup'd against the last requested offset).  Best-effort over the
+    /// control socket; the new window arrives on the next `poll`.  Every
+    /// ask, sent or not, makes the answer to an earlier prompt jump stale:
+    /// the session applies the two in order and ends where this one says.
+    pub(super) fn forward_scroll(&mut self, view_offset: u16) {
+        self.view_seq = self.view_seq.wrapping_add(1);
+        if self.req_view_offset == Some(view_offset) {
+            return;
+        }
+        self.req_view_offset = Some(view_offset);
+        let _ = self.control.send(Frame::new(MsgType::GridScroll, encode_grid_scroll(view_offset)));
+    }
+
+    /// Ask the session to move the view to the prompt `dir` of it.  Until
+    /// it answers, where it publishes is unknown here, so the next scroll
+    /// is sent even to the offset last asked for.
     fn forward_prompt_jump(&mut self, dir: PromptDir) {
-        let _ = self.control.send_with(MsgType::PromptJump, |out| encode_prompt_jump(PromptJump { dir, seq: 0 }, out));
+        self.req_view_offset = None;
+        let jump = PromptJump { dir, seq: self.view_seq };
+        let _ = self.control.send_with(MsgType::PromptJump, |out| encode_prompt_jump(jump, out));
     }
 }
 
@@ -65,16 +83,23 @@ impl Pane {
         }
     }
 
-    /// The session moved the view to `off`: this side takes that offset
-    /// and marks the row on top until `now + PROMPT_FLASH`.
-    pub fn prompt_jumped(&mut self, off: u16, now: Instant) {
-        self.view_offset = off;
+    /// The session moved the view to a prompt: this side takes the offset
+    /// it moved to and marks the prompt's row until `now + PROMPT_FLASH`.
+    /// An answer to a jump asked before a later key or scroll is dropped:
+    /// the session has already moved on to where that one said.  True
+    /// when the answer was taken.
+    pub fn prompt_jumped(&mut self, said: PromptJumped, now: Instant) -> bool {
         if let PaneBackend::L3(c) = &mut self.session {
+            if said.seq.is_some_and(|s| s != c.view_seq) {
+                return false;
+            }
             // where the session is, so a scroll to there is not sent
-            c.req_view_offset = off;
+            c.req_view_offset = Some(said.view_offset);
         }
-        let span = HighlightSpan { view_row: 0, col_start: 0, col_end_inclusive: u16::MAX };
+        self.view_offset = said.view_offset;
+        let span = HighlightSpan { view_row: said.row, col_start: 0, col_end_inclusive: u16::MAX };
         self.prompt_flash = Some(PromptFlash { span, until: now + PROMPT_FLASH });
+        true
     }
 
     /// When the marked row is to be unmarked, while it is.
@@ -105,13 +130,17 @@ impl Pane {
 mod tests {
     use super::*;
 
+    fn to(view_offset: u16, row: u16) -> PromptJumped {
+        PromptJumped { view_offset, row, seq: Some(0) }
+    }
+
     /// The row on top is marked for its time and then not, and the
     /// search's mark is what shows again.
     #[test]
     fn a_jump_marks_the_top_row_until_its_time_is_up() {
         let mut p = Pane::new_vacant(1, 80, 24);
         let now = Instant::now();
-        p.prompt_jumped(30, now);
+        assert!(p.prompt_jumped(to(30, 0), now));
         assert_eq!(p.view_offset, 30);
         assert_eq!(p.highlight_spans(), &[HighlightSpan { view_row: 0, col_start: 0, col_end_inclusive: u16::MAX }]);
         assert_eq!(p.prompt_flash_until(), Some(now + PROMPT_FLASH), "the loop has a deadline to wake at");
@@ -125,11 +154,21 @@ mod tests {
     #[test]
     fn leaving_the_view_unmarks_the_row() {
         let mut p = Pane::new_vacant(1, 80, 24);
-        p.prompt_jumped(30, Instant::now());
+        p.prompt_jumped(to(30, 0), Instant::now());
         assert!(p.snap_to_live());
         assert!(p.highlight_spans().is_empty());
-        p.prompt_jumped(30, Instant::now());
+        p.prompt_jumped(to(30, 0), Instant::now());
         p.set_view_offset(12);
         assert!(p.highlight_spans().is_empty());
+    }
+
+    /// A jump down to a prompt on the live screen marks the row the
+    /// prompt is on there, not the top row.
+    #[test]
+    fn a_jump_to_the_live_screen_marks_the_prompt_row() {
+        let mut p = Pane::new_vacant(1, 80, 24);
+        p.prompt_jumped(to(0, 17), Instant::now());
+        assert_eq!(p.view_offset, 0);
+        assert_eq!(p.highlight_spans(), &[HighlightSpan { view_row: 17, col_start: 0, col_end_inclusive: u16::MAX }]);
     }
 }

@@ -101,11 +101,14 @@ impl CoreApp {
     }
 
     /// The session moved its view to a prompt: the pane follows and
-    /// marks the row on top for a moment.
+    /// marks the prompt's row for a moment, unless a key or a scroll
+    /// since the jump made the answer stale.
     fn prompt_jumped(&mut self, sid: u64, payload: &[u8]) {
         let Ok(said) = marspot::shell_proto::decode_prompt_jumped(payload) else { return };
         let Some(pane) = self.pane_by_sid_mut(sid) else { return };
-        pane.prompt_jumped(said.view_offset, Instant::now());
+        if !pane.prompt_jumped(said, Instant::now()) {
+            return;
+        }
         if let Some((wi, _)) = self.slot_showing(sid) {
             win!(self, wi).needs_render = true;
         }

@@ -47,7 +47,7 @@ use crate::render::SessionView;
 use crate::selection_tape;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
-    encode_event, encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_paste, Frame, MsgType,
+    encode_event, encode_get_selection_text, encode_grid_resize, encode_paste, Frame, MsgType,
     FIRST_WINDOW_ID,
 };
 use crate::tools::{search_bar::SearchBar, search_list::SearchList};
@@ -705,9 +705,11 @@ pub struct L3Conn {
     req_cols: u16,
     req_rows: u16,
     /// Last scrollback view offset we *requested* L3 publish at (dedup, as
-    /// with the dims).  L2 can't scroll the mirror itself — it holds only
-    /// the visible window — so it asks L3 which window to publish.
-    req_view_offset: u16,
+    /// with the dims); `None` while a prompt jump may have moved it.
+    req_view_offset: Option<u16>,
+    /// Counts the scrolls asked for; a prompt jump carries it, and its
+    /// answer is taken only while no scroll has been asked since.
+    view_seq: u32,
     /// Scrollback depth from the last snapshot — L2 has no scrollback of
     /// its own, so this is what `apply_scroll_lines` clamps against.
     snap_scrollback_len: u32,
@@ -883,18 +885,6 @@ impl L3Conn {
         self.req_cols = cols;
         self.req_rows = rows;
         let frame = Frame::new(MsgType::GridResize, encode_grid_resize(cols, rows));
-        let _ = self.control.send(frame);
-    }
-
-    /// Ask L3 to publish the window at `view_offset` rows up from live
-    /// (dedup'd against the last requested offset).  Best-effort over the
-    /// control socket; the new window arrives on the next `poll`.
-    fn forward_scroll(&mut self, view_offset: u16) {
-        if view_offset == self.req_view_offset {
-            return;
-        }
-        self.req_view_offset = view_offset;
-        let frame = Frame::new(MsgType::GridScroll, encode_grid_scroll(view_offset));
         let _ = self.control.send(frame);
     }
 
