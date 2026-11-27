@@ -58,7 +58,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 RUN_START="$(date +%s)"
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SB="$(mktemp -d /tmp/msp-qau.XXXXXX)"
+SB="$(mktemp -d "$(dev_tmp msp-qau).XXXXXX")"
 APP="$SB/Marspot.app"
 BID="com.goliajp.marspot.e2e-quit-after-update"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister

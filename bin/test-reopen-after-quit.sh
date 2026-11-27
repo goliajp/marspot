@@ -33,7 +33,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SB="$(mktemp -d /tmp/msp-reopen.XXXXXX)"
+SB="$(mktemp -d "$(dev_tmp msp-reopen).XXXXXX")"
 APP="$SB/Marspot.app"
 BID="com.goliajp.marspot.e2e-reopen"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
