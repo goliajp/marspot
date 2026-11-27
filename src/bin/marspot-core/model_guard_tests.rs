@@ -376,8 +376,9 @@ fn marspots_own_typing_is_not_judged_even_under_a_live_box() {
     let (mut app, mut s, _front) = showing(&sb, "", CcModel::Managed);
     app.inject_input(s.sid, b"\x03");
     app.inject_input(s.sid, RESUME);
-    app.forward_pane_paste(s.sid, "carried");
     assert_eq!(s.sent(&app.windows[0].panes[0], MsgType::InjectInput), 2);
+    // each count reads every frame up to it: the paste goes after the first
+    app.forward_pane_paste(s.sid, "carried");
     assert_eq!(s.sent(&app.windows[0].panes[0], MsgType::Paste), 1);
     assert_eq!(app.notices.shell_text(), None);
     // a program's /model into the live box is still refused, and so is a
