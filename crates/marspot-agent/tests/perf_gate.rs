@@ -1,5 +1,5 @@
 //! What the scheduler costs, held to the budgets in `BUDGETS.md`: each
-//! budget is three times the P95 measured on mini.
+//! budget is three times the largest P95 of three runs on mini2.
 
 use marspot_agent::quota::choose::Mover;
 use marspot_agent::quota::replay::{Inputs, Kind, Rule};
@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 /// One scan's decisions: 64 panes, 16 accounts priced, 8 candidates
 /// each.  Budget per decision.
-const DECIDE_BUDGET: Duration = Duration::from_nanos(8_500);
+const DECIDE_BUDGET: Duration = Duration::from_nanos(2_406);
 
 /// The candidates of one resting pane's account decision built from
 /// the objective in force over 16 accounts.  Budget per decision.
-const ALLOC_BUDGET: Duration = Duration::from_micros(94);
+const ALLOC_BUDGET: Duration = Duration::from_nanos(28_875);
 
 /// What the scheduler remembers may not grow past this.
 const STATE_CAP: usize = 64 * 1024;
@@ -27,6 +27,17 @@ fn accounts(n: u8) -> Vec<Quant> {
 
 fn loads(n: usize) -> Vec<Load> {
     (0..n).map(|i| Load { restricted: 0.002 * (i % 3) as f64, plain: 0.004 + 0.001 * (i % 5) as f64 }).collect()
+}
+
+/// A wall-clock budget holds on the machines it was measured against.  A
+/// hosted CI runner (`CI` set) is shared and of unknown speed: there the
+/// time is printed and the work counts are still held.
+fn within(what: &str, p: Duration, budget: Duration) {
+    if std::env::var_os("CI").is_some() {
+        println!("{what}: {p:?} against {budget:?} not held on a hosted CI runner");
+        return;
+    }
+    assert!(p < budget, "{what}: P95 {p:?} over {budget:?}");
 }
 
 fn p95(mut v: Vec<Duration>) -> Duration {
@@ -60,7 +71,7 @@ fn sched_decide_perf_gate() {
     }
     let p = p95(scans.split_off(100));
     println!("sched decide P95 per decision {p:?}, budget {DECIDE_BUDGET:?}");
-    assert!(p < DECIDE_BUDGET, "P95 {p:?} over {DECIDE_BUDGET:?}");
+    within("sched decide", p, DECIDE_BUDGET);
 }
 
 #[test]
@@ -88,7 +99,7 @@ fn sched_alloc_perf_gate() {
     }
     let p = p95(times.split_off(50));
     println!("sched alloc P95 per decision {p:?}, budget {ALLOC_BUDGET:?}");
-    assert!(p < ALLOC_BUDGET, "P95 {p:?} over {ALLOC_BUDGET:?}");
+    within("sched alloc", p, ALLOC_BUDGET);
 }
 
 #[test]
@@ -101,14 +112,14 @@ fn sched_state_bytes() {
 
 /// One full search of the pane plan at 64 panes × 16 accounts, some of
 /// them running out inside the day.  Budget per search.
-const PLAN_BUDGET: Duration = Duration::from_millis(824);
+const PLAN_BUDGET: Duration = Duration::from_micros(207_076);
 
 /// The standing plan re-timed and re-costed at the same size.
-const RETIME_BUDGET: Duration = Duration::from_micros(20_721);
+const RETIME_BUDGET: Duration = Duration::from_micros(1_557);
 
 /// One full search whose exhaustive pass enumerates the most joint
 /// choices it allows.
-const EXACT_BUDGET: Duration = Duration::from_micros(18_285);
+const EXACT_BUDGET: Duration = Duration::from_micros(14_230);
 
 fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pane>) {
     let a = (0..accounts)
@@ -171,7 +182,7 @@ fn sched_plan_perf_gate() {
         small.push(t0.elapsed());
     }
     println!("sched plan P95 at today's size (8 accounts, 12 panes) {:?}", p95(small.split_off(10)));
-    assert!(full < PLAN_BUDGET, "P95 {full:?} over {PLAN_BUDGET:?}");
+    within("sched plan", full, PLAN_BUDGET);
 }
 
 #[test]
@@ -192,7 +203,7 @@ fn sched_plan_retime_perf_gate() {
     }
     let p = p95(times.split_off(10));
     println!("sched plan re-time P95 {p:?}, {} standing switches, budget {RETIME_BUDGET:?}", st.switches.len());
-    assert!(p < RETIME_BUDGET, "P95 {p:?} over {RETIME_BUDGET:?}");
+    within("sched plan re-time", p, RETIME_BUDGET);
 }
 
 /// Four accounts that last the day, five panes spread over them: each
@@ -230,7 +241,7 @@ fn sched_plan_exact_worst_case_perf_gate() {
     println!("sched plan P95 per full search in exact mode at its cap {p:?} ({} switches, mode {}, {} simulations), budget {EXACT_BUDGET:?}", pl.switches.len(), pl.mode.word(), pl.sims);
     assert_eq!(pl.mode, level2::Mode::Exact);
     assert!(pl.sims >= 1024, "{} simulations: the exhaustive pass did not reach its cap", pl.sims);
-    assert!(p < EXACT_BUDGET, "P95 {p:?} over {EXACT_BUDGET:?}");
+    within("sched plan exact", p, EXACT_BUDGET);
 }
 
 #[test]
