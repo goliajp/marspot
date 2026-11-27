@@ -18,6 +18,11 @@ use super::{Account, H2, Input, LASTS_H, Pane};
 use crate::quota::EPS;
 
 const BUCKET_H: f64 = 6.0;
+/// A move onto an account before its renewal is timed as if the pane
+/// ran at this share of its level: what is left there lapses whole when
+/// the pane runs slower than its level, while an account it empties
+/// early costs one refusal and a move on.
+const DRAIN_PACE: f64 = 0.5;
 const SAME_H: f64 = 1e-6;
 
 /// Where accounts and panes are, by index.
@@ -49,6 +54,9 @@ pub struct Grid {
     /// its own high-band load.
     load: Vec<f64>,
     pane_high: Vec<f64>,
+    /// The same at the level.
+    level_load: Vec<f64>,
+    pane_level: Vec<f64>,
     /// Each pane's targets, worked out when first asked for.
     targets: Vec<OnceCell<Vec<usize>>>,
 }
@@ -114,9 +122,18 @@ impl Grid {
         }
         cuts.extend(input.panes.iter().map(|p| p.earliest_h).filter(|t| *t > 0.0 && *t < H2));
         cuts.extend_from_slice(extra);
+        let on: Vec<Option<usize>> = input.panes.iter().map(|p| index(input.accounts, p.on)).collect();
+        let load: Vec<f64> = (0..input.accounts.len()).map(|j| high_load(input, &on, j)).collect();
+        let pane_high: Vec<f64> = input.panes.iter().map(|p| p.high[0] + p.high[1]).collect();
+        let level_load: Vec<f64> = (0..input.accounts.len()).map(|j| input.panes.iter().enumerate().filter(|(k, _)| on[*k] == Some(j)).map(|(_, p)| p.speed[0] + p.speed[1]).sum()).collect();
+        let pane_level: Vec<f64> = input.panes.iter().map(|p| p.speed[0] + p.speed[1]).collect();
+        // one cut per account that would lapse week at a renewal inside
+        // the horizon: where a pane of the fleet's mean level joining it
+        // uses the rest up just by then
+        let mean = pane_level.iter().sum::<f64>() / pane_level.len().max(1) as f64;
+        cuts.extend((0..input.accounts.len()).filter_map(|k| drain_at(input, &level_load, k, mean)).filter(|t| *t > 0.0));
         cuts.sort_by(f64::total_cmp);
         cuts.dedup_by(|b, a| *b - *a < SAME_H);
-        let on: Vec<Option<usize>> = input.panes.iter().map(|p| index(input.accounts, p.on)).collect();
         let first = input.panes.iter().map(|p| cut_at(&cuts, p.earliest_h.max(0.0)).unwrap_or(cuts.len() - 1)).collect();
         let renews = input.accounts.iter().map(|a| (a.q.t > 0.0).then(|| cut_at(&cuts, a.q.t)).flatten()).collect();
         let renews_f = input.accounts.iter().map(|a| (a.q.tf > 0.0 && a.q.tf < a.q.t - SAME_H).then(|| cut_at(&cuts, a.q.tf)).flatten()).collect();
@@ -124,10 +141,18 @@ impl Grid {
         let late = vec![None; input.accounts.len()];
         let deadline = vec![H2; input.accounts.len()];
         let dead = deadline.clone();
-        let load = (0..input.accounts.len()).map(|j| high_load(input, &on, j)).collect();
-        let pane_high = input.panes.iter().map(|p| p.high[0] + p.high[1]).collect();
         let targets = vec![OnceCell::new(); input.panes.len()];
-        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead, load, pane_high, targets }
+        Grid { cuts, on, first, renews, renews_f, keeper, late, deadline, dead, load, pane_high, level_load, pane_level, targets }
+    }
+
+    /// The earliest cut from which pane `p` joining account `k` uses up
+    /// its week just by its renewal inside the horizon at `DRAIN_PACE` of
+    /// its level, with the panes there now at theirs: the level, not the
+    /// high band, since at the high band a third of what it should use
+    /// would lapse.
+    pub fn drain_cut(&self, input: &Input, p: usize, k: usize) -> Option<usize> {
+        let at = drain_at(input, &self.level_load, k, self.pane_level[p])?;
+        cut_at(&self.cuts, at.max(0.0))
     }
 
     pub fn segs(&self) -> usize {
@@ -173,6 +198,16 @@ impl Grid {
     pub fn movable(&self, input: &Input, p: usize) -> bool {
         !input.stale_feed && !self.keeper[p] && input.panes[p].switches_left > 0 && self.first[p] < self.segs()
     }
+}
+
+/// When a pane using `h` weeks an hour joining account `k` uses up what
+/// the panes there leave at its renewal inside the horizon, just by then
+/// at `DRAIN_PACE` of that speed.
+fn drain_at(input: &Input, load: &[f64], k: usize, h: f64) -> Option<f64> {
+    let h = h * DRAIN_PACE;
+    let q = &input.accounts[k].q;
+    let left = q.r - load[k] * q.t;
+    (q.open && q.t > 0.0 && q.t < H2 && h > 0.0 && left > EPS).then(|| q.t - left / h)
 }
 
 /// Weeks an hour the panes on account `j` use at the high band.

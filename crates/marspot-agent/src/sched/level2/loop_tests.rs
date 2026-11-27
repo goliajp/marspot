@@ -47,7 +47,7 @@ fn print(what: &str, seeds: std::ops::Range<u64>, bias: f64, short: f64, shell: 
     let planner = weeks(seeds.clone(), Policy::Planner { bias, short, shell });
     if bias != 1.0 {
         // today's rule reads the same speeds: wrong by the same factor
-        let same = weeks(seeds, Policy::Today { bias });
+        let same = weeks(seeds.clone(), Policy::Today { bias });
         println!(
             "closed loop {what}: today with the same forecast money {:.2} (switches {:.2} refusals {:.2} lapsed {:.2}), refusals {}, switches {}",
             100.0 * sum(&same, |w| w.money),
@@ -58,9 +58,9 @@ fn print(what: &str, seeds: std::ops::Range<u64>, bias: f64, short: f64, shell: 
             same.iter().map(|w| w.switches).sum::<usize>(),
         );
     }
-    for (k, (t, p)) in today.iter().zip(&planner).enumerate() {
+    for (seed, (t, p)) in seeds.zip(today.iter().zip(&planner)) {
         println!(
-            "week {k}: today money {:.2} = switches {:.2} + refusals {:.2} + lapsed {:.2}, refusals {} ({}), switches {} ({}); planner money {:.2} = switches {:.2} + refusals {:.2} + lapsed {:.2}, refusals {} ({}), switches {} ({})",
+            "{what} seed {seed}: today money {:.2} = switches {:.2} + refusals {:.2} + lapsed {:.2}, refusals {} ({}), switches {} ({}); planner money {:.2} = switches {:.2} + refusals {:.2} + lapsed {:.2}, refusals {} ({}), switches {} ({})",
             100.0 * t.money, 100.0 * t.switch_rw, 100.0 * t.refusal_rw, 100.0 * t.lapsed, t.refusals, t.refusals_r, t.switches, t.switches_r,
             100.0 * p.money, 100.0 * p.switch_rw, 100.0 * p.refusal_rw, 100.0 * p.lapsed, p.refusals, p.refusals_r, p.switches, p.switches_r,
         );

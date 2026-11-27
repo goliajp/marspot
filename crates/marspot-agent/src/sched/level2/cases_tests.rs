@@ -66,6 +66,23 @@ fn sched_level2_herd_planned_at_the_high_band_two_hours_ahead() {
 }
 
 #[test]
+fn sched_level2_week_that_would_lapse_at_a_renewal_is_used_up_before_it() {
+    // P1 holds 3 points nobody uses and renews in 10 h; P2 empties at
+    // the high band in about 13 h.  A pane moves onto P1 in time to use
+    // the 3 points up by the renewal, and its window is not put off
+    // toward P2's deadline, which lies past the renewal
+    let a = [acct(1, 0.03, 0.0, 10.0), acct(2, 0.12, 0.0, 120.0)];
+    let p = [pane(10, 2, false, 0.0, 0.004), pane(11, 2, false, 0.0, 0.002)];
+    let i = input(&a, &p);
+    let idle = evaluate(&i, &[Sched::STAY; 2]);
+    let plan = plan(&i, None);
+    let s = plan.switches.iter().find(|s| s.to == 1).unwrap_or_else(|| panic!("no move onto P1: {:?}", plan.switches));
+    assert!(s.t_open < 10.0 && s.t_dead <= 10.0 + 1e-9 && s.t_open <= s.t_dead, "{s:?}");
+    assert!(plan.totals.lapsed < idle.totals.lapsed - 0.01, "lapsed {} against {} idle", plan.totals.lapsed, idle.totals.lapsed);
+    assert!(plan.totals.money < idle.totals.money, "money {} against {} idle", plan.totals.money, idle.totals.money);
+}
+
+#[test]
 fn sched_level2_churn_of_helpers_changes_no_structure() {
     // twenty helpers of three minutes each over an hour count only in
     // fleet demand: passes every 2 s, at most one full search a minute

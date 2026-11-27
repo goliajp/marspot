@@ -39,16 +39,21 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
             debug_assert!(first || from.is_none_or(|j| t_open <= g.dead_for(p, j) + 1e-6), "a switch planned after its deadline");
             // a window never closes before it opens: a cut within rounding
             // of the deadline may lie just after it
+            // a move onto an account before its renewal uses up what lapses
+            // there: it is worth its time only until the renewal, and is not
+            // put off toward the source's deadline
+            let drains = g.renews[hop.to as usize].filter(|&r| (hop.at as usize) < r).map(|r| g.cuts[r]);
             let t_dead = match from {
-                Some(j) if averts => g.dead_for(p, j).max(t_open),
-                _ => dead_by_gain(t_open, gain, pane.rewrite),
+                Some(j) if averts => g.dead_for(p, j).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
+                _ => dead_by_gain(t_open, gain, pane.rewrite).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
             };
+            let late = averts && drains.is_none();
             // the window's length is taken as worked out: `t_dead` less the
             // opening moved up to it differs from the lead by rounding, and
             // a clean rest's chance taken on that falls under the stopping
             // rule's for about half of them
-            let w = if averts { (t_dead - t_open).min(lead(pane)) } else { t_dead - t_open };
-            let t_open = if averts { t_open.max(t_dead - lead(pane)) } else { t_open };
+            let w = if late { (t_dead - t_open).min(lead(pane)) } else { t_dead - t_open };
+            let t_open = if late { t_open.max(t_dead - lead(pane)) } else { t_open };
             switches.push(Switch {
                 sid: pane.sid,
                 from: from.map_or(pane.on, |j| input.accounts[j].q.id),
