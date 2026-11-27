@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# CARVE-OUT: pre-existing runner over the size limit; it shrinks on every touch
 # bin/_remote-measure-others-runner.sh — runs on the bench host, driven
 # from bin/remote-measure-others.sh. Emits a single JSON object on
 # stdout shaped like:

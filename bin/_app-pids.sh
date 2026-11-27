@@ -61,12 +61,22 @@ verified_pid() {
   [[ -n $started ]] && (( started >= $2 ))
 }
 
-# quit_pid <pid>: the app's own quit, addressed to that one process (an
-# AppleEvent by app name reaches whichever instance answers to the name)
+# quit_pid <pid> <launch-epoch> <binary-path>: the app's own quit,
+# addressed to that one process (an AppleEvent by app name reaches
+# whichever instance answers to the name).  The same process that asks it
+# to quit first checks it is that binary, launched at or after the epoch,
+# so the pid cannot change hands between the check and the quit.  A
+# process LaunchServices did not launch has no launchDate and is left to
+# the signals.
 quit_pid() {
   /usr/bin/osascript -l JavaScript -e "ObjC.import('AppKit');
-var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier($1);
-a.isNil() ? 'gone' : (a.terminate() ? 'asked' : 'refused')" 2>/dev/null || true
+function run(argv) {
+  var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(argv[0]));
+  if (a.isNil()) return 'gone';
+  var u = a.executableURL, d = a.launchDate;
+  if (u.isNil() || d.isNil() || u.path.js !== argv[2] || d.timeIntervalSince1970 < Number(argv[1])) return 'not ours';
+  return a.terminate() ? 'asked' : 'refused';
+}" "$1" "$2" "$3" 2>/dev/null || true
 }
 
 # stop_recorded_pids <pid-file> <binary-path>: stop each recorded pid that
@@ -83,7 +93,7 @@ stop_recorded_pids() {
   done < <(sort -u "$1")
   : > "$1"
   (( ${#live[@]} )) || return 0
-  for p in "${live[@]}"; do quit_pid "${p%% *}" >/dev/null; done
+  for p in "${live[@]}"; do quit_pid "${p%% *}" "${p#* }" "$2" >/dev/null; done
   # the last pass only waits for the SIGKILL to land
   for sig in TERM KILL -; do
     for ((i = 0; i < 20; i++)); do

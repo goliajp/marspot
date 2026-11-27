@@ -68,8 +68,9 @@ stop_ghostty() {
     [[ $pid =~ ^[0-9]+$ ]] && (( pid > 300 )) || continue
     comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
     [[ $comm == */Ghostty.app/Contents/MacOS/ghostty ]] || continue
-    began="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
-    began_s="$(date -j -f '%a %b %d %T %Y' "$began" +%s 2>/dev/null || echo 0)"
+    # lstart and its parse follow the locale
+    began="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null || true)"
+    began_s="$(LC_ALL=C date -j -f '%a %b %d %T %Y' "$began" +%s 2>/dev/null || echo 0)"
     (( began_s >= RUN_STARTED )) || continue
     kill -TERM "$pid" 2>/dev/null || true
   done < "$GHOSTTY_PIDS"
