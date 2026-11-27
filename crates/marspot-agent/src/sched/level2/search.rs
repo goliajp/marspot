@@ -158,7 +158,7 @@ pub(super) fn run(input: &Input, start: Option<&[Sched]>) -> Plan {
     if !gains {
         best = idle;
     }
-    super::finish::plan(&mut e, &best, mode, active, charge, idle_cost.totals)
+    super::finish::plan(&mut e, &best, mode, active, charge, idle_cost.totals, &[])
 }
 
 /// The best schedules from `start` at the charge in force.
@@ -252,15 +252,16 @@ fn active(e: &mut Eval, cur: &[Sched]) -> Vec<usize> {
 
 /// The plan of exactly `scheds`, costed and timed, with no search.
 pub(super) fn evaluate(input: &Input, scheds: &[Sched]) -> Plan {
-    evaluate_on(input, &Grid::new(input), scheds)
+    evaluate_on(input, &Grid::new(input), scheds, &[])
 }
 
-/// As `evaluate`, on the grid `g` of `input` already worked out.
-pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched]) -> Plan {
+/// As `evaluate`, on the grid `g` of `input` already worked out; `kept`
+/// as `finish::plan` takes it.
+pub(super) fn evaluate_on(input: &Input, g: &Grid, scheds: &[Sched], kept: &[(u64, u8, f64, f64)]) -> Plan {
     let ctx = Ctx::new(input, g);
     let sim = Sim::new(&ctx);
     let mut e = Eval { ctx, sim, charge: 0.0, tally: Tally::default() };
     let idle = e.cost(&vec![Sched::STAY; input.panes.len()]).totals;
-    super::finish::plan(&mut e, scheds, Mode::Search, 0, 0.0, idle)
+    super::finish::plan(&mut e, scheds, Mode::Search, 0, 0.0, idle, kept)
 }
 

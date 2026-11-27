@@ -166,8 +166,11 @@ pub struct Switch {
     pub kind: Kind,
     /// It averts a refusal within `EXEMPT_H`: not in the fleet's count.
     pub exempt: bool,
-    /// What the plan saves by it, weeks.
+    /// What the plan saves by it, weeks, and stall hours: a switch that
+    /// only averts a refusal may save no money (the refusal pays the same
+    /// rewrite) and still save the refusal's stall.
     pub gain: f64,
+    pub gain_eff: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

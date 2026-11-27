@@ -11,7 +11,7 @@
 //!
 //! A switch whose window is open is committed: it is not re-targeted
 //! for a better score, only cancelled when its target fails a filter or
-//! its gain is gone.  A window whose deadline passes with the pane where
+//! its gain is gone: it saves neither money nor stall hours.  A window whose deadline passes with the pane where
 //! it was is a miss.  After a miss or a cancel the pane is pinned to its
 //! account for an hour.
 //!
@@ -45,6 +45,7 @@ pub struct Planned {
     pub open_at: i64,
     pub dead_at: i64,
     pub gain: f64,
+    pub gain_eff: f64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -149,7 +150,7 @@ impl Standing {
         let mut keep = Vec::with_capacity(self.switches.len());
         for s in self.switches.clone() {
             let on = input.panes.iter().find(|p| p.sid == s.sid).map(|p| p.on);
-            let gain = timed.and_then(|t| t.switches.iter().find(|x| x.sid == s.sid && x.order == s.order)).map(|x| x.gain);
+            let gain = timed.and_then(|t| t.switches.iter().find(|x| x.sid == s.sid && x.order == s.order)).map(|x| (x.gain, x.gain_eff));
             let why = if s.open_at > now || s.order > 0 {
                 None
             } else if on.is_none() || on == Some(s.to) {
@@ -159,7 +160,7 @@ impl Standing {
                 Some("missed")
             } else if timed.is_none() {
                 Some("target fails a filter")
-            } else if gain.is_none_or(|g| g <= 0.0) {
+            } else if gain.is_none_or(|(g, eff)| g <= 0.0 && eff <= 0.0) {
                 Some("gain gone")
             } else {
                 None
@@ -220,7 +221,7 @@ impl Standing {
             .switches
             .iter()
             .take(SWITCHES_CAP)
-            .map(|s| Planned { sid: s.sid, from: s.from, to: s.to, order: s.order, open_at: at(s.t_open), dead_at: at(s.t_dead), gain: s.gain })
+            .map(|s| Planned { sid: s.sid, from: s.from, to: s.to, order: s.order, open_at: at(s.t_open), dead_at: at(s.t_dead), gain: s.gain, gain_eff: s.gain_eff })
             .collect();
     }
 }

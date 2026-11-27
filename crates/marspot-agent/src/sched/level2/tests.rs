@@ -184,7 +184,7 @@ fn sched_level2_a_second_switch_keeps_the_whole_dwell_after_the_first() {
     let i = input(&a, &p);
     let g = Grid::new(&i);
     let now = 1_800_000_000;
-    let planned = |order: u8, from: u8, to: u8, open_at: i64| standing::Planned { sid: 10, from, to, order, open_at, dead_at: open_at + 3600, gain: 0.01 };
+    let planned = |order: u8, from: u8, to: u8, open_at: i64| standing::Planned { sid: 10, from, to, order, open_at, dead_at: open_at + 3600, gain: 0.01, gain_eff: 0.0 };
     let mut st = Standing::default();
     st.switches = vec![planned(0, 1, 2, now), planned(1, 2, 3, now + (DWELL_H * 3600.0) as i64)];
     let s = st.schedules(&i, &g, now).expect("the structure holds");
@@ -203,4 +203,39 @@ fn sched_level2_leaving_an_account_it_joined_takes_the_reading_error_at_the_load
     assert_eq!(g.dead_for(0, 1), window::dead_by_exhaustion(g.deadline[1], with));
     assert!(g.dead_for(0, 1) > g.dead[1]);
     assert_eq!(g.dead_for(1, 1), g.dead[1]);
+}
+
+#[test]
+fn sched_level2_a_retime_keeps_the_gain_of_a_refusal_averting_switch_not_yet_open() {
+    let a = [acct(1, 0.02, 0.0, 100.0), acct(2, 0.6, 0.0, 120.0)];
+    let p = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002), pane(12, 1, false, 0.0, 0.004)];
+    let i = input(&a, &p);
+    let now = 1_800_000_000;
+    let mut st = Standing::default();
+    pass::full(&mut st, &i, 1, now);
+    assert!(!st.switches.is_empty() && st.switches.iter().all(|s| s.open_at > now + 2), "{:?}", st.switches);
+    st.switches.iter_mut().for_each(|s| s.gain = 0.123);
+    let r = pass::retime(&mut st, &i, now + 2).expect("the structure holds");
+    assert!(r.plan.switches.iter().all(|s| s.gain == 0.123), "{:?}", r.plan.switches);
+    // a full search weighs the structure by gains worked out afresh
+    st.switches.iter_mut().for_each(|s| s.gain = 0.123);
+    let r = pass::full(&mut st, &i, 1, now + 4);
+    assert!(!r.plan.switches.is_empty() && r.plan.switches.iter().all(|s| s.gain != 0.123), "{:?}", r.plan.switches);
+}
+
+#[test]
+fn sched_level2_a_committed_switch_that_averts_a_refusal_stays_though_it_saves_no_money() {
+    // the refusal pays the same rewrite as the switch: what leaving saves
+    // is the refusal's stall
+    let a = [acct(1, 0.02, 0.0, 100.0), acct(2, 0.6, 0.0, 120.0)];
+    let p = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002), pane(12, 1, false, 0.0, 0.004)];
+    let i = input(&a, &p);
+    let now = 1_800_000_000;
+    let mut st = Standing::default();
+    pass::full(&mut st, &i, 1, now);
+    let (sid, opened) = (st.switches[0].sid, st.switches[0].open_at);
+    let r = pass::retime(&mut st, &i, opened).expect("the structure holds");
+    assert!(r.ended.cancelled.is_empty(), "{:?}", r.ended.cancelled);
+    let s = r.plan.switches.iter().find(|s| s.sid == sid).expect("the switch");
+    assert!(s.gain_eff > 0.0, "{s:?}");
 }
