@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# e2e-dock-tiles-max: 3  app 2 (its tile, and the next one while the Dock still holds the last) + the instance opened beside it with open -n (a second instance asked for, --ls-refresh) 1
 #
 # The app is one record in LaunchServices, under the bundle, alive, in
 # every state -- and an update makes it so where it is not.

@@ -17,12 +17,9 @@ import collections, re
 from datetime import datetime
 
 INSERT, REMOVE, URL = "Inserting tile", "Removing tiles identical to", "Got App URL: "
-# tiles of ours at once: the app, and its next image's tile while the
-# Dock still holds the last one
-MOST_AT_ONCE = 2
 # from loginwindow's line naming a launched app to the Dock's insert (up to
-# 59 ms on mini2, 2026-11-27): it tells the probe's inserts and a helper of
-# the run apart; an insert named for no app is never excused by it
+# 59 ms on mini2, 2026-11-27): it tells the probe's inserts from the
+# suite's, which all count; an insert named for no app counts as the suite's
 ATTRIBUTE_S = 0.2
 PROBE = "/marspot-dockprobe"
 
@@ -114,14 +111,15 @@ def probe_snap(d, read):
     return ["probe_dock_pid=" + p["dock_pid"], "probe_index=" + p["index"]]
 
 
-def at_once(text, base, ours, under):
-    """the most tiles of the suite the Dock held at once and the limit, from the inserts after
-    the probe's.  The count starts one above the probe's index before the suite: the Dock
-    logs a removal line once the probe is gone, but a removal line does not say which tile
-    went, so the probe's own tile may still hold its index when the suite's first tile comes.
+def at_once(text, base):
+    """the most tiles of the suite the Dock held at once, from the inserts after the probe's.
+    Every insert but the probe's counts, whatever program it is for: the limit is the
+    number the suite declares for all the programs it opens on purpose.  The count starts
+    one above the probe's index before the suite: the Dock logs a removal line once the
+    probe is gone, but a removal line does not say which tile went, so the probe's own tile
+    may still hold its index when the suite's first tile comes.
     An insert at or below the probe's index lowers the start to it (a tile went: stricter,
-    never laxer).  A program of this run that is not the app (a helper registering as a
-    regular app) is the suite's subject and adds one to the limit.
+    never laxer).
 
     Counted from one above, the count is one low when the probe's tile goes after the
     suite's first tile came: A goes in at base+1 beside the probe's tile, the probe's tile
@@ -131,12 +129,11 @@ def at_once(text, base, ours, under):
     come in a run; when the log shows it anyway (probe_went_late) the count is not read"""
     ins = [(i, u) for i, u in inserts(text) if not (u and u.endswith(PROBE))]
     if not ins:
-        return 0, MOST_AT_ONCE, ""
+        return 0, ""
     idx = [i for i, _ in ins]
     low = min([base + 1] + idx)
-    helpers = {u for _, u in ins if u and (ours(u) or under(u)) and "marspot" not in u.lower()}
     span = "insert index %d..%d, %d before the suite" % (min(idx), max(idx), base)
-    return max(idx) - low + 1, MOST_AT_ONCE + len(helpers), span
+    return max(idx) - low + 1, span
 
 
 def probe_went_late(text):
@@ -152,7 +149,8 @@ def probe_went_late(text):
     return lines[early[0] - 1][:23] if early else None
 
 
-def log_check(d, b, read, ours, under, kind, left, unread):
+def log_check(d, b, read, most, kind, left, unread):
+    """most: the tiles of the suite the Dock may hold at once, as the suite declares"""
     dock = read(d, "dock.log")
     if dock is None or not dock.startswith("Timestamp"):
         unread.append("dock log: log show gave no output")
@@ -174,7 +172,7 @@ def log_check(d, b, read, ours, under, kind, left, unread):
         if others:
             unread.append("dock: tiles at once: a Dock other than %s logged tiles in the suite (%s)" % (pid, " ".join(others)))
             return
-        peak, most, span = at_once(dock, int(b["probe_index"]), ours, under)
+        peak, span = at_once(dock, int(b["probe_index"]))
         late = probe_went_late(dock)
     except ValueError:
         unread.append("dock log: a tile line without a time")

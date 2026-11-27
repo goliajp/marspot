@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# e2e-dock-tiles-max: 2  app 2: the tile of the opening after a quit goes in while the Dock still holds the quit one's, which goes 0.5 s after the quit
 #
 # Quit the app, open it again: it opens, every time, however soon.
 #

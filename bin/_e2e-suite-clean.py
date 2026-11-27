@@ -1,5 +1,5 @@
 # bin/_e2e-suite-clean.py snap DIR LOCK_PID
-#                         check DIR BEFORE LEFTOVERS_RC LEFTOVERS_OUT LOCK_PID PREFIX...
+#                         check DIR BEFORE LEFTOVERS_RC LEFTOVERS_OUT LOCK_PID DOCK_MAX PREFIX...
 # the decision of bin/_e2e-suite-clean.sh over the inputs it saved in DIR.
 # snap prints the before state as key=value lines; check prints the raw
 # counts, what was found and last clean=0|1|2 (also the exit status).
@@ -292,7 +292,7 @@ def quiet_preflight(r, under):
             and any(under(p) for p in r["paths"] if p != SYSPOLICYD))
 
 
-def check(d, before, lrc, lout, me, prefixes):
+def check(d, before, lrc, lout, me, most, prefixes):
     left, unread, wide = [], [], []
     pairs = [l.split("=", 1) for l in open(before).read().splitlines() if "=" in l] if os.path.exists(before) else []
     b = dict(pairs)
@@ -318,7 +318,7 @@ def check(d, before, lrc, lout, me, prefixes):
     kind, why = window(d, b, me)
     fg_same = "fg_set" in b and "fg_set" in c and json.loads(b["fg_set"]) == c["fg_set"]
     dock.probe_check(d, b, read, kind, fg_same, left, unread)
-    dock.log_check(d, b, read, ours, under, kind, left, unread)
+    dock.log_check(d, b, read, most, kind, left, unread)
     for r in recs or []:
         if key(r) in known:
             known.remove(key(r))
@@ -350,5 +350,5 @@ def check(d, before, lrc, lout, me, prefixes):
 if sys.argv[1] == "snap":
     snap(sys.argv[2], sys.argv[3])
     sys.exit(0)
-d, before, lrc, lout, me = sys.argv[2:7]
-sys.exit(check(d, before, int(lrc), lout, me, [strip(p) for p in sys.argv[7:]]))
+d, before, lrc, lout, me, most = sys.argv[2:8]
+sys.exit(check(d, before, int(lrc), lout, me, int(most), [strip(p) for p in sys.argv[8:]]))

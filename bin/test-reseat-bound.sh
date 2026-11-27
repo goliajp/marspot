@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# e2e-dock-tiles-max: 3  app 2 (its tile, and the next one while the Dock still holds the last) + one program opened beside it at a time (ownother, or the open -n --ls-refresh instance) 1
 #
 # A coalition kept by a record that LaunchServices no longer lists does
 # not send the app round and round.

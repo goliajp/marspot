@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
+# e2e-dock-tiles-max: 2  app 2 (its tile, and the next one while the Dock still holds the last); it opens no other program
 #
-# RFC-005 — end-to-end check that marspot really runs more than one
-# window.
+# RFC-005 — end-to-end check that marspot really runs more than one window.
 #
 # Cmd-N cannot be driven from a script (AppleScript cannot focus the
 # sandbox app to deliver a keystroke), but the restore path exercises
@@ -41,8 +41,7 @@ fail() {
   exit 1
 }
 
-cleanup() { dev_kill_shell_core; }
-trap cleanup EXIT
+cleanup() { dev_kill_shell_core; }; trap cleanup EXIT
 
 if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" || ! -x "$SESSION_BIN" ]]; then
   echo "==> building release binaries"

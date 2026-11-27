@@ -32,6 +32,11 @@
 #                           it exclusively, and `E2E_LOCK=bench` takes it
 #                           exclusively for every suite and builds inside
 #                           that hold
+#   - not beside our own  : a suite starts only while no other job of
+#                           ours holds the host's lock (run_held), waited
+#                           for up to E2E_MAX_WAIT; the Dock may hold as
+#                           many of its tiles at once as its file says
+#                           (dock_tiles_max)
 #   - bounded             : each suite is stopped after E2E_SUITE_TIMEOUT
 #                           seconds (default 900); the build after
 #                           E2E_BUILD_TIMEOUT (default 1800)
@@ -94,20 +99,6 @@ DEFAULT_SUITES=(
   test-awake-cost.sh
 )
 
-# The suites that are measurements.  Their exit codes are the four of
-# bin/measure-idle-marspot.sh: 1 is over budget, 2 the instrument
-# failing, 3 a host too busy to read.
-is_measurement() {
-  [[ $1 == test-idle-wakeups.sh || $1 == measure-idle-marspot.sh || $1 == test-awake-cost.sh \
-    || $1 == measure-active.sh ]]
-}
-
-# Exit 3 from these means a measurement in them was read on a busy host
-# and everything else passed.
-may_be_unmeasured() {
-  is_measurement "$1" || [[ $1 == soak-l3.sh ]]
-}
-
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOST="${HOST:-mini}"
 REMOTE_NAME="${REMOTE_NAME:-e2e-marspot}"
@@ -124,16 +115,18 @@ RUN_ID="$(date +%H%M%S)$$"
 # Names the remote process group of whatever is running right now, so
 # an interrupted run can stop exactly that and nothing else.
 REMOTE_PIDF="/tmp/marspot-e2e-$RUN_ID.pgid"
-# Two runs from two checkouts would sync over each other's remote tree.
-# one run per remote copy: two copies do not share a build tree
+# one run per remote copy: two runs would sync over each other's tree
 LOCK_LOCAL="/tmp/marspot-e2e-remote.$REMOTE_NAME.lock.d"
 
 SUITES=("$@")
 if [[ ${#SUITES[@]} -eq 0 ]]; then
   SUITES=("${DEFAULT_SUITES[@]}")
 fi
+# shellcheck source=bin/_e2e-suites.sh
+source "$ROOT/bin/_e2e-suites.sh"
 for suite in "${SUITES[@]}"; do
   [[ -f "$ROOT/bin/$suite" ]] || { echo "no such suite: bin/$suite" >&2; exit 2; }
+  dock_tiles_max "$ROOT/bin/$suite" >/dev/null || { echo "refusing to run bin/$suite" >&2; exit 2; }
 done
 
 if ! mkdir "$LOCK_LOCAL" 2>/dev/null; then
@@ -147,6 +140,8 @@ echo "$$" > "$LOCK_LOCAL/pid"
 
 # shellcheck source=bin/_e2e-remote-lib.sh
 source "$ROOT/bin/_e2e-remote-lib.sh"
+# shellcheck source=bin/_e2e-host-share.sh
+source "$ROOT/bin/_e2e-host-share.sh"
 
 # Told to stop (Ctrl-C, a TERM, the terminal or ssh going away): stop
 # the suite running now, clean its sandbox, and start no other.
@@ -238,11 +233,17 @@ for suite in "${SUITES[@]}"; do
   pre_clean=""
   [[ $suite == measure-active.sh ]] && pre_clean="bin/_active_iterm.sh close $current_sd/iterm.pids; "
   start=$(date +%s)
-  set +e
-  # the suite, its cleanup and the leftover check, all in one hold
-  remote_gui "$(locked_cmd "$current_sd" "$lock" "$run" "$pre_clean" "$suite_env$fwd")"
-  suite_rc=$?
-  set -e
+  most="$(dock_tiles_max "$ROOT/bin/$suite")" || { rc=1; results+=("FAIL  $suite  (its Dock tile maximum)"); break; }
+  # the suite, its cleanup and the leftover check, all in one hold, taken
+  # only while no other job of ours holds the lock (sets suite_rc)
+  run_held "$(locked_cmd "$current_sd" "$lock" "$run" "$pre_clean" "$suite_env$fwd" "$most")"
+  if (( suite_rc == OWN_JOB_RC )); then
+    echo "FAIL: $suite not started: a job of ours held $HOST's lock for ${MAX_WAIT}s; starting no other suite" >&2
+    results+=("FAIL  $suite  (not started: a job of ours held $HOST's lock)")
+    drop_sandbox "$current_sd"
+    rc=1
+    break
+  fi
   secs=$(( $(date +%s) - start ))
   # for a stopped run, which skipped both inside the hold
   if [[ $suite == measure-active.sh ]]; then

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# e2e-dock-tiles-max: 3  app 2 (its tile, and the next one while the Dock still holds the last) + ownprobe run as a regular app, from a pane or from outside 1
 #
 # The app takes the sessions' coalition back from a program that was
 # given it.

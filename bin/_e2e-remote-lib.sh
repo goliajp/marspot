@@ -191,7 +191,10 @@ stopped_from_outside() {
 }
 
 # The command a suite runs on the far side, inside the host's lock:
-# locked_cmd STATE_DIR LOCK RUN PRE_CLEAN ENV.  The state dir is created
+# locked_cmd STATE_DIR LOCK RUN PRE_CLEAN ENV DOCK_MAX.  First, inside
+# the hold, another job of ours holding the lock beside it stops the
+# command with OWN_JOB_RC before anything runs (bin/_e2e-host-share.sh).
+# The state dir is created
 # first so the sandbox helpers find it and give its sessions ids of their
 # own (see dev_seed_session_base).  What the suite left running is
 # stopped before the lock is let go, so nothing it opened outlives the
@@ -207,16 +210,17 @@ stopped_from_outside() {
 # check.  Its output then goes nowhere, the ssh it wrote to being gone,
 # so the cleanup cannot die of SIGPIPE.
 locked_cmd() {
-  local sd=$1 lock=$2 run=$3 pre=$4 env=$5
+  local sd=$1 lock=$2 run=$3 pre=$4 env=$5 most=$6
   printf '%s' "cd ~/$REMOTE_DIR && sd=$sd && rm -rf \"\${sd:?}\" \"\${sd:?}\".before \"\${sd:?}\".clean && mkdir -p $sd && \
     env MARSPOT_STATE_DIR=$sd$env /usr/local/bin/bench-lock $lock \
     sh -c 'stopped=; trap \"stopped=1; exec >/dev/null 2>&1\" TERM INT HUP; \
+    bin/_bounded.sh 30 /usr/bin/python3 bin/_e2e-own-jobs.py --self \$PPID || { [ -n \"\$stopped\" ] && exit 143; exit $OWN_JOB_RC; }; \
     bin/_bounded.sh 60 bin/_e2e-suite-clean.sh snap $sd.before --lock-pid \$PPID --live /tmp/msp-e2e-$RUN_ID-live --probe /tmp/msp-e2e-$RUN_ID-dockprobe; \
     if [ -z \"\$stopped\" ]; then $run; rc=\$?; else rc=143; fi; $pre\
     bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $sd; \
     [ -n \"\$stopped\" ] && exit \$rc; \
     bin/_bounded.sh 150 bin/_e2e-suite-clean.sh check $sd.before $sd.clean --probe /tmp/msp-e2e-$RUN_ID-dockprobe \
-      --suite-rc \$rc --lock-pid \$PPID$KNOWN_ARGS \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID- >/dev/null; \
+      --dock-max $most --suite-rc \$rc --lock-pid \$PPID$KNOWN_ARGS \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID- >/dev/null; \
     case \$? in 0) exit \$rc ;; 1) exit 4 ;; *) exit 5 ;; esac'"
 }
 
@@ -266,32 +270,4 @@ record_result() {
     results+=("FAIL  ${secs}s  $suite  ($why)")
     rc=1
   fi
-}
-
-# The suites whose app keeps its Dock tile.  Every other suite runs the
-# app with MARSPOT_TEST_NO_DOCK, as an accessory app: no tile, nothing
-# for the runner's Dock to keep.  These keep it because what they test
-# is the app as a regular one:
-#   - its LaunchServices record and the sessions' coalition (lsappinfo
-#     treats a program with no Dock tile differently: see
-#     test-reseat-bound.sh), and the record going from accessory back to
-#     regular when the resident is opened again;
-#   - activating it and making a window key before a close
-#     (test-multi-window.sh).
-# Their tiles are counted by the check in the hold (_e2e-suite-clean.sh),
-# and the walks among them quit only once the Dock dropped the app's
-# tile (_ownership-quit.sh).  test-reopen-after-quit.sh switches the
-# resident from accessory back to regular, which is what a user's open
-# after a quit does; it quits only once the window is up and answered,
-# after the Dock dropped the last tile (on mini2 its inserts stayed at the
-# same index, two at most at once), and the probe after it says whether
-# one was left.  test-quit-after-update.sh compares the shell's
-# coalition as lsappinfo lists it, which it lists for an accessory app as
-# for a regular one.
-keeps_dock_tile() {
-  case $1 in
-    test-session-ownership.sh | test-one-app-record.sh | test-coalition-reclaim.sh | test-reseat-bound.sh \
-      | test-reopen-after-quit.sh | test-multi-window.sh) return 0 ;;
-    *) return 1 ;;
-  esac
 }

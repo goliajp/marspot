@@ -13,7 +13,7 @@
 #       time, written to BEFORE.  Also proves the Dock and tccd log
 #       queries still match anything (24 h back); a positive answer is
 #       kept in CACHE for the rest of the run.
-#   check BEFORE RESULT [--suite-rc N] [--lock-pid N] [--probe DIR] [--known PID:PATH]... PREFIX...
+#   check BEFORE RESULT [--suite-rc N] [--lock-pid N] [--probe DIR] [--dock-max N] [--known PID:PATH]... PREFIX...
 #       after the suite, with records given up to ten seconds to go:
 #       - the Dock probe, run again, lands where it did before under the
 #         same Dock process: a larger index is a tile the suite left, also
@@ -22,8 +22,9 @@
 #         tile the Dock had not dropped yet).  Next to another job an
 #         equal index passes only when every insert in the suite is named
 #         for an app and the removals match the inserts; and the Dock held at most
-#         two tiles of the suite at once (its insert indexes in the suite
-#         against the probe's before it)
+#         N tiles of the suite at once (default 2, the number the suite
+#         declares: bin/_e2e-suites.sh), from its insert indexes in the
+#         suite against the probe's before it
 #       - the Foreground count is what BEFORE says, and no kept or recent
 #         tile was added (nor a kept one gone)
 #       - lsappinfo lists no marspot executable or bundle that was not
@@ -153,12 +154,14 @@ result=${3:?result file}
 shift 3
 suite_rc=""
 known=""
+most=2
 kargs=()
 while [[ $# -ge 2 ]]; do
   case $1 in
     --suite-rc) suite_rc=$2 ;;
     --lock-pid) lock_pid=$2 ;;
     --probe) probe_dir=$2 ;;
+    --dock-max) most=$2 ;;
     --known) kargs+=(--known "$2"); known+="$2"$'\n' ;;
     *) break ;;
   esac
@@ -181,14 +184,14 @@ while :; do
   [[ -z $start ]] || grab dock.log logwin --style compact --predicate "$DOCK_PRED"
   lrc=0
   lout="$("$here/_ls-leftovers.sh" --from "$w/lsappinfo.txt" ${kargs[@]+"${kargs[@]}"} "$@" 2>&1)" || lrc=$?
-  out="$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout" "$lock_pid" "$@")"
+  out="$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout" "$lock_pid" "$most" "$@")"
   [[ ${out##*clean=} == 1 && -z ${E2E_CLEAN_INPUTS:-} && $SECONDS -lt $deadline ]] || break
   sleep 1
 done
 # requests are not withdrawn and the lock is read once more: both only at the end
 [[ -z $start ]] || grab tcc.ndjson logwin --style ndjson --predicate "$TCC_PRED"
 grab_lock
-out="$head$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout" "$lock_pid" "$@")"
+out="$head$(CLEAN_KNOWN="$known" /usr/bin/python3 "$here/_e2e-suite-clean.py" check "$w" "$before" "$lrc" "$lout" "$lock_pid" "$most" "$@")"
 clean=${out##*clean=}
 # the decision itself failing proves nothing either way
 case $clean in 0 | 1 | 2) ;; *) out+=$'\n'"unread: the check failed"$'\n'"clean=2"; clean=2 ;; esac

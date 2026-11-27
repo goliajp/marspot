@@ -135,13 +135,35 @@ probed 56 >"$T/paced-reopens/in/probe-end.txt"
   remove 31.000; probe_tile 40 56; } >"$T/paced-reopens/in/dock.log"
 expect paced-reopens 0 "dock: tiles at once=2 (most allowed 2, insert index 56..57, 56 before the suite)"
 
-# the suite's helper registering as a regular app is its subject: one more allowed
+# every insert but the probe's counts, whatever program it is for: a helper of the run
+# registering as a regular app is allowed only by the number the suite declares
 base helper
 probe_before helper 56
 probed 56 >"$T/helper/in/probe-end.txt"
 { echo "$HEADER"; opened "$APP_URL" 01.000; launch 01.004 56; opened "$PROBE_URL" 02.000; launch 02.004 57
   opened "$APP_URL" 03.000; launch 03.004 58; remove 04.000; remove 05.000; } >"$T/helper/in/dock.log"
-expect helper 0 "dock: tiles at once=3 (most allowed 3, insert index 56..58, 56 before the suite)"
+expect helper 1 "left: dock: 3 tiles at once (insert index 56..58, 56 before the suite), more than 2" "$RESTORE"
+cp -R "$T/helper" "$T/helper-declared"
+expect helper-declared 0 "dock: tiles at once=3 (most allowed 3, insert index 56..58, 56 before the suite)" -- --dock-max 3
+
+echo "the most tiles at once a suite declares"
+# n tiles of the app at once, from the probe's index 37
+at_once_log() {
+  local i
+  echo "$HEADER"
+  for ((i = 0; i < $1; i++)); do opened "$APP_URL" "1$i.000"; launch "1$i.004" $((37 + i)); done
+  for ((i = 0; i < $1; i++)); do remove "2$i.000"; done
+}
+base declared-4-holds-4
+at_once_log 4 >"$T/declared-4-holds-4/in/dock.log"
+expect declared-4-holds-4 0 "dock: tiles at once=4 (most allowed 4, insert index 37..40, 37 before the suite)" -- --dock-max 4
+base declared-4-holds-5
+at_once_log 5 >"$T/declared-4-holds-5/in/dock.log"
+expect declared-4-holds-5 1 "left: dock: 5 tiles at once (insert index 37..41, 37 before the suite), more than 4" "$RESTORE" \
+  -- --dock-max 4
+base undeclared-holds-3
+at_once_log 3 >"$T/undeclared-holds-3/in/dock.log"
+expect undeclared-holds-3 1 "left: dock: 3 tiles at once (insert index 37..39, 37 before the suite), more than 2"
 
 # the probe's own inserts, named by loginwindow, are not the suite's
 base probe-lines
@@ -174,6 +196,35 @@ base other-dock
 { echo "$HEADER"; launch 01.000; echo "2026-11-27 10:00:02.000 Df Dock[900:1] [com.apple.dock:dock-tiles] Inserting tile: <private> at index: 3 for reason: x"; } \
   >"$T/other-dock/in/dock.log"
 expect other-dock 2 "unread: dock: tiles at once: a Dock other than 726 logged tiles in the suite (900)"
+
+echo "the declaration in a suite's file"
+# shellcheck source=bin/_e2e-suites.sh
+source "$ROOT/bin/_e2e-suites.sh"
+declared() { # name, expected exit, expected output, then the file's lines
+  local name=$1 want=$2 out_want=$3 got=0 out
+  shift 3
+  printf '#!/usr/bin/env bash\n' >"$T/suite-$name.sh"
+  [[ $# -eq 0 ]] || printf '%s\n' "$@" >>"$T/suite-$name.sh"
+  echo 'echo run' >>"$T/suite-$name.sh"
+  out="$(dock_tiles_max "$T/suite-$name.sh" 2>&1)" || got=$?
+  if [[ $got == "$want" && $out == *"$out_want"* ]]; then echo "  ok    $name"; else
+    echo "  FAIL  $name: exit $got (wanted $want), printed: $out (wanted: $out_want)"; failed=1; fi
+}
+declared absent 0 2 "# a suite"
+declared four 0 4 "# e2e-dock-tiles-max: 4  app 2 + probe 1 + instance 1" "#"
+declared no-reason 2 "malformed" "# e2e-dock-tiles-max: 4"
+declared not-a-number 2 "malformed" "# e2e-dock-tiles-max: four  app"
+declared zero 2 "malformed" "# e2e-dock-tiles-max: 0  none"
+declared no-colon 2 "malformed" "# e2e-dock-tiles-max 3  app"
+declared twice 2 "2 lines name e2e-dock-tiles-max" "# e2e-dock-tiles-max: 3  a" "# e2e-dock-tiles-max: 4  b"
+# what the suites in this tree declare
+for s in test-session-ownership.sh:4 test-one-app-record.sh:3 test-coalition-reclaim.sh:3 test-reseat-bound.sh:3 \
+  test-reopen-after-quit.sh:2 test-multi-window.sh:2 test-shell-core.sh:2; do
+  n="$(dock_tiles_max "$ROOT/bin/${s%%:*}")" || n="refused"
+  if [[ $n == "${s##*:}" ]] && { [[ ${s%%:*} == test-shell-core.sh ]] || grep -q '^# e2e-dock-tiles-max: ' "$ROOT/bin/${s%%:*}"; }; then
+    echo "  ok    ${s%%:*} declares $n"
+  else echo "  FAIL  ${s%%:*}: $n, wanted ${s##*:} declared"; failed=1; fi
+done
 
 echo "the probe's reading of the Dock's log"
 EXE=/tmp/msp-e2e-1-dockprobe/marspot-dockprobe
