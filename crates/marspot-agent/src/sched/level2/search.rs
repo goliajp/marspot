@@ -91,12 +91,6 @@ impl<'a, 'b> Eval<'a, 'b> {
         (0..s.n as usize).filter(|&h| !self.exempt(p, s, h)).count()
     }
 
-    /// The linear score of pane `p` following `s` with the charge on its
-    /// counted switches, as the simulated cost it is tried against has.
-    fn charged(&self, p: usize, s: &Sched, linear: f64) -> f64 {
-        linear + self.charge * self.counted_of(p, s) as f64
-    }
-
     /// Notice-switches inside the first hour.
     fn notices(&self, s: &[Sched]) -> usize {
         let (input, g) = (self.input(), self.grid());
@@ -207,14 +201,17 @@ fn sweep(e: &mut Eval, cur: &mut [Sched], cost: &mut Cost, order: &[usize]) -> b
     let mut kept = false;
     // proposals are priced off the last run, which may be a trial
     // that differs from `cur` in one pane: close enough to rank by
+    // the screen is linear only: adding the charge to it either rules out
+    // proposals the simulated cost would keep or lets in ones it keeps
+    // greedily on the way to a dearer plan
     for &p in order {
-        let here = e.charged(p, &cur[p], score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]));
+        let here = score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &cur[p]);
         let mut props = proposals(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, KEEP);
         if cur[p] != Sched::STAY {
             props.push((score(e.input(), e.grid(), &e.sim, &e.ctx.deadline, p, &Sched::STAY), Sched::STAY));
         }
         for (sc, s) in props {
-            if e.charged(p, &s, sc) < here - SCREEN {
+            if sc < here - SCREEN {
                 kept |= e.try_pane(cur, cost, p, s);
             }
         }
