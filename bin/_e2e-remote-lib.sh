@@ -11,15 +11,26 @@ SSH_CLEANUP=(-o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax
 # the exclude list from git itself, so a path this repo ignores is never
 # sent and never deleted on the far side -- which is how the remote
 # target/ survives a sync from a tree that has none.
+#
+# In a process group of its own and waited for, like remote_tracked: the
+# receiving rsync may wait up to half an hour for a measurement on the
+# host, and a signal to this script must not wait with it.
+SYNC_PGID=""
 remote_sync() {
-  local tool
+  local tool rc=0
   tool="$(command -v remote-sync || true)"
   [[ -n $tool ]] || tool="$HOME/workspace/goliajp/golia-claude-configs/bin/remote-sync"
   [[ -x $tool ]] || {
     echo "remote-sync not found (looked on PATH and in $tool)" >&2
     exit 1
   }
-  "$tool" "$@"
+  set -m
+  "$tool" "$@" </dev/null &
+  SYNC_PGID=$!
+  set +m
+  wait "$SYNC_PGID" || rc=$?
+  SYNC_PGID=""
+  return $rc
 }
 
 # The command in the console login session: a plain ssh process is in
@@ -54,6 +65,7 @@ remote_tracked() {
 }
 
 stop_remote() {
+  [[ -n $SYNC_PGID ]] && kill -TERM -- "-$SYNC_PGID" 2>/dev/null
   [[ -n $SSH_PID ]] && kill -TERM "$SSH_PID" 2>/dev/null
   ssh "${SSH_CLEANUP[@]}" "$HOST" "
     if [ -f $REMOTE_PIDF ]; then
@@ -68,19 +80,27 @@ reap_sandbox() {
     "cd ~/$REMOTE_DIR && bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $1" </dev/null || true
 }
 
+# A suite's state dir and its scratch (dev_tmp, under the same prefix),
+# removed once it passed or was not measured; a failed one is kept.
+drop_sandbox() {
+  ssh "${SSH_CLEANUP[@]}" "$HOST" "rm -rf ${1:?} ${1:?}-*" </dev/null || true
+}
+
 # What LaunchServices still lists of what a suite opened (a Dock tile on
 # a machine nobody is at), read in the console session; records go a
 # moment after their process, so it is looked at for up to ten seconds.
 # Only this run's paths count: its remote tree, and the state dirs and
 # scratch under /tmp/msp-e2e-<run>- (what another run on the host left
-# is not this one's).  Prints bin/_ls-leftovers.sh's lines.  0: nothing
-# left; 4: something left; 5: the list could not be read, which proves
-# nothing either way.
+# is not this one's), less the records listed before the first suite
+# (KNOWN_ARGS, see note_known_leftovers).  Prints bin/_ls-leftovers.sh's
+# lines.  0: nothing left; 4: something left; 5: the list could not be
+# read, which proves nothing either way.
+KNOWN_ARGS=""
 check_leftovers() {
   local out rc
   out="$(ssh "${SSH_CLEANUP[@]}" "$HOST" "cd ~/$REMOTE_DIR && bin/_bounded.sh 30 $(gui_cmd "cd ~/$REMOTE_DIR && \
     for i in 1 2 3 4 5 6 7 8 9 10; do \
-    out=\$(bin/_ls-leftovers.sh \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID-); rc=\$?; \
+    out=\$(bin/_ls-leftovers.sh$KNOWN_ARGS \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID-); rc=\$?; \
     [ \$rc -eq 1 ] || break; sleep 1; done; echo \"\$out\"; exit \$rc")" </dev/null 2>&1)"
   rc=$?
   printf '%s\n' "$out"
@@ -89,6 +109,32 @@ check_leftovers() {
     1) return 4 ;;
     *) return 5 ;;
   esac
+}
+
+# Before the first suite: what the remote tree already has listed was
+# left by an earlier run.  It still needs cleaning, so it is said once
+# here, but no suite of this run made it: each suite's check leaves
+# those records (by pid and path) out.
+note_known_leftovers() {
+  local out rc=0 line n=0
+  out="$(check_leftovers)" || rc=$?
+  case $rc in
+    0) return 0 ;;
+    4) ;;
+    *)
+      echo "==> warning: what LaunchServices lists on $HOST could not be read before the first suite;" \
+        "every record a suite's check finds counts against that suite"
+      printf '%s\n' "$out" | sed 's/^/    /'
+      return 0 ;;
+  esac
+  while IFS= read -r line; do
+    [[ $line =~ ^[^\ ]+\ pid=([^\ ]+)\ (.+)$ ]] || continue
+    KNOWN_ARGS+=" --known $(printf '%q' "${BASH_REMATCH[1]}:${BASH_REMATCH[2]}")"
+    n=$((n + 1))
+  done <<<"$out"
+  echo "==> warning: $HOST already lists $n app record(s) under ~/$REMOTE_DIR, left by an earlier run;" \
+    "they need cleaning, and no suite of this run is blamed for them:"
+  printf '%s\n' "$out" | sed 's/^/    /'
 }
 
 # A suite's exit status that says it was stopped from outside (the

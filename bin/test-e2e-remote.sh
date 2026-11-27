@@ -181,10 +181,16 @@ if [[ ${E2E_LOCK:-heavy} != bench ]]; then
   tail -2 "$LOCK_LOCAL/build.log"
   # macOS assesses a freshly built executable on its first exec, for an
   # unbounded time on a busy host; pay that here, outside every suite's
-  # stopwatch.
-  ssh "$HOST" "cd ~/$REMOTE_DIR && for b in marspot-shell marspot-core marspot-session; do \
-    MARSPOT_NO_REDIRECT=1 target/release/\$b --version >/dev/null 2>&1; done" </dev/null || true
+  # stopwatch.  Bounded, and waited for so a signal is not held up by it.
+  ssh "${SSH_CLEANUP[@]}" "$HOST" "cd ~/$REMOTE_DIR && bin/_bounded.sh 120 sh -c \
+    'for b in marspot-shell marspot-core marspot-session; do \
+    MARSPOT_NO_REDIRECT=1 target/release/\$b --version >/dev/null 2>&1; done'" </dev/null &
+  SSH_PID=$!
+  wait "$SSH_PID" || true
+  SSH_PID=""
 fi
+
+note_known_leftovers
 
 # A measuring suite's knobs (`IDLE_*`) are set here and read there, and
 # so is anything listed in E2E_ENV ("K=V K=V", e.g. a soak's duration).
@@ -230,9 +236,15 @@ for suite in "${SUITES[@]}"; do
   # ids of their own (see dev_seed_session_base).  What the suite left
   # running is stopped before the host's lock is let go, so nothing it
   # opened outlives the hold; the reap after it is for a stopped run.
+  # A stopped run signals the whole remote group, bench-lock and this sh
+  # included: bench-lock lets go only once its command returns, so the sh
+  # waits for _bounded.sh to stop the suite and still runs the cleanup.
+  # Its output then goes nowhere, the ssh it wrote to being gone, so the
+  # cleanup cannot die of SIGPIPE.
   remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && \
     env MARSPOT_STATE_DIR=$current_sd$suite_env$fwd /usr/local/bin/bench-lock $lock \
-    sh -c '$run; rc=\$?; bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $current_sd; exit \$rc'"
+    sh -c 'trap \"exec >/dev/null 2>&1\" TERM INT HUP; $run; rc=\$?; \
+    bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $current_sd; exit \$rc'"
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))
@@ -258,26 +270,26 @@ for suite in "${SUITES[@]}"; do
   # nothing else copies back
   if [[ $suite == test-awake-cost.sh ]]; then
     mkdir -p "$ROOT/bench/results"
-    scp -q "${HOST}:${REMOTE_DIR}/bench/results/awake-cost-*.json" "$ROOT/bench/results/" </dev/null || true
+    scp -q "${SSH_CLEANUP[@]}" "${HOST}:${REMOTE_DIR}/bench/results/awake-cost-*.json" "$ROOT/bench/results/" </dev/null || true
   fi
   if [[ $suite == measure-active.sh ]]; then
     mkdir -p "$ROOT/bench/results"
-    scp -q "${HOST}:${REMOTE_DIR}/bench/results/active-*.json" "$ROOT/bench/results/" </dev/null || true
+    scp -q "${SSH_CLEANUP[@]}" "${HOST}:${REMOTE_DIR}/bench/results/active-*.json" "$ROOT/bench/results/" </dev/null || true
   fi
   if (( suite_rc == 0 && left_rc == 0 )); then
-    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd $current_sd-*" </dev/null || true
+    drop_sandbox "$current_sd"
     results+=("PASS  ${secs}s  $suite")
     # said now as well: a run that is cut short prints no summary
     echo "==> PASS  ${secs}s  $suite"
   elif (( suite_rc == 3 && left_rc == 0 )) && may_be_unmeasured "$suite"; then
-    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+    drop_sandbox "$current_sd"
     results+=("BUSY  ${secs}s  $suite  (not measured: $HOST was busy)")
     echo "==> BUSY  ${secs}s  $suite: not measured, $HOST was busy; neither a pass nor a regression"
     unmeasured=1
   elif (( suite_rc == 75 && left_rc == 0 )) && is_measurement "$suite"; then
     # the exclusive hold waits for every other heavy job on the host;
     # not getting it in time says the host was busy, not the suite failed
-    ssh -o ConnectTimeout=5 "$HOST" "rm -rf $current_sd" </dev/null || true
+    drop_sandbox "$current_sd"
     results+=("BUSY  ${secs}s  $suite  (not measured: no exclusive hold of $HOST's lock within ${MAX_WAIT}s)")
     echo "==> BUSY  ${secs}s  $suite: not measured, the exclusive lock was not free within ${MAX_WAIT}s;" \
       "neither a pass nor a regression"
