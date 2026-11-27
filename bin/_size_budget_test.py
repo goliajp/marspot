@@ -122,7 +122,11 @@ def _gate(root, work, sizes, update="0"):
     env = dict(os.environ, MARSPOT_BENCH_HISTORY_DIR=os.path.join(work, "history"))
     baseline = os.path.join(work, "baseline.json")
     if not os.path.exists(baseline):
-        shutil.copy(os.path.join(HERE, "..", "bench", "baseline.json"), baseline)
+        b = json.load(open(os.path.join(HERE, "..", "bench", "baseline.json")))
+        # the copy is locked on this machine: an update here is not a re-lock on a new one
+        here = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip()
+        b.setdefault("host", {})["name"] = here
+        json.dump(b, open(baseline, "w"), indent=2)
     p = subprocess.run([sys.executable, os.path.join(HERE, "_bench_gate.py"),
                         baseline, cur, "fast", update, root],
                        env=env, capture_output=True, text=True)
