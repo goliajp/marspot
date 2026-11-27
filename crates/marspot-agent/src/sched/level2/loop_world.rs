@@ -19,24 +19,29 @@
 //! leaves more at the end looked dearer than one that did the reverse.
 //! Level 1 reads the recorded restricted use in six-hour buckets and
 //! their highest as the prudent rate, as the shell hands it.
+//!
+//! Both policies read each account's week and restricted window with a
+//! reading error of up to one point either way, drawn afresh every
+//! reading from a stream of its own, so both see the same readings; an
+//! account with nothing left reads empty.
 
+use super::loop_plan::planned;
+use super::oracle_tests::Rng;
 use super::standing::Standing;
 use super::tests::KAPPA;
-use super::*;
 use crate::quota::choose::{MUST_LAST_H, Mover};
 use crate::quota::replay::Kind as Decision;
 use crate::quota::rest::is_keeper;
 use crate::quota::speed::PaneUse;
 use crate::quota::waste::{self, PARAMS, switch_cost};
 use crate::quota::{Class, Load, Quant};
-use crate::sched::level1::{self, World};
 
 const FIXTURE: &str = include_str!("../../../tests/fixtures/forecast_facts_20261126.tsv");
 const STEP: i64 = 300;
-const WEEK: i64 = 7 * 24 * 3600;
+pub(super) const WEEK: i64 = 7 * 24 * 3600;
 /// Transcript rests of a minute or more per busy hour, the eight
 /// largest panes of 2026-11-24 to 11-26.
-const RESTS: [f64; 8] = [19.7, 14.3, 11.2, 9.3, 6.6, 3.9, 2.4, 1.9];
+pub(super) const RESTS: [f64; 8] = [19.7, 14.3, 11.2, 9.3, 6.6, 3.9, 2.4, 1.9];
 /// Each pane's share of the fleet's plain and restricted use.
 const SHARE: [f64; 8] = [0.2, 0.17, 0.15, 0.13, 0.11, 0.1, 0.08, 0.06];
 
@@ -72,25 +77,30 @@ pub(super) fn hours() -> Vec<[f64; 2]> {
     }).collect()
 }
 
-/// The recorded restricted use in six-hour buckets, weeks an hour: what
-/// the shell hands level 1 as the fleet's buckets, and their highest as
-/// the prudent rate.
-fn buckets() -> Vec<f64> {
-    hours().chunks_exact(6).map(|c| c.iter().map(|h| h[0]).sum::<f64>() / 6.0).collect()
-}
-
-struct P {
-    on: u8,
-    restricted: bool,
+pub(super) struct P {
+    pub on: u8,
+    pub restricted: bool,
     used: PaneUse,
     stalled: bool,
-    planned: Vec<i64>,
+    pub planned: Vec<i64>,
     moved_at: Option<i64>,
-    left: Option<(u8, i64)>,
+    pub left: Option<(u8, i64)>,
+}
+
+/// One point of reading error either way at most.
+const READ_ERR: f64 = 0.01;
+
+/// What the policies read of the accounts: each one's week and
+/// restricted window, with this reading's error.
+pub(super) struct Read<'a> {
+    acc: &'a [(Quant, i64)],
+    err: &'a [[f64; 2]],
 }
 
 pub(super) fn run(seed: u64, policy: Policy) -> Week {
-    let mut rng = super::oracle_tests::Rng(seed);
+    let mut rng = Rng(seed);
+    let mut noise = Rng(seed ^ 0x5DEE_CE66_D1CE_4E5B);
+    let mut err = vec![[0.0; 2]; 8];
     let hours = hours();
     let mut acc: Vec<(Quant, i64)> = (0..8u8)
         .map(|k| {
@@ -132,15 +142,18 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
                 *renew += WEEK;
             }
         }
+        for e in &mut err {
+            *e = [READ_ERR * (2.0 * noise.next() - 1.0), READ_ERR * (2.0 * noise.next() - 1.0)];
+        }
         if let Policy::Planner { bias } = policy
             && (now % 3600 == 0 || !planned_once)
         {
-            planned(&mut st, &acc, &panes, now, bias);
+            planned(&mut st, &Read { acc: &acc, err: &err }, &panes, now, bias);
             planned_once = true;
         }
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
             if rng.next() < 1.0 - (-rate / 12.0).exp() {
-                rest(&mut acc, &mut panes, k, now, policy, &st, &mut w);
+                rest(&Read { acc: &acc, err: &err }, &mut panes, k, now, policy, &st, &mut w);
             }
         }
         let mut refused = false;
@@ -174,30 +187,41 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         }
         for k in 0..panes.len() {
             if panes[k].stalled {
-                refuse(&acc, &mut panes, k, now, &mut w);
+                refuse(&Read { acc: &acc, err: &err }, &mut panes, k, now, &mut w);
             }
         }
         if refused && let Policy::Planner { bias } = policy {
-            planned(&mut st, &acc, &panes, now, bias);
+            planned(&mut st, &Read { acc: &acc, err: &err }, &panes, now, bias);
         }
     }
     w
 }
 
-fn quants(acc: &[(Quant, i64)]) -> Vec<Quant> {
-    acc.iter().map(|x| x.0.clone()).collect()
+impl Read<'_> {
+    pub(super) fn quants(&self) -> Vec<Quant> {
+        self.acc
+            .iter()
+            .zip(self.err)
+            .map(|((q, _), e)| {
+                // an account that refuses reads empty: the feed knows it
+                let read = |x: f64, e: f64, top: f64| if x <= 0.0 { 0.0 } else { (x + e).clamp(0.0, top) };
+                let r = read(q.r, e[0], 1.0);
+                Quant { r, f: read(q.f.min(q.r), e[1], r), ..q.clone() }
+            })
+            .collect()
+    }
 }
 
-fn speeds(p: &P, now: i64) -> (f64, f64) {
+pub(super) fn speeds(p: &P, now: i64) -> (f64, f64) {
     let (f, n, _) = p.used.rate_or_default(now, if p.restricted { Class::Restricted } else { Class::Plain });
     (f, n)
 }
 
-fn loads(acc: &[(Quant, i64)], panes: &[P], now: i64, skip: Option<usize>) -> Vec<Load> {
-    let mut l = vec![Load::default(); acc.len()];
+fn loads(q: &[Quant], panes: &[P], now: i64, skip: Option<usize>) -> Vec<Load> {
+    let mut l = vec![Load::default(); q.len()];
     for (_, p) in panes.iter().enumerate().filter(|(k, _)| Some(*k) != skip) {
         let (f, n) = speeds(p, now);
-        if let Some(j) = acc.iter().position(|x| x.0.id == p.on) {
+        if let Some(j) = q.iter().position(|x| x.id == p.on) {
             l[j].restricted += f;
             l[j].plain += n;
         }
@@ -223,9 +247,9 @@ fn switch(panes: &mut [P], k: usize, to: u8, now: i64, w: &mut Week) {
     p.stalled = false;
 }
 
-fn refuse(acc: &[(Quant, i64)], panes: &mut [P], k: usize, now: i64, w: &mut Week) {
-    let q = quants(acc);
-    let l = loads(acc, panes, now, Some(k));
+fn refuse(read: &Read, panes: &mut [P], k: usize, now: i64, w: &mut Week) {
+    let q = read.quants();
+    let l = loads(&q, panes, now, Some(k));
     let m = mover(&panes[k], now);
     if let Some((to, _)) = waste::decide(&q, &l, m, panes[k].on, Some(KAPPA), &Decision::Out { horizon_h: MUST_LAST_H }, 0, &PARAMS) {
         w.money += switch_cost(m.class, m.tokens);
@@ -238,11 +262,11 @@ fn refuse(acc: &[(Quant, i64)], panes: &mut [P], k: usize, now: i64, w: &mut Wee
     }
 }
 
-fn rest(acc: &mut [(Quant, i64)], panes: &mut [P], k: usize, now: i64, policy: Policy, st: &Standing, w: &mut Week) {
+fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &Standing, w: &mut Week) {
     match policy {
         Policy::Today => {
-            let q = quants(acc);
-            let l = loads(acc, panes, now, None);
+            let q = read.quants();
+            let l = loads(&q, panes, now, None);
             let p = &panes[k];
             let me = (k as u64, mover(p, now).rate);
             let same = panes.iter().enumerate().filter(|(j, y)| *j != k && y.on == p.on && y.restricted == p.restricted).map(|(j, y)| (j as u64, mover(y, now).rate));
@@ -273,40 +297,4 @@ fn rest(acc: &mut [(Quant, i64)], panes: &mut [P], k: usize, now: i64, policy: P
             switch(panes, k, s.to, now, w);
         }
     }
-}
-
-fn planned(st: &mut Standing, acc: &[(Quant, i64)], panes: &[P], now: i64, bias: f64) {
-    let q = quants(acc);
-    let sp: Vec<(f64, f64)> = panes.iter().map(|p| speeds(p, now)).map(|(f, n)| (f * bias, n * bias)).collect();
-    let demand = [sp.iter().map(|x| x.0).sum(), sp.iter().map(|x| x.1).sum()];
-    let b = buckets();
-    let a_hi = b.iter().copied().fold(0.0, f64::max);
-    let l1 = level1::plan(&World { accounts: &q, window_full: KAPPA, demand, prudent: a_hi.max(demand[0]), buckets: &b, offers: &[], closures: &[], last_pi: None });
-    let accounts: Vec<Account> = q.iter().enumerate().map(|(j, x)| Account { q: x.clone(), spare: l1.spare[j], price: l1.price[j].unwrap_or([0.0; 2]) }).collect();
-    let ps: Vec<Pane> = panes
-        .iter()
-        .enumerate()
-        .map(|(k, p)| {
-            let since = p.planned.last().map_or(f64::INFINITY, |t| (now - t) as f64 / 3600.0);
-            Pane {
-                sid: k as u64,
-                on: p.on,
-                restricted: p.restricted,
-                speed: [sp[k].0, sp[k].1],
-                high: [sp[k].0 * 2.5, sp[k].1 * 1.5],
-                rewrite: switch_cost(if p.restricted { Class::Restricted } else { Class::Plain }, Some(400_000)),
-                lost_work: 0.0,
-                clean_per_h: RESTS[k],
-                long_background: false,
-                earliest_h: (DWELL_H - since).max(0.0),
-                left: p.left.map(|(id, at)| (id, 6.0 - (now - at) as f64 / 3600.0)),
-                barred: 0,
-                switches_left: (6usize.saturating_sub(p.planned.iter().filter(|t| now - **t < WEEK).count())) as u8,
-                disturb_left: 4,
-            }
-        })
-        .collect();
-    let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
-    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
-    pass::full(st, &i, now as u64, now);
 }

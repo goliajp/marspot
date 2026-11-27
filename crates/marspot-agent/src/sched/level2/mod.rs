@@ -235,6 +235,8 @@ impl Sched {
 #[cfg(test)]
 mod cases_tests;
 #[cfg(test)]
+mod loop_plan;
+#[cfg(test)]
 mod loop_tests;
 #[cfg(test)]
 mod loop_world;
