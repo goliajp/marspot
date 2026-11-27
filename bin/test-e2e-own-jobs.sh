@@ -95,7 +95,7 @@ jobs status-unread 2 "unread: bench-lock status exited 1" "$OURS"
 run_driver() {
   local S="$T/$1"
   rc=0
-  PATH="$S/stubs:$PATH" HOST=stub.invalid REMOTE_NAME="$NAME" E2E_MAX_WAIT=2 timeout 60 \
+  PATH="$S/stubs:$PATH" HOST=stub.invalid REMOTE_NAME="$NAME" E2E_MAX_WAIT="${2:-2}" timeout 60 \
     "$S/root/bin/test-e2e-remote.sh" test-first.sh test-second.sh >"$S/driver.log" 2>&1 || rc=$?
 }
 
@@ -124,7 +124,9 @@ printf '%s\n%s\n' "$OURS" "$FOREIGN" >"$S/status.1"
 printf '%s\n' "$FOREIGN" >"$S/status"
 printf '%s\n%s\n' "$FOREIGN_TAKE" "$OURS_TAKE" >"$S/lock.log"
 printf '#!/bin/bash\n# e2e-dock-tiles-max: 4  app 2 + probe 1 + instance 1\n' >"$S/root/bin/test-first.sh"
-run_driver own-gone
+# long enough that the look after the first one still falls inside it
+# however slowly the first look's stand-ins start
+run_driver own-gone 8
 check "it waited for our job" grep -q '==> waiting (up to' "$S/driver.log"
 check "then the suite ran in its hold" grep -q 'suite-clean check held=1' "$S/events"
 check "the hold looked once more (status read $(cat "$S/status.n") times)" test "$(cat "$S/status.n")" -ge 3
