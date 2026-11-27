@@ -102,6 +102,25 @@ is_measurement() {
     || $1 == measure-active.sh ]]
 }
 
+# The suites whose app keeps its Dock tile.  Every other suite runs the
+# app with MARSPOT_TEST_NO_DOCK, as an accessory app: no tile, nothing
+# for the runner's Dock to keep.  These keep it because what they test
+# is the app as a regular one:
+#   - its LaunchServices record and the sessions' coalition (lsappinfo
+#     treats a program with no Dock tile differently: see
+#     test-reseat-bound.sh), and the record going from accessory back to
+#     regular when the resident is opened again;
+#   - activating it and making a window key before a close
+#     (test-multi-window.sh).
+# Their tiles are counted by the check in the hold (_e2e-suite-clean.sh).
+keeps_dock_tile() {
+  case $1 in
+    test-session-ownership.sh | test-one-app-record.sh | test-coalition-reclaim.sh | test-reseat-bound.sh \
+      | test-reopen-after-quit.sh | test-multi-window.sh) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Exit 3 from these means a measurement in them was read on a busy host
 # and everything else passed.
 may_be_unmeasured() {
@@ -232,6 +251,7 @@ for suite in "${SUITES[@]}"; do
   if [[ $suite == test-* ]] && ! is_measurement "$suite"; then
     suite_env+=" MARSPOT_TEST_ICON_MASKS=\$PWD/tests/fixtures/appkit/icon-masks.bin"
   fi
+  keeps_dock_tile "$suite" || suite_env+=" MARSPOT_TEST_NO_DOCK=1"
   # a measure-active run that timed out can leave iTerm2 up: quit it and
   # SIGTERM the pids the run wrote down (a no-op when it cleaned up)
   pre_clean=""

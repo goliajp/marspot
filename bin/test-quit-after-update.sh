@@ -111,7 +111,7 @@ wait_more() { # marker, count before, seconds
   return 1
 }
 app_env=(--env "MARSPOT_STATE_DIR=$MARSPOT_STATE_DIR" --env "MARSPOT_SESSION_BIN=$ROOT/target/release/marspot-session"
-  --env "MARSPOT_CORE_BIN=$ROOT/target/release/marspot-core" --env MARSPOT_DEV_SANDBOX=1 --env MARSPOT_MANUAL_UPDATE_ONLY=1)
+  --env "MARSPOT_CORE_BIN=$ROOT/target/release/marspot-core" --env MARSPOT_DEV_SANDBOX=1 --env MARSPOT_MANUAL_UPDATE_ONLY=1 --env "MARSPOT_TEST_NO_DOCK=${MARSPOT_TEST_NO_DOCK:-}")
 
 dev_kill_shell_core
 rm -rf "$MARSPOT_STATE_DIR"; mkdir -p "$MARSPOT_STATE_DIR/logs"
