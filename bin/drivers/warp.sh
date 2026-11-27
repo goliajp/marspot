@@ -19,6 +19,9 @@
 #     Open a Warp window that runs <cmd>, through a launch
 #     configuration and the warp:// URL scheme.
 #
+#   bin/drivers/warp.sh <run-sub-command> --pid-file <file> ...
+#     Any run sub-command: also append the app's pid to <file>.
+#
 #   bin/drivers/warp.sh paste-block <n> <cmd>
 #     Print a paste-ready block: open Warp, hit cmd-N <n-1> times,
 #     paste the block in each window.  Caller polls the marker.
@@ -30,9 +33,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"
+# shellcheck source=bin/_app-pids.sh
+source "$ROOT/bin/_app-pids.sh"
 
 cmd_word=${1:-}
 shift || true
+# --pid-file <file>: once the app is up, append its pid there.  The
+# caller passes it only for an app that was not running before, so it
+# can later stop exactly what it started.
+pid_file=""
+if [[ ${1:-} == --pid-file ]]; then
+  pid_file=${2:?pid-file}
+  shift 2
+fi
 
 case "$cmd_word" in
   run-single)
@@ -47,6 +60,7 @@ case "$cmd_word" in
     chmod 0755 "$wrapper"
     short_cmd="bash $wrapper; exit"
     open -a Warp
+    [[ -z $pid_file ]] || record_app_pid dev.warp.Warp-Stable "$pid_file"
     sleep 0.8  # focus settle
     osascript <<APPLESCRIPT >/dev/null
 tell application "System Events"
@@ -80,6 +94,7 @@ windows:
             - exec: $wrapper; exit
 YAML
     open "warp://launch/marspot-bench.yaml"
+    [[ -z $pid_file ]] || record_app_pid dev.warp.Warp-Stable "$pid_file"
     ;;
   paste-block)
     n=${1:?n}; shift

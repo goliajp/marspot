@@ -11,6 +11,9 @@
 #     Open <n> separate iTerm2 windows, each running <cmd>.  Prints
 #     <n> window IDs to stdout, one per line.
 #
+#   bin/drivers/iterm.sh <run-sub-command> --pid-file <file> ...
+#     Any run sub-command: also append the app's pid to <file>.
+#
 #   bin/drivers/iterm.sh close-windows <id> [<id>...]
 #     Close exactly those windows by id.  Does NOT touch any other
 #     windows — that's the whole point of the id-tracking contract.
@@ -26,9 +29,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"
+# shellcheck source=bin/_app-pids.sh
+source "$ROOT/bin/_app-pids.sh"
 
 cmd_word=${1:-}
 shift || true
+# --pid-file <file>: once the app is up, append its pid there.  The
+# caller passes it only for an app that was not running before, so it
+# can later stop exactly what it started.
+pid_file=""
+if [[ ${1:-} == --pid-file ]]; then
+  pid_file=${2:?pid-file}
+  shift 2
+fi
 
 case "$cmd_word" in
   run-tabs|run-windows)
@@ -59,7 +72,7 @@ case "$cmd_word" in
     # rendering / draining PTY in the background — focus doesn't
     # affect throughput, only which app receives keystrokes.
     if [[ "$cmd_word" == "run-tabs" ]]; then
-      osascript <<APPLESCRIPT
+      osascript <<APPLESCRIPT || rc=$?
 tell application "iTerm"
   set beforeIds to {}
   repeat with w in windows
@@ -89,7 +102,7 @@ tell application "iTerm"
 end tell
 APPLESCRIPT
     else
-      osascript <<APPLESCRIPT
+      osascript <<APPLESCRIPT || rc=$?
 tell application "iTerm"
   set beforeIds to {}
   repeat with w in windows
@@ -115,6 +128,9 @@ tell application "iTerm"
 end tell
 APPLESCRIPT
     fi
+    # recorded even when the script failed part way: the app is up
+    [[ -z $pid_file ]] || record_app_pid com.googlecode.iterm2 "$pid_file"
+    exit "${rc:-0}"
     ;;
   close-windows)
     if (( $# == 0 )); then

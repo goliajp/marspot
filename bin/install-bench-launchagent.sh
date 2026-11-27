@@ -93,7 +93,7 @@ fi
 # blocked by a Are-you-sure dialog. iTerm + Terminal both default to
 # prompting; setting these once per LaunchAgent fire is idempotent and
 # zero-cost when already off. Warp / Ghostty don't have an equivalent
-# pref (and the cycle pkills them anyway).
+# pref (the cycle stops them by the pids it recorded when it started them).
 defaults write com.googlecode.iterm2 PromptOnQuit -bool false 2>/dev/null || true
 defaults write com.apple.Terminal "Confirm Quit Even if Background Process" -bool false 2>/dev/null || true
 defaults write com.apple.Terminal "Confirm Close Window" -bool false 2>/dev/null || true
