@@ -146,11 +146,11 @@ pub(crate) enum Follow {
 /// A pane absorbing a flood parses one full read per turn of the loop,
 /// and a frame after each is four thousand frames a second -- a hash
 /// and a copy of the whole grid every time, for a display that shows a
-/// hundred and twenty.  While output arrives a full read at a time, one
-/// frame goes out per [`FloodGate::FRAME`].
+/// hundred and twenty.  While each turn parses at least
+/// `frames::BULK_TURN_BYTES`, one frame goes out per [`FloodGate::FRAME`].
 ///
-/// Nothing else waits: a turn that parsed less than a full read is the
-/// end of a flood or was never one, and for two frames after a key was
+/// Nothing else waits: a turn that parsed less than that is the end of
+/// a flood or was never one, and for two frames after a key was
 /// typed every frame goes out as it is ready, so an echo in the middle
 /// of a flood is on screen as soon as it would have been.  An answer
 /// that takes its program longer than that is in the flood's next
@@ -175,8 +175,9 @@ impl FloodGate {
     /// One frame of a 120 Hz display.
     pub(crate) const FRAME: Duration = Duration::from_millis(8);
 
-    /// What one turn of the loop parses at least while a flood lasts:
-    /// one read buffer.
+    /// One read buffer of pty output: the bytelog hands on a turn shorter
+    /// than this at once, and a flood's by filling its buffers; a key's
+    /// answer in a chunk may hold this much before a frame is due.
     pub(crate) const BULK_BYTES: usize = 64 * 1024;
 
     /// How long after a key its answer is taken to be in the very next
