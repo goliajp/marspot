@@ -124,7 +124,9 @@ impl Calib {
         (c.used, c.want, c.ratio) = (0.0, 0.0, None);
         for (j, q) in accounts.iter().enumerate() {
             let renewed = q.t > w.t[j] + 1e-6 || q.r > w.r[j] + 0.05;
-            if renewed || w.skip[j] || q.r <= DRY {
+            // an account no pane was on all window is used, if at all, from
+            // elsewhere: its loss says nothing of the panes' speeds
+            if renewed || w.skip[j] || q.r <= DRY || w.asked[j] <= 0.0 {
                 continue;
             }
             let used = w.r[j] - q.r;

@@ -159,3 +159,18 @@ fn sched_calib_use_lost_without_ask_counts_toward_the_least_use() {
     window(&mut c, 0, 0.0033, 0.01);
     assert!(c.ratio.is_some_and(|r| r > BAND[1]), "{:?}", c.ratio);
 }
+
+#[test]
+fn sched_calib_an_account_no_pane_was_on_is_left_out() {
+    let mut c = Calib::default();
+    // account 2 has no pane and loses twenty points from elsewhere; account
+    // 1's panes ask what it loses
+    for k in 0..=72 {
+        let at = k * 300;
+        let h = at as f64 / 3600.0;
+        let a = [q(1, 0.8 - 0.02 * h, 100.0 - h), q(2, 0.6 - 0.2 * h / 6.0, 50.0 - h)];
+        c.observe(at, &a, &[0.02, 0.0], false);
+    }
+    assert_eq!(c.factor(), 1.0);
+    assert!(c.ratio.is_some_and(|r| (r - 1.0).abs() < 0.05), "{:?}", c.ratio);
+}
