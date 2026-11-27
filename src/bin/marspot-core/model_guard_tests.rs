@@ -282,6 +282,8 @@ fn a_cancelled_answering_composition_does_not_eat_the_next_text() {
     let (mut app, mut s) = answered_then_cancelled(&sb);
     let esc_up = MarspotKeyEvent { state: KeyState::Released, logical: ESC, ..Default::default() };
     app.key(0, esc_up, Modifiers::default());
+    // the release itself goes to the pane like any key once the guard has its answer
+    assert_eq!(s.keys(&app.windows[0].panes[0]), 1);
     app.preedit(0, String::new());
     commit(&mut app, "，");
     assert_eq!(s.keys(&app.windows[0].panes[0]), 1, "the comma is typed into the pane");
