@@ -60,6 +60,7 @@ const SHELL_IMAGE_VARS: &[&str] = &[
     "MARSPOT_SHELL_LOCK_FD",
     "MARSPOT_SHELL_LOOK",
     "MARSPOT_UPDATE_WAITING",
+    "MARSPOT_DOCK_LEAVE_AT",
     crate::owner::RESIDENT_ENV,
     crate::owner::HEIR_ENV,
 ];
