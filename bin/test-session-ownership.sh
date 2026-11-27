@@ -169,8 +169,6 @@ state "opened from outside the sessions' coalition"
 # back what the closed windows held over the next seconds: read when it has
 settled_footprint() { local f i; for (( i = 0; i < 50; i++ )); do f=$("$PROBE" footprint "$1"); (( f <= RESIDENT_KIB )) && break; sleep 0.2; done; echo "$f"; }
 RESIDENT_KIB=32768
-# the Dock holds the open app's tile and no other of ours before them
-dock_settled 1
 keep="$L1"; c_keep="$(coalition "$L1")"; n_ok=0; foots=""; loop_start=$SECONDS
 for (( round = 1; round <= 20; round++ )); do
   residents=$(count SHELL_RESIDENT)
@@ -194,7 +192,8 @@ else
 fi
 # a quit that came before the Dock dropped the tile of the one before
 # leaves that tile behind for good: one more than the open app's is a
-# tile left
+# tile left.  (Before them the app can have none: the shell a handover
+# started loses its tile with the one that handed over.)
 dock_settled 1
 ok "the Dock holds the open app's tile and no other of ours after twenty quick quits (probe at index $DOCK_LAST)"
 reattached
