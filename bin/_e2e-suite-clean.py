@@ -103,10 +103,17 @@ def tcc_requests(text):
         m = re.search(r"msgID=([^,]+)", msg)
         if not m:
             continue
-        r = reqs.setdefault(m.group(1), {"svc": "?", "paths": []})
+        r = reqs.setdefault(m.group(1), {"svc": "?", "paths": [], "preflight": False, "prompt": False, "desired": None})
         s = re.search(r"service=(\w+)", msg)
         if s:
             r["svc"] = s.group(1)
+        if msg.startswith("AUTHREQ_CTX") and re.search(r"\bpreflight=yes\b", msg):
+            r["preflight"] = True
+        if msg.startswith("AUTHREQ_PROMPTING"):
+            r["prompt"] = True
+        a = re.search(r"\bdesired_auth=(\d+)", msg)
+        if a:
+            r["desired"] = int(a.group(1))
         # responsible, accessing and requesting each name a binary_path
         for p in re.findall(r"(?:binary|responsible)_path=([^,}]+)", msg):
             if strip(p) not in r["paths"]:
@@ -283,10 +290,21 @@ def tcc_check(d, b, under, left, wide, unread):
         unread.append("tcc log: no request in the suite nor in the 24 h probe (predicate or format dead)")
         return
     mine = [r for r in reqs.values() if any(ours(p) for p in r["paths"])]
-    print("tcc: requests=%d ours=%d" % (len(reqs), len(mine)))
+    quiet = [r for r in mine if listen_preflight(r)]
+    print("tcc: requests=%d ours=%d listen_event_preflights=%d" % (len(reqs), len(mine), len(quiet)))
     for r in mine:
         line = "tcc: %s %s" % (r["svc"], " ".join(r["paths"]))
+        if r in quiet:
+            print("info: " + line + " (preflight, no prompt)")
+            continue
         (left if any(under(p) for p in r["paths"]) else wide).append(line)
+
+
+def listen_preflight(r):
+    """the input-monitoring preflight AppKit and the window server make for every app with
+    key windows: it asks, never prompts and records nothing; any other request is a finding"""
+    return (r["svc"] == "kTCCServiceListenEvent" and r["preflight"] and not r["prompt"]
+            and r["desired"] == 0)
 
 
 def check(d, before, lrc, lout, me, prefixes):

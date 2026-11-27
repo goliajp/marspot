@@ -40,6 +40,12 @@ BUILD=/Users/u/work/e2e-marspot/target/release/marspot-shell
 LANDER=/private/tmp/msp-e2e-1-1-lander/Marspot.app/Contents/MacOS/marspot-shell
 TCC_OTHER="$(ndjson "$(attribution 9.1 "$OTHER" "$OTHER")" "$(ctx 9.1 kTCCServiceCamera)")"
 TCC_OURS="$(ndjson "$(attribution 401.7 "$BUILD" "$OTHER")" "$(ctx 401.7 kTCCServiceAppleEvents)")"
+result() { echo "AUTHREQ_RESULT: msgID=$1, authValue=1, authReason=5, authVersion=1, desired_auth=0, error=(null),"; }
+TCC_LISTEN="$(ndjson "$(attribution 403.1 "$OTHER" "$BUILD")" "$(ctx 403.1 kTCCServiceListenEvent)" "$(result 403.1)")"
+TCC_LISTEN_PROMPT="$(ndjson "$(attribution 404.1 "$OTHER" "$BUILD")" "$(ctx 404.1 kTCCServiceListenEvent)" \
+  "AUTHREQ_PROMPTING: msgID=404.1, service=kTCCServiceListenEvent" "$(result 404.1)")"
+TCC_LISTEN_ASK="$(ndjson "$(attribution 405.1 "$OTHER" "$BUILD")" \
+  "AUTHREQ_CTX: msgID=405.1, function=<private>, service=kTCCServiceListenEvent, preflight=no, query=1" "$(result 405.1)")"
 TCC_ACCESSING="$(ndjson "$(attribution 402.1 "$OTHER" "$LANDER")" "$(ctx 402.1 kTCCServiceListenEvent)")"
 ME=$'4000\theavy\tholding since 2026-11-27 10:00:00\tsh -c stopped=; ...'
 SOMEONE=$'5000\theavy\tholding since 2026-11-27 09:59:00\tcargo build'
@@ -172,6 +178,18 @@ expect tcc 1 "left: tcc: kTCCServiceAppleEvents $BUILD $OTHER /System/Library"
 base tcc-accessing
 printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_ACCESSING" >"$T/tcc-accessing/in/tcc.ndjson"
 expect tcc-accessing 1 "left: tcc: kTCCServiceListenEvent $OTHER ${LANDER#/private}"
+
+base listen-preflight
+printf '%s\n%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" "$TCC_LISTEN" >"$T/listen-preflight/in/tcc.ndjson"
+expect listen-preflight 0 "tcc: requests=2 ours=1 listen_event_preflights=1" "info: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+
+base listen-prompt
+printf '%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN_PROMPT" >"$T/listen-prompt/in/tcc.ndjson"
+expect listen-prompt 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+
+base listen-ask
+printf '%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN_ASK" >"$T/listen-ask/in/tcc.ndjson"
+expect listen-ask 1 "left: tcc: kTCCServiceListenEvent $OTHER $BUILD"
 
 base unread-log
 rm "${T:?}/unread-log/in/dock.log"
