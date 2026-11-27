@@ -317,7 +317,8 @@ switch_to claude "$TAG_TO_CLAUDE_P1"
 C2="$(last_start claude)"; C2_PID="$(pid_of "$C2")"
 kill -0 "$X1_PID" 2>/dev/null && fail "codex is still running after the switch"
 MCP_CONFIG="$MARSPOT_STATE_DIR/claude-mcp.json"
-grep -qF " argv=--mcp-config $MCP_CONFIG --allowedTools mcp__marspot --resume $C_ID" <<<"$C2" && [[ $C2 == *" --resume $C_ID" ]] \
+# every claude marspot starts names its model after the rest
+grep -qF " argv=--mcp-config $MCP_CONFIG --allowedTools mcp__marspot --resume $C_ID --model " <<<"$C2" \
   || fail "claude should resume $C_ID with marspot's MCP config: $C2"
 grep -q '"args": \[' "$MCP_CONFIG" && grep -q '"mcp"' "$MCP_CONFIG" && grep -q 'marspot-peer"' "$MCP_CONFIG" \
   || fail "the MCP config should name marspot-peer mcp: $(cat "$MCP_CONFIG" 2>&1)"
@@ -346,7 +347,7 @@ for (( i = 0; i < 150; i++ )); do (( $(binds) >= 2 )) && break; sleep 0.2; done
 echo "==> hand off to codex P1 again"
 switch_to codex "$TAG_TO_CODEX_P1"
 X2="$(last_start codex)"; X2_PID="$(pid_of "$X2")"
-grep -q " argv=resume $X_ID$" <<<"$X2" || fail "codex should resume $X_ID: $X2"
+grep -qE " argv=resume $X_ID( -m [^ ]+)?$" <<<"$X2" || fail "codex should resume $X_ID: $X2"
 ok "back to codex: it resumed the same session $X_ID"
 wait_file "input agent=codex pid=$X2_PID text=\[marspot handoff\]" 30 || fail "codex was never handed the message"
 DOC="$(cat "$HANDOFF/$SID.md")"
