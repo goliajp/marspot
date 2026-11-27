@@ -66,7 +66,7 @@ impl Sim {
                 }
             }
             let to = self.fallback(c, k, j, band, &open[usize::from(!p.restricted)]);
-            self.at.place(c.input, k, to);
+            self.place(c, k, to);
             moved = Some((j, to));
         }
         self.due = due;
@@ -74,6 +74,7 @@ impl Sim {
     }
 
     pub(super) fn load_of(&mut self, c: &Ctx, j: usize) {
+        self.known[j] = self.key(j);
         let (sep, tot) = self.at.sums(c.input, j);
         self.load[j] = if self.phi(j) > EPS { sep } else { [0.0, tot] };
         for cl in 0..2 {
