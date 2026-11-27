@@ -181,7 +181,7 @@ expect tcc-accessing 1 "left: tcc: kTCCServiceListenEvent $OTHER ${LANDER#/priva
 
 base listen-preflight
 printf '%s\n%s\n{"count":5,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN" >"$T/listen-preflight/in/tcc.ndjson"
-expect listen-preflight 0 "tcc: requests=2 ours=1 listen_event_preflights=1 screen_capture_preflights=0" "info: tcc: kTCCServiceListenEvent $OTHER $BUILD"
+expect listen-preflight 0 "tcc: requests=2 ours=1 listen_event_preflights=1 screen_capture_preflights=0 developer_tool_preflights=0" "info: tcc: kTCCServiceListenEvent $OTHER $BUILD"
 
 base listen-prompt
 printf '%s\n%s\n{"count":6,"finished":1}\n' "$TCC_OTHER" "$TCC_LISTEN_PROMPT" >"$T/listen-prompt/in/tcc.ndjson"
@@ -203,6 +203,19 @@ ndjson "$(ctx 175.2117 kTCCServiceScreenCapture)" "$(attribution 175.2117 "$OTHE
   >"$T/capture-preflight/in/tcc.ndjson"
 echo '{"count":3,"finished":1}' >>"$T/capture-preflight/in/tcc.ndjson"
 expect capture-preflight 0 "screen_capture_preflights=1" "info: tcc: kTCCServiceScreenCapture $OTHER $BUILD"
+
+# Gatekeeper asks whether a bundle of this run is a developer tool when it first runs a new binary
+devtool() { # msgID, accessing path
+  ndjson "$(ctx "$1" kTCCServiceDeveloperTool)" \
+    "AUTHREQ_ATTRIBUTION: msgID=$1, attribution={accessing={TCCDProcess: identifier=marspot_shell, pid=68466, auid=501, euid=501, binary_path=$2}, requesting={TCCDProcess: identifier=com.apple.syspolicyd, pid=274, auid=0, euid=0, binary_path=/usr/libexec/syspolicyd}, }," \
+    "$(result "$1")"
+}
+base devtool-ours
+{ devtool 274.1 "$LANDER"; echo '{"count":3,"finished":1}'; } >"$T/devtool-ours/in/tcc.ndjson"
+expect devtool-ours 0 "developer_tool_preflights=1"
+base devtool-elsewhere
+{ devtool 274.2 "$BUILD"; echo '{"count":3,"finished":1}'; } >"$T/devtool-elsewhere/in/tcc.ndjson"
+expect devtool-elsewhere 1 "left: tcc: kTCCServiceDeveloperTool"
 
 # the same client reuses its msgID for a second preflight seconds later (seen on a runner)
 base listen-reuse

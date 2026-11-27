@@ -137,6 +137,7 @@ def tcc_requests(text):
 
 
 QUIET_SERVICES = {"kTCCServiceListenEvent", "kTCCServiceScreenCapture"}
+SYSPOLICYD = "/usr/libexec/syspolicyd"
 
 # seconds before the snap in which our own take of the lock may be logged
 LOOKBACK = 5
@@ -307,10 +308,11 @@ def tcc_check(d, b, under, left, wide, unread):
         unread.append("tcc log: no request in the suite nor in the 24 h probe (predicate or format dead)")
         return
     mine = [r for k, r in reqs.items() if k.startswith("!") or any(ours(p) for p in r["paths"])]
-    quiet = [r for r in mine if quiet_preflight(r)]
+    quiet = [r for r in mine if quiet_preflight(r, under)]
     count = lambda svc: sum(1 for r in quiet if r["svcs"] == {svc})
-    print("tcc: requests=%d ours=%d listen_event_preflights=%d screen_capture_preflights=%d" % (
-        len(reqs), len(mine), count("kTCCServiceListenEvent"), count("kTCCServiceScreenCapture")))
+    print("tcc: requests=%d ours=%d listen_event_preflights=%d screen_capture_preflights=%d"
+          " developer_tool_preflights=%d" % (len(reqs), len(mine), count("kTCCServiceListenEvent"),
+          count("kTCCServiceScreenCapture"), count("kTCCServiceDeveloperTool")))
     for r in mine:
         line = "tcc: %s %s" % (r["svc"], " ".join(r["paths"]))
         if r in quiet:
@@ -319,12 +321,18 @@ def tcc_check(d, b, under, left, wide, unread):
         (left if r["prompt"] or any(under(p) for p in r["paths"]) else wide).append(line)
 
 
-def quiet_preflight(r):
+def quiet_preflight(r, under):
     """the input-monitoring and screen-recording preflights AppKit and the window server make
-    (the latter before the shell captures its own window): they ask, never prompt and record
-    nothing; any other request is a finding"""
-    return (len(r["svcs"]) == 1 and r["svcs"] <= QUIET_SERVICES and r["ctx"] == [["yes"]]
-            and r["results"] == 1 and not r["prompt"] and r["desired"] == {0})
+    (the latter before the shell captures its own window), and Gatekeeper's developer-tool
+    preflight when a bundle of this run first runs a new binary: they ask, never prompt and
+    record nothing; any other request is a finding"""
+    if not (len(r["svcs"]) == 1 and r["ctx"] == [["yes"]] and r["results"] == 1
+            and not r["prompt"] and r["desired"] == {0}):
+        return False
+    if r["svcs"] <= QUIET_SERVICES:
+        return True
+    return (r["svcs"] == {"kTCCServiceDeveloperTool"} and SYSPOLICYD in r["paths"]
+            and any(under(p) for p in r["paths"]))
 
 
 def check(d, before, lrc, lout, me, prefixes):
