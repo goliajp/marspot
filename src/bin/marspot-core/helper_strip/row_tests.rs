@@ -65,7 +65,7 @@ const ROW: Row = Row {
     named: false,
     task: "job",
     state: State::Running,
-    elapsed_ms: 3_000,
+    elapsed_ms: Some(3_000),
     tokens: None,
     arrow: Arrow::Up,
 };

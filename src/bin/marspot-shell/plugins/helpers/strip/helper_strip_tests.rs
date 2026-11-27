@@ -24,6 +24,17 @@ pub(super) fn panes(list: &[(u64, u64)]) -> Arc<Observation> {
     Arc::new(Observation::from_parts(Instant::now(), ProcTable::from_rows(Vec::new()), list.iter().map(one).collect(), |_| None))
 }
 
+fn no_status(_: u64) -> Option<marspot::pane_state::PaneStatus> {
+    None
+}
+
+fn no_title(_: u64) -> Option<String> {
+    None
+}
+
+/// Panes of which nothing is known but what `obs` says.
+pub(super) const UNSEEN: Panes<'static> = Panes { status: &no_status, title: &no_title };
+
 pub(super) fn number(sid: u64) -> Option<u16> {
     Some(1000 + sid as u16)
 }
@@ -35,8 +46,9 @@ pub(super) fn begin(s: &Shared, sid: u64, parent: u64, agent: AgentKind) {
 /// The records as of `now_ms`, seen with `obs`; the facts found are
 /// written down, as the worker does.
 pub(super) fn strips_at(s: &Shared, m: &mut Memory, obs: &Observation, now_ms: u64) -> Vec<HelperStrip> {
-    ask_numbers(m, &s.table(), obs, &number);
-    let (strips, facts) = compose(&mut s.lock(), obs, m, now_ms);
+    let others = plain::sids(&s.lock(), obs);
+    ask_numbers(m, &s.table(), obs, &number, &others);
+    let (strips, facts) = compose(&mut s.lock(), obs, m, now_ms, &UNSEEN);
     for (sid, at, ev) in facts {
         s.record_seen(sid, at, ev);
     }
@@ -78,7 +90,9 @@ fn lists_helpers_by_their_top_pane_in_start_order() {
     feed(&s, 4, vec![Event::started(started(10, "claude", AgentKind::Claude))]);
     let got = strips(&s, &mut Memory::default(), &obs);
     let lists: Vec<(u64, Vec<u64>)> = got.iter().map(|x| (x.root_sid, x.rows.iter().map(|r| r.sid).collect())).collect();
-    assert_eq!(lists, [(10, vec![3, 1]), (20, vec![2])]);
+    // 30 is a plain shadow pane: listed as well, before the helper under it
+    assert_eq!(lists, [(10, vec![3, 1]), (20, vec![30, 2])]);
+    assert!(got[1].rows[0].plain && !got[1].rows[1].plain);
     assert_eq!(got[0].rows[0].number, Some(1003));
     dir_gone(&d);
 }
@@ -357,8 +371,7 @@ fn declares_on_change_and_empty_when_the_batch_is_over() {
     let d = temp("strip-declare");
     let (s, _rx) = shared_at(&d);
     let (mut decls, mut m) = (PaneDecls::new(), Memory::default());
-    // 11 is a plain shadow pane of 10: nothing is said of it
-    let mut obs = panes(&[(10, 0), (11, 10), (20, 0)]);
+    let mut obs = panes(&[(10, 0), (20, 0)]);
     let reads = std::cell::Cell::new(0);
     let sent = |decls: &mut PaneDecls<HelperStrip>| {
         let mut out = Vec::new();
@@ -374,18 +387,18 @@ fn declares_on_change_and_empty_when_the_batch_is_over() {
             reads.set(reads.get() + 1);
             Arc::clone(obs)
         };
-        declare_in(decls, &s, m, &look, &number);
+        declare_in(decls, &s, m, &look, &number, &UNSEEN);
     };
     pass(&mut decls, &mut m, &obs);
     assert_eq!(sent(&mut decls), []);
     pass(&mut decls, &mut m, &obs);
-    assert_eq!((sent(&mut decls), reads.get()), (vec![], 0), "with no helpers nothing is looked at");
+    assert_eq!(sent(&mut decls), [], "with no helpers and no shadow panes nothing is said");
     begin(&s, 1, 10, AgentKind::Codex);
-    obs = panes(&[(10, 0), (11, 10), (20, 0), (1, 10)]);
+    obs = panes(&[(10, 0), (20, 0), (1, 10)]);
     pass(&mut decls, &mut m, &obs);
     assert_eq!(sent(&mut decls), [(10, 1)]);
     // a fresh look at the same panes, and a fact the strip does not show
-    obs = panes(&[(10, 0), (11, 10), (20, 0), (1, 10)]);
+    obs = panes(&[(10, 0), (20, 0), (1, 10)]);
     feed(&s, 1, vec![Event::ResultChanged]);
     pass(&mut decls, &mut m, &obs);
     assert_eq!(sent(&mut decls), []);
@@ -402,9 +415,8 @@ fn declares_on_change_and_empty_when_the_batch_is_over() {
     assert_eq!(sent(&mut decls), [(10, 0)]);
     decls.core_replaced();
     assert_eq!(sent(&mut decls), [(10, 0)], "known to have none is told, too");
-    let n = reads.get();
     pass(&mut decls, &mut m, &obs);
-    assert_eq!(reads.get(), n);
+    assert_eq!(sent(&mut decls), []);
     dir_gone(&d);
 }
 
@@ -437,7 +449,8 @@ fn context_read_is_kept_for_helpers_outside_containers() {
     let g = s.strip_gen.load(Ordering::Acquire);
     s.used(1, "c", read(Some(12_010), None));
     assert_eq!(s.strip_gen.load(Ordering::Acquire), g, "nothing new");
-    let obs = panes(&[(10, 0), (1, 10), (2, 10), (3, 10)]);
+    // no helper's pane is open as 3
+    let obs = panes(&[(10, 0), (1, 10), (2, 10)]);
     let rows = |s: &Shared| strips(s, &mut Memory::default(), &obs)[0].rows.iter().map(|r| (r.sid, r.tokens, r.had_tool)).collect::<Vec<_>>();
     assert_eq!(rows(&s), [(1, Some(12_010), false), (2, None, true)]);
     s.used(1, "c", read(None, Some(true)));

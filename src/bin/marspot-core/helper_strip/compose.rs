@@ -54,7 +54,8 @@ pub(in super::super) struct Row<'a> {
     pub named: bool,
     pub task: &'a str,
     pub state: State,
-    pub elapsed_ms: u64,
+    /// None: a pane that is not timed, which shows no figures.
+    pub elapsed_ms: Option<u64>,
     pub tokens: Option<u64>,
     pub arrow: Arrow,
 }

@@ -21,6 +21,7 @@ pub(super) fn row(sid: u64, works: bool) -> StripRow {
         agent: StripAgent::Codex,
         gone: false,
         had_tool: true,
+        plain: false,
         started_ms: now,
         worked_ms: 65_000,
         running_since_ms: works.then_some(now),
@@ -127,6 +128,7 @@ pub(super) fn say(app: &mut CoreApp, root: u64, rows: Vec<StripRow>) {
     let batch = rows.len().min(1) as u64;
     app.pane_control.strips.take(HelperStrip { batch, rows, parent_agent: StripAgent::Codex, ..HelperStrip::empty(root) });
     app.strips_tick();
+    super::count::assert_counted_as_reached(app, root);
 }
 
 pub(super) fn given(app: &CoreApp) -> u16 {

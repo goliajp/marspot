@@ -85,6 +85,7 @@ mod tests {
             agent: StripAgent::Claude,
             gone: false,
             had_tool: false,
+            plain: false,
             started_ms: 1,
             worked_ms: 0,
             running_since_ms: Some(1),

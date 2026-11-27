@@ -213,7 +213,7 @@ impl ShellApp {
         }
         let said = std::iter::from_fn(|| self.pane_title_rx.try_recv().ok()).map(|u| (u.shelld_session_id, u.text));
         plugins::helpers::titles::declare(&mut self.pane_look.titles, said);
-        self.pane_look.strips_known |= plugins::helpers::strip::declare(&mut self.pane_look.strips);
+        self.pane_look.strips_known |= plugins::helpers::strip::declare(&mut self.pane_look.strips, &self.plugin_host);
         for (s, p, side, mask) in self.core_icons.drawn() {
             self.send(MsgType::IconMask, marspot::shell_proto::encode_icon_mask(s, p, side, &mask));
             self.draw_core_icons();

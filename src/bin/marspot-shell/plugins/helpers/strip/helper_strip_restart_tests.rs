@@ -9,7 +9,7 @@ use super::super::table::{Event, Started};
 use super::super::tests::{host_with, shared_at, started, temp};
 use super::super::turn::{poked_at_start, turn, turns_at_start};
 use super::super::{rebuild, records};
-use super::helper_strip_tests::{T, at, begin, begin_at, dir_gone, number, panes, strips_at};
+use super::helper_strip_tests::{T, UNSEEN, at, begin, begin_at, dir_gone, number, panes, strips_at};
 use super::*;
 
 fn over(sid: u64, at: u64) {
@@ -100,11 +100,11 @@ fn codes_are_asked_once_for_open_panes_and_not_under_the_lock() {
     };
     for _ in 0..3 {
         s.strip_changed();
-        declare_in(&mut decls, &s, &mut m, &|| Arc::clone(&obs), &ask);
+        declare_in(&mut decls, &s, &mut m, &|| Arc::clone(&obs), &ask, &UNSEEN);
     }
     assert_eq!(*asked.borrow(), [1, 3]);
     at(&s, 1, records::now_ms(), vec![Event::Stopped { exited: false }]);
-    declare_in(&mut decls, &s, &mut m, &|| panes(&[(10, 0), (3, 10)]), &ask);
+    declare_in(&mut decls, &s, &mut m, &|| panes(&[(10, 0), (3, 10)]), &ask, &UNSEEN);
     let codes: Vec<_> = decls.declared(10).unwrap().rows.iter().map(|r| (r.sid, r.number)).collect();
     assert_eq!(codes, [(1, Some(1001)), (2, None), (3, None)]);
     assert_eq!(asked.borrow().len(), 2);
@@ -140,11 +140,11 @@ fn no_observation_is_kept_once_nothing_is_listed() {
     let (mut decls, mut m) = (PaneDecls::new(), Memory::default());
     begin(&s, 1, 10, AgentKind::Codex);
     let obs = panes(&[(10, 0), (1, 10)]);
-    declare_in(&mut decls, &s, &mut m, &|| Arc::clone(&obs), &number);
+    declare_in(&mut decls, &s, &mut m, &|| Arc::clone(&obs), &number, &UNSEEN);
     at(&s, 1, records::now_ms(), vec![Event::ExitedNoticed, Event::Stopped { exited: false }]);
     s.expire_strips(records::now_ms() + 3_000);
     let last = panes(&[(10, 0)]);
-    declare_in(&mut decls, &s, &mut m, &|| Arc::clone(&last), &number);
+    declare_in(&mut decls, &s, &mut m, &|| Arc::clone(&last), &number, &UNSEEN);
     assert!(decls.declared(10).is_some_and(HelperStrip::is_empty));
     assert_eq!((Arc::strong_count(&obs), Arc::strong_count(&last)), (1, 1));
     dir_gone(&d);

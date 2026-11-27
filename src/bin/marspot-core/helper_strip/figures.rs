@@ -113,10 +113,13 @@ pub(super) fn figures(row: &Row, ending: bool) -> Text {
         State::Idle if ending => t.join("idle"),
         _ => {}
     }
-    t.join(elapsed(row.elapsed_ms).as_str());
+    if let Some(ms) = row.elapsed_ms {
+        t.join(elapsed(ms).as_str());
+    }
     if let Some(n) = row.tokens.filter(|n| *n > 0) {
         let arrow = if row.arrow == Arrow::Up { "↑" } else { "↓" };
-        let _ = write!(t, " · {arrow} {} tokens", compact(n).as_str());
+        let dot = if t.as_str().is_empty() { "" } else { " · " };
+        let _ = write!(t, "{dot}{arrow} {} tokens", compact(n).as_str());
     }
     t
 }

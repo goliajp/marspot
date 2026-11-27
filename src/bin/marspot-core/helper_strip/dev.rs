@@ -38,7 +38,7 @@ const ROW: Row = Row {
     named: false,
     task: "a task of some length",
     state: State::Running,
-    elapsed_ms: 92_000,
+    elapsed_ms: Some(92_000),
     tokens: Some(115_300),
     arrow: Arrow::Down,
 };

@@ -142,7 +142,7 @@ impl Host {
                 named: false,
                 task: &r.task,
                 state: state(r),
-                elapsed_ms: r.elapsed_ms(now_ms),
+                elapsed_ms: (!r.plain).then(|| r.elapsed_ms(now_ms)),
                 tokens: r.tokens,
                 arrow: if r.had_tool { Arrow::Down } else { Arrow::Up },
             };

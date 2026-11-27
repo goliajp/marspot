@@ -30,7 +30,7 @@ fn a_list_composed_again_allocates_nothing() {
         named: true,
         task: "👩\u{200d}👩\u{200d}👧 正在核对每一项的结果然后汇报给主会话",
         state: State::Running,
-        elapsed_ms: 0,
+        elapsed_ms: Some(0),
         tokens: Some(999_000),
         arrow: Arrow::Down,
     };
@@ -39,7 +39,7 @@ fn a_list_composed_again_allocates_nothing() {
     strip.fit(60, 8);
     for second in 0..130u64 {
         for (i, r) in rows.iter_mut().enumerate() {
-            r.elapsed_ms = second * 1000 + i as u64 * 100;
+            r.elapsed_ms = Some(second * 1000 + i as u64 * 100);
             r.tokens = Some(999_000 + second * 100);
         }
         let selected = Some(Pick::Row(second as usize % 7));

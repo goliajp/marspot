@@ -33,6 +33,11 @@ pub(crate) fn declare(decls: &mut PaneDecls<String>, said: impl Iterator<Item = 
     declare_in(decls, plugins, &titles, |sid| obs.session(sid).is_some_and(|s| s.entry.shadow_of != 0));
 }
 
+/// What pane `sid`'s plugin last titled it.
+pub(super) fn plugin_title(sid: u64) -> Option<String> {
+    PLUGINS.lock().unwrap_or_else(|p| p.into_inner()).as_ref()?.get(&sid).cloned()
+}
+
 fn take_said(decls: &mut PaneDecls<String>, plugins: &mut HashMap<u64, String>, said: impl Iterator<Item = (u64, String)>) {
     for (sid, text) in said {
         decls.declare_ref(sid, &text);
