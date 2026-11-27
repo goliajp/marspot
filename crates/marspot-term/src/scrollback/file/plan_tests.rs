@@ -426,8 +426,11 @@ fn pushes_lines_until_killed() {
     for i in 0u64..=u64::MAX {
         sb.push_line(&ragged(i), false);
         if i % 512 == 511 {
-            // how far it has certainly got
-            let _ = std::fs::write(dir.join("pushed"), (i + 1).to_string());
+            // how far it has certainly got, renamed into place: a reader
+            // racing a rewrite in place read "9728" then the "0" of
+            // "10240", and took 97280 lines for pushed
+            let _ = std::fs::write(dir.join("pushed.new"), (i + 1).to_string());
+            let _ = std::fs::rename(dir.join("pushed.new"), dir.join("pushed"));
         }
     }
 }
