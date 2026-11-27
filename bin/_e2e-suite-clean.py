@@ -94,9 +94,9 @@ def tile_lines(text):
 
 
 def tcc_requests(text):
-    """per msgID: every service, CTX preflight value and desired_auth seen, so two requests that
-    share a msgID (pid.counter wraps) can never pass as one preflight; a prompt line without a
-    msgID is kept under its own key"""
+    """one record per CTX line (a msgID can be reused): every service, CTX preflight value,
+    RESULT and desired_auth seen, so two requests folded together never pass as one preflight;
+    a prompt line without a msgID is kept under its own key"""
     reqs, seen = {}, {}
     for n, line in enumerate((text or "").splitlines()):
         try:
@@ -113,12 +113,14 @@ def tcc_requests(text):
             seen[key] += 1
         seen.setdefault(key, 0)
         key = "%s#%d" % (key, seen[key])
-        r = reqs.setdefault(key, {"svcs": set(), "paths": [], "ctx": [], "prompt": False, "desired": set()})
+        r = reqs.setdefault(key, {"svcs": set(), "paths": [], "ctx": [], "prompt": False, "desired": set(), "results": 0})
         r["svcs"].update(re.findall(r"\bservice=(\w+)", msg))
         if msg.startswith("AUTHREQ_CTX"):
             r["ctx"].append(re.findall(r", preflight=(\w+),", msg))
         if msg.startswith("AUTHREQ_PROMPTING"):
             r["prompt"] = True
+        if msg.startswith("AUTHREQ_RESULT"):
+            r["results"] += 1
         r["desired"].update(int(a) for a in re.findall(r"\bdesired_auth=(\d+)", msg))
         # responsible, accessing and requesting each name a binary_path
         for p in re.findall(r"(?:binary|responsible)_path=([^,}]+)", msg):
@@ -322,7 +324,7 @@ def quiet_preflight(r):
     (the latter before the shell captures its own window): they ask, never prompt and record
     nothing; any other request is a finding"""
     return (len(r["svcs"]) == 1 and r["svcs"] <= QUIET_SERVICES and r["ctx"] == [["yes"]]
-            and not r["prompt"] and r["desired"] == {0})
+            and r["results"] == 1 and not r["prompt"] and r["desired"] == {0})
 
 
 def check(d, before, lrc, lout, me, prefixes):
