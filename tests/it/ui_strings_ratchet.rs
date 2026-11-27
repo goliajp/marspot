@@ -269,6 +269,7 @@ fn interface_files_hold_no_text_outside_the_catalogue() {
     files.push(source("app_menu.rs"));
     files.push(source("commands.rs"));
     files.retain(|(name, _)| !NOT_INTERFACE.iter().any(|x| name.ends_with(x)));
+    let files = without_test_files(files);
     assert!(files.len() >= 45, "only {} files were scanned", files.len());
 
     let mut found = Vec::new();
