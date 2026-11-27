@@ -132,7 +132,9 @@ impl Follower {
             return;
         }
         self.next_check = Some(now + CHECK_EVERY);
-        if !marspot::settings::get().codex_follow_updates {
+        let settings = marspot::settings::get();
+        // after a no for codex, marspot does not update it
+        if !settings.codex_follow_updates || !crate::plugins::agents::may_update("codex", &settings.install_consent) {
             return;
         }
         // a watch whose directory went away reports nothing more

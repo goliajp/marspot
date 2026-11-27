@@ -4,17 +4,20 @@
 //! `gemini` or `kimi`, and nothing a vendor's installer could lean on:
 //! no Node, no package manager.  Each one is fetched the way its vendor
 //! ships a standalone build, into `~/.local/bin` (kimi's into
-//! `~/.kimi-code/bin`), which every pane has on its PATH.  A CLI that
+//! `~/.kimi-code/bin`), which every pane has on its PATH, once the
+//! person has said yes for that CLI (`agentsvc::install`).  A CLI that
 //! is already there, however it got there, is left alone.
 //!
 //! Staying current is each CLI's own business where it has a way:
 //! claude's native build and kimi update themselves, codex is followed
 //! by the codex plugin.  gemini has none, so the one installed here is
-//! replaced when a newer release is out.
+//! replaced when a newer release is out.  A CLI answered no is not
+//! updated by marspot either.
 //!
 //! Everything runs on one background thread, a few times a day.
 
 pub(crate) mod changes;
+mod consent;
 mod gemini;
 mod kimi;
 
@@ -24,12 +27,14 @@ use std::io::Read;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use marspot_term::{lx_info, lx_warn};
 
 use crate::plugins::codex;
+
+pub(crate) use consent::{follow_answers, may_update, Running};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Cli {
@@ -72,11 +77,11 @@ const VERSION_WITHIN: Duration = Duration::from_secs(120);
 
 /// Start the thread; it ends when what this returns is dropped.  Not in
 /// a sandbox: it shares the developer's HOME and the network.
-pub(crate) fn start() -> Option<Sender<()>> {
+pub(crate) fn start() -> Option<Running> {
     if std::env::var_os("MARSPOT_DEV_SANDBOX").is_some() {
         return None;
     }
-    let (stop, stopped) = channel();
+    let (running, stopped) = consent::wake_channel();
     let spawned = std::thread::Builder::new().name("agents-install".into()).spawn(move || {
         let mut failed = Failures::default();
         every(&stopped, FIRST_AFTER, EVERY, || {
@@ -88,16 +93,17 @@ pub(crate) fn start() -> Option<Sender<()>> {
     if let Err(e) = spawned {
         lx_warn!("agents.spawn_failed", &e.to_string());
     }
-    Some(stop)
+    Some(running)
 }
 
-/// Run `step` after `first` and then once every `period`, until the
-/// sender of `stopped` is dropped.  The app that is put away while its
-/// sessions stay has no pane to install a CLI for, and a thread asleep
-/// on a clock would wake the process that stays for as long as it does.
+/// Run `step` after `first`, then once every `period` and whenever
+/// `stopped` brings a wake, until its sender is dropped.  The app that
+/// is put away while its sessions stay has no pane to install a CLI
+/// for, and a thread asleep on a clock would wake the process that
+/// stays for as long as it does.
 fn every(stopped: &Receiver<()>, first: Duration, period: Duration, mut step: impl FnMut()) {
     let mut wait = first;
-    while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(wait) {
+    while let Ok(()) | Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(wait) {
         step();
         wait = period;
     }
@@ -202,23 +208,34 @@ impl Failures {
 
 fn pass(failed: &mut Failures) {
     let Some(at) = Places::of_this_process() else { return };
-    let gone = missing(&at);
+    pass_at(&at, &marspot::settings::get().install_consent, consent::fixtures().as_deref(), failed);
+}
+
+/// One pass over the CLIs at `at`: a missing one is installed only with
+/// a yes in `answers`; from the scripts in `fixtures` when given.
+fn pass_at(at: &Places, answers: &marspot::settings::InstallConsents, fixtures: Option<&Path>, failed: &mut Failures) {
+    let gone = missing(at);
     for cli in Cli::ALL {
         let now = Instant::now();
         if !failed.due(cli, now) {
             continue;
         }
         let absent = gone.contains(&cli);
-        let result = match cli {
-            Cli::Claude if absent => install_claude(&at.home),
-            Cli::Codex if absent => codex::install_cli(&at.codex_home)
+        if (absent && !consent::may_install(cli, at, answers)) || !may_update(cli.command(), answers) {
+            continue;
+        }
+        let result = match (cli, fixtures) {
+            (_, Some(_)) if !absent => continue,
+            (_, Some(dir)) => consent::install_fixture(dir, cli, at),
+            (Cli::Claude, None) if absent => install_claude(&at.home),
+            (Cli::Codex, None) if absent => codex::install_cli(&at.codex_home)
                 .map(|()| codex::installed_cli(&at.codex_home).map(|r| r.to_string()).unwrap_or_default()),
-            Cli::Gemini => match gemini::step(&at, !absent) {
+            (Cli::Gemini, None) => match gemini::step(at, !absent) {
                 Ok(Some(version)) => Ok(version),
                 Ok(None) => continue,
                 Err(e) => Err(e),
             },
-            Cli::Kimi if absent => kimi::install(&at.home),
+            (Cli::Kimi, None) if absent => kimi::install(&at.home),
             _ => continue,
         };
         finished(cli, &result);
@@ -320,7 +337,7 @@ mod tests {
     /// still asleep on its period would never let happen.
     #[test]
     fn the_passes_end_when_the_app_is_put_away() {
-        let (stop, stopped) = channel();
+        let (stop, stopped) = std::sync::mpsc::sync_channel::<()>(1);
         let passes = Arc::new(AtomicU32::new(0));
         let counted = Arc::clone(&passes);
         let t = std::thread::spawn(move || {
@@ -334,6 +351,26 @@ mod tests {
         drop(stop);
         t.join().expect("the thread ends");
         assert_eq!(passes.load(Ordering::SeqCst), 1, "a pass ran after the stop");
+    }
+
+    /// A wake runs a pass at once, not after the period.
+    #[test]
+    fn a_wake_runs_a_pass_before_the_period_is_up() {
+        let (wake, woken) = std::sync::mpsc::sync_channel::<()>(1);
+        let passes = Arc::new(AtomicU32::new(0));
+        let counted = Arc::clone(&passes);
+        let t = std::thread::spawn(move || {
+            every(&woken, Duration::from_secs(3600), Duration::from_secs(3600), || {
+                counted.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+        wake.send(()).unwrap();
+        while passes.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        drop(wake);
+        t.join().expect("the thread ends");
+        assert_eq!(passes.load(Ordering::SeqCst), 1);
     }
 
     use super::*;

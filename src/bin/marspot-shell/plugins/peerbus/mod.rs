@@ -89,7 +89,7 @@ pub struct PeerbusPlugin {
     /// The noted changes (`agents::changes`) the worker was asked to look at.
     config_seen: u64,
     /// Keeps the CLI installer's thread running; dropped at stop.
-    agents: Option<std::sync::mpsc::Sender<()>>,
+    agents: Option<super::agents::Running>,
 }
 
 impl PeerbusPlugin {
