@@ -13,8 +13,8 @@
 # so an insert at that index plus k says the Dock held k more at once.
 # Indexes are compared only under one Dock process: a restarted Dock
 # counts afresh.
-import collections, re
-from datetime import datetime
+import collections, itertools, re
+from datetime import datetime, timedelta
 
 INSERT, REMOVE, URL = "Inserting tile", "Removing tiles identical to", "Got App URL: "
 # from loginwindow's line naming a launched app to the Dock's insert (up to
@@ -22,6 +22,9 @@ INSERT, REMOVE, URL = "Inserting tile", "Removing tiles identical to", "Got App 
 # suite's, which all count; an insert named for no app counts as the suite's
 ATTRIBUTE_S = 0.2
 PROBE = "/marspot-dockprobe"
+# the probe is named over about 30 ms per start; its next start is a second or more after the
+# Dock logged its tile gone
+RUN_GAP_S = 1.0
 
 
 def tile_lines(text):
@@ -67,12 +70,13 @@ def strip_url(p):
     return p[len("/private"):] if p.startswith("/private/") else p
 
 
-def attributed(lines):
-    """(line number from 1, insert index, Dock pid, app) for each insert line, the app or None.
-    The apps named for an insert are those loginwindow names within ATTRIBUTE_S of it, before
-    or after: the name comes first nearly always (1 of 608 inserts on mini2, 2026-11-27
-    21:30-23:07, had it 5 ms after), and a program is named again around its insert (the
-    probes are named three times per start), so the nearest name says nothing.
+def named_inserts(lines):
+    """(line number from 1, insert index, Dock pid, time, the apps named within ATTRIBUTE_S, the
+    app it is attributed to or None) for each insert line.  The apps named for an insert are
+    those loginwindow names within ATTRIBUTE_S of it, before or after: the name comes first
+    nearly always (1 of 608 inserts on mini2, 2026-11-27 21:30-23:07, had it 5 ms after), and a
+    program is named again around its insert (the probes are named three times per start), so
+    the nearest name says nothing.
       - another insert within ATTRIBUTE_S: None, two tiles and the names cannot be paired
       - one app named: that app
       - several named: the one of them known to take a tile, or None when that is not one app.
@@ -80,8 +84,14 @@ def attributed(lines):
         alone next to an insert alone elsewhere in the lines.  A program named here that is
         known to take no tile (another project's headless browser, named 1 ms nearer the
         probe's insert than the probe on mini2, 2026-11-28 01:45:32) is not a candidate, since
-        the Dock inserted one tile in the window.  A program whose first tile ever is this
-        one is not known yet: then the probe can be named for it, the residue of the rule"""
+        the Dock inserted one tile in the window.
+    Takers are learnt from the lines given only.  The probe's reader gives its own stream of
+    about 15 s, where hardly any other app is known, so there an insert named for the probe and
+    for other apps is taken as the probe's whenever it is the only insert within ATTRIBUTE_S.
+    The gap: the probe's own insert comes later than ATTRIBUTE_S after its names (it then
+    reports no tile anyway) and an app named within ATTRIBUTE_S of the probe's names has its
+    single insert there; that insert is taken as the probe's.  When both get a tile there, the
+    probe's reader sees two inserts next to the probe's names and answers unread"""
     urls = [(stamp(l), strip_url(l.split(URL, 1)[1])) for l in lines if URL in l]
     ins = []
     for n, l in enumerate(lines, 1):
@@ -92,27 +102,42 @@ def attributed(lines):
     def near(t):
         return abs(t.total_seconds()) <= ATTRIBUTE_S
 
-    def named(n, t):
+    seen = []
+    for n, i, p, t in ins:
         crowded = any(near(t - u) for k, _, _, u in ins if k != n)
-        return crowded, {u for ut, u in urls if near(t - ut)}
-
-    seen = [(n, i, p) + named(n, t) for n, i, p, t in ins]
-    takers = {next(iter(u)) for _, _, _, c, u in seen if not c and len(u) == 1}
+        seen.append((n, i, p, t, crowded, {u for ut, u in urls if near(t - ut)}))
+    takers = {next(iter(u)) for _, _, _, _, c, u in seen if not c and len(u) == 1}
     out = []
-    for n, i, p, crowded, apps in seen:
+    for n, i, p, t, crowded, apps in seen:
         known = [u for u in apps if u in takers or u.endswith(PROBE)]
         app = None
         if not crowded and len(apps) == 1:
             app = next(iter(apps))
         elif not crowded and len(known) == 1:
             app = known[0]
-        out.append((n, i, p, app))
+        out.append((n, i, p, t, apps, app))
     return out
 
 
-def inserts(text):
-    """(insert index, the app loginwindow named next to it or None) for each insert"""
-    return [(i, u) for _, i, _, u in attributed((text or "").splitlines())]
+def attributed(lines):
+    """(line number from 1, insert index, Dock pid, app) for each insert line, the app or None
+    (named_inserts)"""
+    return [(n, i, p, app) for n, i, p, _, _, app in named_inserts(lines)]
+
+
+def probe_runs(lines, is_probe):
+    """the inserts that are the probe's or have the probe named within ATTRIBUTE_S, as
+    (insert index, attributed to the probe) per probe run: one run is the probe's names with
+    less than RUN_GAP_S between them.  A run takes one tile; more than one insert next to its
+    names means another app's tile is among them and which is the probe's cannot be told"""
+    names = sorted(stamp(l) for l in lines if URL in l and is_probe(strip_url(l.split(URL, 1)[1])))
+    starts = [t for k, t in enumerate(names) if k == 0 or (t - names[k - 1]).total_seconds() > RUN_GAP_S]
+    runs = [[] for _ in starts]
+    for n, i, _, t, apps, app in named_inserts(lines):
+        if any(is_probe(u) for u in apps):
+            runs[max(k for k, s in enumerate(starts) if s <= t + timedelta(seconds=ATTRIBUTE_S))].append(
+                (n, i, app is not None and is_probe(app)))
+    return runs
 
 
 def by_reason(c):
@@ -150,14 +175,28 @@ def at_once(text, base):
     goes and A moves down to base, B goes in at base+1 and C at base+2; three tiles of the
     suite are held and base+2 - (base+1) + 1 = 2 is counted.  The probe before the suite
     waits for the Dock's removal line after it and one second more, so that order does not
-    come in a run; when the log shows it anyway (probe_went_late) the count is not read"""
-    ins = [(i, u) for i, u in inserts(text) if not (u and u.endswith(PROBE))]
-    if not ins:
-        return 0, ""
-    idx = [i for i, _ in ins]
-    low = min([base + 1] + idx)
-    span = "insert index %d..%d, %d before the suite" % (min(idx), max(idx), base)
-    return max(idx) - low + 1, span
+    come in a run; when the log shows it anyway (probe_went_late) the count is not read.
+
+    Each probe run took one tile, so exactly one insert next to its names is left out per run,
+    never every insert attributed to the probe: an app's tile logged next to the probe's names
+    (both named within ATTRIBUTE_S, or its insert taken as the probe's) still counts.  When a
+    run has several such inserts, the one left out is the one that leaves the highest count"""
+    lines = (text or "").splitlines()
+    runs = probe_runs(lines, lambda u: u.endswith(PROBE))
+    near = {n for r in runs for n, _, _ in r}
+    rest = [i for n, i, _, _ in attributed(lines) if n not in near]
+    best = None
+    for drop in itertools.product(*[range(len(r)) for r in runs if r]):
+        kept = [i for r, d in zip([r for r in runs if r], drop) for k, (_, i, _) in enumerate(r) if k != d]
+        idx = rest + kept
+        if not idx:
+            got = (0, "")
+        else:
+            low = min([base + 1] + idx)
+            got = (max(idx) - low + 1, "insert index %d..%d, %d before the suite" % (min(idx), max(idx), base))
+        if best is None or got[0] > best[0]:
+            best = got
+    return best
 
 
 def probe_went_late(text):

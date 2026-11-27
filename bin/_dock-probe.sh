@@ -17,9 +17,9 @@
 #                          prints `dock_pid=N` and `index=N`, or
 #                          `unread=why` and returns 2
 #
-# The probe is told from every other app by loginwindow's line naming it
-# (its own path) nearest to the insert, and from a suite's tiles by
-# when it runs: alone, before the suite starts and after it was stopped.
+# The probe's insert is the one insert next to loginwindow's lines naming
+# it (its own path), and it is told from a suite's tiles by when it runs:
+# alone, before the suite starts and after it was stopped.
 
 DOCK_PROBE_PRED='(process == "Dock" AND category == "dock-tiles") OR (process == "loginwindow" AND eventMessage CONTAINS "Got App URL")'
 DOCK_PROBE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,6 +85,8 @@ dock_probe() {
         esac ;;
       3) out="unread=the Dock restarted while the probe started" ;;
       4) out="unread=a line of the Dock's log has no time: ${out#untimed=}" ;;
+      5) out="unread=the Dock inserted more than one tile next to the probe's name: which is the probe's cannot be told" ;;
+      6) out="unread=the probe's tile was not settled within 15 s: a second insert next to it could still come" ;;
       *) out="unread=the Dock logged no tile for the probe within 15 s" ;;
     esac
   fi

@@ -172,19 +172,38 @@ base probe-lines
   opened "$DOCKPROBE_URL" 09.000; launch 09.004 39; remove 09.900; } >"$T/probe-lines/in/dock.log"
 expect probe-lines 0 "dock: tiles at once=1 (most allowed 2, insert index 37..37, 37 before the suite)"
 
-# step B on mini2, 2026-11-28 01:45:32 (Dock pid 84089): the probe after test-reopen-after-quit.sh,
-# another project's headless browser named 1 ms nearer its insert than the probe.  The probe's
-# index is 10, as before the suite
-CHROME=/Users/x/Library/Caches/ms-playwright/chromium_headless_shell-1200/chrome-mac/headless_shell
-stepb() { opened "$DOCKPROBE_URL" 32.214; opened "$CHROME" 32.215; opened "$CHROME" 32.223; opened "$DOCKPROBE_URL" 32.225
-  launch 32.227 10; opened "$CHROME" 32.228; opened "$DOCKPROBE_URL" 32.240; }
+# step B on mini2 (Dock pid 84089), as `log show` printed it: the probe after
+# test-reopen-after-quit.sh, another project's headless browser named 1 ms nearer its insert
+# than the probe.  The probe's index is 10, as before the suite
+stepb() { cat <<'LOG'
+Timestamp               Ty Process[PID:TID]
+2026-11-28 01:45:32.214 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file:///private/tmp/msp-e2e-01155914491-dockprobe/marspot-dockprobe
+2026-11-28 01:45:32.215 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file:///Users/u/Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell
+2026-11-28 01:45:32.223 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file:///Users/u/Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell
+2026-11-28 01:45:32.225 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file:///private/tmp/msp-e2e-01155914491-dockprobe/marspot-dockprobe
+2026-11-28 01:45:32.227 Df Dock[84089:1ae541] [com.apple.dock:dock-tiles] Inserting tile: <private> at index: 10 for reason: -[DockBar _handleLaunchNotification:data:]
+2026-11-28 01:45:32.228 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file:///Users/u/Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell
+2026-11-28 01:45:32.240 Df loginwindow[179:9d5] [com.apple.loginwindow.logging:Standard] -[Application _updateInformationInternal] | Got App URL: file:///private/tmp/msp-e2e-01155914491-dockprobe/marspot-dockprobe
+LOG
+}
+STEPB_EXE=/tmp/msp-e2e-01155914491-dockprobe/marspot-dockprobe
+STEPB_REMOVED='2026-11-28 01:45:47.867 Df Dock[84089:1ae541] [com.apple.dock:dock-tiles] Removing tiles identical to: <private> for reason: _emptyDeleteList()'
 # the step B lines as the suite's log sees them: the probe's insert is not the suite's, and with
 # the index equal before and after, the suite is clean
 base step-b
+sed -i '' 's/^probe_dock_pid=.*/probe_dock_pid=84089/' "$T/step-b/before"
 probe_before step-b 10
-probed 10 >"$T/step-b/in/probe-end.txt"
-{ echo "$HEADER"; stepb; remove 33.000; } >"$T/step-b/in/dock.log"
+probed 10 84089 >"$T/step-b/in/probe-end.txt"
+{ stepb; echo "$STEPB_REMOVED"; } >"$T/step-b/in/dock.log"
 expect step-b 0 "dock: tiles at once=0 (most allowed 2)" "dock probe: index before=10 after=10"
+# an app's tile between the probe's names (both inserts next to a probe name): one of the two is
+# the probe's, the other counts as the suite's, whichever it is
+base probe-names-around
+probe_before probe-names-around 10
+probed 10 >"$T/probe-names-around/in/probe-end.txt"
+{ echo "$HEADER"; opened "$DOCKPROBE_URL" 02.000; opened /Applications/Marspot.app 02.050; launch 02.100 10
+  opened "$DOCKPROBE_URL" 02.340; launch 02.350 11; remove 03.000; } >"$T/probe-names-around/in/dock.log"
+expect probe-names-around 0 "dock: tiles at once=1 (most allowed 2, insert index 11..11, 10 before the suite)"
 # two inserts in one window with two programs named, next to another job: not passed
 base two-in-window
 probe_before two-in-window 10
@@ -269,7 +288,8 @@ reads ready 0 "" py ready 0 "$S"
 : >"$S.out"
 echo 'Filtering the log data using "x"' >"$S.err"
 reads ready-on-errors 0 "" py ready 0 "$S.out" "$S.err"
-reads insert-named-last 0 $'index=41\nline=8' py insert "$S" "$EXE" 726 0
+# the probe named for two inserts: which is its own cannot be told
+reads insert-named-twice 5 "" py insert "$S" "$EXE" 726 0
 reads removed-after 0 "" py removed "$S" 8 726 0
 reads removed-none 1 "" py removed "$S" 9 726 0
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.300 40; } >"$S.late"
@@ -291,17 +311,25 @@ reads insert-other-after 0 $'index=40\nline=3' py insert "$S.near2" "$EXE" 726 3
   opened "$DOCKPROBE_URL" 02.000; launch 02.100 40; opened /Applications/Other.app 02.110; } >"$S.near3"
 reads insert-other-taker 1 "" py insert "$S.near3" "$EXE" 726 0
 # step B: the probe's index is 10, as before the suite
-{ echo 'Filtering'; stepb; remove 47.867; } >"$S.stepb"
-reads insert-step-b 0 $'index=10\nline=6' py insert "$S.stepb" "$EXE" 726 0
+{ echo 'Filtering'; stepb | tail -n +2; echo "$STEPB_REMOVED"; } >"$S.stepb"
+reads insert-step-b 0 $'index=10\nline=6' py insert "$S.stepb" "$STEPB_EXE" 84089 0
 # two inserts in one window with two programs named: neither is guessed
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; opened /Applications/Other.app 02.001; launch 02.004 40
   launch 02.010 41; remove 03.000; } >"$S.two"
-reads insert-two-in-window 1 "" py insert "$S.two" "$EXE" 726 0
+reads insert-two-in-window 5 "" py insert "$S.two" "$EXE" 726 0
+# the probe named before and after an app's insert, its own 0.25 s later: the first is not taken
+# as the probe's (it would hide the app's tile), the two are unread
+{ echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; opened /Applications/Marspot.app 02.050; launch 02.100 10
+  opened "$DOCKPROBE_URL" 02.340; launch 02.350 11; remove 03.000; } >"$S.around"
+reads insert-names-around 5 "" py insert "$S.around" "$EXE" 726 0
+# the probe's insert seen but not stood by the time given: its own answer, not "no tile"
+{ echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.unsettled"
+reads insert-unsettled 6 "" py insert "$S.unsettled" "$EXE" 726 0.5
 # a second insert logged just after the probe's makes it unattributable: the answer waits for
 # the window to pass
 { echo 'Filtering'; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.grow"
 ( sleep 0.4; { opened /Applications/Other.app 02.005; launch 02.010 41; remove 03.000; } >>"$S.grow" ) &
-reads insert-grows 1 "" py insert "$S.grow" "$EXE" 726 2
+reads insert-grows 5 "" py insert "$S.grow" "$EXE" 726 2
 wait
 # a line with no time is answered at once, not after the wait
 { echo 'Filtering'; echo "garbled Got App URL: file://$DOCKPROBE_URL/"; opened "$DOCKPROBE_URL" 02.000; launch 02.004 40; } >"$S.untimed"

@@ -12,12 +12,16 @@
 # Exit 0 when seen, 1 when not within SECS, 3 when a tile line comes from
 # a Dock other than DOCK_PID (it restarted: its indexes are not comparable),
 # 4 at once when an insert or app line has no time it can be read by (printed
-# as `untimed=LINE`).
+# as `untimed=LINE`), 5 when more than one insert has EXE named within
+# ATTRIBUTE_S (another app's tile is among them; which is EXE's cannot be
+# told), 6 when EXE's insert was seen but had not stood by SECS.
 # Which app an insert is for is decided as in the suite's check
-# (_e2e_dock.attributed), and an insert taken as EXE's stands only once
+# (_e2e_dock.named_inserts), and an insert taken as EXE's stands only once
 # the stream holds a line logged ATTRIBUTE_S past it or SETTLE_S went by
 # with the same answer: a second insert or name logged just after it
-# would make it unattributable, and a stream line can come late.
+# would make it unattributable, and a stream line can come late.  The gap
+# left: an insert within ATTRIBUTE_S of EXE's that the stream delivers more
+# than SETTLE_S late, after every line had gone quiet.
 import sys, time
 
 sys.dont_write_bytecode = True
@@ -29,20 +33,23 @@ SETTLE_S = 1.0
 
 
 def find_insert(lines, exe, pid):
-    """(index, line number, settled) of the first tile the Dock pid inserted that is named
-    for exe, settled when a later line is logged ATTRIBUTE_S past it; "other" when another
-    Dock logged a tile line before it, or None"""
-    named = {n: (i, u) for n, i, _, u in dock.attributed(lines)}
-    for n, l in enumerate(lines, 1):
-        if TILES not in l:
-            continue
-        if dock.dock_pid(l) != pid:
-            return "other"
-        if n in named and named[n][1] == dock.strip_url(exe):
-            t = dock.stamp(l)
-            later = any((dock.stamp(k) - t).total_seconds() > dock.ATTRIBUTE_S for k in lines[n:] if timed(k))
-            return named[n][0], n, later
-    return None
+    """(index, line number, settled) of the one tile the Dock pid inserted next to exe's names
+    and attributed to exe, settled when a later line is logged ATTRIBUTE_S past it; "many" when
+    more than one insert has exe named within ATTRIBUTE_S (the probe starts once per stream);
+    "other" when another Dock logged a tile line before the last of those; or None"""
+    own = dock.strip_url(exe)
+    near = [c for r in dock.probe_runs(lines, lambda u: u == own) for c in r]
+    last = near[-1][0] if near else len(lines)
+    if any(TILES in l and dock.dock_pid(l) != pid for l in lines[:last]):
+        return "other"
+    if len(near) > 1:
+        return "many"
+    if not near or not near[0][2]:
+        return None
+    n, i, _ = near[0]
+    t = dock.stamp(lines[n - 1])
+    later = any((dock.stamp(k) - t).total_seconds() > dock.ATTRIBUTE_S for k in lines[n:] if timed(k))
+    return i, n, later
 
 
 def timed(l):
@@ -74,6 +81,10 @@ class Untimed(Exception):
     pass
 
 
+# an answer seen that had not stood by SECS
+UNSETTLED = "unsettled"
+
+
 def untimed(lines):
     for l in lines:
         if dock.INSERT in l or dock.URL in l:
@@ -87,7 +98,7 @@ def untimed(lines):
 def poll(paths, secs, look, settle=None):
     """look's answer once it has one, None at SECS; Untimed(line) at once when a line it reads
     has no time: waiting does not give it one.  With settle, an answer stands once settle says
-    so or it held SETTLE_S unchanged; one that has not stood by SECS is None"""
+    so or it held SETTLE_S unchanged; one that has not stood by SECS is UNSETTLED"""
     end = time.monotonic() + secs
     held = None
     while True:
@@ -108,7 +119,7 @@ def poll(paths, secs, look, settle=None):
             if settle(got) or now - held[1] >= SETTLE_S:
                 return got
         if now >= end:
-            return None
+            return None if held is None else UNSETTLED
         time.sleep(0.1)
 
 
@@ -126,9 +137,9 @@ def answer(a):
         return 0 if got else 1
     if a[0] == "insert":
         got = poll([a[1]], float(a[4]), lambda ls: find_insert(ls, a[2], a[3]),
-                   lambda g: g == "other" or g[2])
-        if got == "other":
-            return 3
+                   lambda g: g in ("other", "many") or g[2])
+        if got in ("other", "many", UNSETTLED):
+            return {"other": 3, "many": 5, UNSETTLED: 6}[got]
         if got is None:
             return 1
         print("index=%d\nline=%d" % got[:2])
