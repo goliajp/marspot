@@ -53,6 +53,7 @@ mod reader;
 mod region;
 mod settle;
 mod shown;
+mod snapshot;
 mod write_packed;
 pub mod cells;
 pub use self::{cells::FrameBuf, reader::GridShmReader};
@@ -62,6 +63,8 @@ pub use ident::{Identity, SessionRegions, delete_session_regions};
 pub use names::{session_shm_name, state_hash};
 pub use region::{create_region, create_region_named, delete_region, open_region};
 pub use title::TitleWriter;
+pub use snapshot::GridSnapshot;
+use snapshot::view_word;
 pub use peek::{Frame, peek, peek_frame, peek_frame_now};
 use hash::compute_publish_hash;
 use region::attach_and_maybe_upgrade;
@@ -180,37 +183,6 @@ struct Header {
 
 const HEADER_BYTES: usize = std::mem::size_of::<Header>();
 
-/// One published frame's metadata, returned alongside the cells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GridSnapshot {
-    pub cols: u16,
-    pub rows: u16,
-    pub cursor_col: u16,
-    pub cursor_row: u16,
-    pub flags: u32,
-    pub scroll_push_count: u64,
-    pub scrollback_len: u32,
-    pub view_offset: u16,
-}
-
-impl GridSnapshot {
-    pub fn cursor_visible(&self) -> bool {
-        self.flags & FLAG_CURSOR_VISIBLE != 0
-    }
-    pub fn app_cursor_keys(&self) -> bool {
-        self.flags & FLAG_APP_CURSOR_KEYS != 0
-    }
-    pub fn bracketed_paste(&self) -> bool {
-        self.flags & FLAG_BRACKETED_PASTE != 0
-    }
-    pub fn alt_scroll(&self) -> bool {
-        self.flags & FLAG_ALT_SCROLL != 0
-    }
-    pub fn alt_screen(&self) -> bool {
-        self.flags & FLAG_ALT_SCREEN != 0
-    }
-}
-
 /// Byte length the writer/reader actually touches at `cols × rows`:
 /// header + cell region + per-row wrapped flags.  Used for bounds
 /// checks against the (fixed) mapping size — the actual mapping is
@@ -266,6 +238,9 @@ pub struct GridShmWriter {
     /// Where the window title goes, once attached.
     title: Option<TitleWriter>,
     shown: shown::Shown,
+    /// The core's last view ask this session applied, published beside
+    /// the view offset.
+    view_seq: u16,
 }
 
 // The raw pointer is into a private mmap this struct solely owns; it is
@@ -309,13 +284,15 @@ impl GridShmWriter {
             row_clusters: Vec::new(),
             title: None,
             shown: shown::Shown::default(),
+            // an image after an update goes on answering what the one before it did
+            view_seq: snapshot::split_view_word(unsafe { (*(base as *mut Header)).view_offset }).1,
         })
     }
 
     /// How far back the frame in the region is scrolled: until the
     /// first publish, the last frame of the session's previous image.
     pub fn published_view_offset(&self) -> u32 {
-        unsafe { (*self.header()).view_offset }
+        snapshot::split_view_word(unsafe { (*self.header()).view_offset }).0 as u32
     }
 
     /// The shm fd, for passing to a child (e.g. inherited by L2/L3).
@@ -455,7 +432,7 @@ impl GridShmWriter {
             (*h).flags = flags;
             (*h).scroll_push_count = grid.scroll_push_count();
             (*h).scrollback_len = grid.scrollback_len() as u32;
-            (*h).view_offset = view_offset as u32;
+            (*h).view_offset = view_word(view_offset, self.view_seq);
             // the frame's own layout; the version goes back to the one
             // every reader takes as soon as a frame is twenty-byte cells
             // again, so a reader from before eight-byte cells can attach

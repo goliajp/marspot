@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.866"  # a half-configured devops is an error, not a machine without devops
-core    = "0.12.758"  # font family matching never waits on a font macOS has not downloaded
-session = "0.11.483"  # marspot-term: dropping a history waits for the segment still being made
+shell   = "0.7.867"  # marspot-term: frames carry the number of the last view ask applied
+core    = "0.12.759"  # marspot-term: frames carry the number of the last view ask applied
+session = "0.11.484"  # a scroll or prompt jump applied is published as its number beside the offset

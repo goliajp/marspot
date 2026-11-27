@@ -42,8 +42,8 @@ pub(crate) struct Shown {
     pub(crate) predicted: bool,
     pub(crate) resized: bool,
     pub(crate) modes_changed: bool,
-    /// The view offset L2 asked for this turn.
-    pub(crate) scroll: Option<u16>,
+    /// The view L2 asked for this turn, and the number of its last ask.
+    pub(crate) scroll: crate::view::Asked,
 }
 
 pub(crate) enum Turn {
@@ -80,6 +80,7 @@ impl Frames {
     pub(crate) fn replace_shm(&mut self, mut shm: GridShmWriter) -> GridShmWriter {
         // the same reader, reading another region
         shm.set_reader_frames(self.shm.reader_frames());
+        shm.set_view_seq(self.shm.view_seq());
         std::mem::replace(&mut self.shm, shm)
     }
 
@@ -88,9 +89,7 @@ impl Frames {
     /// while the user is viewing scrollback (`view_offset > 0`).  Without
     /// this, every PTY line the shell emits while the user is scrolled
     /// back shifts the visible content downward by one row — the
-    /// "老内容被新内容覆盖" symptom.  L2's `pump_all` runs the symmetric
-    /// bump so the two sides stay in lockstep without an extra
-    /// forward_scroll round-trip.
+    /// "老内容被新内容覆盖" symptom.
     pub(crate) fn follow_scroll_from(&mut self, session: &SessionImpl) {
         self.last_scroll_push = session.terminal().grid().scroll_push_count();
     }
@@ -176,13 +175,15 @@ impl Frames {
     ) -> Turn {
         let Shown { predicted, resized, modes_changed, scroll } = shown;
         // A scroll changes which window we publish even with no new output.
-        let scrolled = match scroll {
+        // An ask answered goes out even when the view did not move:
+        // the core holds its own offset until a frame says it was applied.
+        let scrolled = match scroll.off {
             Some(off) if off != self.view_offset => {
                 self.view_offset = off;
                 true
             }
             _ => false,
-        };
+        } | scroll.seq.is_some_and(|s| self.shm.set_view_seq(s));
 
         watch.phase("pump");
         let (n, queued) = session.pump_within(self.pace());
@@ -191,8 +192,8 @@ impl Frames {
         // a row into scrollback while the user is viewing history,
         // shift view_offset by the same delta so the visible window
         // tracks the same absolute content instead of sliding down.
-        // L2 runs the symmetric bump in `pump_all` so the two stay in
-        // sync without an extra forward_scroll round-trip.
+        // L2 takes the offset from the frame once the frame answers
+        // its last ask, so the two stay in sync without a round-trip.
         let cur_scroll_push = session.terminal().grid().scroll_push_count();
         if self.view_offset > 0 && cur_scroll_push > self.last_scroll_push {
             let delta = (cur_scroll_push - self.last_scroll_push).min(u16::MAX as u64) as u16;

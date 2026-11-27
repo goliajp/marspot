@@ -29,6 +29,28 @@ pub fn decode_grid_scroll(payload: &[u8]) -> io::Result<u16> {
     Ok(u16::from_le_bytes(*b))
 }
 
+/// A GridScroll that also carries the number of the ask, `seq u16 LE`,
+/// written into the writer's queue.  The session puts the number of
+/// the last ask it applied into the frames it publishes, so the core
+/// can tell the frames that answer this scroll from older ones.
+pub fn encode_grid_scroll_asked(view_offset: u16, seq: u16, out: &mut Vec<u8>) {
+    out.extend_from_slice(&view_offset.to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+}
+
+/// The offset and, from a core that counts its asks, the ask's number.
+pub fn decode_grid_scroll_asked(payload: &[u8]) -> io::Result<(u16, Option<u16>)> {
+    let off = decode_grid_scroll(payload)?;
+    Ok((off, payload.get(2..4).map(|b| u16::from_le_bytes([b[0], b[1]]))))
+}
+
+/// The number a frame carries for the core's view ask `count` (its
+/// count of scrolls and jumps asked for): never 0, which is what a
+/// session that does not count publishes.
+pub fn view_ask_seq(count: u32) -> u16 {
+    (count % 0xFFFF) as u16 + 1
+}
+
 /// Which way a `PromptJump` goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptDir {
@@ -110,6 +132,19 @@ fn short(what: &str, need: usize) -> io::Error {
 mod tests {
     use super::*;
     use crate::shell_proto::MsgType;
+
+    #[test]
+    fn grid_scroll_carries_the_asks_number() {
+        let mut out = Vec::new();
+        encode_grid_scroll_asked(300, 9, &mut out);
+        assert_eq!(decode_grid_scroll_asked(&out).unwrap(), (300, Some(9)));
+        assert_eq!(decode_grid_scroll(&out).unwrap(), 300, "an older session reads the offset");
+        assert_eq!(decode_grid_scroll_asked(&encode_grid_scroll(300)).unwrap(), (300, None), "an older core");
+        assert_eq!(view_ask_seq(0), 1);
+        assert_eq!(view_ask_seq(0xFFFE), 0xFFFF);
+        assert_eq!(view_ask_seq(0xFFFF), 1, "wraps past 0");
+        assert_ne!(view_ask_seq(u32::MAX), 0);
+    }
 
     #[test]
     fn prompt_jump_roundtrip() {

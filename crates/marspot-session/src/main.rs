@@ -204,7 +204,7 @@ enum SessionEvent {
     /// L2 forwarded a scrollback view offset (rows up from live). L3 owns
     /// the scrollback, so it publishes that window; L2 renders the mirror
     /// as-is (it can't scroll its window-only mirror itself).
-    Scroll(u16),
+    Scroll(u16, Option<u16>),
     /// L2 asks for the prompt before or after the view: see `view`.
     PromptJump(marspot_term::shell_proto::PromptJump),
     /// L2 wants the clipboard text under a selection (Cmd-C). L3 owns the
@@ -862,7 +862,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // program was just killed can be never.
         let mut modes_changed = false;
         let mut pending_resize: Option<(u16, u16)> = None;
-        let mut pending_scroll: Option<u16> = None;
+        let mut pending_scroll = view::Asked::default();
         let mut procs_changed = false;
         let mut selection_reqs: Vec<(u32, (u16, u32), (u16, u32), bool)> = Vec::new();
         input::taken();
@@ -928,7 +928,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     }
                 }
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
-                SessionEvent::Scroll(off) => view::scroll(&session, off, &mut pending_scroll),
+                SessionEvent::Scroll(off, seq) => view::scroll(&session, off, seq, &mut pending_scroll),
                 SessionEvent::PromptJump(jump) => {
                     view::prompt_jump(&session, jump, &mut pending_scroll, frames.view_offset(), poke.as_mut())
                 }

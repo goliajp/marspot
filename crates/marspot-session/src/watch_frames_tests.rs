@@ -37,7 +37,7 @@ fn flood(mut poke: Option<&mut ControlWriter>) -> (u64, u64) {
     let started = Instant::now();
     for chunk in chunks {
         tx.send(chunk.into()).expect("queue a chunk");
-        let shown = Shown { predicted: false, resized: false, modes_changed: false, scroll: None };
+        let shown = Shown { predicted: false, resized: false, modes_changed: false, scroll: Default::default() };
         frames.turn(&mut session, poke.as_deref_mut(), &mut loop_watch, shown);
         ctl.after_turn(&mut session, Some(&mut frames), false, poke.as_deref_mut());
     }
