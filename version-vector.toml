@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.826"  # marspot-term carries the ProgramInput frame
-core    = "0.12.742"  # marspot-term carries the ProgramInput frame
+shell   = "0.7.827"  # a --send or autorun goes out as program input; marspot's own typing is not judged by the /model guard
+core    = "0.12.743"  # the /model guard judges only program input, and a box only while claude is in front
 session = "0.11.472"  # marspot-term drops the sched.reset_read setting (not used by session)

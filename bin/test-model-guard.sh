@@ -155,7 +155,9 @@ check "and the keys written with it stay" key_is n 99
 check "theme too" grep -q light "$SHARED"
 
 echo "════ 2. /model typed in the box ════"
-pc send --force "$P1" "python3 $ROOT/bin/_fake_claude_box.py $SHARED $SUBMITS $KEYS" >/dev/null || die "could not start the stand-in"
+# the guard judges a box only while a program named claude is in front:
+# a sleep by that name joins the stand-in's process group and ends with it
+pc send --force "$P1" "bash -c '(exec -a claude sleep 900) & exec python3 \"\$@\"' claude $ROOT/bin/_fake_claude_box.py $SHARED $SUBMITS $KEYS" >/dev/null || die "could not start the stand-in"
 wait_shows "$SD" "$P1" "? for shortcuts" 20 || die "the stand-in's box never showed"
 held=$(count "$SD" MODEL_GUARD_HELD) shown=$(count "$SD" NOTICE_SHOWN)
 go go-2

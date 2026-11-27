@@ -90,6 +90,7 @@ impl ShellApp {
             );
         }
         let op = plugins::pty_op::PtyOp::new("cli.send")
+            .typed_for_program()
             // Nothing is frozen and no keys are locked: this is a
             // delivery, not a takeover.  The user can keep typing in
             // that pane while it happens.

@@ -104,6 +104,7 @@ pub(super) fn decode_frame(t: MsgType, payload: &[u8]) -> Option<CoreEvent> {
         MsgType::InjectInput => marspot::shell_proto::decode_inject_input(payload)
             .ok()
             .map(|(sid, bytes)| CoreEvent::InjectInput(sid, bytes)),
+        MsgType::ProgramInput => marspot::shell_proto::decode_program_input(payload).ok().map(CoreEvent::ProgramInput),
         MsgType::Preedit => decode_preedit(payload)
             .ok()
             .map(|(text, win)| CoreEvent::Preedit(text, win)),

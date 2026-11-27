@@ -38,36 +38,6 @@ use marspot::pidtree::{self, ProcId, SignalError};
 
 pub use super::pty_command::{PtyCommand, quotable, shell_safe};
 
-/// Bytes to a pane's PTY, and holds on its picture.
-///
-/// Implemented over whatever can reach the pane (in production, the
-/// plugin host's inject-input channel).  Kept separate from [`OpEnv`]
-/// so the process/clock half can be real while this half is a fake.
-pub trait PtyIo: Send + Sync {
-    fn send(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()>;
-    /// Ask L3 to hold this pane's picture where it is (or release it).
-    fn hold(&self, sid: u64, on: bool) -> std::io::Result<()>;
-    /// Deliver text the way a paste would arrive.
-    ///
-    /// Not the same as [`send`](Self::send): only L3 knows whether the
-    /// program in the pane has bracketed paste on, and multi-line text
-    /// delivered without it is executed a line at a time.  Anything
-    /// handing a *message* to a running program takes this route.
-    fn paste(&self, sid: u64, text: &str) -> std::io::Result<()>;
-    /// Tell L3 to stop believing the foreground program wants mouse
-    /// reports.  Sent after a `terminate` step: a signal produces no
-    /// bytes, so the `CSI ? 1002 l` a clean exit would have sent never
-    /// arrives and the shell underneath inherits mouse tracking.
-    fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()>;
-    /// Either kind of typing; what [`OpRunner::type_into`] calls.
-    fn write(&self, sid: u64, what: Typed<'_>) -> std::io::Result<()> {
-        match what {
-            Typed::Bytes(b) => self.send(sid, b),
-            Typed::Paste(t) => self.paste(sid, t),
-        }
-    }
-}
-
 /// Everything a running op needs from the world.
 ///
 /// One trait so a test can drive a whole script in microseconds with a
@@ -625,6 +595,8 @@ pub struct PtyOp {
     /// Told how the run ended: the submitter's own channel back, since
     /// the queue's reports go to whoever owns the queue.
     pub on_end: Option<OnEnd>,
+    /// Whose input the run types: see [`Origin`].
+    pub origin: Origin,
 }
 
 /// See [`PtyOp::on_end`].
@@ -654,6 +626,7 @@ impl PtyOp {
             escape_hatch: true,
             badge: None,
             on_end: None,
+            origin: Origin::Marspot,
         }
     }
     pub fn on_end(mut self, f: OnEnd) -> Self {
@@ -1868,7 +1841,7 @@ mod job;
 pub use job::Job;
 mod real_env;
 mod typing;
-pub use typing::Typed;
+pub use typing::{Origin, PtyIo, Typed};
 pub use real_env::RealEnv;
 #[cfg(test)]
 mod never_ran_tests;

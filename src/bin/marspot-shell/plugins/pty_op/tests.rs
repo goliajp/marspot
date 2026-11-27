@@ -295,6 +295,7 @@ pub(super) struct FakeState {
     holds: Mutex<Vec<bool>>,
     pasted: Mutex<Vec<String>>,
     mouse_resets: Mutex<Vec<u64>>,
+    programs: Mutex<Vec<String>>,
     /// `(seq, flags)` the pane's region would report, or `None`
     /// for a pane whose region cannot be read.
     modes: Mutex<Option<(u64, u32)>>,
@@ -327,6 +328,10 @@ impl PtyIo for FakeIo {
     }
     fn paste(&self, _sid: u64, text: &str) -> std::io::Result<()> {
         self.0.pasted.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+    fn program_input(&self, _sid: u64, what: Typed<'_>) -> std::io::Result<()> {
+        self.0.programs.lock().unwrap().push(format!("{what:?}"));
         Ok(())
     }
     fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()> {
@@ -1851,3 +1856,6 @@ fn submit_paste_drops_end_marker_in_the_text() {
         vec![b"\x1b[200~abc\x1b[201~".to_vec()],
     );
 }
+
+#[path = "origin_tests.rs"]
+mod origin_tests;

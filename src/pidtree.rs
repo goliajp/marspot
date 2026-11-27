@@ -17,12 +17,14 @@ use std::ffi::CStr;
 use std::path::PathBuf;
 
 mod args;
+mod front_claude;
 mod ident;
 mod pane_cwd;
 mod probes;
 mod table;
 
 pub use args::{proc_argv, proc_cmdline, proc_env_value, proc_env_values, release_room};
+pub use front_claude::claude_in_front;
 pub use ident::{ProcId, SignalError, proc_id, signal};
 pub use pane_cwd::pane_cwd;
 pub use probes::{Zombie, cpu_with_children, exe_path, fd_path, proc_cpu_time_ns, zombies};
