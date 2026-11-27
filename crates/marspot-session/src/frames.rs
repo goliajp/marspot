@@ -22,6 +22,19 @@ use crate::publish_gate::{BlankGate, FloodGate, SyncGate, grid_is_blank};
 /// publish and apply a resize. A frame at 120 Hz.
 const PUMP_BUDGET: Duration = Duration::from_millis(8);
 
+/// A turn that parsed at least this much, a kilobyte, is bulk output,
+/// however far short of a read buffer it fell.
+///
+/// A writer that waits for a core pauses past the reader's tail wait
+/// every kilobyte or three, and each piece was a turn of its own that
+/// put a frame out and handed its lines to their files, as at the end
+/// of a flood.  Background-only, on six efficiency cores with six
+/// spinning programs, that was a frame every 2.9 KB, and the frames
+/// alone 0.4 million instructions each, 38 % of all the session spent;
+/// taken as bulk, 32 MB cost 37 % fewer instructions and took 7 % less
+/// time, while unrestricted output costs what it did.
+pub(crate) const BULK_TURN_BYTES: usize = 1024;
+
 /// The region the grid is published into and what decides when.
 pub(crate) struct Frames {
     shm: GridShmWriter,
@@ -226,9 +239,10 @@ impl Frames {
             lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
             return Turn::Exited;
         }
-        // Lines that scrolled off go to their files when a burst ends,
-        // and a flood's last ones on the turn after it.
-        let flood = n >= FloodGate::BULK_BYTES || queued;
+        // lines that scrolled off go to their files on a turn under a
+        // kilobyte with nothing queued; a bulk turn's go on the turn after
+        // it, at most a frame later
+        let flood = n >= BULK_TURN_BYTES || queued;
         if !flood {
             session.terminal().grid().scrollback_hand_off();
         }
