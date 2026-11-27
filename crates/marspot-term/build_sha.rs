@@ -4,6 +4,9 @@
 // with no `.git`, so the syncing side passes its sha in `MARSPOT_GIT_SHA`;
 // a working repository always wins over that variable.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 /// `git_head` is `git rev-parse --short=8 HEAD` (None when there is no
 /// repository), `git_dirty` whether `git status --porcelain` printed
 /// anything, `env` the value of `MARSPOT_GIT_SHA`
@@ -29,9 +32,45 @@ fn from_env(value: &str) -> Option<String> {
     Some(if dirty { format!("{short}-dirty") } else { short.to_string() })
 }
 
+/// The git files whose change can move what `choose` returns, for
+/// `cargo:rerun-if-changed`: HEAD and the index from the worktree's own
+/// git dir, packed-refs and HEAD's branch ref from the common dir.  In
+/// a linked worktree `.git` is a file and the two dirs differ, so the
+/// paths come from `git rev-parse`, not from `.git/`.  Only paths that
+/// exist: cargo takes a missing one as forever stale and reruns the
+/// script, and with it the new build time and every crate after it, on
+/// each build.  Empty when `dir` is in no repository.
+pub fn git_watch_paths(dir: &Path) -> Vec<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])
+        .args(["--symbolic-full-name", "HEAD"])
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else { return Vec::new() };
+    let (git_dir, common) = (Path::new(git_dir), Path::new(common));
+    let mut paths = vec![git_dir.join("HEAD"), git_dir.join("index"), common.join("packed-refs")];
+    // a detached HEAD prints `HEAD` here and has no branch ref to watch
+    if let Some(refname) = lines.next().filter(|r| r.starts_with("refs/")) {
+        paths.push(common.join(refname));
+    }
+    paths.retain(|p| p.exists());
+    paths
+}
+
+/// What the build scripts print for `git_watch_paths`.
+pub fn print_git_watch() {
+    for p in git_watch_paths(Path::new(".")) {
+        println!("cargo:rerun-if-changed={}", p.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::choose;
+    use super::{choose, git_watch_paths};
 
     #[test]
     fn git_wins_over_the_variable() {
@@ -73,5 +112,46 @@ mod tests {
             assert_eq!(choose(None, false, Some(bad)), "unknown", "{bad:?}");
         }
         assert_eq!(choose(None, false, None), "unknown");
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A linked worktree has a `.git` file, not a directory: its HEAD and
+    /// index are under the main repository's `worktrees/<name>`, its
+    /// branch ref under the main repository's `refs/`.
+    #[test]
+    fn a_linked_worktree_watches_its_own_git_files() {
+        let tmp = marspot_term::test_env::TempDir::new("build-sha-worktree");
+        let main = tmp.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "trunk"]);
+        std::fs::write(main.join("f"), "x").unwrap();
+        git(&main, &["add", "f"]);
+        git(&main, &["commit", "-q", "-m", "x"]);
+        let linked = tmp.join("linked");
+        git(&main, &["worktree", "add", "-q", "-b", "side", linked.to_str().unwrap()]);
+        assert!(linked.join(".git").is_file());
+
+        let common = main.join(".git").canonicalize().unwrap();
+        let own = common.join("worktrees/linked");
+        let watched: Vec<_> = git_watch_paths(&linked).into_iter().map(|p| p.canonicalize().unwrap()).collect();
+        assert_eq!(watched, [own.join("HEAD"), own.join("index"), common.join("refs/heads/side")]);
+
+        let watched: Vec<_> = git_watch_paths(&main).into_iter().map(|p| p.canonicalize().unwrap()).collect();
+        assert_eq!(watched, [common.join("HEAD"), common.join("index"), common.join("refs/heads/trunk")]);
+
+        git(&main, &["pack-refs", "--all"]);
+        git(&linked, &["checkout", "-q", "--detach"]);
+        let watched: Vec<_> = git_watch_paths(&linked).into_iter().map(|p| p.canonicalize().unwrap()).collect();
+        assert_eq!(watched, [own.join("HEAD"), own.join("index"), common.join("packed-refs")]);
     }
 }

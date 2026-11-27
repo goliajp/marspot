@@ -20,12 +20,9 @@ running_equiv() {
   if [[ -f "$TREE/current/$bin" ]]; then echo "$TREE/current/$bin"; else echo "$MACOS/$bin"; fi
 }
 
-# Extract the git sha embedded by build.rs into a marspot binary. The
-# marspot + marspot-term crates embed a literal `MARSPOT_FP=<sha>|
-# <ts>|END` static into the binary's rodata so this extractor is
-# robust to linker ordering. Returns just the sha portion (with
-# optional `-dirty`); empty = unable to find one (caller falls back to
-# byte-compare).
+# The sha (with optional `-dirty`) in a binary's `MARSPOT_FP=<sha>|<ts>|END`
+# rodata marker, written by build.rs; empty when there is none (the
+# caller then compares bytes).
 binary_git_sha() {
   local bin="$1"
   [[ -f "$bin" ]] || { echo ""; return; }
@@ -37,12 +34,11 @@ binary_git_sha() {
 
 # built_from_tree SHA: whether SHA, the commit a target binary names, is
 # what the source tree (SRC_TREE, default ROOT) holds: clean and at that
-# commit.  build.rs reruns only when git's HEAD, refs or index change,
-# and in a linked worktree on none of them, so a binary rebuilt after an
-# unstaged edit, or after a commit, can still name an older clean commit.
-# Only the tree says the name is true.  The binaries `--no-build`
-# installs were built on a runner from a copy of this tree, so the same
-# check holds for them.  The tree is read once per run.
+# commit.  build.rs reruns only when git's HEAD, refs or index change (or
+# MARSPOT_GIT_SHA, which install-local's build sets), so a binary built
+# otherwise after an unstaged edit can still name a clean commit.  The
+# binaries `--no-build` installs were built on a runner from a copy of
+# this tree; a tree that moved since then only swaps more layers.
 _TREE_AT=""  # the tree's commit when clean, "-" otherwise
 built_from_tree() {
   if [[ -z "$_TREE_AT" ]]; then
@@ -113,6 +109,8 @@ layer_of_bin() {
 # built from, for the INSTALL_LAYERS line.
 _why() { printf -v "WHY_$1" '%s' "$2"; }
 _from() { printf -v "FROM_$1" '%s' "$(binary_git_sha "$2")"; }
+# _running_clean LAYER: after _from, its running binary names a clean commit
+_running_clean() { local v="FROM_$1"; [[ -n "${!v:-}" && "${!v}" != *-dirty ]]; }
 
 # changed BIN: true when BIN must be staged.
 changed() {
@@ -132,9 +130,10 @@ changed() {
   # rebuild bumped the sha and build time embedded in every binary.
   # Not for a build the tree does not confirm: mid-iteration the vector
   # may not reflect uncommitted source, so fall through to byte-compare.
+  # Nor when the running binary is a -dirty build: code no commit has.
   local tgt_sha
   tgt_sha="$(binary_git_sha "$TARGET/$bin")"
-  if built_from_tree "$tgt_sha"; then
+  if built_from_tree "$tgt_sha" && _running_clean "$layer"; then
     local ref_ver tgt_ver
     ref_ver="$(binary_layer_ver "$ref" "$layer")"
     tgt_ver="$(binary_layer_ver "$TARGET/$bin" "$layer")"
