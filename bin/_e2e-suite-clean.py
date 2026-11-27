@@ -332,16 +332,17 @@ def tcc_check(d, b, under, left, wide, unread):
 def quiet_preflight(r, under):
     """the input-monitoring and screen-recording preflights AppKit and the window server make
     (the latter before the shell captures its own window), and Gatekeeper's developer-tool
-    preflight when a bundle of this run first runs a new binary: they ask, never prompt and
+    preflight when a binary of this run first runs: they ask, never prompt and
     record nothing; any other request is a finding"""
     if not (len(r["svcs"]) == 1 and r["ctx"] == [["yes"]] and r["results"] == 1
             and not r["prompt"] and r["desired"] == {0}):
         return False
     if r["svcs"] <= QUIET_SERVICES:
         return True
-    # only a bundle this run made under its own scratch prefix, never the shared build tree
+    # a binary under this run's scratch prefix or this run's remote copy, which Gatekeeper
+    # checks the first time it runs
     return (r["svcs"] == {"kTCCServiceDeveloperTool"} and SYSPOLICYD in r["paths"]
-            and any(under(p) and "/msp-e2e-" in p for p in r["paths"]))
+            and any(under(p) for p in r["paths"] if p != SYSPOLICYD))
 
 
 def check(d, before, lrc, lout, me, prefixes):
