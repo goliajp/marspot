@@ -203,7 +203,8 @@ impl CoreApp {
                 continue;
             }
             let Some(record) = self.pane_control.strips.of(sid) else { continue };
-            for r in record.rows.iter().filter(|r| !self.strips.sized.contains(&r.sid)) {
+            // a plain shadow pane keeps the size it was opened with
+            for r in record.rows.iter().filter(|r| !r.plain && !self.strips.sized.contains(&r.sid)) {
                 if let Some(p) = self.shadows.iter_mut().find(|p| p.is_l3() && p.shelld_session_id() == Some(r.sid)) {
                     p.resize(size.0, size.1);
                 }

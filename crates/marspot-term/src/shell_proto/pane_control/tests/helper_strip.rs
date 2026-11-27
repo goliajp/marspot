@@ -12,6 +12,7 @@ fn row(sid: u64) -> StripRow {
         agent: StripAgent::Claude,
         gone: false,
         had_tool: true,
+        plain: false,
         started_ms: 1_800_000_000_000,
         worked_ms: 90_000,
         running_since_ms: Some(1_800_000_100_000),
@@ -48,8 +49,8 @@ fn helper_strip_round_trips_each_state_and_what_is_not_known() {
         let m = HelperStrip { rows: vec![r], ..strip(0) };
         assert_eq!(back(&m), m, "no tokens counted is not tokens unknown");
     }
-    for bits in 0..4 {
-        let r = StripRow { gone: bits & 1 != 0, had_tool: bits & 2 != 0, ..row(1) };
+    for bits in [0, 1, 2, 3, 8, 9, 10, 11] {
+        let r = StripRow { gone: bits & 1 != 0, had_tool: bits & 2 != 0, plain: bits & 8 != 0, ..row(1) };
         let m = HelperStrip { rows: vec![r], ..strip(0) };
         assert_eq!(encode_helper_strip(&m).unwrap()[33], bits);
         assert_eq!(back(&m), m);

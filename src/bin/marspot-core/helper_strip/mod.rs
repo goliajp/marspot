@@ -15,6 +15,7 @@ use marspot::shell_proto::HELPER_STRIP_ROWS;
 
 mod clock;
 mod compose;
+mod count;
 mod dev;
 mod figures;
 mod height;
@@ -31,7 +32,7 @@ mod tick;
 
 pub(super) use strip::{Over, Strip, MAX_ROWS};
 
-const NO_ROW: Row = Row { name: "", named: false, task: "", state: State::Done, elapsed_ms: 0, tokens: None, arrow: Arrow::Down };
+const NO_ROW: Row = Row { name: "", named: false, task: "", state: State::Done, elapsed_ms: None, tokens: None, arrow: Arrow::Down };
 
 #[derive(Default)]
 pub(super) struct Strips {

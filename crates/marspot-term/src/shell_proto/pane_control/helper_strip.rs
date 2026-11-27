@@ -27,6 +27,7 @@ const TOKENS_UNKNOWN: u64 = u64::MAX;
 const ROW_GONE: u8 = 1;
 const ROW_HAD_TOOL: u8 = 1 << 1;
 // 1 << 2 is set by older shells and read by no one
+const ROW_PLAIN: u8 = 1 << 3;
 
 wire_enum!(
     /// What a row's helper is doing.  `Waiting`: at an approval prompt;
@@ -84,6 +85,9 @@ pub struct StripRow {
     pub gone: bool,
     /// A tool was called, or it is not known that none was.
     pub had_tool: bool,
+    /// A shadow pane no helper runs in: what is in front of it, with no
+    /// figures, and it keeps the size it was opened with.
+    pub plain: bool,
     /// Ms after the epoch.
     pub started_ms: u64,
     /// How long it was at work before `running_since_ms`.
@@ -109,7 +113,7 @@ impl StripRow {
     }
 
     fn flags(&self) -> u8 {
-        (self.gone as u8 * ROW_GONE) | (self.had_tool as u8 * ROW_HAD_TOOL)
+        (self.gone as u8 * ROW_GONE) | (self.had_tool as u8 * ROW_HAD_TOOL) | (self.plain as u8 * ROW_PLAIN)
     }
 }
 
@@ -147,6 +151,7 @@ fn decode_row(p: &[u8]) -> io::Result<StripRow> {
         agent: StripAgent::from_u8(agent),
         gone: flags & ROW_GONE != 0,
         had_tool: flags & ROW_HAD_TOOL != 0,
+        plain: flags & ROW_PLAIN != 0,
         started_ms: r.u64()?,
         worked_ms: r.u64()?,
         running_since_ms: Some(r.u64()?).filter(|t| *t != 0),

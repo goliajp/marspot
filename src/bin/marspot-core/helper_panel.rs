@@ -1,7 +1,8 @@
 //! The helper panel, and what the chrome says about shadow panes: the
 //! `+N` after a pane's title and the sidebar's count.
 //!
-//! Both are derived from `shadows` and whose shadow each one is.  The
+//! The sidebar's is derived from `shadows` and whose shadow each one
+//! is, the `+N` from the strips' records (`helper_strip/count.rs`).  The
 //! counts are worked out when the shadows change, the panel's rows when
 //! the shadows, a title or the deny list do; how long a pane has run is
 //! worked out when the panel is drawn.  Nothing here wakes the loop by
@@ -273,11 +274,10 @@ impl CoreApp {
     pub(super) fn publish_helpers(&mut self, wi: usize, wr: &mut marspot::render_metal::WindowRender) {
         let panel = self.helpers_render(wi);
         self.renderer.set_helpers_panel(panel);
-        let fam = &self.pane_control.shadows.family;
         let panes = win!(self, wi).panes.iter();
         wr.set_helpers(
             self.shadows.len() as u32,
-            panes.map(|p| p.shelld_session_id().filter(|sid| !self.strips.drawn(*sid)).map_or(0, |sid| fam.count(sid))),
+            panes.map(|p| p.shelld_session_id().filter(|sid| !self.strips.drawn(*sid)).map_or(0, |sid| self.shadows_counted(sid))),
         );
     }
 

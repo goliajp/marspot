@@ -115,6 +115,7 @@ pub(super) fn row(h: &Helper, state: StripState, number: Option<u16>, used: Used
         agent: agent(h.started.agent),
         gone: false,
         had_tool: used.had_tool.unwrap_or(true),
+        plain: false,
         started_ms: h.started_ms,
         worked_ms: h.clock.worked_ms,
         running_since_ms: h.clock.since_ms,

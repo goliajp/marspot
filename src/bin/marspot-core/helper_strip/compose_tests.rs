@@ -60,7 +60,7 @@ fn row(line: &'static str) -> Row<'static> {
             "stopped" => State::Stopped,
             s => panic!("{s}"),
         },
-        elapsed_ms: f[4].parse().unwrap(),
+        elapsed_ms: Some(f[4].parse().unwrap()),
         tokens: Some(f[5].parse().unwrap()),
         arrow: Arrow::Down,
     }
@@ -263,7 +263,7 @@ fn a_row_with_no_figures_leaves_them_at_the_right_edge() {
         named: false,
         task: "review the parser",
         state: State::Running,
-        elapsed_ms: 12_000,
+        elapsed_ms: Some(12_000),
         tokens: None,
         arrow: Arrow::Down,
     }];
