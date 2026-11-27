@@ -9,6 +9,10 @@
 #   sync  : during the copy to the host.  The copy's whole process group
 #           (the sync tool and what it started) is stopped.
 #
+# and, not told to stop, that a suite whose check inside the lock finds
+# something left fails, prints what was found and starts no other suite
+# (left).  A stopped run skips that check but not the cleanup.
+#
 # Runs on this machine in a few seconds and reaches no runner: ssh, scp,
 # sudo, remote-sync and bench-lock are stand-ins.  The ssh stand-in runs
 # the suite's command and the stop command locally, each in a process
@@ -72,9 +76,21 @@ setup() {
   git -C "$S/root" -c user.name=t -c user.email=t@localhost commit -qm t
 
   cp "$ROOT/bin/_bounded.sh" "$R/bin/"
-  printf '#!/bin/bash\necho $$ >"%s/suite.pid"\nexec sleep 60\n' "$S" >"$R/bin/test-first.sh"
+  if [[ $1 == left ]]; then
+    printf '#!/bin/bash\nexit 0\n' >"$R/bin/test-first.sh"
+  else
+    printf '#!/bin/bash\necho $$ >"%s/suite.pid"\nexec sleep 60\n' "$S" >"$R/bin/test-first.sh"
+  fi
   printf '#!/bin/bash\necho "kill-sandbox held=${STUB_LOCK_HELD:-0} $*" >>"%s/events"\n' "$S" \
     >"$R/bin/kill-sandbox-marspot.sh"
+  # the check finds a record left behind
+  cat >"$R/bin/_e2e-suite-clean.sh" <<EOF
+#!/bin/bash
+echo "suite-clean \$1 held=\${STUB_LOCK_HELD:-0}" >>"$S/events"
+[[ \$1 == check ]] || exit 0
+printf 'suite_rc=0\nleft: record: Foreground pid=1 /tmp/msp-e2e-x/Marspot.app\nclean=1\n' >"\$3"
+exit 1
+EOF
 
   cat >"$S/stubs/ssh" <<EOF
 #!/bin/bash
@@ -87,6 +103,8 @@ case "\$cmd" in
     exec env HOME="$S/home" perl -e 'setpgrp(0, 0); exec @ARGV or die' bash -c "\$cmd" ;;
   *"kill -TERM -- -"*)
     exec bash -c "\$cmd" ;;
+  *"cat "*.clean)
+    exec env HOME="$S/home" bash -c "\$cmd" ;;
 esac
 exit 0
 EOF
@@ -173,8 +191,25 @@ check "the suite's sandbox was reaped" grep -qE 'kill-sandbox-marspot.sh --state
 check "the suite was stopped" gone "$(cat "$S/suite.pid")"
 check "the sandbox was cleaned inside the lock" grep -q 'kill-sandbox held=1' "$S/events"
 check "bench-lock let go only after that cleanup" before "$S/events" 'kill-sandbox held=1' 'bench-lock released'
+check "the before snapshot was taken inside the lock" grep -q 'suite-clean snap held=1' "$S/events"
+check "the stopped run skipped the check" bash -c "! grep -q 'suite-clean check' '$S/events'"
 check "the local lock was removed" test ! -e "$LOCK"
 ((failed)) && dump suite
+
+echo "left: the first suite passes but leaves a record"
+before_left=$failed
+setup left
+S="$T/left"
+rc=0
+PATH="$S/stubs:$PATH" HOST=stub.invalid REMOTE_NAME="$NAME" timeout 60 \
+  "$S/root/bin/test-e2e-remote.sh" test-first.sh test-second.sh >"$S/driver.log" 2>&1 || rc=$?
+check "exit 1 (got $rc)" test "$rc" -eq 1
+check "the check ran inside the lock, after the cleanup" before "$S/events" 'kill-sandbox held=1' 'suite-clean check held=1'
+check "bench-lock let go only after the check" before "$S/events" 'suite-clean check held=1' 'bench-lock released'
+check "what was left is printed" grep -q 'left: record: Foreground pid=1' "$S/driver.log"
+check "the suite failed for it" grep -q 'FAIL: test-first.sh: passed, but left something' "$S/driver.log"
+check "the second suite was never started" bash -c "! grep -q 'test-second.sh' '$S/ssh.log'"
+((failed > before_left)) && dump left
 
 echo "sync: TERM while the tree is copied to the host"
 before_sync=$failed

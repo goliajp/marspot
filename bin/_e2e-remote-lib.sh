@@ -85,11 +85,27 @@ reap_sandbox() {
 # sh expands the glob: the runner's login zsh would refuse the whole rm
 # when no scratch matches
 drop_sandbox() {
-  ssh "${SSH_CLEANUP[@]}" "$HOST" "sh -c 'rm -rf \"\${1:?}\" \"\${1:?}\"-*' _ ${1:?}" </dev/null || true
+  ssh "${SSH_CLEANUP[@]}" "$HOST" \
+    "sh -c 'rm -rf \"\${1:?}\" \"\${1:?}\"-* \"\${1:?}\".before \"\${1:?}\".clean' _ ${1:?}" </dev/null || true
 }
 
-# What LaunchServices still lists of what a suite opened (a Dock tile on
-# a machine nobody is at), read in the console session; records go a
+# What bin/_e2e-suite-clean.sh found inside the suite's hold, read from
+# STATE_DIR.clean and printed.  0: nothing left; 4: something left; 5: it
+# could not be read, or the check never ran (a stopped run).
+read_clean() {
+  local out
+  out="$(ssh "${SSH_CLEANUP[@]}" "$HOST" "cd ~/$REMOTE_DIR && bin/_bounded.sh 10 cat ${1:?}.clean" </dev/null 2>&1)"
+  printf '%s\n' "${out:-no result file: the check did not run}"
+  case $out in
+    *clean=0) return 0 ;;
+    *clean=1) return 4 ;;
+    *) return 5 ;;
+  esac
+}
+
+# What LaunchServices lists under this run's paths, before the first
+# suite (each suite's own check runs inside its hold, see read_clean),
+# read in the console session; records go a
 # moment after their process, so it is looked at for up to ten seconds.
 # Only this run's paths count: its remote tree, and the state dirs and
 # scratch under /tmp/msp-e2e-<run>- (what another run on the host left

@@ -1,9 +1,9 @@
 #!/bin/bash
-# bin/_ls-leftovers.sh [--known PID:PATH]... PATH_PREFIX... — the
+# bin/_ls-leftovers.sh [--from FILE] [--known PID:PATH]... PATH_PREFIX... — the
 # applications LaunchServices still lists whose executable or bundle is
 # under one of the prefixes: what a run left in the Dock (a Foreground
 # record is a Dock tile, alive or not) and in the app list.  Read-only
-# (`lsappinfo list`).
+# (`lsappinfo list`, or its output saved in FILE).
 #
 # Prints one line per record ("<type> pid=<pid> <bundle or executable>")
 # and last "left=N tiles=T known=K", T the Foreground ones.  A record
@@ -15,13 +15,22 @@
 # with a list that has none of the login's apps and so none of ours
 # either: a list without the Dock is taken as unread.
 set -uo pipefail
+from=""
+if [[ ${1:-} == --from && $# -ge 2 ]]; then
+  from=$2
+  shift 2
+fi
 known=""
 while [[ ${1:-} == --known && $# -ge 2 ]]; do
   known+="$2"$'\n'
   shift 2
 done
-(( $# > 0 )) || { echo "usage: $0 [--known PID:PATH]... PATH_PREFIX..." >&2; exit 2; }
-out="$(/usr/bin/lsappinfo list 2>/dev/null)" || exit 2
+(( $# > 0 )) || { echo "usage: $0 [--from FILE] [--known PID:PATH]... PATH_PREFIX..." >&2; exit 2; }
+if [[ -n $from ]]; then
+  out="$(cat "$from" 2>/dev/null)" || exit 2
+else
+  out="$(/usr/bin/lsappinfo list 2>/dev/null)" || exit 2
+fi
 [[ -n $out ]] || exit 2
 printf '%s\n' "$out" | LS_KNOWN="$known" /usr/bin/python3 -c '
 import collections, os, re, sys

@@ -230,40 +230,57 @@ for suite in "${SUITES[@]}"; do
   if [[ $suite == test-* ]] && ! is_measurement "$suite"; then
     suite_env+=" MARSPOT_TEST_ICON_MASKS=\$PWD/tests/fixtures/appkit/icon-masks.bin"
   fi
+  # a measure-active run that timed out can leave iTerm2 up: quit it and
+  # SIGTERM the pids the run wrote down (a no-op when it cleaned up)
+  pre_clean=""
+  [[ $suite == measure-active.sh ]] && pre_clean="bin/_active_iterm.sh close $current_sd/iterm.pids; "
   start=$(date +%s)
   set +e
   # created here so the sandbox helpers find it and give its sessions
   # ids of their own (see dev_seed_session_base).  What the suite left
   # running is stopped before the host's lock is let go, so nothing it
   # opened outlives the hold; the reap after it is for a stopped run.
+  # Still inside the hold, bin/_e2e-suite-clean.sh compares the runner
+  # with what it was before the suite (Dock tiles, app records, TCC
+  # requests) and writes $current_sd.clean; the command then gives 4
+  # when something was left and 5 when that could not be read.
   # A stopped run signals the whole remote group, bench-lock and this sh
   # included: bench-lock lets go only once its command returns, so the sh
-  # waits for _bounded.sh to stop the suite and still runs the cleanup.
-  # Its output then goes nowhere, the ssh it wrote to being gone, so the
-  # cleanup cannot die of SIGPIPE.
-  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && \
+  # waits for _bounded.sh to stop the suite and still runs the cleanup,
+  # but not the check.  Its output then goes nowhere, the ssh it wrote to
+  # being gone, so the cleanup cannot die of SIGPIPE.
+  remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd $current_sd.before $current_sd.clean && mkdir -p $current_sd && \
     env MARSPOT_STATE_DIR=$current_sd$suite_env$fwd /usr/local/bin/bench-lock $lock \
-    sh -c 'trap \"exec >/dev/null 2>&1\" TERM INT HUP; $run; rc=\$?; \
-    bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $current_sd; exit \$rc'"
+    sh -c 'stopped=; trap \"stopped=1; exec >/dev/null 2>&1\" TERM INT HUP; \
+    bin/_bounded.sh 30 bin/_e2e-suite-clean.sh snap $current_sd.before; \
+    $run; rc=\$?; $pre_clean\
+    bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $current_sd; \
+    [ -n \"\$stopped\" ] && exit \$rc; \
+    bin/_bounded.sh 60 bin/_e2e-suite-clean.sh check $current_sd.before $current_sd.clean \
+      --suite-rc \$rc$KNOWN_ARGS \$HOME/$REMOTE_DIR/ /tmp/msp-e2e-$RUN_ID- >/dev/null; \
+    case \$? in 0) exit \$rc ;; 1) exit 4 ;; *) exit 5 ;; esac'"
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))
-  # a measure-active run that timed out can leave iTerm2 up: quit it and
-  # SIGTERM the pids the run wrote down (a no-op when it cleaned up)
+  # for a stopped run, which skipped both inside the hold
   if [[ $suite == measure-active.sh ]]; then
     remote_gui "cd ~/$REMOTE_DIR && bin/_active_iterm.sh close $current_sd/iterm.pids" || true
   fi
   reap_sandbox "$current_sd"
-  # nothing a suite opened may stay listed as an app
+  # nothing a suite opened may outlive it: the check made inside the hold
   left_rc=0
-  left_ls="$(check_leftovers)" || left_rc=$?
+  left_ls="$(read_clean "$current_sd")" || left_rc=$?
+  # the suite's own status, where the hold's command gave the check's
+  if [[ $left_ls =~ (^|$'\n')suite_rc=([0-9]+) ]]; then
+    suite_rc=${BASH_REMATCH[2]}
+  fi
   left_why=""
   if (( left_rc != 0 )); then
-    echo "  LaunchServices after $suite:"
+    echo "  runner after $suite:"
     printf '%s\n' "$left_ls" | sed 's/^/    /'
     case $left_rc in
-      4) left_why="left apps listed in LaunchServices (Dock tiles)" ;;
-      *) left_why="what LaunchServices lists could not be read" ;;
+      4) left_why="left something on $HOST (Dock tile, app record or TCC request)" ;;
+      *) left_why="what $HOST has left could not be read" ;;
     esac
   fi
   # a suite that records readings leaves them in the remote tree, which
@@ -313,6 +330,10 @@ for suite in "${SUITES[@]}"; do
     rc=1
   fi
   current_sd=""
+  if (( left_rc != 0 )) && ! stopped_from_outside "$suite_rc"; then
+    echo "==> $suite $left_why; starting no other suite" >&2
+    break
+  fi
   if stopped_from_outside "$suite_rc"; then
     echo "==> $suite was stopped from outside (exit $suite_rc); starting no other suite" >&2
     stop_remote
