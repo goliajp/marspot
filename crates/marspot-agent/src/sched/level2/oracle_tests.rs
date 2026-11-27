@@ -10,7 +10,8 @@
 use super::grid::Grid;
 use super::propose::{allowed, candidates};
 use super::search::{Cost, better};
-use super::sim::{Ctx, Sim};
+use super::ctx::Ctx;
+use super::sim::Sim;
 use super::tests::{KAPPA, acct, input, pane};
 use super::*;
 use crate::sched::level1::{self, World};
@@ -156,6 +157,7 @@ fn sched_level2_gap_to_the_fluid_bound_is_reported_at_every_size() {
         let mut i = input(&a, &p);
         i.pi = l1.pi;
         let plan = plan(&i, None);
+        assert!(plan.switches.iter().all(|s| s.t_dead >= s.t_open), "a window that closes before it opens: {:?}", plan.switches);
         rows.push((a.len(), p.len(), plan.money_h2(i.pi) - l1.money.total, plan.idle.money - plan.totals.money));
     }
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;

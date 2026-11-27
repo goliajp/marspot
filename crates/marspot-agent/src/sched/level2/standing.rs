@@ -32,6 +32,8 @@ const SWITCHES_CAP: usize = 128;
 /// Windows are kept to the second: a window opening at a cut may read
 /// up to half a second after it.
 const SECOND_H: f64 = 1.0 / 3600.0;
+/// Float noise in a sum of cut times, hours.
+const DWELL_EPS_H: f64 = 1e-9;
 
 /// One switch of the standing plan, in absolute time.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,8 +128,10 @@ impl Standing {
                 }
                 g.cuts.iter().position(|c| *c >= open_h - SECOND_H).unwrap_or(0).max(g.first[p])
             } else {
-                let prev = out[p].hops().first()?.at as usize;
-                g.cuts.iter().position(|c| *c >= open_h.max(g.cuts[prev] + DWELL_H) - SECOND_H)?
+                // the rounding tolerance is for the stored window only:
+                // the dwell after the first switch is exact
+                let dwell = g.cuts[out[p].hops().first()?.at as usize] + DWELL_H;
+                g.cuts.iter().position(|c| *c >= open_h - SECOND_H && *c >= dwell - DWELL_EPS_H)?
             };
             if at >= g.segs() || out[p].n as usize != s.order as usize {
                 return None;

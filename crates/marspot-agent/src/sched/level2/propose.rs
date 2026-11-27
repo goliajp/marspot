@@ -46,12 +46,12 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
     }
     let first = g.first[p];
     let targets = g.targets(input, p);
-    for &j in &targets {
+    for &j in targets {
         out.push(Sched::one(j, first));
     }
     // the same switch at the last moment it averts the refusal
     if let Some(late) = g.on[p].and_then(|j| g.late[j]).filter(|&c| c > first) {
-        for &j in &targets {
+        for &j in targets {
             out.push(Sched::one(j, late));
         }
     }
@@ -66,7 +66,7 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
         if input.panes[p].switches_left < 2 {
             continue;
         }
-        for &j in &targets {
+        for &j in targets {
             if j != k && g.cuts[r] >= g.cuts[first] + DWELL_H - 1e-9 {
                 let mut s = Sched::one(j, first);
                 s.push(k, r);

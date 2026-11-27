@@ -3,6 +3,7 @@
 //! high band, and the refusals the plan still foresees.
 
 use super::search::Eval;
+use super::tally::Stage;
 use super::window::{dead_by_gain, kind};
 use super::window::{CLEAN_CHANCE, NOTICE_LEAD_H};
 use super::{H2, Mode, Pane, Plan, Sched, Switch, Totals};
@@ -26,9 +27,11 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
             // only a first switch at the pane's first allowed moment may
             // open after the latest moment it averts the refusal
             let first = h == 0 && hop.at as usize == g.first[p];
-            debug_assert!(first || from.is_none_or(|j| t_open <= g.dead[j] + 1e-6), "a switch planned after its deadline");
+            debug_assert!(first || from.is_none_or(|j| t_open <= g.dead_for(p, j) + 1e-6), "a switch planned after its deadline");
+            // a window never closes before it opens: a cut within rounding
+            // of the deadline may lie just after it
             let t_dead = match from {
-                Some(j) if averts => g.dead[j].max(if first { t_open } else { 0.0 }),
+                Some(j) if averts => g.dead_for(p, j).max(t_open),
                 _ => dead_by_gain(t_open, gain, pane.rewrite),
             };
             let t_open = if averts { t_open.max(t_dead - lead(pane)) } else { t_open };
@@ -46,8 +49,9 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
             from = Some(hop.to as usize);
         }
     }
+    e.mark(Stage::Finish);
     let empty = level.into_iter().zip(high).map(|(l, h)| [l, h]).collect();
-    Plan { mode, switches, scheds: best.to_vec(), deadline: e.ctx.deadline.clone(), totals: totals_level, idle, empty, refusals, active, sims: e.sim.runs, charge, cuts: e.grid().cuts.clone() }
+    Plan { mode, switches, scheds: best.to_vec(), deadline: e.ctx.deadline.clone(), totals: totals_level, idle, empty, refusals, active, sims: e.sim.runs, tally: e.tally, charge, cuts: e.grid().cuts.clone() }
 }
 
 /// What the plan saves by switch `h` of pane `p` and those after it.

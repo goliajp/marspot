@@ -161,7 +161,7 @@ fn sched_plan_perf_gate() {
     }
     let pl = last.expect("a plan");
     let full = p95(times.split_off(5));
-    println!("sched plan P95 per full search {full:?} ({} switches, mode {}, {} active, {} simulations), budget {PLAN_BUDGET:?}", pl.switches.len(), pl.mode.word(), pl.active, pl.sims);
+    println!("sched plan P95 per full search {full:?} ({} switches, mode {}, {} active, {} simulations: {}; money {:.4} against {:.4} idle), budget {PLAN_BUDGET:?}", pl.switches.len(), pl.mode.word(), pl.active, pl.sims, pl.tally, pl.totals.money * 100.0, pl.idle.money * 100.0);
     let (a8, p12) = plan_world(8, 12);
     let i8 = plan_input(&a8, &p12);
     let mut small = Vec::new();

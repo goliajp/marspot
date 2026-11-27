@@ -174,3 +174,33 @@ fn sched_level2_a_committed_switch_whose_gain_is_gone_is_cancelled_and_pinned() 
     assert_eq!(r.ended.cancelled, vec![(10, "gain gone")]);
     assert!(st.pinned_h(10, 1100).is_some_and(|h| (h - 1.0).abs() < 0.01));
 }
+
+#[test]
+fn sched_level2_a_second_switch_keeps_the_whole_dwell_after_the_first() {
+    // a renewal cut 0.4 s before the dwell bound: a window stored to the
+    // second reads back at the bound, and must not snap to that cut
+    let a = [acct(1, 0.9, 0.3, 100.0), acct(2, 0.9, 0.3, 100.0), acct(3, 0.5, 0.2, DWELL_H - 0.4 / 3600.0)];
+    let p = [pane(10, 1, false, 0.0, 0.002)];
+    let i = input(&a, &p);
+    let g = Grid::new(&i);
+    let now = 1_800_000_000;
+    let planned = |order: u8, from: u8, to: u8, open_at: i64| standing::Planned { sid: 10, from, to, order, open_at, dead_at: open_at + 3600, gain: 0.01 };
+    let mut st = Standing::default();
+    st.switches = vec![planned(0, 1, 2, now), planned(1, 2, 3, now + (DWELL_H * 3600.0) as i64)];
+    let s = st.schedules(&i, &g, now).expect("the structure holds");
+    let (first, second) = (g.cuts[s[0].hops[0].at as usize], g.cuts[s[0].hops[1].at as usize]);
+    assert!(second >= first + DWELL_H - 1e-9, "second switch at {second} h, first at {first} h");
+}
+
+#[test]
+fn sched_level2_leaving_an_account_it_joined_takes_the_reading_error_at_the_load_with_the_pane() {
+    let a = [acct(1, 0.9, 0.3, 100.0), acct(2, 0.05, 0.0, 100.0)];
+    let p = [pane(10, 1, false, 0.0, 0.002), pane(11, 2, false, 0.0, 0.002)];
+    let i = input(&a, &p);
+    let g = Grid::new(&i);
+    assert!(g.deadline[1] < H2, "account 2 lasts the day");
+    let with = grid::high_load(&i, &g.on, 1) + p[0].high[1];
+    assert_eq!(g.dead_for(0, 1), window::dead_by_exhaustion(g.deadline[1], with));
+    assert!(g.dead_for(0, 1) > g.dead[1]);
+    assert_eq!(g.dead_for(1, 1), g.dead[1]);
+}
