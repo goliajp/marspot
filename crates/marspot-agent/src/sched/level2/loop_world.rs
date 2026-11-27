@@ -28,7 +28,7 @@
 //! reading from a stream of its own, so both see the same readings; an
 //! account with nothing left reads empty.
 
-use super::loop_plan::{Driver, planned};
+use super::loop_plan::{Driver, Read};
 use super::oracle_tests::Rng;
 use super::standing::Standing;
 use super::tests::KAPPA;
@@ -52,10 +52,11 @@ const SHARE: [f64; 8] = [0.2, 0.17, 0.15, 0.13, 0.11, 0.1, 0.08, 0.06];
 pub(super) enum Policy {
     /// Today's rule, its speeds times `bias` at a rest.
     Today { bias: f64 },
-    /// The planner, its speeds times `bias`: a full search on the hour
-    /// and after a refusal, or (`shell`) as the shell drives it, at every
-    /// reading a full search when a trigger is due and else a re-time.
-    Planner { bias: f64, shell: bool },
+    /// The planner, its level times `bias` and its three-hour speed
+    /// times `short`: a full search on the hour and after a refusal, or
+    /// (`shell`) as the shell drives it, at every reading a full search
+    /// when a trigger is due and else a re-time.
+    Planner { bias: f64, short: f64, shell: bool },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -97,13 +98,6 @@ pub(super) struct P {
 /// One point of reading error either way at most.
 const READ_ERR: f64 = 0.01;
 
-/// What the policies read of the accounts: each one's week and
-/// restricted window, with this reading's error.
-pub(super) struct Read<'a> {
-    acc: &'a [(Quant, i64)],
-    err: &'a [[f64; 2]],
-}
-
 pub(super) fn run(seed: u64, policy: Policy) -> Week {
     let mut rng = Rng(seed);
     let mut noise = Rng(seed ^ 0x5DEE_CE66_D1CE_4E5B);
@@ -122,7 +116,6 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
     }
     let mut w = Week::default();
     let mut drv = Driver::default();
-    let mut planned_once = false;
     // the last moment demand went unmet; a renewal lapses as waste when
     // demand went unmet in the week before it
     let mut last_unmet: Option<i64> = None;
@@ -152,14 +145,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         for e in &mut err {
             *e = [READ_ERR * (2.0 * noise.next() - 1.0), READ_ERR * (2.0 * noise.next() - 1.0)];
         }
-        match policy {
-            Policy::Planner { bias, shell: true } => drv.pass(&Read { acc: &acc, err: &err }, &panes, now, bias, false),
-            Policy::Planner { bias, shell: false } if now % 3600 == 0 || !planned_once => {
-                planned(&mut drv.st, &Read { acc: &acc, err: &err }, &panes, now, bias);
-                planned_once = true;
-            }
-            _ => {}
-        }
+        drv.step(policy, &Read { acc: &acc, err: &err }, &panes, now, false);
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
             if rng.next() < 1.0 - (-rate / 12.0).exp() {
                 rest(&Read { acc: &acc, err: &err }, &mut panes, k, now, policy, &drv.st, &mut w);
@@ -199,28 +185,11 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
                 refuse(&Read { acc: &acc, err: &err }, &mut panes, k, now, &mut w);
             }
         }
-        match policy {
-            Policy::Planner { bias, shell: true } if refused => drv.pass(&Read { acc: &acc, err: &err }, &panes, now, bias, true),
-            Policy::Planner { bias, shell: false } if refused => planned(&mut drv.st, &Read { acc: &acc, err: &err }, &panes, now, bias),
-            _ => {}
+        if refused {
+            drv.step(policy, &Read { acc: &acc, err: &err }, &panes, now, true);
         }
     }
     w
-}
-
-impl Read<'_> {
-    pub(super) fn quants(&self) -> Vec<Quant> {
-        self.acc
-            .iter()
-            .zip(self.err)
-            .map(|((q, _), e)| {
-                // an account that refuses reads empty: the feed knows it
-                let read = |x: f64, e: f64, top: f64| if x <= 0.0 { 0.0 } else { (x + e).clamp(0.0, top) };
-                let r = read(q.r, e[0], 1.0);
-                Quant { r, f: read(q.f.min(q.r), e[1], r), ..q.clone() }
-            })
-            .collect()
-    }
 }
 
 pub(super) fn speeds(p: &P, now: i64) -> (f64, f64) {
