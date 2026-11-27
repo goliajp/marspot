@@ -6,7 +6,8 @@ use super::cli_args::{self, Spec, Stop};
 pub const USAGE: &str = "usage:
   marspot-peer list
   marspot-peer whoami
-  marspot-peer send [--now] <name | uds:address> <text... | - | -- TEXT...>
+  marspot-peer send [--now] [--from NAME] <name | uds:address> <text... | - | -- TEXT...>
+    (--from only outside any agent session; recipients see external:NAME)
   marspot-peer mcp [--client-timeout-s N]
   marspot-peer relay <inbox> <upstream> <send>
   marspot-peer claude-hook
@@ -28,7 +29,8 @@ pub enum Top {
     Control(&'static str, Vec<String>),
     List,
     Whoami,
-    Send { now: bool, to: String, words: Vec<String>, stdin: bool },
+    /// `from`: the name an outside sender gives itself.
+    Send { now: bool, from: Option<String>, to: String, words: Vec<String>, stdin: bool },
     /// `--client-timeout-s` as written, and the words `mcp` does not
     /// know; both read by the caller.
     Mcp { client_timeout_s: Option<String>, ignored: Vec<String> },
@@ -48,7 +50,7 @@ pub fn parse(args: &[String]) -> Result<Top, Stop> {
         "procs" => return control("procs"),
         "reset" => return control("reset"),
         // options go before the name; after it every word is text
-        "send" => Spec { flags: &["--now"], values: &[], whole_after: None, text_after: Some(1) },
+        "send" => Spec { flags: &["--now"], values: &["--from"], whole_after: None, text_after: Some(1) },
         "mcp" => return mcp(rest),
         "list" | "whoami" | "relay" | "claude-hook" | "gemini-hook" | "kimi-hook" => Spec::flags(&[]),
         other => return Err(cli_args::unknown(other, rest)),
@@ -64,7 +66,7 @@ pub fn parse(args: &[String]) -> Result<Top, Stop> {
         ("relay", [p, u, s]) => Top::Relay { public: p.clone(), upstream: u.clone(), send: s.clone() },
         ("send", [_, _, ..]) => {
             let text = a.after_first();
-            Top::Send { now: a.flag("--now"), to: words[0].clone(), stdin: text.stdin_sign(), words: text.words() }
+            Top::Send { now: a.flag("--now"), from: a.value("--from"), to: words[0].clone(), stdin: text.stdin_sign(), words: text.words() }
         }
         _ => return Err(Stop::Usage(String::new())),
     };

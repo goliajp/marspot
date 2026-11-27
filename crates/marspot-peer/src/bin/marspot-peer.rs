@@ -4,7 +4,7 @@
 //! ```text
 //! marspot-peer list
 //! marspot-peer whoami
-//! marspot-peer send [--now] <name | uds:address> <text… | - | -- TEXT…>
+//! marspot-peer send [--now] [--from NAME] <name | uds:address> <text… | - | -- TEXT…>
 //! marspot-peer mcp [--client-timeout-s N]
 //! marspot-peer relay <inbox> <upstream> <send>
 //! marspot-peer claude-hook
@@ -18,7 +18,8 @@
 //!
 //! On the command line the sender is the Codex session this runs
 //! under, found by `CODEX_THREAD_ID` (Codex sets it for every command
-//! it runs).  `mcp` serves the same over stdio as MCP tools, where each
+//! it runs).  `--from` is for a sender outside every session (a
+//! scheduled job): recipients see it as `external:NAME`.  `mcp` serves the same over stdio as MCP tools, where each
 //! call names its thread instead.  `relay` is started by marspot, one
 //! per Codex session (see `marspot_peer::relay`).  `claude-hook` is the
 //! Claude Code hook that lets a Claude session use pane names
@@ -33,8 +34,10 @@ use std::process::ExitCode;
 use marspot_peer::bound;
 use marspot_peer::control::cli_args;
 use marspot_peer::control::cli_top::{self, Top};
+use marspot_peer::external;
 use marspot_peer::frame::Priority;
 use marspot_peer::peers;
+use marspot_peer::proc;
 use marspot_peer::registry::Entry;
 
 fn main() -> ExitCode {
@@ -50,7 +53,7 @@ fn main() -> ExitCode {
         Top::Control(_, rest) => return ExitCode::from(marspot_peer::control::cli_proc::main(&rest)),
         Top::List => list(),
         Top::Whoami => whoami(),
-        Top::Send { now, to, words, stdin } => send(now, &to, &words, stdin),
+        Top::Send { now, from, to, words, stdin } => send(now, from.as_deref(), &to, &words, stdin),
         Top::Mcp { client_timeout_s, ignored } => {
             if !ignored.is_empty() {
                 eprintln!("marspot-peer mcp: ignoring {ignored:?}; serving as usual");
@@ -145,7 +148,7 @@ fn whoami() -> Result<(), Fail> {
     Ok(())
 }
 
-fn send(now: bool, to: &str, words: &[String], stdin: bool) -> Result<(), Fail> {
+fn send(now: bool, from: Option<&str>, to: &str, words: &[String], stdin: bool) -> Result<(), Fail> {
     let priority = if now { Priority::Now } else { Priority::Next };
     let body = if stdin {
         let mut s = String::new();
@@ -156,6 +159,13 @@ fn send(now: bool, to: &str, words: &[String], stdin: bool) -> Result<(), Fail> 
     } else {
         words.join(" ")
     };
+    if let Some(name) = from {
+        let entries = peers::live_entries();
+        let panes = marspot_peer::panes::live(&entries);
+        let around = external::session_around(&entries, std::process::id() as i32, proc::ppid, |k| std::env::var_os(k).is_some());
+        let sent = external::send(name, around, &entries, &panes, to, &body, priority).map_err(|m| Fail(3, m))?;
+        return report(&sent);
+    }
     if let Some(thread) = std::env::var_os("CODEX_THREAD_ID") {
         let found = || me(&peers::live_entries()).is_ok();
         let waiter = bound::Waiter::new(marspot_peer::control::socket_path(), bound::LIMIT);
@@ -163,10 +173,14 @@ fn send(now: bool, to: &str, words: &[String], stdin: bool) -> Result<(), Fail> 
     }
     let entries = peers::live_entries();
     let panes = marspot_peer::panes::live(&entries);
-    let me = me(&entries)?;
+    let me = me(&entries).map_err(|Fail(c, m)| Fail(c, format!("{m}; from outside every agent session, send with --from NAME")))?;
     let sent = peers::send(me, &entries, &panes, to, &body, priority, false).map_err(|m| Fail(3, m))?;
+    report(&sent)
+}
+
+fn report(sent: &peers::Sent) -> Result<(), Fail> {
     println!("sent {} to {}", sent.msg_id, sent.to);
-    if let Some(note) = sent.note {
+    if let Some(note) = &sent.note {
         println!("{note}");
     }
     Ok(())

@@ -121,8 +121,8 @@ fn cli_help_words_after_double_dash_pass_through() {
         other => panic!("{other:?}"),
     }
     let send = parse(&w("send --now bob -- -x --help")).unwrap();
-    assert_eq!(send, Top::Send { now: true, to: "bob".into(), words: w("-x --help"), stdin: false });
-    assert_eq!(parse(&w("send bob -")).unwrap(), Top::Send { now: false, to: "bob".into(), words: w("-"), stdin: true });
+    assert_eq!(send, Top::Send { now: true, from: None, to: "bob".into(), words: w("-x --help"), stdin: false });
+    assert_eq!(parse(&w("send bob -")).unwrap(), Top::Send { now: false, from: None, to: "bob".into(), words: w("-"), stdin: true });
     assert_eq!(parse(&w("mcp --client-timeout-s 600")).unwrap(), Top::Mcp { client_timeout_s: Some("600".into()), ignored: vec![] });
     assert_eq!(parse(&w("relay a b c")).unwrap(), Top::Relay { public: "a".into(), upstream: "b".into(), send: "c".into() });
 }
@@ -130,7 +130,7 @@ fn cli_help_words_after_double_dash_pass_through() {
 #[test]
 fn cli_help_text_after_its_first_word_is_never_an_option() {
     let send = |line: &str| match parse(&w(line)) {
-        Ok(Top::Send { now, to, words, stdin: false }) => (now, to, words.join(" ")),
+        Ok(Top::Send { now, from: None, to, words, stdin: false }) => (now, to, words.join(" ")),
         other => panic!("{line}: {other:?}"),
     };
     assert_eq!(send("send bob hi --help"), (false, "bob".into(), "hi --help".into()));
@@ -138,6 +138,10 @@ fn cli_help_text_after_its_first_word_is_never_an_option() {
     assert_eq!(send("send bob use --now please"), (false, "bob".into(), "use --now please".into()));
     assert_eq!(send("send --now bob -x"), (true, "bob".into(), "-x".into()));
     assert_eq!(parse(&w("send --help bob hi")), Err(Stop::Help));
+    let from = Top::Send { now: true, from: Some("cron".into()), to: "bob".into(), words: w("hi --from x"), stdin: false };
+    assert_eq!(parse(&w("send --from cron --now bob hi --from x")).unwrap(), from);
+    assert_eq!(parse(&w("send bob --from")).unwrap(), Top::Send { now: false, from: None, to: "bob".into(), words: w("--from"), stdin: false });
+    assert_eq!(parse(&w("send --from")), Err(Stop::Usage("--from needs a value".into())));
     let text = |t: &str, enter| Ok(Some((Op::Send(SendArgs { target: "spg".into(), input: Input::Text { text: t.into(), enter }, force: false }), false)));
     assert_eq!(decide("pane send spg git log -5"), text("git log -5", true));
     assert_eq!(decide("pane send spg say --help --no-enter"), text("say --help --no-enter", true));
