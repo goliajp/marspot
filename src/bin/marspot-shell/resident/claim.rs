@@ -31,13 +31,19 @@ pub(super) fn wait_for_image() {
 
 /// Replace this image with itself as a resident, for a lost Apple event
 /// registration, unless a resume or a leave is already ending it: a
-/// resumed image checks its registration anew.  `None` when skipped.
+/// resumed image checks its registration anew.  A tile still held is
+/// handed over with the time it may leave.  `None` when skipped.
 pub(crate) fn replace_as_resident(extra: &[(&str, &str)]) -> Option<std::io::Error> {
     if !claim_image() {
         lx_event!("SHELL_AE_REPLACE_SKIPPED", "the resident is already becoming another image");
         return None;
     }
-    Some(become_image(&own_image(), extra))
+    let leave_at = super::dock_leave::carry();
+    let mut extra = extra.to_vec();
+    if let Some(at) = leave_at.as_deref() {
+        extra.push((super::dock_leave::LEAVE_AT_ENV, at));
+    }
+    Some(become_image(&own_image(), &extra))
 }
 
 /// Replace this image with `exe`, same pid and coalition, as the app.

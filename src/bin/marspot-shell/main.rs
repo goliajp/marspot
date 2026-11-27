@@ -119,6 +119,7 @@ use window_frames::{DEFAULT_H_PT, DEFAULT_TITLE, DEFAULT_W_PT, FRESH_H_PT, FRESH
 const REDRAW_INTERVAL_MS: u64 = 1_000;
 
 fn main() {
+    resident::mark_image_start();
     // SAFETY: no thread yet; before this image opens anything
     let arrival = unsafe { marspot_term::exec_contract::arrive() };
     // the child that checks the registration: one event and out

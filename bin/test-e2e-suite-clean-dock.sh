@@ -340,9 +340,9 @@ touch "$S.empty"
 reads not-attached 1 "" py ready 0 "$S.empty"
 
 echo "the ownership walk's quit, paced on the probe"
-pace() { # name, expected exit, expected last line, then the probe's answers
-  local name=$1 want=$2 last=$3 got=0 out
-  shift 3
+pace() { # name, our tiles expected, expected exit, expected last line, then the probe's answers
+  local name=$1 own=$2 want=$3 last=$4 got=0 out
+  shift 4
   printf '%s\n' "$@" >"$T/answers.$name"
   : >"$T/asked.$name"
   out="$(cd "$T" && ROOT="$ROOT" SB="$T" bash -c '
@@ -353,17 +353,34 @@ pace() { # name, expected exit, expected last line, then the probe's answers
       a="$(sed -n "${n}p" "'"$T/answers.$name"'")"; [[ -n $a ]] || a="$(tail -1 "'"$T/answers.$name"'")"
       [[ $a == unread=* ]] && { echo "$a"; return 2; }; printf "dock_pid=%s\nindex=%s\n" "${a%%:*}" "${a#*:}"; }
     DOCK_PROBE_EXE=x DOCK_SETTLE_S=1 DOCK_BASE=726:56
-    dock_settled && echo settled' 2>&1)" || got=$?
+    if [[ -n "'"${CHECK:-}"'" ]]; then dock_check '"$own"' && echo settled || { echo "WHY: $DOCK_WHY"; echo returned; }
+    else dock_settled '"$own"' && echo settled; fi' 2>&1)" || got=$?
   if [[ $got == "$want" && $(tail -1 <<<"$out") == "$last"* ]]; then echo "  ok    $name"; else
     echo "  FAIL  $name: exit $got (wanted $want), printed: $out"; failed=1; fi
 }
-pace settled 0 settled 726:57 726:56
-pace kept-tile 1 "DIE: the Dock still holds a tile 1s after the quit: the probe at index 57, 56 before the app was opened" 726:57
+pace settled 0 0 settled 726:57 726:56
+pace kept-tile 0 1 "DIE: the Dock still holds 1 tile(s) of ours too many 1s on: the probe at index 57, 56 expected (56 before the app was opened, 0 of ours)" 726:57
 # below the baseline: another tile went, and waiting cannot tell; dies at the first reading
-pace below-base 1 "DIE: unreadable: the Dock probe after a quit at index 55, below 56 before the app was opened" 726:55 726:56
-pace restarted 1 "DIE: the Dock restarted during the walk (pid 726, now 900)" 900:56
-pace unread 1 "DIE: the Dock probe after a quit: the Dock logged no tile for the probe within 15 s" \
+pace below-base 0 1 "DIE: unreadable: the Dock probe at index 55, below 56 (56 before the app was opened, 0 of ours expected)" 726:55 726:56
+pace restarted 0 1 "DIE: the Dock restarted during the walk (pid 726, now 900)" 900:56
+pace unread 0 1 "DIE: the Dock probe with 0 tile(s) of ours expected: the Dock logged no tile for the probe within 15 s" \
   "unread=the Dock logged no tile for the probe within 15 s"
+# the app open: its own tile is expected, one more is a tile left
+pace open-settled 1 0 settled 726:58 726:57
+pace open-left 1 1 "DIE: the Dock still holds 1 tile(s) of ours too many 1s on: the probe at index 58, 57 expected (56 before the app was opened, 1 of ours)" 726:58
+pace open-below 1 1 "DIE: unreadable: the Dock probe at index 56, below 57 (56 before the app was opened, 1 of ours expected)" 726:56
+# the variant a walk records and goes on from: returns with the reason, the suite not ended
+CHECK=1 pace check-settled 1 0 settled 726:58 726:57
+CHECK=1 pace check-left 1 0 returned 726:58
+CHECK=1 pace check-restarted 0 0 returned 900:56
+out="$(cd "$T" && ROOT="$ROOT" SB="$T" bash -c '
+  die() { echo "DIE: $*"; exit 1; }
+  source "$ROOT/bin/_ownership-quit.sh"
+  dock_probe() { printf "dock_pid=726\nindex=58\n"; }
+  DOCK_PROBE_EXE=x DOCK_SETTLE_S=1 DOCK_BASE=726:56
+  dock_check 1; echo "rc=$? why=$DOCK_WHY"' 2>&1)"
+if [[ $out == "rc=1 why=the Dock still holds 1 tile(s) of ours too many 1s on: the probe at index 58, 57 expected (56 before the app was opened, 1 of ours)" ]]; then
+  echo "  ok    check-why"; else echo "  FAIL  check-why: $out"; failed=1; fi
 
 ((failed)) && exit 1
 echo "PASS: test-e2e-suite-clean-dock"

@@ -10,9 +10,13 @@
 # lazily; opened and quit again before it has, the app leaves a tile the Dock
 # keeps after the process is gone, one per opening (mini2, 2026-11-27: 46
 # of them over three runs of the twenty quits in test-session-ownership.sh).
-# So a quit returns only once the Dock probe (bin/_dock-probe.sh) lands
-# where it did before the app was first opened: the Dock holds no tile
-# of the app any more.  Not within DOCK_SETTLE_S seconds fails the suite.
+# The shell itself keeps its tile until the Dock has dropped the one
+# before (resident/dock_leave.rs), so quick quits leave nothing; the
+# twenty quick ones in test-session-ownership.sh use quit_app_unpaced and
+# check that.  Every other quit returns only once the Dock probe
+# (bin/_dock-probe.sh) lands where it did before the app was first opened:
+# the Dock holds no tile of the app any more.  Not within DOCK_SETTLE_S
+# seconds fails the suite.
 
 # shellcheck source=bin/_dock-probe.sh
 source "$ROOT/bin/_dock-probe.sh"
@@ -28,26 +32,39 @@ dock_baseline() {
   echo "    (the Dock puts a new tile at index ${DOCK_BASE#*:} before the app is opened)"
 }
 
-# until the probe lands at the baseline under the same Dock
-dock_settled() {
-  local out got="" start=$SECONDS
-  [[ -n $DOCK_BASE ]] || die "the Dock was not probed before the app was first opened"
+# until the probe lands at the baseline plus OWN (default 0: the app is
+# quit; 1 while it is open) under the same Dock.  Returns 1 with the
+# reason in DOCK_WHY, for a walk that records it and goes on.
+dock_check() {
+  local own=${1:-0} out got="" want start=$SECONDS
+  DOCK_WHY=""
+  [[ -n $DOCK_BASE ]] || { DOCK_WHY="the Dock was not probed before the app was first opened"; return 1; }
+  want=$(( ${DOCK_BASE#*:} + own ))
   while :; do
-    out="$(dock_probe "$DOCK_PROBE_EXE")" || die "the Dock probe after a quit: ${out#unread=}"
+    out="$(dock_probe "$DOCK_PROBE_EXE")" \
+      || { DOCK_WHY="the Dock probe with $own tile(s) of ours expected: ${out#unread=}"; return 1; }
     got="$(sed -n 's/^dock_pid=//p' <<<"$out"):$(sed -n 's/^index=//p' <<<"$out")"
-    [[ ${got%%:*} == "${DOCK_BASE%%:*}" ]] || die "the Dock restarted during the walk (pid ${DOCK_BASE%%:*}, now ${got%%:*})"
-    [[ $got == "$DOCK_BASE" ]] && return 0
-    # below where it was with none of ours: some other tile went, and one of ours could be
+    [[ ${got%%:*} == "${DOCK_BASE%%:*}" ]] \
+      || { DOCK_WHY="the Dock restarted during the walk (pid ${DOCK_BASE%%:*}, now ${got%%:*})"; return 1; }
+    DOCK_LAST=${got#*:}
+    (( DOCK_LAST == want )) && return 0
+    # below where it should be: some other tile went, and one of ours could be
     # hidden behind it; waiting cannot tell
-    (( ${got#*:} > ${DOCK_BASE#*:} )) \
-      || die "unreadable: the Dock probe after a quit at index ${got#*:}, below ${DOCK_BASE#*:} before the app was opened"
+    (( DOCK_LAST > want )) \
+      || { DOCK_WHY="unreadable: the Dock probe at index $DOCK_LAST, below $want (${DOCK_BASE#*:} before the app was opened, $own of ours expected)"; return 1; }
     (( SECONDS - start < DOCK_SETTLE_S )) \
-      || die "the Dock still holds a tile ${DOCK_SETTLE_S}s after the quit: the probe at index ${got#*:}, ${DOCK_BASE#*:} before the app was opened"
+      || { DOCK_WHY="the Dock still holds $(( DOCK_LAST - want )) tile(s) of ours too many ${DOCK_SETTLE_S}s on: the probe at index $DOCK_LAST, $want expected (${DOCK_BASE#*:} before the app was opened, $own of ours)"; return 1; }
     sleep 1
   done
 }
 
-quit_app() {
+# dock_check, ending the suite when it fails
+dock_settled() {
+  dock_check "$@" || die "$DOCK_WHY"
+}
+
+# the quit alone, not waiting for the Dock
+quit_app_unpaced() {
   local cleanups answered i
   cleanups=$(count SHELL_QUIT_CLEANUP)
   # the app answers on its command socket before it takes events:
@@ -61,5 +78,9 @@ quit_app() {
   [[ $answered == true ]] || die "the quit request was not delivered: $answered"
   (( i == 0 )) || echo "    (the quit request was refused $i time(s) first)"
   wait_count SHELL_QUIT_CLEANUP $((cleanups + 1)) 10 || die "the app did not act on the quit"
+}
+
+quit_app() {
+  quit_app_unpaced
   dock_settled
 }

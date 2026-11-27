@@ -23,22 +23,24 @@
 //! may not.  The shell a session starts with no window, after a crash,
 //! has no earlier image to lose an event.
 
-use std::os::unix::process::CommandExt;
-
 use marspot::{lx_event, lx_warn};
 use marspot_term::owner::RESIDENT_ENV;
 use marspot_term::session_registry;
 use objc2::rc::Retained;
-use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSApplicationTerminateReply};
 
 use crate::supervisor::BinaryTree;
 use crate::{launch, ownership, sup_log};
 
 mod claim;
+mod dock_leave;
+mod lander;
 pub(crate) use claim::replace_as_resident;
 use claim::{become_image, wait_for_image};
+pub(crate) use dock_leave::mark_image_start;
+pub(crate) use lander::land_staged_bundle;
 
 /// Set for the app that a resident becomes when an update was staged
 /// while it had no core to hand it to.
@@ -145,47 +147,6 @@ fn leave(why: &'static str) -> ! {
     std::process::exit(0)
 }
 
-/// Start the armed bundle lander, if there is one, and hand it the one
-/// moment it can work in.
-///
-/// `install-local.sh` cannot write `Marspot.app/Contents/MacOS/` while
-/// a process is running that binary: the system kills a process whose
-/// file on disk stops matching what it was started from.  So a changed
-/// shell is staged behind a one-shot `land.sh`, which waits for this
-/// pid to be gone.  Its LaunchAgent at login is only a backstop: the
-/// app is what the user opens first, so that copy finds it running and
-/// gives up.
-///
-/// Detached into its own process group so the exit right after this
-/// does not take it along.  Every failure is silent on purpose: nothing
-/// about quitting may depend on an update landing.
-pub(crate) fn land_staged_bundle() {
-    let script = marspot_term::paths::state_root().join("pending-bundle").join("land.sh");
-    if !script.exists() {
-        return;
-    }
-    let pid = std::process::id();
-    let spawned = std::process::Command::new(&script)
-        .arg(pid.to_string())
-        .process_group(0)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    match spawned {
-        Ok(child) => lx_event!(
-            "BUNDLE_LANDER_START",
-            "handed the armed bundle lander this exit to land in",
-            lander_pid = child.id(),
-            waits_for = pid
-        ),
-        Err(e) => lx_warn!(
-            "shell.quit.lander_spawn_failed",
-            &format!("{e} — the stage stays armed for the login backstop")
-        ),
-    }
-}
-
 /// Take what an install staged while there is no core to take it.
 ///
 /// A good core is promoted for the next one that is started.  A staged
@@ -278,7 +239,18 @@ define_class!(
         // Dock icon: it is the login session ending
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _sender: &NSApplication) -> NSApplicationTerminateReply {
+            if dock_leave::turn_down_quit(dock_leave::pending(), marspot::app_delegate::quit_event_gives_a_reason()) {
+                lx_event!("SHELL_RESIDENT_QUIT_IGNORED", "asked to quit from the tile it is about to drop");
+                return NSApplicationTerminateReply::TerminateCancel;
+            }
             leave("asked to quit")
+        }
+    }
+
+    impl Delegate {
+        #[unsafe(method(leaveDock:))]
+        fn leave_dock(&self, _arg: Option<&AnyObject>) {
+            dock_leave::leave_now(&NSApplication::sharedApplication(self.mtm()));
         }
     }
 );
@@ -309,9 +281,15 @@ pub(crate) fn is_resident() -> bool {
     RESIDENT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Watch the sessions and wait for the app to be opened.
-fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker) -> ! {
+/// Watch the sessions and wait for the app to be opened, leaving the
+/// Dock after `keep_tile`.
+fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker, keep_tile: std::time::Duration) -> ! {
     RESIDENT.store(true, std::sync::atomic::Ordering::SeqCst);
+    // held before anything can replace this image, so that the
+    // replacement is handed the wait
+    if !keep_tile.is_zero() {
+        dock_leave::hold(keep_tile);
+    }
     crate::apple_events::as_resident();
     crate::reclaim::watch();
     if let Err(e) = std::thread::Builder::new().name("l1-resident".into()).spawn(move || {
@@ -320,24 +298,33 @@ fn wait(sessions: Vec<i32>, app: &NSApplication, mtm: MainThreadMarker) -> ! {
         lx_warn!("shell.resident.watch_failed", &format!("{e}"));
         leave("cannot watch the sessions");
     }
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    lx_event!("SHELL_RESIDENT_REGISTERED", "registered with no Dock icon");
     let delegate: Retained<Delegate> = {
         let this = Delegate::alloc(mtm).set_ivars(());
         // SAFETY: NSObject's `init`, on a freshly allocated subclass.
         unsafe { msg_send![super(this), init] }
     };
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    if keep_tile.is_zero() {
+        dock_leave::leave_now(app);
+    } else {
+        // SAFETY: a one-shot on this run loop, to a method the delegate has
+        // that takes one object argument
+        let _: () = unsafe {
+            msg_send![&*delegate, performSelector: sel!(leaveDock:), withObject: None::<&AnyObject>, afterDelay: keep_tile.as_secs_f64()]
+        };
+    }
     app.run();
     leave("the run loop ended")
 }
 
 /// Run as the resident in an image started for it: a shell a session
-/// started.  The instance lock is already held.
+/// started, or a resident replaced for a lost Apple event registration.
+/// The instance lock is already held.
 pub(crate) fn run() -> ! {
     let started_by_a_session = std::env::var_os(RESIDENT_ENV).is_some_and(|v| v == marspot_term::owner::RESIDENT_STARTED);
     // SAFETY: startup path in main(), before any thread is spawned.
     unsafe { std::env::remove_var(RESIDENT_ENV) };
+    let keep_tile = dock_leave::take_carried();
     let sessions = announce_and_list();
     let registered = !(started_by_a_session || crate::instance::is_heir())
         || crate::identity::take_coalition_as(&[(RESIDENT_ENV, "1")]);
@@ -353,7 +340,9 @@ pub(crate) fn run() -> ! {
         watch(sessions)
     }
     let mtm = MainThreadMarker::new().expect("the resident runs on the main thread");
-    wait(sessions, &NSApplication::sharedApplication(mtm), mtm)
+    // a session's shell never had a tile; a replaced resident keeps the
+    // one it had until the wait its earlier image handed over is out
+    wait(sessions, &NSApplication::sharedApplication(mtm), mtm, keep_tile)
 }
 
 /// This process's physical footprint in KiB, as Activity Monitor counts it.
@@ -395,5 +384,5 @@ pub(crate) fn run_in_place() -> ! {
         footprint_kib_before = before,
         footprint_kib = footprint_kib()
     );
-    wait(sessions, &app, mtm)
+    wait(sessions, &app, mtm, dock_leave::delay(dock_leave::image_age()))
 }

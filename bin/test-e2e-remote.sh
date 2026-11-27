@@ -258,6 +258,8 @@ for suite in "${SUITES[@]}"; do
     suite_rc=${BASH_REMATCH[2]}
   fi
   left_why=""
+  # the Dock's lines are shown on a pass too: what a suite did to it is read here and nowhere else
+  (( left_rc != 0 )) || grep -E '^dock' <<<"$left_ls" | sed 's/^/    /' || true
   if (( left_rc != 0 )); then
     echo "  runner after $suite:"
     printf '%s\n' "$left_ls" | sed 's/^/    /'
