@@ -208,7 +208,7 @@ stopped_from_outside() {
 # so the cleanup cannot die of SIGPIPE.
 locked_cmd() {
   local sd=$1 lock=$2 run=$3 pre=$4 env=$5
-  printf '%s' "cd ~/$REMOTE_DIR && rm -rf $sd $sd.before $sd.clean && mkdir -p $sd && \
+  printf '%s' "cd ~/$REMOTE_DIR && sd=$sd && rm -rf \"\${sd:?}\" \"\${sd:?}\".before \"\${sd:?}\".clean && mkdir -p $sd && \
     env MARSPOT_STATE_DIR=$sd$env /usr/local/bin/bench-lock $lock \
     sh -c 'stopped=; trap \"stopped=1; exec >/dev/null 2>&1\" TERM INT HUP; \
     bin/_bounded.sh 30 bin/_e2e-suite-clean.sh snap $sd.before --lock-pid \$PPID --live /tmp/msp-e2e-$RUN_ID-live; \

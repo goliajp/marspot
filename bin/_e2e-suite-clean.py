@@ -4,7 +4,7 @@
 # snap prints the before state as key=value lines; check prints the raw
 # counts, what was found and last clean=0|1|2 (also the exit status).
 # CLEAN_KNOWN holds PID:PATH records listed before the run, one per line.
-import collections, json, os, re, sys
+import collections, json, os, re, sys, urllib.parse
 from datetime import datetime
 
 DOCK_APP = "/System/Library/CoreServices/Dock.app"
@@ -51,8 +51,27 @@ def key(r):
     return "%s:%s" % (r["pid"], r["paths"][0] if r["paths"] else "")
 
 
+def tile_entries(text):
+    """the Dock's tiles as [path, bundle id, label]"""
+    out = []
+    for chunk in text.split('"tile-data"')[1:]:
+        f = []
+        for k in ("_CFURLString", "bundle-identifier", "file-label"):
+            m = re.search(r'"%s" = (?:"((?:[^"\\]|\\.)*)"|([^;\s]*));' % k, chunk)
+            f.append((m.group(1) or m.group(2) or "") if m else "")
+        if f[0].startswith("file://"):
+            f[0] = strip(urllib.parse.unquote(f[0][len("file://"):]))
+        out.append(f)
+    return out
+
+
+def ident(e):
+    return e[0] or e[1] or "label " + e[2]
+
+
 def state(d):
-    """the counts read now and the records, or None for the list when it is not the console login's"""
+    """the counts read now and the records, or None for the list when it is not the console login's;
+    the kept and recent tiles as lists"""
     c, why = {}, []
     ls = read(d, "lsappinfo.txt")
     recs = records(ls) if ls is not None else []
@@ -66,7 +85,7 @@ def state(d):
         if t is None:
             why.append("defaults: com.apple.dock %s could not be read" % k)
         else:
-            c[k] = t.count('"file-label"')
+            c[k] = tile_entries(t)
     return c, recs, why
 
 
@@ -99,13 +118,31 @@ def holders(text, me):
     return [m.group(1) for m in re.finditer(r"(?m)^(\d+)\t(?:heavy|bench)\tholding", text) if m.group(1) != me]
 
 
+def self_cmd(text, me):
+    """this holder's command as the lock log writes it (tabs and newlines as spaces, 200 chars):
+    the log lines carry no pid, so the command is how our own took line is told apart"""
+    for line in (text or "").splitlines():
+        f = line.split("\t", 3)
+        if me and len(f) == 4 and f[0] == me and f[2].startswith("holding"):
+            cmd = f[3][: -len(" [stopped]")] if f[3].endswith(" [stopped]") else f[3]
+            return cmd[:200]
+    return None
+
+
 def snap(d, me):
     c, recs, why = state(d)
-    out = ["%s=%s" % kv for kv in c.items()] + ["unread=" + w for w in why]
+    out = ["fg=%d" % c["fg"]] if "fg" in c else []
+    for k in ("persistent", "recent"):
+        if k in c:
+            out += ["%s=%d" % (k, len(c[k])), "%s_entries=%s" % (k, json.dumps(c[k]))]
+    out += ["unread=" + w for w in why]
     out += ["known=" + key(r) for r in recs or [] if any(ours(p) for p in r["paths"] + [r["name"]])]
     st = read(d, "status.txt")
     if st is not None:
         out.append("others_snap=" + " ".join(holders(st, me)))
+        own = self_cmd(st, me)
+        if own is not None:
+            out.append("self_cmd=" + own)
     if read(d, "probe-dock.log") is not None or read(d, "probe-tcc.ndjson") is not None:
         out.append("dock_live=%d" % bool(tile_lines(read(d, "probe-dock.log"))))
         out.append("tcc_live=%d" % bool(tcc_requests(read(d, "probe-tcc.ndjson"))))
@@ -115,7 +152,9 @@ def snap(d, me):
 def dock_count(lines):
     """inserts and removals by reason, and removal events: a removal line right after a
     removal line of another reason within a second is the same removal logged twice,
-    which only ever undercounts removals"""
+    which only ever undercounts removals.  Every line that is not an insert counts as a
+    removal: one by an unrelated app while we hold the lock alone can offset one of our
+    inserts here, and the lsappinfo record check is what catches our app then"""
     ins, rem, events, prev = collections.Counter(), collections.Counter(), 0, None
     for l in lines:
         m = re.search(r"for reason: (.*?)\s*$", l)
@@ -160,29 +199,68 @@ def dock_check(d, b, wide, wide_unread):
 
 
 def window(d, b, me):
-    """why the window was shared with another holder of the lock, empty when it was not"""
-    why = []
+    """alone, shared (another holder seen in the lock status or log) or unknown (a source
+    unread and no other holder seen), and why"""
+    seen, unread = [], []
     if "others_snap" not in b:
-        why.append("lock status at snap unread")
+        unread.append("lock status at snap unread")
     elif b["others_snap"].split():
-        why.append("holding at snap: " + b["others_snap"])
+        seen.append("holding at snap: " + b["others_snap"])
     st = read(d, "status.txt")
     if st is None:
-        why.append("lock status at check unread")
+        unread.append("lock status at check unread")
     elif holders(st, me):
-        why.append("holding at check: " + " ".join(holders(st, me)))
+        seen.append("holding at check: " + " ".join(holders(st, me)))
     log = read(d, "lock.log")
     if log is None or "start_epoch" not in b:
-        why.append("lock log unread")
+        unread.append("lock log unread")
     else:
-        n = 0
+        start, own = int(b["start_epoch"]), b.get("self_cmd") or self_cmd(st, me)
+        n, odd = 0, 0
         for l in log.splitlines():
             f = l.split("\t")
-            if len(f) > 3 and f[0].isdigit() and int(f[0]) > int(b["start_epoch"]) and f[3] in ("took", "released"):
-                n += 1
+            if not (len(f) > 4 and f[0].isdigit() and int(f[0]) >= start and f[3] in ("took", "released")):
+                continue
+            # our own took line comes before the snap, at the latest in its second
+            if int(f[0]) == start and f[3] == "took":
+                if own is None:
+                    odd += 1
+                    continue
+                if f[4] == own:
+                    own = ""
+                    continue
+            n += 1
         if n:
-            why.append("%d lock take/release in the window" % n)
-    return why
+            seen.append("%d lock take/release in the window" % n)
+        if odd:
+            unread.append("%d lock take in the start second, ours not known to tell it apart" % odd)
+    if seen:
+        return "shared", seen + unread
+    return ("unknown", unread) if unread else ("alone", [])
+
+
+def tiles_check(b, c, under, left, wide, wide_unread):
+    """each kept or recent tile added, and each kept tile gone: the lists have a cap, so
+    a new entry can push the oldest out and leave the count as it was"""
+    for k in ("persistent", "recent"):
+        if k + "_entries" not in b:
+            wide_unread.append("%s tiles not read before the suite" % k)
+            continue
+        if k not in c:
+            continue
+        was = collections.Counter(ident(e) for e in json.loads(b[k + "_entries"]))
+        now = collections.Counter(ident(e) for e in c[k])
+        shown = {ident(e): e for e in c[k]}
+        for i in now - was:
+            e = shown[i]
+            mine = any(p and (under(p) or ours(p)) for p in e)
+            (left if mine else wide).append("%s tile added: %s %s" % (k, i, " ".join(e[1:])))
+        for i in was - now:
+            line = "%s tile gone: %s" % (k, i)
+            if k == "persistent":
+                wide.append(line)
+            else:
+                print("dock: " + line)
 
 
 def tcc_check(d, b, under, left, wide, unread):
@@ -213,14 +291,15 @@ def check(d, before, lrc, lout, me, prefixes):
     unread += [w for w in why if w.startswith("lsappinfo")]
     wide_unread += [w for w in why if not w.startswith("lsappinfo")]
     print("before: fg=%s persistent=%s recent=%s start=%s" % tuple(b.get(k, "?") for k in ("fg", "persistent", "recent", "start")))
-    print("after:  fg=%s persistent=%s recent=%s" % tuple(c.get(k, "?") for k in ("fg", "persistent", "recent")))
-    for k in ("fg", "persistent", "recent"):
-        if k not in b:
-            wide_unread.append("%s count not read before the suite" % k)
-        elif k in c and int(b[k]) != c[k]:
-            wide.append("%s count changed: %s before, %s after" % (k, b[k], c[k]))
-    dock_check(d, b, wide, wide_unread)
+    n = lambda k: len(c[k]) if k in c else "?"
+    print("after:  fg=%s persistent=%s recent=%s" % (c.get("fg", "?"), n("persistent"), n("recent")))
+    if "fg" not in b:
+        wide_unread.append("fg count not read before the suite")
+    elif "fg" in c and int(b["fg"]) != c["fg"]:
+        wide.append("fg count changed: %s before, %s after" % (b["fg"], c["fg"]))
     under = lambda p: any(strip(p).startswith(x) for x in prefixes)
+    tiles_check(b, c, under, left, wide, wide_unread)
+    dock_check(d, b, wide, wide_unread)
     for r in recs or []:
         if key(r) in known:
             known.remove(key(r))
@@ -231,10 +310,13 @@ def check(d, before, lrc, lout, me, prefixes):
     elif lrc != 0:
         unread.append("leftovers: " + (lout.strip() or "exit %d" % lrc))
     tcc_check(d, b, under, left, wide, unread)
-    shared = window(d, b, me)
-    if shared:
-        print("window: shared-window (%s); only this run's paths are judged" % "; ".join(shared))
+    kind, why = window(d, b, me)
+    if kind == "shared":
+        print("window: shared-window (%s); only this run's paths are judged" % "; ".join(why))
         print("".join("info: %s\n" % l for l in wide + wide_unread), end="")
+    elif kind == "unknown":
+        print("window: unknown (%s); the machine-wide findings cannot be judged" % "; ".join(why))
+        unread += wide + wide_unread
     else:
         print("window: alone")
         left, unread = left + wide, unread + wide_unread

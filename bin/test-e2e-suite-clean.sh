@@ -43,15 +43,29 @@ TCC_OURS="$(ndjson "$(attribution 401.7 "$BUILD" "$OTHER")" "$(ctx 401.7 kTCCSer
 TCC_ACCESSING="$(ndjson "$(attribution 402.1 "$OTHER" "$LANDER")" "$(ctx 402.1 kTCCServiceListenEvent)")"
 ME=$'4000\theavy\tholding since 2026-11-27 10:00:00\tsh -c stopped=; ...'
 SOMEONE=$'5000\theavy\tholding since 2026-11-27 09:59:00\tcargo build'
+# tile LABEL [PATH [BUNDLE]]: one Dock tile as `defaults read com.apple.dock` prints it
+tile() {
+  printf '    {\n        GUID = 1;\n        "tile-data" =         {\n            "bundle-identifier" = "%s";\n' "${3:-com.x.$1}"
+  printf '            "file-data" =             {\n                "_CFURLString" = "file://%s/";\n            };\n' "${2:-/Applications/$1.app}"
+  printf '            "file-label" = %s;\n        };\n        "tile-type" = "file-tile";\n    },\n' "$1"
+}
+# each argument is one tile's words, split on purpose
+# shellcheck disable=SC2086
+tiles() { echo "("; local t; for t in "$@"; do tile $t; done; echo ")"; }
+# the before snapshot's list of the tiles in /Applications named
+entries() { local o="" l; for l; do o+="${o:+, }[\"/Applications/$l.app/\", \"com.x.$l\", \"$l\"]"; done; echo "[$o]"; }
+OURS_TILE="Marspot /private/tmp/msp-e2e-1-1-lander/Marspot.app com.goliajp.marspot"
 
 # $1 name; fills $T/$1 with the inputs of a clean suite run alone
 base() {
   local d="$T/$1"
   mkdir -p "$d/in"
   printf 'start=2026-11-27 10:00:00\nstart_epoch=1700000000\nfg=1\npersistent=2\nrecent=1\nothers_snap=\ndock_live=1\ntcc_live=1\n' >"$d/before"
+  echo "persistent_entries=$(entries A B)" >>"$d/before"
+  echo "recent_entries=$(entries C)" >>"$d/before"
   printf '%s\n' "$DOCK" >"$d/in/lsappinfo.txt"
-  printf '(\n{ "file-label" = A; },\n{ "file-label" = B; }\n)\n' >"$d/in/persistent.txt"
-  printf '(\n{ "file-label" = C; }\n)\n' >"$d/in/recent.txt"
+  tiles A B >"$d/in/persistent.txt"
+  tiles C >"$d/in/recent.txt"
   { echo "$HEADER"; launch 01.000; remove 05.000; } >"$d/in/dock.log"
   printf '%s\n{"count":2,"finished":1}\n' "$TCC_OTHER" >"$d/in/tcc.ndjson"
   printf '%s\n' "$ME" >"$d/in/status.txt"
@@ -114,8 +128,20 @@ sed -i '' 's/^tcc_live=1/tcc_live=0/' "$T/dead-tcc/before"
 expect dead-tcc 2 "unread: tcc log: no request in the suite nor in the 24 h probe"
 
 base persistent
-printf '(\n{ "file-label" = A; }\n)\n' >"$T/persistent/in/persistent.txt"
-expect persistent 1 "left: persistent count changed: 2 before, 1 after"
+tiles A >"$T/persistent/in/persistent.txt"
+expect persistent 1 "left: persistent tile gone: /Applications/B.app/"
+
+# the recent list is full: ours pushes the oldest out and the count stays
+base recent-replaced
+sed -i '' "s|^recent_entries=.*|recent_entries=$(entries C D E)|" "$T/recent-replaced/before"
+# shellcheck disable=SC2086
+{ echo "("; tile D; tile E; tile $OURS_TILE; echo ")"; } >"$T/recent-replaced/in/recent.txt"
+expect recent-replaced 1 "left: recent tile added: /tmp/msp-e2e-1-1-lander/Marspot.app/ com.goliajp.marspot Marspot" \
+  "dock: recent tile gone: /Applications/C.app/" "after:  fg=1 persistent=2 recent=3"
+
+base recent-other
+tiles Other >"$T/recent-other/in/recent.txt"
+expect recent-other 1 "left: recent tile added: /Applications/Other.app/"
 
 base record
 printf '%s\n%s\n' "$DOCK" "$MARSPOT" >"$T/record/in/lsappinfo.txt"
@@ -179,10 +205,39 @@ printf '%s\n%s\n{"count":4,"finished":1}\n' "$TCC_OTHER" "$TCC_ACCESSING" >"$T/s
 expect shared-ours 1 "window: shared-window (holding at snap: 5000)" \
   "left: leftover: BackgroundOnly pid=4242 /tmp/msp-e2e-1-1-lander/Marspot.app" "left: tcc: kTCCServiceListenEvent"
 
+# a kept tile under this run's prefix is ours even next to another holder
+base shared-tile
+printf '%s\n%s\n' "$ME" "$SOMEONE" >"$T/shared-tile/in/status.txt"
+tiles A B Other "Foo /private/tmp/msp-e2e-1-2-x/Foo.app" >"$T/shared-tile/in/persistent.txt"
+expect shared-tile 1 "window: shared-window (holding at check: 5000)" \
+  "left: persistent tile added: /tmp/msp-e2e-1-2-x/Foo.app/" "info: persistent tile added: /Applications/Other.app/"
+
+# no other holder seen but a lock source unread: the machine-wide findings are not judged either way
 base status-unread
 rm "${T:?}/status-unread/in/status.txt"
 launch 06.000 >>"$T/status-unread/in/dock.log"
-expect status-unread 0 "lock status at check unread" "info: dock: 2 tile insert(s)"
+expect status-unread 2 "window: unknown (lock status at check unread)" "unread: dock: 2 tile insert(s), 1 removal(s)"
+
+base log-unread
+rm "${T:?}/log-unread/in/lock.log"
+launch 06.000 >>"$T/log-unread/in/dock.log"
+expect log-unread 2 "window: unknown (lock log unread)" "unread: dock: 2 tile insert(s), 1 removal(s)"
+
+# our own took line can fall in the snap's second; the log has no pid, so it is told by the command
+base own-took
+printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-took/in/lock.log"
+expect own-took 0 "window: alone"
+
+base other-same-second
+printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n1700000000\theavy\t0\ttook\tcargo build\t/\n' \
+  >"$T/other-same-second/in/lock.log"
+expect other-same-second 0 "window: shared-window (1 lock take/release in the window)"
+
+base own-unknown
+printf '1700000000\theavy\t0\ttook\tsh -c stopped=; ...\t/w\n' >"$T/own-unknown/in/lock.log"
+rm "${T:?}/own-unknown/in/status.txt"
+launch 06.000 >>"$T/own-unknown/in/dock.log"
+expect own-unknown 2 "1 lock take in the start second, ours not known to tell it apart" "unread: dock: 2 tile insert(s)"
 
 # snap: the before state, the probes' answer kept for the run, then reused
 d="$T/snap"
@@ -197,8 +252,9 @@ rm "${d:?}/in/probe-dock.log" "${d:?}/in/probe-tcc.ndjson"
 E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before2" --lock-pid 4000 --live "$d/live"
 E2E_CLEAN_INPUTS="$d/in" "$ROOT/bin/_e2e-suite-clean.sh" snap "$d/before3" --lock-pid 4000
 ok=1
-for l in fg=1 persistent=2 recent=1 "known=4242:/tmp/msp-e2e-1-1-lander/Marspot.app" others_snap=5000 dock_live=1 tcc_live=1; do
-  grep -qx -- "$l" "$d/before" && grep -qx -- "$l" "$d/before2" || ok=0
+for l in fg=1 persistent=2 recent=1 "known=4242:/tmp/msp-e2e-1-1-lander/Marspot.app" others_snap=5000 dock_live=1 tcc_live=1 \
+  "self_cmd=sh -c stopped=; ..." "recent_entries=[[\"/Applications/C.app/\", \"com.x.C\", \"C\"]]"; do
+  grep -qxF -- "$l" "$d/before" && grep -qxF -- "$l" "$d/before2" || ok=0
 done
 grep -qx 'dock_live=1' "$d/live" && grep -qx 'tcc_live=1' "$d/live" || ok=0
 ! grep -qx 'dock_live=1' "$d/before3" || ok=0

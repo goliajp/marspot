@@ -4,22 +4,25 @@
 # once before the suite and once after its sandbox was stopped.
 #
 #   snap BEFORE [--lock-pid N] [--live CACHE]
-#       the Foreground record count, the Dock's kept and recent tile
-#       counts, the marspot records already listed, the other holders of
-#       the lock (N is this suite's holder) and the start time, written to
-#       BEFORE.  Also proves the Dock and tccd log queries still match
-#       anything (24 h back); a positive answer is kept in CACHE for the
-#       rest of the run.
+#       the Foreground record count, the Dock's kept and recent tiles,
+#       the marspot records already listed, the other holders of the lock
+#       and this holder's command (N is this suite's holder) and the start
+#       time, written to BEFORE.  Also proves the Dock and tccd log
+#       queries still match anything (24 h back); a positive answer is
+#       kept in CACHE for the rest of the run.
 #   check BEFORE RESULT [--suite-rc N] [--lock-pid N] [--known PID:PATH]... PREFIX...
 #       after the suite, with records given up to ten seconds to go:
 #       - every Dock tile inserted was removed again
-#       - the Foreground, kept and recent counts are what BEFORE says
+#       - the Foreground count is what BEFORE says, and no kept or recent
+#         tile was added (nor a kept one gone)
 #       - lsappinfo lists no marspot executable or bundle that was not
 #         there before (or --known)
 #       - bin/_ls-leftovers.sh finds nothing under the PREFIXes
 #       - tccd logged no request from a marspot build or msp- scratch
 #       When another job held the lock at any time in the suite, only the
-#       conditions on this run's PREFIXes are judged; the rest is shown.
+#       conditions on this run's PREFIXes (and marspot names) are judged;
+#       the rest is shown.  When the lock status or log could not be read
+#       and no other holder was seen, the rest counts as not read.
 #       RESULT gets suite_rc first (so a check stopped half way still
 #       says it), then the raw counts, what was found and a last line
 #       clean=0 (nothing left), 1 (something left) or 2 (could not read);
@@ -57,7 +60,7 @@ dock_key() {
 logwin() { /usr/bin/log show --start "$start" --end "$(date -v+1S '+%Y-%m-%d %H:%M:%S')" "$@"; }
 # empty output is a dead query, which the decision reads as such
 tcc_probe() { /usr/bin/log show --last 24h --style ndjson --predicate "$TCC_PRED" | head -n 200; return 0; }
-lock_lines() { /usr/bin/awk -F'\t' -v s="$start_epoch" '$1 > s' "$LOCK_LOG"; }
+lock_lines() { /usr/bin/awk -F'\t' -v s="$start_epoch" '$1 >= s' "$LOCK_LOG"; }
 grab_state() {
   grab lsappinfo.txt /usr/bin/lsappinfo list
   grab persistent.txt dock_key persistent-apps
