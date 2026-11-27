@@ -6,7 +6,7 @@
 //! of that family, and a family the machine lacks is reported as such
 //! rather than drawn in a proportional face.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use core_text::font::{new_from_descriptor, CTFont};
@@ -28,17 +28,42 @@ fn style_of(d: &CTFontDescriptor) -> u32 {
     d.traits().symbolic_traits() & (kCTFontBoldTrait | kCTFontItalicTrait)
 }
 
-/// `family` at `point`, or `None` when no font of that family is
-/// installed.  The regular face is the one without bold or italic
-/// traits; a family that has only styled faces opens its first.
+fn is_mono(traits: u32) -> bool {
+    traits & kCTFontMonoSpaceTrait != 0
+}
+
+/// The face the grid's regular style is drawn in: among the family's
+/// monospaced faces, an unstyled one if there is any, then the one
+/// whose weight and width are nearest normal, then by name, so the
+/// choice never rests on the order CoreText lists the faces in.  A
+/// family with a proportional face beside its monospaced one (Osaka
+/// and Osaka-Mono) gives the monospaced one.
+fn pick_regular(descs: &[CTFontDescriptor]) -> Option<&CTFontDescriptor> {
+    let key = |d: &CTFontDescriptor| {
+        let t = d.traits();
+        (style_of(d) != 0, t.normalized_weight().abs() + t.normalized_width().abs(), d.font_name())
+    };
+    descs.iter().filter(|d| is_mono(d.traits().symbolic_traits())).min_by(|a, b| {
+        let (a, b) = (key(a), key(b));
+        a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2))
+    })
+}
+
+/// `family` at `point`, or `None` when the machine has no monospaced
+/// face of that family — not installed, or proportional only (a name
+/// written into the settings by hand, such as Helvetica) — so the
+/// caller falls back to a terminal font.  A style the family lacks, or
+/// has only as a proportional face, is the regular face.
 pub fn open(family: &str, point: f64) -> Option<Faces> {
     let descs = font_collection::create_for_family(family)?.get_descriptors()?;
     let descs: Vec<CTFontDescriptor> = descs.iter().map(|d| d.clone()).collect();
-    let regular = descs.iter().find(|d| style_of(d) == 0).or(descs.first())?;
-    let regular = new_from_descriptor(regular, point);
+    let regular = new_from_descriptor(pick_regular(&descs)?, point);
     let mask = kCTFontBoldTrait | kCTFontItalicTrait;
     let variant = |traits: u32| {
-        regular.clone_with_symbolic_traits(traits, mask).unwrap_or_else(|| regular.clone())
+        regular
+            .clone_with_symbolic_traits(traits, mask)
+            .filter(|f| is_mono(f.symbolic_traits()))
+            .unwrap_or_else(|| regular.clone())
     };
     Some(Faces {
         bold: variant(kCTFontBoldTrait),
@@ -57,7 +82,7 @@ pub fn list_installed() -> Vec<String> {
     };
     let mut names: Vec<String> = descs
         .iter()
-        .filter(|d| d.traits().symbolic_traits() & kCTFontMonoSpaceTrait != 0)
+        .filter(|d| is_mono(d.traits().symbolic_traits()))
         .map(|d| d.family_name())
         .filter(|n| !n.is_empty() && !n.starts_with('.'))
         .collect();
@@ -77,10 +102,27 @@ pub fn installed() -> Arc<[String]> {
     Arc::clone(&store().read().unwrap_or_else(|p| p.into_inner()))
 }
 
+static LISTINGS: AtomicU64 = AtomicU64::new(0);
+static ON_LISTED: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// How many listings have finished: a reader that saw a smaller number
+/// has a stale [`installed`].
+pub fn listings() -> u64 {
+    LISTINGS.load(Ordering::Acquire)
+}
+
+/// Call `f` from the listing thread each time a [`refresh`] finishes,
+/// so the thread that draws can look again without waiting on it.  The
+/// first call sets it for the life of the process.
+pub fn on_listed(f: impl Fn() + Send + Sync + 'static) {
+    let _ = ON_LISTED.set(Box::new(f));
+}
+
 /// List the installed families now, on the calling thread.
 pub fn refresh_now() {
     let fresh: Arc<[String]> = list_installed().into();
     *store().write().unwrap_or_else(|p| p.into_inner()) = fresh;
+    LISTINGS.fetch_add(1, Ordering::AcqRel);
 }
 
 /// List the installed families again on a thread of its own, so a font
@@ -96,6 +138,9 @@ pub fn refresh() {
     let spawned = std::thread::Builder::new().name("font-families".into()).spawn(|| {
         refresh_now();
         LISTING.store(false, Ordering::Release);
+        if let Some(f) = ON_LISTED.get() {
+            f();
+        }
     });
     if spawned.is_err() {
         LISTING.store(false, Ordering::Release);
@@ -166,5 +211,25 @@ mod tests {
         assert_eq!(f.regular.family_name(), "Menlo");
         assert!(f.bold.family_name() == "Menlo" && f.bold.symbolic_traits() & kCTFontBoldTrait != 0);
         assert!(open("No Such Family 7f3a", 12.0).is_none());
+    }
+
+    /// Only a monospaced face is opened: a proportional family named by
+    /// hand is refused, and a family with both kinds gives its
+    /// monospaced face whatever order CoreText lists them in.
+    #[test]
+    fn only_a_monospaced_face_is_opened() {
+        assert!(open("Helvetica", 12.0).is_none(), "a proportional family is not drawn");
+        let has_osaka = font_collection::create_for_family("Osaka")
+            .and_then(|c| c.get_descriptors())
+            .is_some_and(|d| d.iter().any(|d| d.font_name() == "Osaka-Mono"));
+        if !has_osaka {
+            eprintln!("SKIPPED: Osaka-Mono is not installed on this Mac");
+            return;
+        }
+        let f = open("Osaka", 12.0).expect("Osaka has a monospaced face");
+        assert_eq!(f.regular.postscript_name(), "Osaka-Mono");
+        for face in [&f.bold, &f.italic, &f.bold_italic] {
+            assert!(is_mono(face.symbolic_traits()), "{}", face.postscript_name());
+        }
     }
 }

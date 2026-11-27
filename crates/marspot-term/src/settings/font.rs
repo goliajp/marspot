@@ -17,6 +17,10 @@ pub const DEFAULT_SIZE: f32 = 12.0;
 /// to read; above 32 a 13-inch screen holds fewer than 50 columns.
 pub const SIZE_MIN: f32 = 8.0;
 pub const SIZE_MAX: f32 = 32.0;
+/// The longest family name a file may give, in bytes: real names are
+/// well under 64, and the name is drawn in the panel and handed to
+/// CoreText.
+pub const FAMILY_MAX: usize = 128;
 
 /// The value of one of the font keys, `None` for any other key.
 pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
@@ -31,14 +35,28 @@ pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
 pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
     match key {
         "appearance.font_family" => {
-            if !v.is_empty() {
-                s.font_family = v.to_string();
+            let name = family_name(v);
+            if !name.is_empty() {
+                s.font_family = name;
             }
         }
         "appearance.font_size" => s.font_size = parse_f32(v, s.font_size, SIZE_MIN, SIZE_MAX),
         _ => return false,
     }
     true
+}
+
+/// A family name as the file gives it, without control characters
+/// and cut at a character boundary to [`FAMILY_MAX`] bytes.
+fn family_name(v: &str) -> String {
+    let mut out = String::new();
+    for c in v.chars().filter(|c| !c.is_control()) {
+        if out.len() + c.len_utf8() > FAMILY_MAX {
+            break;
+        }
+        out.push(c);
+    }
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -74,5 +92,20 @@ mod tests {
         ] {
             assert_eq!(parse(body), Settings::default(), "{body:?}");
         }
+    }
+
+    /// The family name is the file's input: control characters are
+    /// dropped and a runaway name is cut to the cap.
+    #[test]
+    fn a_family_name_loses_control_characters_and_is_capped() {
+        use super::FAMILY_MAX;
+        let s = parse("appearance.font_family = Fira\u{7}\u{1b}Code\n");
+        assert_eq!(s.font_family, "FiraCode");
+        let long = "\u{3042}".repeat(100);
+        let s = parse(&format!("appearance.font_family = {long}\n"));
+        let n = s.font_family.len();
+        assert!(n <= FAMILY_MAX && n > FAMILY_MAX - 3, "{n}");
+        assert!(long.starts_with(&s.font_family));
+        assert_eq!(parse("appearance.font_family = \u{7}\n"), Settings::default());
     }
 }

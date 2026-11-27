@@ -164,13 +164,11 @@ impl Row {
                 options: LANGUAGE_LABELS,
                 chosen: LANGUAGE_CHOICES.iter().position(|l| *l == s.appearance_language).unwrap_or(usize::MAX),
             },
-            Row::FontFamily => Control::Picker {
-                value: s.font_family.clone(),
-                arrows: true,
+            Row::FontFamily => {
                 // one family is nowhere to step to
-                prev: crate::font_families::installed().len() > 1,
-                next: crate::font_families::installed().len() > 1,
-            },
+                let steps = crate::font_families::installed().len() > 1;
+                Control::Picker { value: s.font_family.clone(), arrows: true, prev: steps, next: steps }
+            }
             Row::FontSize => Control::Picker {
                 value: font_size_label(s.font_size),
                 arrows: false,

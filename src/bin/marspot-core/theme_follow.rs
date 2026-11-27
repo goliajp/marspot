@@ -34,9 +34,11 @@ static WATCHER: OnceLock<Option<Watcher>> = OnceLock::new();
 
 /// Watch the files; `wake` is called, from the watcher's thread, after
 /// one of them changed.
-pub(super) fn watch(wake: impl Fn() + Send + 'static) {
+pub(super) fn watch(wake: impl Fn() + Clone + Send + Sync + 'static) {
     // the font families the settings panel offers, listed off this
-    // thread before anyone opens it
+    // thread before anyone opens it; an open panel is drawn again with
+    // the list once it is in
+    marspot::font_families::on_listed(wake.clone());
     marspot::font_families::refresh();
     let files = [
         marspot::settings::path(),
@@ -81,8 +83,25 @@ impl super::CoreApp {
         }
         // the language rides the same look
         self.follow_language(looked);
+        self.follow_font_listing();
         if marspot::system_theme::changed("every window is drawn again in the theme now in force") {
             for w in self.windows.iter_mut() {
+                w.needs_render = true;
+            }
+        }
+    }
+
+    /// A settings panel drawn before the font families were listed
+    /// shows its family arrows disabled; draw it again once they are.
+    fn follow_font_listing(&mut self) {
+        static SEEN: AtomicU64 = AtomicU64::new(0);
+        let now = marspot::font_families::listings();
+        if SEEN.load(Ordering::Relaxed) == now {
+            return;
+        }
+        SEEN.store(now, Ordering::Relaxed);
+        for w in self.windows.iter_mut() {
+            if w.panels.open() == Some(super::SurfaceKind::Settings) {
                 w.needs_render = true;
             }
         }
