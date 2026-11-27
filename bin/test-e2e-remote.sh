@@ -227,9 +227,12 @@ for suite in "${SUITES[@]}"; do
   start=$(date +%s)
   set +e
   # created here so the sandbox helpers find it and give its sessions
-  # ids of their own (see dev_seed_session_base)
+  # ids of their own (see dev_seed_session_base).  What the suite left
+  # running is stopped before the host's lock is let go, so nothing it
+  # opened outlives the hold; the reap after it is for a stopped run.
   remote_gui "cd ~/$REMOTE_DIR && rm -rf $current_sd && mkdir -p $current_sd && \
-    env MARSPOT_STATE_DIR=$current_sd$suite_env$fwd /usr/local/bin/bench-lock $lock $run"
+    env MARSPOT_STATE_DIR=$current_sd$suite_env$fwd /usr/local/bin/bench-lock $lock \
+    sh -c '$run; rc=\$?; bin/_bounded.sh 30 bin/kill-sandbox-marspot.sh --state-dir $current_sd; exit \$rc'"
   suite_rc=$?
   set -e
   secs=$(( $(date +%s) - start ))
