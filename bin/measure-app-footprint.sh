@@ -24,7 +24,7 @@ dev_no_dock
 
 ROUNDS="${FP_ROUNDS:-3}"
 OUT="${FP_OUT:-$ROOT/build/app-footprint.json}"
-BIN="$ROOT/target/release"
+BIN="${MARSPOT_BENCH_BIN_DIR:-$ROOT/target/release}"   # a bench run passes its copies
 APPLOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 GAUGE="$ROOT/bin/_app_gauge.py"
 COLS=4 ROWS=3

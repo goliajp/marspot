@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bin/_remote-measure-others-mini.sh — runs on the bench host, driven
+# bin/_remote-measure-others-runner.sh — runs on the bench host, driven
 # from bin/remote-measure-others.sh. Emits a single JSON object on
 # stdout shaped like:
 #
@@ -26,7 +26,7 @@ TRIALS=3
 # first-fire, after which subsequent LaunchAgent-spawned runs reuse
 # the cached TCC scope.
 # Measurement order matters: marspot in the SAME cycle as every
-# competitor so all five are measured under identical mini load. The
+# competitor so all five are measured under identical load. The
 # cycle is sequential — at any moment exactly one terminal is doing
 # PTY work — so per-cell contention is zero. This is what makes the
 # vs-best-other ratio fair: every cell is the terminal vs an idle box.
@@ -49,7 +49,7 @@ ROUNDS=${MEASURE_ROUNDS:-3}
 # terminal merge in remote-measure-others.sh.
 MARKER_TIMEOUT_S=${MEASURE_MARKER_TIMEOUT_S:-120}
 # Seconds between one terminal's close and the next one's launch.
-# Lets mini cool: GPU thermal, scheduler-cached affinity, page-cache
+# Lets the host cool: GPU thermal, scheduler-cached affinity, page-cache
 # warmth for /tmp scenarios. 3 s is empirically enough for variance
 # to settle to ~5 % run-to-run.
 COOLDOWN_S=3
@@ -69,19 +69,14 @@ COOLDOWN_S=3
 #    where bsexec-spawned osascript can find them) and `sudo -n
 #    launchctl asuser` (-1712 timeout — root osascript needs a separate
 #    TCC Automation grant that can't be granted non-interactively).
-#    AS syntax also varies between versions — `create window with
-#    profile "Default"` errors at parse time in 3.6.11 even when iTerm
-#    is fully running.
 #  * Warp's driver depends on `tell application "System Events" to
 #    keystroke`. SE keystroke is a TCC Accessibility-gated path that
 #    is unreachable from any ssh-spawned osascript regardless of
 #    bridge (-1712 in both).
 #
-# Result: iTerm / Warp / Terminal.app baseline data must be refreshed
-# from a console (Screen Sharing) session via direct `bash
-# bin/_remote-measure-others-mini.sh` with no SSH_CONNECTION env. Per-
-# terminal merge keeps their previous snapshot intact when this ssh
-# run produces no entry for them.
+# Result: iTerm / Warp / Terminal.app are refreshed from the console
+# session (no SSH_CONNECTION); an ssh run that has no entry for them
+# leaves their snapshot from the same host as it was.
 ASUSER=""
 SSH_MODE=0
 if [[ -n "${SSH_CONNECTION:-}" ]]; then
@@ -295,7 +290,7 @@ cleanup() {
 
   # Always-clean residue: driver wrappers + scenario markers.
 
-  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* /tmp/marspot-wrapper-* 2>/dev/null || true
+  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
   rm -f /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
   # Same story as the processes: anything a root-spawned terminal wrote
   # (wrappers, markers) is root-owned, and /tmp is sticky — this shell
@@ -308,10 +303,12 @@ cleanup() {
   fi
   rm -f /tmp/measure-*-all.txt 2>/dev/null || sudo -n rm -f /tmp/measure-*-all.txt 2>/dev/null || true
   rm -rf "$SESSION_DIR" 2>/dev/null || true
+  bench_run_end
   echo "==> cleanup done (script rc=$rc)" >&2
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+bench_run_begin   # the product runs from the run dir's copies
 
 # Per-terminal close — runs immediately after that terminal's marker
 # completes (or times out). Closes only this terminal; the others
@@ -454,10 +451,12 @@ for t in "${TERMS[@]}"; do
     marspot)
       # the pane's shell is a wrapper around the same command every
       # other terminal got
-      wrapper=$(mktemp /tmp/marspot-wrapper-XXXXXX)
+      wrapper="$MARSPOT_BENCH_RUN_DIR/wrapper-$t-r$round"
       printf '#!/bin/bash\n%s\n' "$cmd" > "$wrapper"
       chmod 0755 "$wrapper"
-      $ASUSER bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
+      # sudo drops the environment: the bin dir is passed by hand
+      $ASUSER env MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" \
+        bin/drivers/marspot.sh run-app "$wrapper" >&2 || launch_rc=$?
       ;;
   esac
 

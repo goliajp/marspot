@@ -26,7 +26,8 @@
 # goes to stdout with its unit, limit, the span of its trials and the
 # host's load while it was measured; a one-line summary at the end says
 # GATE PASSED, GATE FAILED or GATE INCONCLUSIVE for perf, plus SSIM GATE
-# PASSED / FAILED when --ssim is on.
+# PASSED / FAILED when --ssim is on.  Exit 4, before anything is built:
+# the floors were locked on another machine (bin/_bench_baseline.py).
 #
 # Every run leaves bench/results/gate-record.json and appends each row to
 # bench/results/history/<metric>.jsonl (`bin/_bench_record.py show`).
@@ -87,6 +88,9 @@ if (( SIZE_TABLES )); then
   (( ! DO_MEASURE )) || "$ROOT/bin/_size_tables.sh" tables
   exit 0
 fi
+# floors are only compared on the machine they were locked on; checked
+# before the build, so a refused run costs nothing
+python3 "$ROOT/bin/_bench_baseline.py" check "$BASELINE" "$UPDATE" || exit 4
 
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).
 #
@@ -105,7 +109,7 @@ done
 # Build release unconditionally — cargo is incremental, so an
 # up-to-date tree is a sub-second no-op.  The previous "only if the
 # binary is missing" check silently benched a stale binary forever
-# once one existed: on the mini the gate measured a Jun 6 build for
+# once one existed: on the bench host the gate measured a Jun 6 build for
 # a month of runs (caught 2026-07-11 via byte-identical size numbers
 # across an objc2 major upgrade).
 if (( DO_BUILD )); then
@@ -135,59 +139,18 @@ fi
 if (( ! DO_MEASURE )); then
   exit 0
 fi
-
-
-
-# Let the machine come down off the build before measuring anything.
-#
-# The per-scenario warm-up trial below already pays the cold-CACHE cost,
-# which is a different thing: a `cargo build --release` with fat LTO
-# pins every core for minutes, and the cores are still hot (and clocked
-# down) the instant it exits.  Measured 2026-08-19 on mini: headless
-# parse inside `--full` read cjk 187.2 / emoji 126.6, while the same
-# binary re-measured by hand a few minutes later read 215.7 / 140.7 —
-# 13-15 % apart, enough to fail floors that nothing had regressed past.
-#
-# This does not fix a bench host with a permanent tenant (mini runs
-# another project's test suite most of the day); it fixes the part
-# this script causes itself.  `BENCH_SETTLE_S=0` opts out.
 BENCH_SETTLE_S="${BENCH_SETTLE_S:-8}"
-if [[ "$BENCH_SETTLE_S" != "0" ]]; then
-  echo "==> settling ${BENCH_SETTLE_S}s after build"
-  sleep "$BENCH_SETTLE_S"
-  # A fixed wait is not enough on the remote host: a fat-LTO build
-  # leaves load high for longer than 8 s, and the FIRST scenario is
-  # measured right into it.  Four remote runs on one commit — 185.5 /
-  # 202.8 / 203.3 / 207.6 MB/s on cat-cjk when the run included a
-  # build, then 229.5 / 235.3 / 238.2 on the next run when the build
-  # was a no-op.  Half this metric's gate failures were the machine,
-  # not the code.  Wait for load to actually come down, bounded so a
-  # busy host still gets measured (the load gate refuses the hopeless
-  # ones before we get here).
-  #
-  # Up to four minutes: the load average is a one-minute mean, and from
-  # the 8 a nine-session trial leaves behind it takes about a minute
-  # and a half to fall under 3.  Whatever is measured before that is
-  # thrown away as "the host was busy" by the checks below.
-  _settle_waited=0
-  while [[ "$_settle_waited" -lt 240 ]]; do
-    _l1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
-    [[ -z "$_l1" ]] && break
-    if awk -v l="$_l1" 'BEGIN { exit !(l < 3.0) }'; then
-      [[ "$_settle_waited" -gt 0 ]] && echo "    load down to $_l1 after ${_settle_waited}s"
-      break
-    fi
-    sleep 3
-    _settle_waited=$((_settle_waited + 3))
-  done
-  if [[ "$_settle_waited" -ge 240 ]]; then
-    echo "    still warm after ${_settle_waited}s (load1=$_l1) — measuring anyway"
-  fi
-fi
+bench_settle "$BENCH_SETTLE_S"
 
 # ---- collect current measurements ---------------------------------------
-
-CUR_DIR=$(mktemp -d)
+# the run's copies of the binaries, and its scratch, live in the run dir
+LOAD_SAMPLER=""
+trap '[[ -z $LOAD_SAMPLER ]] || kill "$LOAD_SAMPLER" 2>/dev/null; bench_run_end' EXIT
+trap 'exit 143' TERM INT HUP
+bench_run_begin
+echo "==> run dir $MARSPOT_BENCH_RUN_DIR"
+CUR_DIR="$MARSPOT_BENCH_RUN_DIR/cur"
+mkdir -p "$CUR_DIR"
 MARSPOT="$(marspot_bin marspot)"
 load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
 
@@ -197,7 +160,6 @@ load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
 ( while :; do echo "$(date +%s) $(load1)"; sleep 2; done ) > "$CUR_DIR/load.samples" 2>/dev/null &
 LOAD_SAMPLER=$!
 disown "$LOAD_SAMPLER" 2>/dev/null || true
-trap 'kill "$LOAD_SAMPLER" 2>/dev/null; rm -rf "$CUR_DIR"' EXIT
 
 # run_block <name> <function> — run a block of trials, and run it again
 # (up to BLOCK_REQUEUE more times) when the host was busy while it ran.
@@ -278,12 +240,12 @@ run_block parse measure_parse
 # existing series stays comparable, and a regression that only shows
 # in one of the two is worth seeing as exactly that.
 # What the box was doing while this ran decides whether it is a reading.
-# Measured 2026-09-28 on a busy mini: the same binary, interleaved with
+# Measured 2026-09-28 on a busy runner: the same binary, interleaved with
 # itself, scored 26-125 MB/s on cat-mixed — a five-fold spread that no
 # threshold can read.
 measure_parsefile() {
-  local s i dir
-  dir="$(mktemp -d)"
+  local s i dir="$MARSPOT_BENCH_RUN_DIR/parsefile"
+  mkdir -p "$dir"
   for s in cat-ascii cat-mixed cat-cjk cat-emoji cat-styled cat-highlighted; do
     : > "$CUR_DIR/parsefile-$s.samples"
     : > "$CUR_DIR/parsefile-$s.insn"
@@ -296,7 +258,7 @@ measure_parsefile() {
         parse_trial "$CUR_DIR/parsefile-$s" "$SCENARIOS_DIR/$s.bin"
     done
   done
-  rm -rf "$dir"
+  rm -rf "${dir:?}"
 }
 echo "==> headless parse, file-backed scrollback (5 trials, taking median)"
 run_block parsefile measure_parsefile
@@ -352,7 +314,7 @@ if [[ $MODE == "full" ]]; then
   # by the best other terminal's.
   echo "==> live PTY through the product's window (this takes a minute)"
   (cd "$ROOT" && MEASURE_TERMS=marspot MEASURE_ROUNDS="${BENCH_APP_ROUNDS:-4}" \
-    bash bin/_remote-measure-others-mini.sh > "$CUR_DIR/app.json" 2> "$CUR_DIR/measure-app.log") || true
+    bash bin/_remote-measure-others-runner.sh > "$CUR_DIR/app.json" 2> "$CUR_DIR/measure-app.log") || true
   grep -E '^==> (grid|\[marspot)' "$CUR_DIR/measure-app.log" || true
 
   # Same settle between stages, for the same reason as after the build:
@@ -410,8 +372,8 @@ if [[ $MODE == "full" ]]; then
   measure_key_latency() {
     local sd="/tmp/msp-lat-$$" dir="$CUR_DIR/lat-bins" gui=() b rc=0
     rm -rf "${CUR_DIR:?}/latency" && mkdir -p "$dir" "$CUR_DIR/latency"
-    for b in marspot-shell marspot-core; do ln -sf "$LAT_TARGET/release/$b" "$dir/$b"; done
-    ln -sf "$(marspot_bin marspot-session)" "$dir/marspot-session"
+    for b in marspot-shell marspot-core; do cp "$LAT_TARGET/release/$b" "$dir/$b"; done
+    cp "$(marspot_bin marspot-session)" "$dir/marspot-session"
     [[ -n ${SSH_CONNECTION:-} ]] && gui=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
     rm -rf "${sd:?}" && mkdir -p "$sd"
     ${gui[@]+"${gui[@]}"} /bin/bash -c "cd $(printf '%q' "$ROOT") && env MARSPOT_STATE_DIR=$sd \
@@ -438,7 +400,7 @@ if [[ $MODE == "full" ]]; then
   # The shipped app in a window: its memory with 12 panes open, and how
   # long it takes to show a pane's output after launch.  A window needs
   # the console session; a run that came in over ssh reaches it through
-  # launchctl asuser, as bin/_remote-measure-others-mini.sh does.
+  # launchctl asuser, as bin/_remote-measure-others-runner.sh does.
   GUI=()
   [[ -z ${SSH_CONNECTION:-} ]] || GUI=(sudo -n launchctl asuser "$(id -u)" sudo -u "$(id -un)")
   for gauge in footprint:measure-app-footprint.sh:FP_OUT startup:measure-startup.sh:STARTUP_OUT \
@@ -448,6 +410,7 @@ if [[ $MODE == "full" ]]; then
     echo "==> $script (a sandbox window)"
     rm -rf "${sd:?}" && mkdir -p "$sd"
     ${GUI[@]+"${GUI[@]}"} env MARSPOT_STATE_DIR="$sd" "$outvar=$CUR_DIR/$name.json" \
+      MARSPOT_BENCH_RUN_DIR="$MARSPOT_BENCH_RUN_DIR" MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" \
       /bin/bash -l "$ROOT/bin/$script" > "$CUR_DIR/$name.log" 2>&1 || true
     grep -E '^(footprint12|startup|pane-control) |^    (round|trial) |FAIL' "$CUR_DIR/$name.log" || tail -5 "$CUR_DIR/$name.log"
     "$ROOT/bin/kill-sandbox-marspot.sh" --state-dir "$sd" || true

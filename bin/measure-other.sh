@@ -36,20 +36,20 @@ mkdir -p "$RESULTS_DIR"
 # median took a disturbed one, producing a "0.21x vs best other" that
 # was pure interference.
 #
-# The bench host is mini.  Driving
+# The bench host is marspot_host bench (bin/_lib.sh).  Driving
 # GUI terminals needs a GUI session, which ssh does not have, so the
 # route is `bin/remote-measure-others.sh` — it health-checks for
 # exactly that and prints the Screen-Sharing steps.
 #
 # Set MARSPOT_MEASURE_ANYWHERE=1 to override, deliberately.
-if [[ -z "${MARSPOT_MEASURE_ANYWHERE:-}" && "$(hostname -s)" != "mini" ]]; then
-  cat >&2 <<'WARN'
+if [[ -z "${MARSPOT_MEASURE_ANYWHERE:-}" && "$(hostname -s)" != "$(marspot_host bench)" ]]; then
+  cat >&2 <<WARN
 This saturates the machine it runs on, and this is not the bench host.
 
   * numbers taken here are contaminated by whatever else is running
   * it opens terminal windows over the user's work
 
-Run it on mini instead — bin/remote-measure-others.sh explains how
+Run it on $(marspot_host bench) instead — bin/remote-measure-others.sh explains how
 (a GUI session is required; ssh cannot dispatch AppleEvents).
 
 MARSPOT_MEASURE_ANYWHERE=1 overrides this, for when a rough local

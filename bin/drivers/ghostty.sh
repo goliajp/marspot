@@ -23,7 +23,7 @@
 #   bin/drivers/ghostty.sh quit (refuses)
 #
 # Note on ssh+ssh-driven runs: the caller (e.g.
-# bin/_remote-measure-others-mini.sh) wraps this driver in
+# bin/_remote-measure-others-runner.sh) wraps this driver in
 # `sudo -n launchctl asuser <uid>` so the spawned ghostty lives in the
 # user's GUI launchd domain. Without that, ssh-spawned ghostty has no
 # Aqua bootstrap and its surface never materializes. The wrapper is

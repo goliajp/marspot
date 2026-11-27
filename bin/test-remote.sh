@@ -4,13 +4,13 @@
 # Why: the full suite spins up real L3 processes, PTYs and Metal/CoreText
 # per test binary.  On the dev box that competes with the terminal the
 # user is working in (and once, 2026-07-28, took WindowServer down with
-# it); on mini it competes with nothing.  Same arch + macOS, so a pass
+# it); on the test host it competes with nothing.  Same arch + macOS, so a pass
 # there means what a pass here means.
 #
 # Usage:
-#   bin/test-remote.sh                      # whole suite (default host=mini)
+#   bin/test-remote.sh                      # whole suite, on marspot_host test
 #   bin/test-remote.sh -E 'test(idle)'      # args pass through to nextest
-#   HOST=other-mini bin/test-remote.sh
+#   HOST=<host> bin/test-remote.sh
 #   MARSPOT_FONT_SNAPSHOT=1 bin/test-remote.sh -E 'test(panel_snapshot)'
 #                                           # record baselines on the host;
 #                                           # fetch them with scp afterwards
@@ -45,9 +45,11 @@ remote_sync() {
 }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"
 # shellcheck source=bin/_lock-mark.sh
 source "$ROOT/bin/_lock-mark.sh"
-HOST="${HOST:-mini}"
+HOST="${HOST:-$(marspot_host test)}"
 REMOTE_NAME="${REMOTE_NAME:-test-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.

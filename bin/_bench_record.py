@@ -75,6 +75,11 @@ def meta(root):
         "rustc": _out(["rustc", "--version"]) or None,
         "runner": _out(["hostname", "-s"]) or None,
         "os": _out(["sw_vers", "-productVersion"]) or None,
+        # login and non-login shells on the runners resolve these to
+        # different installs; the record says which one this run had
+        "tools": {"python3": f"{sys.executable} {sys.version.split()[0]}",
+                  "cargo": _out(["sh", "-c", "command -v cargo"]) or None,
+                  "rsync": _out(["sh", "-c", "echo $(command -v rsync) $(rsync --version | head -1)"]) or None},
     }
 
 

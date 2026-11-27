@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bin/remote-measure-others.sh — automate cross-terminal measurement
-# on a clean remote Apple Silicon host (default: ssh mini), then
+# on the bench host (marspot_host bench in bin/_lib.sh), then
 # refresh bench/baseline.json.competitors_snapshot in place.
 #
 # Why this exists: bin/measure-other.sh prints paste-ready commands
@@ -12,7 +12,7 @@
 # via bin/drivers/{iterm,warp,terminal}.sh on the remote host.
 #
 # Usage:
-#   bin/remote-measure-others.sh                # default HOST=mini
+#   bin/remote-measure-others.sh                # HOST=<host> overrides
 #   HOST=other ./bin/remote-measure-others.sh
 #
 # Contract:
@@ -32,8 +32,8 @@
 #     workaround if hit.
 #   - Workaround when ssh dispatch is blocked: connect to the bench
 #     host via Screen Sharing (or run physically) and invoke
-#     `bin/_remote-measure-others-mini.sh > /tmp/measured.json`
-#     yourself; then `scp mini:/tmp/measured.json -` into a manual
+#     `bin/_remote-measure-others-runner.sh > /tmp/measured.json`
+#     yourself; then `scp <host>:/tmp/measured.json -` into a manual
 #     baseline merge.
 #   - Warp's driver is keystroke-based; if it misfires the marker
 #     wait will time out per-terminal and that terminal is omitted
@@ -56,9 +56,11 @@ remote_sync() {
   "$tool" "$@"
 }
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"
 # shellcheck source=bin/_lock-mark.sh
 source "$ROOT/bin/_lock-mark.sh"
-HOST="${HOST:-mini}"
+HOST="${HOST:-$(marspot_host bench)}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
@@ -103,7 +105,7 @@ if [[ "$HEALTH" == *"-1712"* ]] || [[ "$HEALTH" == *"timed out"* ]] || [[ "$HEAL
   echo "" >&2
   echo "Workaround:" >&2
   echo "  1. Screen-Share / VNC into $HOST as a console user." >&2
-  echo "  2. cd ~/$REMOTE_DIR && bash bin/_remote-measure-others-mini.sh > /tmp/measured.json" >&2
+  echo "  2. cd ~/$REMOTE_DIR && bash bin/_remote-measure-others-runner.sh > /tmp/measured.json" >&2
   echo "  3. scp $HOST:/tmp/measured.json $OUT_DIR/measured.json" >&2
   echo "  4. Re-run this script with REMOTE_MEAS_JSON=$OUT_DIR/measured.json to merge into baseline." >&2
   exit 3
@@ -137,7 +139,7 @@ if [[ -z "${REMOTE_MEAS_JSON:-}" ]]; then
       $(lock_until "${MARSPOT_MEASURE_TIMEOUT:-3000}" measure-others "$REMOTE_NAME") \
       caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-3000} sh -c \
       'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
-        && exec bash bin/_remote-measure-others-mini.sh'"
+        && exec bash bin/_remote-measure-others-runner.sh'"
   # The whole run inside the console user's GUI session when the host
   # allows it: every terminal, the product included, is then started
   # the same way, and the AppleScript-driven ones are reachable.
@@ -193,6 +195,9 @@ baseline_path, meas_path, tmp_path = sys.argv[1:4]
 baseline = json.load(open(baseline_path))
 meas = json.load(open(meas_path))
 cs = baseline.setdefault("competitors_snapshot", {})
+# readings from two machines are not one snapshot: a new machine starts it over
+if (cs.get("host") or {}).get("name") != (meas.get("host") or {}).get("name"):
+    cs = baseline["competitors_snapshot"] = {k: v for k, v in cs.items() if not isinstance(v, dict)}
 # Per-terminal overwrite + bump captured_at. We keep any
 # previously-recorded terminals not in this run (e.g. if warp
 # timed out, its old numbers stay rather than vanish silently).

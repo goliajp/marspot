@@ -33,8 +33,9 @@ mkdir -p "$TRIG_DIR" "$PLIST_DIR"
 
 # ---- receiver.sh -----------------------------------------------------
 # Watches for refresh-others.req. When present, removes the trigger
-# (so the WatchPaths event doesn't loop), runs _remote-measure-
-# others-mini.sh inside the LaunchAgent's user aqua session (no
+# (so the WatchPaths event doesn't loop), runs
+# _remote-measure-others-runner.sh inside the LaunchAgent's user aqua
+# session, under the host's bench lock (no
 # SSH_CONNECTION, so the script runs in console mode — all four
 # terminals get driven, not just Ghostty), writes result.json and a
 # done sentinel.
@@ -80,10 +81,12 @@ rm -f "$TRIG_DIR/result.json" "$TRIG_DIR/err.log" "$TRIG_DIR/done"
 # every bench run measures the current shipping versions. iTerm2 / Warp
 # / Ghostty are all `auto_updates` casks, so brew upgrade is a no-op
 # when they're current — fast (a few seconds when nothing to do).
+# The bench host runs nothing outside its bench lock, this included.
 PATH="/opt/homebrew/bin:$PATH"
+LOCK=(/usr/local/bin/bench-lock bench --max-wait 1800)
 if command -v brew >/dev/null 2>&1; then
   echo "==> brew upgrade --cask iterm2 warp ghostty"
-  brew upgrade --cask iterm2 warp ghostty 2>&1 | tail -5 || true
+  "${LOCK[@]}" brew upgrade --cask iterm2 warp ghostty 2>&1 | tail -5 || true
 fi
 
 # Disable "Confirm Quit" prompts so AS quit in the close cycle isn't
@@ -96,12 +99,17 @@ defaults write com.apple.Terminal "Confirm Quit Even if Background Process" -boo
 defaults write com.apple.Terminal "Confirm Close Window" -bool false 2>/dev/null || true
 
 # Critical: LaunchAgent inherits no SSH_CONNECTION; this also makes
-# _remote-measure-others-mini.sh fall into console mode where iTerm,
+# _remote-measure-others-runner.sh fall into console mode where iTerm,
 # Warp, Terminal AND Ghostty all get driven.
 unset SSH_CONNECTION || true
 
-cd "$HOME/bench-marspot"
-if bash bin/_remote-measure-others-mini.sh > "$TRIG_DIR/result.json" 2> "$TRIG_DIR/err.log"; then
+# the copy bin/bench-remote.sh keeps; the product is built in the same
+# lock hold as the measurement
+cd "$HOME/work/bench-marspot"
+if "${LOCK[@]}" --until "+20m marspot terminal refresh" sh -c \
+    '. "$HOME/.cargo/env" && export CARGO_TARGET_DIR="$PWD/target" \
+      && cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
+      && exec bash bin/_remote-measure-others-runner.sh' > "$TRIG_DIR/result.json" 2> "$TRIG_DIR/err.log"; then
   echo "  measure OK"
 else
   rc=$?

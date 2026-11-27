@@ -20,7 +20,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 dev_no_dock
 
 OUT="${PANECTL_OUT:-$ROOT/build/pane-control.json}"
-BIN="$ROOT/target/release"
+BIN="${MARSPOT_BENCH_BIN_DIR:-$ROOT/target/release}"   # a bench run passes its copies
 SD="$MARSPOT_STATE_DIR"
 APPLOG="$SD/logs/marspot.log"
 PEER="$BIN/marspot-peer"

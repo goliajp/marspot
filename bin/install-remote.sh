@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/install-remote.sh — install marspot on another Mac, signed.
 #
-#   bin/install-remote.sh [host]        # default: mini
+#   bin/install-remote.sh <host>        # never a runner: they run no installed app
 #
 # Why this exists rather than running install-local.sh over ssh: an ssh
 # session cannot reach the login keychain, so `codesign` there fails
@@ -16,7 +16,7 @@
 # machine and the remote host needs no certificate of its own.
 set -euo pipefail
 
-HOST="${1:-mini}"
+HOST="${1:?usage: bin/install-remote.sh <host>}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="$ROOT/target/release"
 STAGE="/tmp/marspot-remote-$HOST.app"

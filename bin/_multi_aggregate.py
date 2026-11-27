@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turns the markers of bin/_remote-measure-multi-mini.sh into its JSON.
+"""Turns the markers of bin/_remote-measure-multi-runner.sh into its JSON.
 
   _multi_aggregate.py <session-dir> <windows> <rounds> <trials> <skew-s> "<terms>" <scenario>...
 

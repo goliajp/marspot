@@ -6,10 +6,7 @@
 #  - $SCENARIOS_DIR / $RESULTS_DIR exist
 #  - All marker files go under /tmp with a known prefix so we can clean
 #    them between trials without fighting old runs
-#
-# The whole bench mechanism is documented in the maintainer's own
-# notes, outside this repository.  Read them
-# before adding to this file.
+#  - Runner hosts come from marspot_host, never from a literal name
 
 # Resolve $ROOT to the marspot repo root from wherever we're sourced.
 # This works whether the caller is bin/foo.sh or bin/scenarios/bar.sh.
@@ -27,6 +24,21 @@ mkdir -p "$RESULTS_DIR"
 
 MARKER_PREFIX="/tmp/marspot-bench"
 
+# ---- runner hosts ----------------------------------------------------------
+# Tests, the CI mac job and window e2e go to the test host.  Benchmarks go
+# to the bench host, which runs nothing else: there the build and the
+# measurement share one `bench-lock bench` hold.  The environment overrides
+# either name; how a host is picked changes here and nowhere else.
+MARSPOT_TEST_HOST="${MARSPOT_TEST_HOST:-mini2}"
+MARSPOT_BENCH_HOST="${MARSPOT_BENCH_HOST:-mini3}"
+marspot_host() {
+  case "${1:-}" in
+    test)  echo "$MARSPOT_TEST_HOST" ;;
+    bench) echo "$MARSPOT_BENCH_HOST" ;;
+    *) echo "marspot_host: test|bench, not '${1:-}'" >&2; return 2 ;;
+  esac
+}
+
 # ---- cargo binary resolution -------------------------------------------
 #
 # On systems with a global CARGO_TARGET_DIR (e.g. external SSD per
@@ -42,11 +54,82 @@ _mars_target_dir() {
   fi
   echo "$_MARSPOT_TARGET_DIR"
 }
-# marspot_bin <name> [profile=release] → absolute path of built binary
+# marspot_bin <name> [profile=release] → absolute path of built binary;
+# inside a bench run, the run's copy of a release binary
 marspot_bin() {
   local name=$1
   local profile=${2:-release}
-  echo "$(_mars_target_dir)/$profile/$name"
+  if [[ $profile == release && -n "${MARSPOT_BENCH_BIN_DIR:-}" ]]; then
+    echo "$MARSPOT_BENCH_BIN_DIR/$name"
+  else
+    echo "$(_mars_target_dir)/$profile/$name"
+  fi
+}
+
+# ---- the bench run dir -------------------------------------------------------
+# Every executable a measurement launches is a copy under
+# $MARSPOT_BENCH_RUN_ROOT/<run-id>/: the bench host's console guard exempts
+# that prefix alone, and only while `bench-lock bench` is held.  State dirs
+# stay in /tmp.  The outermost script calls bench_run_begin after the build
+# and bench_run_end on every exit; the scripts it runs inherit
+# MARSPOT_BENCH_RUN_DIR and MARSPOT_BENCH_BIN_DIR and leave the dir alone.
+MARSPOT_BENCH_RUN_ROOT="${MARSPOT_BENCH_RUN_ROOT:-$HOME/work/bench-marspot/run}"
+_BENCH_RUN_OWNED=""
+bench_run_begin() {
+  [[ -z "${MARSPOT_BENCH_RUN_DIR:-}" ]] || return 0
+  local src f
+  src="$(_mars_target_dir)/release"
+  MARSPOT_BENCH_RUN_DIR="$MARSPOT_BENCH_RUN_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_RUN_DIR/bin"
+  mkdir -p "$MARSPOT_BENCH_BIN_DIR/examples"
+  _BENCH_RUN_OWNED=1
+  # cp, never ln: a link would launch the file in the target dir
+  for f in "$src"/* "$src/examples/l3_throughput"; do
+    [[ -f $f && -x $f ]] || continue
+    cp "$f" "$MARSPOT_BENCH_BIN_DIR/${f#"$src"/}"
+  done
+  export MARSPOT_BENCH_RUN_DIR MARSPOT_BENCH_BIN_DIR
+}
+bench_run_end() {
+  [[ -n "$_BENCH_RUN_OWNED" ]] || return 0
+  _BENCH_RUN_OWNED=""
+  rm -rf "${MARSPOT_BENCH_RUN_DIR:?}"
+}
+
+# bench_settle <seconds> — let the machine come down off the build before
+# measuring anything; 0 opts out.
+#
+# The per-scenario warm-up trial already pays the cold-CACHE cost, which
+# is a different thing: a `cargo build --release` with fat LTO pins every
+# core for minutes, and the cores are still hot (and clocked down) the
+# instant it exits.  Measured 2026-08-19: headless parse inside `--full`
+# read cjk 187.2 / emoji 126.6, while the same binary re-measured by hand
+# a few minutes later read 215.7 / 140.7 — 13-15 % apart, enough to fail
+# floors that nothing had regressed past.
+#
+# A fixed wait is not enough: a fat-LTO build leaves load high for longer
+# than 8 s, and the first scenario is measured right into it (four runs on
+# one commit read 185.5 / 202.8 / 203.3 / 207.6 MB/s on cat-cjk with a
+# build, then 229.5 / 235.3 / 238.2 when the build was a no-op).  So it
+# also waits for load1 under 3, up to four minutes: the load average is a
+# one-minute mean, and from the 8 a nine-session trial leaves behind it
+# takes about a minute and a half to fall under 3.
+bench_settle() {
+  local settle=$1 waited=0 l1=""
+  [[ "$settle" != "0" ]] || return 0
+  echo "==> settling ${settle}s after build"
+  sleep "$settle"
+  while [[ "$waited" -lt 240 ]]; do
+    l1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+    [[ -n "$l1" ]] || return 0
+    if awk -v l="$l1" 'BEGIN { exit !(l < 3.0) }'; then
+      [[ "$waited" -eq 0 ]] || echo "    load down to $l1 after ${waited}s"
+      return 0
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  echo "    still warm after ${waited}s (load1=$l1) — measuring anyway"
 }
 
 # ---- timing parser -------------------------------------------------------
@@ -73,9 +156,6 @@ parse_real_ns() {
   ' "$marker"
 }
 
-# parse_all_real_ns marker → emits one ns per `real` line (multi-trial markers)
-parse_all_real_ns() { parse_real_ns "$@"; }
-
 # wait_for_marker <marker> [timeout_s=180] [sentinel=ALL_DONE]
 # Returns 0 when the marker exists and contains the sentinel; 1 on timeout.
 wait_for_marker() {
@@ -86,28 +166,6 @@ wait_for_marker() {
   while [[ $(date +%s) -lt $deadline ]]; do
     if [[ -s "$marker" ]] && grep -q "$sentinel" "$marker" 2>/dev/null; then
       return 0
-    fi
-    sleep 0.5
-  done
-  return 1
-}
-
-# wait_for_n_lines <marker> <pattern> <n> [timeout_s=180]
-# Used for parallel scenarios where N independent workers each emit a
-# match.  Returns 0 once $n matching lines are seen.
-wait_for_n_lines() {
-  local marker=$1
-  local pattern=$2
-  local n=$3
-  local timeout_s=${4:-180}
-  local deadline=$(( $(date +%s) + timeout_s ))
-  while [[ $(date +%s) -lt $deadline ]]; do
-    if [[ -s "$marker" ]]; then
-      local count
-      count=$(grep -c "$pattern" "$marker" 2>/dev/null || echo 0)
-      if (( count >= n )); then
-        return 0
-      fi
     fi
     sleep 0.5
   done
@@ -166,23 +224,6 @@ rss_total_kib() {
   echo "$sum"
 }
 
-# json_emit_kv <key> <value> [more...] → prints `"k":"v","k":v,...`
-# Heuristic: numeric values pass-through unquoted; everything else quoted.
-# Don't use this for nested objects — write JSON directly via python3.
-json_emit_kv() {
-  local out=""
-  while (( $# >= 2 )); do
-    local k=$1; local v=$2; shift 2
-    if [[ -n "$out" ]]; then out+=","; fi
-    if [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || [[ "$v" == "true" || "$v" == "false" || "$v" == "null" ]]; then
-      out+="\"$k\":$v"
-    else
-      out+="\"$k\":\"$v\""
-    fi
-  done
-  printf '%s' "$out"
-}
-
 # kill_app <name>
 # marspot: stops the bench sandbox `bin/drivers/marspot.sh run-app`
 # started and removes its state dir; no other marspot is touched.  For
@@ -199,13 +240,6 @@ kill_app() {
       return 2
       ;;
   esac
-}
-
-# Pretty-print a number of bytes as MiB with one decimal.
-fmt_mib() { python3 -c "print(f'{$1/1048576:.1f}')"; }
-fmt_mbps_from_ns() {
-  # bytes ns → MiB/s
-  python3 -c "print(f'{$1*1e9/$2/1048576:.1f}')"
 }
 
 # ---- focus isolation ---------------------------------------------------
@@ -254,7 +288,7 @@ restore_focus_to() {
 # and it lies WORSE the faster the terminal is — the wrong bias for
 # this repo.
 #
-# Every live consumer (bin/_remote-measure-others-mini.sh for the
+# Every live consumer (bin/_remote-measure-others-runner.sh for the
 # product and the competitors, bin/measure-other.sh for a manual run) cat's each scenario as many times as it takes to
 # clear this bar, so both sides of a cross-terminal comparison push the
 # same number of bytes.  The scenario FILES keep their original sizes:
@@ -303,44 +337,6 @@ live_cat_args() {
 # A terminal that never answers times out after 5 s and writes an empty
 # `cpr=` line; parsers must treat that trial as INVALID rather than
 # folding a 5 s timeout into the throughput number.
-
-# write_live_trial_script <out> <marker> <scenario-path>
-# One scenario, one trial; stderr (the `time` output plus the cpr line)
-# goes to <marker>.
-write_live_trial_script() {
-  local out=$1 marker=$2 scenario=$3
-  local reps args
-  reps=$(live_repeat "$scenario")
-  args=$(live_cat_args "$scenario" "$reps")
-  # Microseconds, for the reason spelled out in
-  # `write_live_matrix_script`: `/usr/bin/time -p` prints two decimals,
-  # a scenario here takes about a quarter of a second, and the step
-  # between adjacent readings is therefore worth several MB/s. The
-  # competitor harness was moved off that clock and this one -- which
-  # measures marspot itself, and feeds the gate's `live` and `vs-best`
-  # rows -- was left on it, so the two sides of the comparison were
-  # read with different instruments.
-  cat > "$out" <<TRIAL
-#!/bin/zsh
-zmodload zsh/datetime
-if [[ -z \$EPOCHREALTIME ]]; then
-  print -u2 "no EPOCHREALTIME: zsh/datetime did not load"; exit 1
-fi
-exec 2> "$marker"
-__s=\$EPOCHREALTIME
-/bin/zsh -c '
-  /bin/cat$args
-  stty raw -echo 2>/dev/null
-  printf "\033[6n" > /dev/tty
-  IFS="[;" read -t 5 -srd R _ _row _col < /dev/tty
-  stty sane 2>/dev/null
-  printf "cpr=%s,%s\n" "\$_row" "\$_col" >&2
-'
-__e=\$EPOCHREALTIME
-printf 'real %.6f\n' \$((__e - __s)) >&2
-TRIAL
-  chmod 0755 "$out"
-}
 
 # write_live_matrix_script <out> <marker> <trials> <scenario-path>...
 # The whole matrix in one terminal session, appending `==SCN== <id>`

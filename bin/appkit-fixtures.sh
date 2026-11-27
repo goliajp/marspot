@@ -26,7 +26,7 @@
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOST="${HOST:-mini}"
+HOST="${HOST:-$(source "$ROOT/bin/_lib.sh" && marspot_host test)}"
 REMOTE_NAME="${REMOTE_NAME:-appkit-fixtures-marspot}"
 write=0
 [[ ${1:-} == --write ]] && write=1

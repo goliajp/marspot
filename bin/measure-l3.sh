@@ -191,7 +191,7 @@ run_trial() {
   load1 >> "$RUN_DIR/trial.load"
 }
 
-RUN_DIR=$(mktemp -d)
+RUN_DIR=$(mktemp -d "${MARSPOT_BENCH_RUN_DIR:-${TMPDIR:-/tmp}}/measure-l3.XXXXXX")
 cleanup() {
   local p
   # stopped mid-trial: the load sampler and the probes of that trial

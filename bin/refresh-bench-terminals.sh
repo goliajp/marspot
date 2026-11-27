@@ -7,7 +7,7 @@
 #      bin/install-bench-launchagent.sh).
 #   2. Receiver runs `brew upgrade --cask iterm2 warp ghostty` so the
 #      measure is against latest stable, then drives the 4 terminals
-#      through bin/_remote-measure-others-mini.sh.
+#      through bin/_remote-measure-others-runner.sh.
 #   3. Poll for the done sentinel (cap 10 min).
 #   4. scp the result back, merge per-terminal into bench/baseline.json
 #      (preserves entries the receiver didn't refresh — e.g. Warp when
@@ -17,7 +17,7 @@
 # Usage:
 #   bin/refresh-bench-terminals.sh                # full pipeline
 #   bin/refresh-bench-terminals.sh --no-gate      # skip bench-remote
-#   HOST=other-mini bin/refresh-bench-terminals.sh
+#   HOST=<host> bin/refresh-bench-terminals.sh
 #
 # Per-terminal entries in baseline include version + captured_at +
 # bundle_id + method (auto-populated by the receiver), so a drifting
@@ -28,7 +28,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-HOST="${HOST:-mini}"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"
+HOST="${HOST:-$(marspot_host bench)}"
 DO_GATE=1
 for arg in "$@"; do
   case "$arg" in
@@ -101,6 +103,9 @@ baseline_path, meas_path, tmp_path = sys.argv[1:4]
 baseline = json.load(open(baseline_path))
 meas = json.load(open(meas_path))
 cs = baseline.setdefault("competitors_snapshot", {})
+# readings from two machines are not one snapshot: a new machine starts it over
+if (cs.get("host") or {}).get("name") != (meas.get("host") or {}).get("name"):
+    cs = baseline["competitors_snapshot"] = {k: v for k, v in cs.items() if not isinstance(v, dict)}
 # Per-key full replace — measured has host + each terminal as a
 # self-contained dict (version, bundle_id, captured_at, method,
 # *_MBps). Replacing wholesale means each refresh updates the entry

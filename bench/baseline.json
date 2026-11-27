@@ -34,6 +34,10 @@
     "2.49) x 0.90."
   ],
   "_units": "Throughput floors (*_MBps_min) are 10^6 bytes per second.  Until 2026-11-12 the headless parse floors were in 2^20 bytes per second under the same name; they were multiplied by 1.048576 that day, which keeps each floor where it was.  The competitor snapshot states its unit per terminal, see its _unit_note.  *_insn_per_byte_max are instructions retired per byte (lower is better), as the kernel reports them for the measured process: marspot-session for the mars_l3 keys, the whole `marspot --bench parse` process for the mars_parse keys.",
+  "host": {
+    "name": "mini",
+    "locked_at": "2026-11-25"
+  },
   "scenarios": [
     {
       "id": "cat-ascii",

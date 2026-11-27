@@ -6,10 +6,10 @@
 # the baseline directly comparable.
 #
 # Usage:
-#   bin/bench-remote.sh                # fast tier (default host=mini)
+#   bin/bench-remote.sh                # fast tier, on marspot_host bench
 #   bin/bench-remote.sh --full         # full tier
 #   bin/bench-remote.sh --size-tables  # module tables for a size budget
-#   HOST=other-mini bin/bench-remote.sh --full
+#   HOST=<host> bin/bench-remote.sh --full
 #
 # Contract:
 #   - exclusive : a local mkdir lock against another bench-remote from
@@ -19,7 +19,10 @@
 #   - clean     : dedicated CARGO_TARGET_DIR, caffeinate -dims
 #   - bounded   : the build + measurement is stopped after
 #                 MARSPOT_BENCH_TIMEOUT seconds (default 5400); cargo
-#                 sweep --time 30 prunes stale target/ artefacts
+#                 sweep --time 30 prunes stale target/ artefacts, inside
+#                 the same lock hold (the bench host runs nothing else)
+#   - one host  : the floors' machine only; bin/bench.sh exits 4 before
+#                 building when the baseline was locked elsewhere
 #   - terminating: trap on EXIT/INT/TERM kills the remote process group,
 #                  and with it the bench's own marspot children
 #   - retrievable: bench/results/ rsync'd back to bench/remote-runs/<ts>/
@@ -48,9 +51,11 @@ remote_sync() {
 }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"
 # shellcheck source=bin/_lock-mark.sh
 source "$ROOT/bin/_lock-mark.sh"
-HOST="${HOST:-mini}"
+HOST="${HOST:-$(marspot_host bench)}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 # remote-sync always lands in ~/work/<name>, so that is where the
 # run has to look.
@@ -232,7 +237,8 @@ ssh "$HOST" "
   # The build half gets the same arguments: --full builds more.
   rc=0
   $LOCK_CMD caffeinate -dims bin/_bounded.sh $TIMEOUT sh -c \
-    './bin/bench.sh --build-only $ARGS_Q && exec ./bin/bench.sh --no-build $ARGS_Q' || rc=\$?
+    './bin/bench.sh --build-only $ARGS_Q && ./bin/bench.sh --no-build $ARGS_Q; rc=\$?; \
+      cargo sweep --time 30 2>&1 | tail -2; exit \$rc' || rc=\$?
   rm -f $REMOTE_PIDF
   exit \$rc
 " </dev/null
@@ -244,6 +250,10 @@ if (( REMOTE_RC == 75 )); then
   echo "==> could not get $HOST to itself within ${MAX_WAIT}s — nothing was measured." >&2
   echo "    Who was in the way is above.  Raise MARSPOT_BENCH_MAX_WAIT, or wait" >&2
   echo "    for them and try again; this is not a gate failure." >&2
+fi
+if (( REMOTE_RC == 4 )); then
+  echo "==> $HOST is not the machine bench/baseline.json was locked on — nothing was" >&2
+  echo "    built or measured.  Its reason is above." >&2
 fi
 set -e
 
@@ -260,10 +270,6 @@ if [[ -f "$OUT_DIR/gate-record.json" ]] \
    && [[ "$OUT_DIR/gate-record.json" -nt "$LOCK_LOCAL/pid" ]]; then
   python3 "$ROOT/bin/_bench_record.py" append "$OUT_DIR/gate-record.json"
 fi
-
-# ---- bounded growth: prune remote target/ ----------------------------
-ssh "$HOST" "cd ~/$REMOTE_DIR && cargo sweep --time 30 2>&1 | tail -2" \
-  </dev/null || true
 
 echo "==> done (bench exit $REMOTE_RC), results in $OUT_DIR"
 exit $REMOTE_RC

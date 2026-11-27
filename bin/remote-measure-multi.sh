@@ -9,7 +9,7 @@
 # Each count is a hold of the host's bench lock of its own: the build
 # and the measurement inside it, as bin/remote-measure-others.sh does.
 # Results: bench/remote-runs/multi-<UTC>/windows-<N>.json, one object
-# per count from bin/_remote-measure-multi-mini.sh, and a table of them
+# per count from bin/_remote-measure-multi-runner.sh, and a table of them
 # on stdout.  Nothing is written to bench/baseline.json.
 
 set -euo pipefail
@@ -26,9 +26,11 @@ remote_sync() {
 }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"
 # shellcheck source=bin/_lock-mark.sh
 source "$ROOT/bin/_lock-mark.sh"
-HOST="${HOST:-mini}"
+HOST="${HOST:-$(marspot_host bench)}"
 REMOTE_NAME="${REMOTE_NAME:-bench-marspot}"
 REMOTE_DIR="work/$REMOTE_NAME"
 OUT_DIR="$ROOT/bench/remote-runs/multi-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -56,7 +58,7 @@ for n in "$@"; do
       $(lock_until "${MARSPOT_MEASURE_TIMEOUT:-1500}" measure-multi "$REMOTE_NAME") \
       caffeinate -dims bin/_bounded.sh ${MARSPOT_MEASURE_TIMEOUT:-1500} sh -c \
       'cargo build --release --bin marspot-shell --bin marspot-core --bin marspot-session >&2 \
-        && exec bash bin/_remote-measure-multi-mini.sh'"
+        && exec bash bin/_remote-measure-multi-runner.sh'"
   echo "==> $n windows on $HOST" >&2
   # inside the GUI session, as the user: the windows need it
   ssh "$HOST" "sudo -n launchctl asuser $GUI_UID sudo -u \$(id -un $GUI_UID) /bin/bash -lc $(printf '%q' "$INNER")" \

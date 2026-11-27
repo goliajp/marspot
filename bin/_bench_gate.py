@@ -30,7 +30,6 @@ Exit: 0 passed, 1 a gating row is over its limit, 3 nothing is over its
 limit but at least one gating row has no valid reading.
 """
 import json
-import math
 import os
 import sys
 
@@ -40,6 +39,7 @@ import _bench_record  # noqa: E402
 import _bench_latency  # noqa: E402
 import _bench_pane_control  # noqa: E402
 import _size_budget  # noqa: E402
+import _bench_baseline  # noqa: E402
 
 STALE_DAYS = 14
 
@@ -69,6 +69,7 @@ def self_test():
             b = json.loads(json.dumps(src))
             day = datetime.date.today() - datetime.timedelta(days=age)
             b["competitors_snapshot"]["captured_at"] = day.isoformat()
+            b["competitors_snapshot"]["host"] = {"name": _bench_baseline.machine()}
             bp = os.path.join(work, f"baseline-{label}.json")
             json.dump(b, open(bp, "w"))
             root = os.path.join(work, f"root-{label}")
@@ -241,6 +242,7 @@ if mode == "full":
     except (TypeError, ValueError):
         snap_age = None
     allow_stale = os.environ.get("MARSPOT_BENCH_ALLOW_STALE_COMPETITORS") == "1"
+    elsewhere = _bench_baseline.competitor_mismatch(baseline, _bench_baseline.machine())
     stale = None
     if snap_age is None:
         stale = f"the competitor snapshot has no readable captured_at ({snap_day!r})"
@@ -265,6 +267,8 @@ if mode == "full":
             r["note"] = f"{stale}; judged anyway (MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1)"
         elif stale and r["verdict"] not in ("invalid", "skip"):
             r.update(verdict="inconclusive", note=stale)
+        if elsewhere and r["verdict"] not in ("invalid", "skip"):
+            r.update(verdict="inconclusive", note=elsewhere)
 
 # ---- nine sessions absorbing the same scenario at once -------------------
 multi = l3_doc("l3-multi.json") if mode == "full" else None
@@ -421,6 +425,7 @@ record.update({
               "KiB": "resident memory, 1024 bytes", "ratio": "marspot / best other terminal",
               "ms": "milliseconds, median of trials"},
     "load_max": _bench_record.LOAD_MAX, "foreign_cores_max": _bench_record.FOREIGN_MAX,
+    "baseline_host": baseline.get("host"),
     "rows": rows, "shell_prod_lines": _size_budget.shell_prod_lines(root),
 })
 results_dir = os.path.join(root, "bench", "results")
@@ -434,33 +439,5 @@ print(f"==> {record_path}; {_bench_record.append(record_path, hist)} readings ap
 
 # ---- --update-baseline -----------------------------------------------------
 if do_update:
-    if rc != 0:
-        print("--update-baseline refused: the gate is not passing")
-        sys.exit(1)
-    # Floors for the wall-clock and latency readings, from this one run
-    # with a safety margin.  The instructions-per-byte ceilings are not
-    # touched: they come from the spread over several runs, and one run
-    # cannot know it.  Nor are the size budgets: see bin/_size_budget.py.
-    print("==> updating floors: 7% headless, 10% live; instruction ceilings left alone")
-    by = {r["metric"]: r["value"] for r in rows if r["value"] is not None}
-    for entry in baseline["scenarios"]:
-        short = entry["id"].removeprefix("cat-")
-        if f"parse MB/s {short}" in by:
-            entry["mars_parse_MBps_min"] = round(by[f"parse MB/s {short}"] * 0.93)
-        # mars_vs_best_other_min is a requirement, not a reading: it is
-        # never derived from a run
-        live = by.get(f"app MB/s {short}")
-        if live is not None and "mars_live_MBps_min" in entry:
-            entry["mars_live_MBps_min"] = round(live * 0.90)
-    # ceil, not round: 1.9 x 1.30 = 2.47 rounds to 2 and the margin is gone
-    for label, key, margin in (("render p99", "render_full_repaint", 1.50),
-                               ("scroll p99", "scroll_repaint", 1.30),
-                               ("scroll-cold p99", "scroll_cold_repaint", 1.30)):
-        if label in by and key in baseline:
-            baseline[key]["p99_us_max"] = math.ceil(by[label] * margin)
-    with open(baseline_path, "w") as f:
-        json.dump(baseline, f, indent=2)
-        f.write("\n")
-    print("==> wrote", baseline_path)
-
+    sys.exit(_bench_baseline.update(baseline, baseline_path, rows, rc, record["runner"]))
 sys.exit(rc)

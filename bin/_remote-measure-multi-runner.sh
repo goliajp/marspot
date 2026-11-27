@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# bin/_remote-measure-multi-mini.sh — N terminal windows absorbing the
+# bin/_remote-measure-multi-runner.sh — N terminal windows absorbing the
 # same corpus at the same moment, for the product and for the terminals
 # whose drivers can open N windows on the bench host.  Runs there, the
-# way bin/_remote-measure-others-mini.sh does, and prints one JSON
+# way bin/_remote-measure-others-runner.sh does, and prints one JSON
 # object on stdout:
 #
 #   { "windows": 4, "host": {...},
 #     "marspot": { "grid": "99x35", "cat-ascii_MBps": 301.2, ..., "rounds": [...] },
 #     "ghostty": { ... } }
 #
-#   MULTI_WINDOWS=4 MEASURE_ROUNDS=4 bash bin/_remote-measure-multi-mini.sh
+#   MULTI_WINDOWS=4 MEASURE_ROUNDS=4 bash bin/_remote-measure-multi-runner.sh
 #
 # What a figure is.  Every window runs the same trial script.  A trial
 # has a start time all N windows share, read off the wall clock; each
@@ -92,9 +92,11 @@ cleanup() {
   stop_ghostty
   bin/drivers/marspot.sh close-app >/dev/null 2>&1
   [[ -n ${MULTI_KEEP:-} ]] || rm -rf "$SESSION_DIR"
+  bench_run_end
   exit "$rc"
 }
 trap cleanup EXIT
+bench_run_begin   # the product runs from the run dir's copies
 
 # The script every window of one terminal and round runs.
 write_multi_script() {
@@ -189,7 +191,7 @@ for t in "${TERMS[@]}"; do
   case "$t" in
     marspot)
       # shellcheck disable=SC2086
-      $ASUSER bin/drivers/marspot.sh run-app "$wrapper" "$N" >&2
+      $ASUSER env MARSPOT_BENCH_BIN_DIR="$MARSPOT_BENCH_BIN_DIR" bin/drivers/marspot.sh run-app "$wrapper" "$N" >&2
       ;;
     ghostty)
       for ((i = 0; i < N; i++)); do
