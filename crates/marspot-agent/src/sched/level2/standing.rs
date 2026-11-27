@@ -11,15 +11,18 @@
 //!
 //! A switch whose window is open is committed: it is not re-targeted
 //! for a better score, only cancelled when its target fails a filter or
-//! its gain is gone: it saves neither money nor stall hours.  A window whose deadline passes with the pane where
-//! it was is a miss.  After a miss or a cancel the pane is pinned to its
-//! account for an hour.
+//! its gain is gone: worked out again, it no longer saves money, nor
+//! costs no more and saves a quarter of a stall hour (the rule every
+//! plan is held to against doing nothing).  A window whose deadline
+//! passes with the pane where it was is a miss.  After a miss or a
+//! cancel the pane is pinned to its account for an hour.
 //!
 //! Plan ids chain: each is a hash of the previous id, a digest of the
 //! inputs and the structure, so a replay from the first plan fact
 //! gives the same ids.
 
 use super::grid::Grid;
+use super::search::NOISE;
 use super::{DWELL_H, Input, MIN_GAIN, MIN_GAIN_EFF, Plan, Sched};
 
 /// A pin after a miss or a cancel, seconds.
@@ -96,6 +99,11 @@ pub fn structure_of(plan: &Plan) -> Vec<(u64, u8, u8)> {
     v
 }
 
+/// A switch saving `g` weeks and `eff` stall hours is worth keeping.
+pub(super) fn still_gains(g: f64, eff: f64) -> bool {
+    g > 0.0 || (g >= -NOISE && eff >= MIN_GAIN_EFF)
+}
+
 impl Standing {
     /// Hours pane `sid` stays pinned from `now`.
     pub fn pinned_h(&self, sid: u64, now: i64) -> Option<f64> {
@@ -160,7 +168,7 @@ impl Standing {
                 Some("missed")
             } else if timed.is_none() {
                 Some("target fails a filter")
-            } else if gain.is_none_or(|(g, eff)| g <= 0.0 && eff <= 0.0) {
+            } else if gain.is_none_or(|(g, eff)| !still_gains(g, eff)) {
                 Some("gain gone")
             } else {
                 None

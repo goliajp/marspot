@@ -251,3 +251,31 @@ fn sched_level2_a_committed_switch_that_averts_a_refusal_stays_though_it_saves_n
     let s = r.plan.switches.iter().find(|s| s.sid == sid).expect("the switch");
     assert!(s.gain_eff > 0.0, "{s:?}");
 }
+
+#[test]
+fn sched_level2_a_committed_switch_that_costs_money_for_a_sliver_of_stall_is_cancelled() {
+    let a = [acct(1, 0.02, 0.0, 100.0), acct(2, 0.6, 0.0, 120.0)];
+    let p = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002), pane(12, 1, false, 0.0, 0.004)];
+    let i = input(&a, &p);
+    let now = 1_800_000_000;
+    let mut st = Standing::default();
+    pass::full(&mut st, &i, 1, now);
+    let (sid, opened) = (st.switches[0].sid, st.switches[0].open_at);
+    let g = Grid::new(&i);
+    let mut timed = evaluate(&i, &st.schedules(&i, &g, opened).expect("the structure holds"));
+    let s = timed.switches.iter_mut().find(|s| s.sid == sid && s.order == 0).expect("the switch");
+    // a third of a point dearer for a hundredth of a stall hour
+    (s.gain, s.gain_eff) = (-0.003, 0.01);
+    let ended = st.end(Some(&timed), &i, opened);
+    assert_eq!(ended.cancelled, vec![(sid, "gain gone")]);
+    assert!(st.pinned_h(sid, opened).is_some());
+}
+
+#[test]
+fn sched_level2_a_committed_switch_is_kept_by_the_selectors_rule() {
+    assert!(standing::still_gains(0.001, 0.0));
+    assert!(standing::still_gains(0.0, MIN_GAIN_EFF));
+    assert!(!standing::still_gains(-0.003, 0.01));
+    assert!(!standing::still_gains(-0.003, 5.0));
+    assert!(!standing::still_gains(0.0, 0.1));
+}
