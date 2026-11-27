@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "reattach_tests.rs"]
 mod reattach_tests;
+#[path = "prompt_jump_tests.rs"]
+mod prompt_jump_tests;
 #[path = "saved_slots_tests.rs"]
 mod saved_slots_tests;
 use marspot::state::{SavedPane, SavedWindowLayout};

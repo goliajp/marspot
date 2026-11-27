@@ -135,6 +135,9 @@ fn item(index: usize, row: &Row, target: &MenuTarget, mtm: MainThreadMarker) -> 
     };
     let key = match row.chord.map(|c| c.key) {
         Some(commands::Key::Char(c)) => c.to_string(),
+        // AppKit's NSUpArrowFunctionKey and NSDownArrowFunctionKey
+        Some(commands::Key::Up) => '\u{F700}'.to_string(),
+        Some(commands::Key::Down) => '\u{F701}'.to_string(),
         Some(commands::Key::Esc) | None => String::new(),
     };
     // SAFETY: the action is AppKit's own, sent up the responder chain

@@ -4,8 +4,8 @@
 //!
 //! Same machinery and the same way of recording and fetching as the
 //! panel pictures (see `panel_snapshot_tests`); the tests are
-//! `chrome_snapshot_{window,search,menu,close,terminal,scrollback}` and the
-//! baselines `bench/ui/snapshots/chrome_{window,search,menu,close,terminal,scrollback}.png`.
+//! `chrome_snapshot_{window,search,menu,close,terminal,scrollback,prompt_jump}` and the
+//! baselines `bench/ui/snapshots/chrome_{window,search,menu,close,terminal,scrollback,prompt_jump}.png`.
 //! `before/` beside them holds the first three scenes as they were
 //! drawn before the chrome took its colours and sizes from the theme.
 //! All but `close` are drawn again under the light and the
@@ -410,6 +410,18 @@ pub(super) fn chrome_snapshot_scrollback() {
         PaneSpec { history: HistoryView { offset: 9000, len: 9500 }, ..pane("devops", "", SessionState::Idle) },
     ];
     snapshot("chrome_scrollback", (1200, 640), (2, 1), &panes, 0, |_, _, _| {});
+}
+
+/// A pane a prompt jump moved back into its history, the row it put on
+/// top marked across the pane in the search hit's colours.
+#[test]
+pub(super) fn chrome_snapshot_prompt_jump() {
+    let panes = [PaneSpec {
+        history: HistoryView { offset: 40, len: 120 },
+        hits: &[HighlightSpan { view_row: 0, col_start: 0, col_end_inclusive: u16::MAX }],
+        ..pane("smix", "", SessionState::Active)
+    }];
+    snapshot("chrome_prompt_jump", (1200, 640), (1, 1), &panes, 0, |_, _, _| {});
 }
 
 /// A screen that ends a third of the way down.

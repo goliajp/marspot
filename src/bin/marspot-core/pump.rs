@@ -11,6 +11,7 @@ impl CoreApp {
         // debounce window has elapsed.  Cheap when no search is
         // open (single `is_none` check per pane).
         self.process_search_debounces();
+        self.expire_prompt_flashes(Instant::now());
         let mut total = 0;
         // Snapshot which session ids are frozen by an L1 PaneSession:
         // the loop holds `&mut` on the window's panes, and reading the

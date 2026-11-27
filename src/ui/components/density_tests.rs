@@ -74,7 +74,7 @@ fn window_light() {
 scenes_hold_at_both_scales! {
     density_settings = panel::panel_snapshot_settings, 14;
     density_settings_ja = settings_ja, 14;
-    density_shortcuts = panel::panel_snapshot_shortcuts, 21;
+    density_shortcuts = panel::panel_snapshot_shortcuts, 23;
     density_layout = panel::panel_snapshot_layout, 7;
     density_layout_grid = panel::panel_snapshot_layout_grid, 13;
     density_process = panel::panel_snapshot_process, 5;
@@ -91,6 +91,7 @@ scenes_hold_at_both_scales! {
     density_chrome_close = chrome::chrome_snapshot_close, 0;
     density_chrome_terminal = chrome::chrome_snapshot_terminal, 0;
     density_chrome_scrollback = chrome::chrome_snapshot_scrollback, 0;
+    density_chrome_prompt_jump = chrome::chrome_snapshot_prompt_jump, 0;
 }
 
 /// A sheet with one thing wrong in it: a card placed in points and
@@ -301,6 +302,7 @@ pictures_at_scale_2! {
     chrome_snapshot_search_2x = chrome::chrome_snapshot_search;
     chrome_snapshot_menu_2x = chrome::chrome_snapshot_menu;
     chrome_snapshot_scrollback_2x = chrome::chrome_snapshot_scrollback;
+    chrome_snapshot_prompt_jump_2x = chrome::chrome_snapshot_prompt_jump;
     panel_snapshot_settings_2x = panel::panel_snapshot_settings;
     panel_snapshot_shortcuts_2x = panel::panel_snapshot_shortcuts;
     panel_snapshot_layout_2x = panel::panel_snapshot_layout;

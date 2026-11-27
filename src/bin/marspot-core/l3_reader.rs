@@ -58,7 +58,8 @@ pub(super) fn l3_reader_loop(
                 MsgType::SessionPublishes
                 | MsgType::SessionReadsFrameCells
                 | MsgType::SessionReadsPaneControl
-                | MsgType::PaneAwake => {
+                | MsgType::PaneAwake
+                | MsgType::PromptJumped => {
                     let _ = tx.send(CoreEvent::L3Says(session_id, f));
                 }
                 MsgType::PaneTyped | MsgType::PaneWatchFired | MsgType::PaneDone => {

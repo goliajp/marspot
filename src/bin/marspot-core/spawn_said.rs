@@ -72,6 +72,9 @@ impl CoreApp {
 
     /// A frame a session sent about itself.
     pub(super) fn session_says(&mut self, sid: u64, frame: &Frame) {
+        if frame.msg_type == MsgType::PromptJumped {
+            return self.prompt_jumped(sid, &frame.payload);
+        }
         match self.pane_by_sid_mut(sid) {
             Some(pane) => pane.session_mut().l3_session_says(frame),
             None => self.pane_control.shadows.early.keep(sid, frame.clone()),
@@ -95,6 +98,29 @@ impl CoreApp {
     pub(super) fn restored_panes_landed(&mut self, wi: usize) -> usize {
         self.replay_early_says();
         marspot::session_signal::ask_all_to_update(win!(self, wi).panes.iter_mut())
+    }
+
+    /// The session moved its view to a prompt: the pane follows and
+    /// marks the row on top for a moment.
+    fn prompt_jumped(&mut self, sid: u64, payload: &[u8]) {
+        let Ok(said) = marspot::shell_proto::decode_prompt_jumped(payload) else { return };
+        let Some(pane) = self.pane_by_sid_mut(sid) else { return };
+        pane.prompt_jumped(said, Instant::now());
+        if let Some((wi, _)) = self.slot_showing(sid) {
+            win!(self, wi).needs_render = true;
+        }
+    }
+
+    /// Unmark the rows prompt jumps marked whose time is up.
+    pub(super) fn expire_prompt_flashes(&mut self, now: Instant) {
+        for w in self.windows.iter_mut() {
+            for p in w.panes.iter_mut() {
+                w.needs_render |= p.expire_prompt_flash(now);
+            }
+        }
+        if self.shadows.iter_mut().fold(false, |any, p| p.expire_prompt_flash(now) | any) {
+            self.windows.iter_mut().for_each(|w| w.needs_render = true);
+        }
     }
 
     pub(super) fn expire_unsaid(&mut self, now: Instant) {

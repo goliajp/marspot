@@ -26,6 +26,8 @@ impl Pane {
         }
         let moved = new as i32 - self.view_offset as i32;
         self.view_offset = new;
+        // the marked row is no longer the one on top
+        self.prompt_flash = None;
         self.session.forward_scroll(new); // no-op for in-process backends
         moved
     }
@@ -69,6 +71,7 @@ impl Pane {
     /// scroll deltas).
     pub fn set_view_offset(&mut self, off: u16) {
         self.view_offset = off;
+        self.prompt_flash = None;
     }
 
     /// Force the view back to the live tail. Used by container code
@@ -79,6 +82,7 @@ impl Pane {
             return false;
         }
         self.view_offset = 0;
+        self.prompt_flash = None;
         self.session.forward_scroll(0); // no-op for in-process backends
         true
     }

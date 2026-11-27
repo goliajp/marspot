@@ -136,6 +136,8 @@ Everything not listed goes to the program in the pane, unchanged.
 | `⌘C` | Copy |
 | `⌘V` | Paste |
 | `⌘F` | Find |
+| `⌘↑` | Jump to Previous Command |
+| `⌘↓` | Jump to Next Command |
 | `⌘B` | Show or Hide Sidebar |
 | `⇧⌘L` | Layout |
 | `⇧⌘P` | Process Monitor |
@@ -163,12 +165,9 @@ Honest list, because you will hit these in the first hour:
   target comes from whatever program writes to the pty, and opening
   it hands it to whichever app claims the scheme.
 - No OSC 7 (working directory; the pane's directory is read from its
-  process instead). OSC 133 prompt marks
-  are read and kept with the history, but nothing uses them yet:
-  there is no key to jump to the previous command. OSC 52 puts text
-  on the clipboard; reading it back is refused on purpose, because
-  answering hands any program that can write to the pty whatever you
-  last copied.
+  process instead). OSC 52 puts text on the clipboard; reading it
+  back is refused on purpose, because answering hands any program
+  that can write to the pty whatever you last copied.
 - There is no terminfo entry of its own. `TERM` is set to
   `xterm-256color`, and every standard capability of that entry is
   tested against marspot (the extended ones, such as the cursor

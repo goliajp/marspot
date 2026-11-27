@@ -30,6 +30,11 @@ pub enum Command {
     Copy,
     Paste,
     Find,
+    /// Scroll the focused pane to the prompt above the top of its view,
+    /// from the marks its shell left with `OSC 133`.
+    PrevPrompt,
+    /// The same, to the prompt below it, or back to the live screen.
+    NextPrompt,
     ToggleSidebar,
     Layout,
     Processes,
@@ -121,6 +126,8 @@ pub enum Runs {
 pub enum Key {
     Char(char),
     Esc,
+    Up,
+    Down,
 }
 
 pub const SHIFT: u8 = 1;
@@ -144,6 +151,11 @@ const fn cmd(c: char) -> Option<Chord> {
     chord(c, CMD)
 }
 
+/// Cmd and an arrow key.
+const fn arrow(key: Key) -> Option<Chord> {
+    Some(Chord { key, mods: CMD })
+}
+
 impl Chord {
     pub fn modifiers(self) -> Modifiers {
         Modifiers {
@@ -159,6 +171,8 @@ impl Chord {
         let logical = match self.key {
             Key::Char(c) => LogicalKey::Char(c),
             Key::Esc => LogicalKey::Named(NamedKey::Escape),
+            Key::Up => LogicalKey::Named(NamedKey::ArrowUp),
+            Key::Down => LogicalKey::Named(NamedKey::ArrowDown),
         };
         MarspotKeyEvent { state: KeyState::Pressed, logical, ..Default::default() }
     }
@@ -175,6 +189,8 @@ impl fmt::Display for Chord {
         match self.key {
             Key::Char(c) => write!(f, "{}", c.to_ascii_uppercase()),
             Key::Esc => f.write_str("Esc"),
+            Key::Up => f.write_str("↑"),
+            Key::Down => f.write_str("↓"),
         }
     }
 }
@@ -255,6 +271,8 @@ pub const TABLE: &[Row] = &[
     row(C::Copy, Msg::MenuCopy, cmd('c'), M::Edit, NoPanel, Core),
     row(C::Paste, Msg::MenuPaste, cmd('v'), M::Edit, NoPanel, Core),
     sep(row(C::Find, Msg::CmdFind, cmd('f'), M::Edit, Always, Core)),
+    sep(row(C::PrevPrompt, Msg::CmdPrevPrompt, arrow(Key::Up), M::Edit, NoPanel, Core)),
+    row(C::NextPrompt, Msg::CmdNextPrompt, arrow(Key::Down), M::Edit, NoPanel, Core),
     row(C::ToggleSidebar, Msg::CmdToggleSidebar, cmd('b'), M::View, NoPanel, Core),
     sep(row(C::Layout, Msg::CmdLayout, chord('l', SHIFT | CMD), M::View, Always, Core)),
     row(C::Processes, Msg::CmdProcesses, chord('p', SHIFT | CMD), M::View, Always, Core),
@@ -305,19 +323,22 @@ fn row_for(key: Key, mods: u8) -> Option<&'static Row> {
 /// 3. Cmd-1 to Cmd-9 that nothing above matched go by the physical
 ///    digit row, so they need no Shift where digits do (AZERTY).
 ///
-/// Runs on every keystroke: a key without Cmd that is not Esc leaves
-/// after two comparisons, and nothing here allocates.
+/// An arrow key is matched as itself, with every modifier held.
+///
+/// Runs on every keystroke and allocates nothing.
 pub fn for_key(event: &MarspotKeyEvent, m: Modifiers) -> Option<&'static Row> {
+    let bit = |held: bool, bit: u8| if held { bit } else { 0 };
+    let mods = bit(m.shift, SHIFT) | bit(m.control, CTRL) | bit(m.alt, OPT) | bit(m.super_, CMD);
     let bare = match event.logical {
         LogicalKey::Char(c) if m.super_ => lower(c),
+        LogicalKey::Named(NamedKey::ArrowUp) if m.super_ => return row_for(Key::Up, mods),
+        LogicalKey::Named(NamedKey::ArrowDown) if m.super_ => return row_for(Key::Down, mods),
         LogicalKey::Named(NamedKey::Escape) => {
             let none = !(m.shift || m.control || m.alt || m.super_);
             return if none { row_for(Key::Esc, 0) } else { None };
         }
         _ => return None,
     };
-    let bit = |held: bool, bit: u8| if held { bit } else { 0 };
-    let mods = bit(m.shift, SHIFT) | bit(m.control, CTRL) | bit(m.alt, OPT) | bit(m.super_, CMD);
     let typed = event.text.as_deref().and_then(only_char).filter(|c| !c.is_control()).map_or(bare, lower);
     let spent = if typed.is_alphabetic() || typed == bare { 0 } else { SHIFT | OPT };
     row_for(Key::Char(typed), mods & !spent)
@@ -462,7 +483,12 @@ mod tests {
         // A capital is the same key: caps lock does not unbind a chord.
         assert_eq!(command('C', CMD), Some(C::Copy));
         let with_chord = TABLE.iter().filter(|r| r.chord.is_some()).count();
-        assert_eq!(with_chord, want.len() + 6, "the six panes not spelled out above");
+        assert_eq!(with_chord, want.len() + 8, "the six panes not spelled out above, and the two arrows below");
+        let arrow = |named, bits| for_key(&key(LogicalKey::Named(named)), mods(bits)).map(|r| r.command);
+        assert_eq!(arrow(NamedKey::ArrowUp, CMD), Some(C::PrevPrompt));
+        assert_eq!(arrow(NamedKey::ArrowDown, CMD), Some(C::NextPrompt));
+        assert_eq!(arrow(NamedKey::ArrowUp, SHIFT | CMD), None, "an arrow chord is all of its modifiers");
+        assert_eq!(arrow(NamedKey::ArrowLeft, CMD), None, "Cmd-Left is the program's");
     }
 
     /// The modifiers are matched exactly, so a chord one modifier away
@@ -537,7 +563,7 @@ mod tests {
         }
         for c in [
             C::Copy, C::Paste, C::ToggleSidebar, C::NewPane, C::PrevPane, C::NextPane,
-            C::FocusPane(0), C::FocusPane(8),
+            C::FocusPane(0), C::FocusPane(8), C::PrevPrompt, C::NextPrompt,
         ] {
             assert_eq!(when(c), NoPanel, "{c:?}");
         }
@@ -578,7 +604,10 @@ mod tests {
             ]
         );
         assert_eq!(menu(M::File), ["New Window ⌘N", "New Pane ⌘T", "| Close Panel ⌘W"]);
-        assert_eq!(menu(M::Edit), ["Copy ⌘C", "Paste ⌘V", "| Find ⌘F"]);
+        assert_eq!(
+            menu(M::Edit),
+            ["Copy ⌘C", "Paste ⌘V", "| Find ⌘F", "| Jump to Previous Command ⌘↑", "Jump to Next Command ⌘↓"]
+        );
         assert_eq!(
             menu(M::View),
             [
@@ -630,7 +659,8 @@ mod tests {
     fn the_reference_lists_each_chord_once_and_the_panes_as_a_range() {
         let lines: Vec<String> =
             reference().iter().map(|r| format!("{} {}", r.keys, t(r.title))).collect();
-        assert_eq!(lines.len(), 20);
+        assert_eq!(lines.len(), 22);
+        assert!(lines.contains(&"⌘↑ Jump to Previous Command".to_string()), "{lines:?}");
         assert!(lines.contains(&"⌘W, Esc Close Panel".to_string()), "{lines:?}");
         assert!(lines.contains(&"⌘1 – ⌘9 Pane 1 – 9".to_string()), "{lines:?}");
         assert!(lines.contains(&"⌃⌘F Enter or Exit Full Screen".to_string()), "{lines:?}");

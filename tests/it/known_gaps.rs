@@ -23,7 +23,7 @@ const ENTRIES: [(&str, &str); 5] = [
         "OSC 8 links open only",
         "links::osc8_opens_only_four_schemes",
     ),
-    ("No OSC 7", "osc_7_none_133_no_jump_key_52_write_only"),
+    ("No OSC 7", "osc_7_none_52_write_only"),
     ("There is no terminfo entry of its own", "terminfo::*"),
     (
         "The settings panel offers the theme",
@@ -57,29 +57,6 @@ fn the_page_says(phrase: &str) {
         flat(SITE).contains(phrase),
         "the page no longer says {phrase:?}"
     );
-}
-
-/// Every Rust source outside the terminal engine, as (path, text).
-fn app_sources() -> Vec<(String, String)> {
-    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir).expect("read a source directory") {
-            let path = entry.expect("a directory entry").path();
-            if path.is_dir() {
-                if !path.ends_with("marspot-term") && !path.ends_with("target") {
-                    walk(&path, out);
-                }
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).expect("read a source file");
-                out.push((path.display().to_string(), text));
-            }
-        }
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut out = Vec::new();
-    walk(&root.join("src"), &mut out);
-    walk(&root.join("crates"), &mut out);
-    assert!(out.len() > 100, "read only {} source files", out.len());
-    out
 }
 
 /// The message for a gap that closed.
@@ -121,16 +98,12 @@ fn the_list_is_the_list_the_tests_know() {
     }
 }
 
-/// OSC 7 is not read, OSC 133 marks are kept but no command jumps to
-/// one, and OSC 52 is written but never read back.
+/// OSC 7 is not read, and OSC 52 is written but never read back.
 #[test]
-fn osc_7_none_133_no_jump_key_52_write_only() {
+fn osc_7_none_52_write_only() {
     says("No OSC 7 (working directory");
-    says("OSC 133 prompt marks are read and kept with the history, but nothing uses them yet");
-    says("there is no key to jump to the previous command");
     says("reading it back is refused on purpose");
     the_page_says("No working-directory escape sequence");
-    the_page_says("are read and kept with the history, but nothing uses them yet");
     the_page_says("reading it back is refused");
 
     // OSC 7: the dispatcher has an arm for 8 and 133 and none for 7
@@ -168,50 +141,14 @@ fn osc_7_none_133_no_jump_key_52_write_only() {
         closed("OSC 7 changed the terminal's state")
     );
 
-    // OSC 133: the mark is on the row, and still there once the row
-    // has scrolled into history
-    let mut t = Terminal::new(20, 3);
-    t.feed(b"\x1b]133;A\x07$ ");
-    assert_eq!(
-        t.grid().row_prompt(0),
-        marspot::grid::PromptMark::PromptStart
-    );
-    t.feed(b"\r\n\r\n\r\n\r\n");
-    assert_eq!(
-        t.grid().scrollback_prompt(0),
-        marspot::grid::PromptMark::PromptStart
-    );
-    // nothing outside the engine reads a mark: no key, menu, panel or
-    // sidebar
-    for (file, text) in app_sources() {
-        for call in ["row_prompt(", "scrollback_prompt(", "PromptMark::"] {
-            assert!(
-                !text.contains(call),
-                "{}",
-                closed(&format!("{file} reads prompt marks ({call})"))
-            );
-        }
+    // OSC 133 is no gap: two commands jump to the marks, and neither
+    // the README nor the page may still say nothing uses them
+    let commands: Vec<String> = marspot::commands::TABLE.iter().map(|r| format!("{:?}", r.command)).collect();
+    for c in ["PrevPrompt", "NextPrompt"] {
+        assert!(commands.iter().any(|n| n == c), "the command table has no {c}");
     }
-    // and no command uses it: the table is every command a key or a
-    // menu can run
-    let commands = marspot::commands::TABLE;
-    assert!(commands.len() > 20, "read no commands out of the table");
-    for row in commands {
-        let name = format!("{:?}", row.command);
-        for word in [
-            "Prompt",
-            "Jump",
-            "Mark",
-            "PrevCommand",
-            "PreviousCommand",
-            "NextCommand",
-        ] {
-            assert!(
-                !name.contains(word),
-                "{}",
-                closed(&format!("the command table has {name}"))
-            );
-        }
+    for (what, text) in [("README.md", README), ("site/index.html", SITE)] {
+        assert!(!flat(text).contains("nothing uses them yet"), "{what} still says nothing uses the OSC 133 marks");
     }
 
     // OSC 52: written, never read back

@@ -2,6 +2,7 @@
 //! go to the program in the focused pane.
 
 use marspot::commands::{self, Command};
+use marspot::shell_proto::PromptDir;
 
 use super::*;
 
@@ -187,6 +188,8 @@ impl CoreApp {
                 }
                 self.handle_cmd_f(wi);
             }
+            Command::PrevPrompt => self.jump_to_prompt(wi, PromptDir::Back),
+            Command::NextPrompt => self.jump_to_prompt(wi, PromptDir::Forward),
             Command::ToggleSidebar => self.toggle_sidebar(wi),
             Command::PrevPane => self.focus_neighbour(wi, false),
             Command::NextPane => self.focus_neighbour(wi, true),
@@ -228,6 +231,14 @@ impl CoreApp {
             self.note_typing(wi);
         }
         true
+    }
+
+    /// Cmd-Up / Cmd-Down: the focused pane's session is asked for the
+    /// prompt that way, and the view moves when it answers.
+    fn jump_to_prompt(&mut self, wi: usize, dir: PromptDir) {
+        if let Some(pane) = self.focused_shown_mut(wi) {
+            pane.jump_to_prompt(dir);
+        }
     }
 
     /// The sidebar's [+] and Cmd-T.

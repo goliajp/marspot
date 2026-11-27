@@ -26,6 +26,8 @@ use crate::grid::Grid;
 
 mod conn_new;
 mod history;
+mod history_requests;
+pub use history_requests::{PromptFlash, PROMPT_FLASH};
 mod mirror;
 mod pointer;
 mod regions;
@@ -45,8 +47,8 @@ use crate::render::SessionView;
 use crate::selection_tape;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
-    encode_event, encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_paste,
-    encode_search_cancel, encode_search_more, encode_search_scrollback, Frame, MsgType, FIRST_WINDOW_ID,
+    encode_event, encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_paste, Frame, MsgType,
+    FIRST_WINDOW_ID,
 };
 use crate::tools::{search_bar::SearchBar, search_list::SearchList};
 use crate::terminal::Terminal;
@@ -391,36 +393,6 @@ impl PaneBackend {
         match self {
             PaneBackend::L3(c) => c.forward_session_update(),
             _ => false,
-        }
-    }
-
-    /// C5 — send a `SearchScrollback` frame to the L3 session
-    /// behind this pane.  No-op on non-L3 backends (search is
-    /// File-backed scrollback only, which only L3 owns).
-    pub fn forward_search_scrollback(
-        &mut self,
-        query_id: u32,
-        case_sensitive: bool,
-        max_total: u32,
-        query: &str,
-    ) {
-        if let PaneBackend::L3(c) = self {
-            c.forward_search_scrollback(query_id, case_sensitive, max_total, query);
-        }
-    }
-
-    /// C5 — cancel an in-flight L3 search by query_id.
-    pub fn forward_search_cancel(&mut self, query_id: u32) {
-        if let PaneBackend::L3(c) = self {
-            c.forward_search_cancel(query_id);
-        }
-    }
-
-    /// C5 — request more hits for the in-flight search (D-phase
-    /// pagination; v1 only uses direction=0 → older).
-    pub fn forward_search_more(&mut self, query_id: u32, count: u32) {
-        if let PaneBackend::L3(c) = self {
-            c.forward_search_more(query_id, count);
         }
     }
 
@@ -900,36 +872,6 @@ impl L3Conn {
         self.control.send(Frame::new(MsgType::SessionUpdate, Vec::new()))
     }
 
-    /// C5 — send a search request to the L3 worker.  The L3 main
-    /// loop cancels any in-flight worker, snapshots the File
-    /// scrollback + live grid (B3 + B4), and replies with
-    /// `SearchResults` frames on the same socket (decoded by
-    /// `l3_reader_loop` into `CoreEvent::SearchResults`).
-    fn forward_search_scrollback(
-        &mut self,
-        query_id: u32,
-        case_sensitive: bool,
-        max_total: u32,
-        query: &str,
-    ) {
-        let payload = encode_search_scrollback(query_id, case_sensitive, max_total, query);
-        let frame = Frame::new(MsgType::SearchScrollback, payload);
-        let _ = self.control.send(frame);
-    }
-
-    fn forward_search_cancel(&mut self, query_id: u32) {
-        let payload = encode_search_cancel(query_id);
-        let frame = Frame::new(MsgType::SearchCancel, payload);
-        let _ = self.control.send(frame);
-    }
-
-    fn forward_search_more(&mut self, query_id: u32, count: u32) {
-        // v1: direction is always 0 (older); D-phase will expose newer.
-        let payload = encode_search_more(query_id, count, 0);
-        let frame = Frame::new(MsgType::SearchMore, payload);
-        let _ = self.control.send(frame);
-    }
-
     /// Forward a cell-grid resize to the session process (dedup'd against
     /// the last requested dims).  L3 resizes its Terminal + PTY, reflows,
     /// and republishes at the new dims; the mirror reshapes on the next
@@ -1110,6 +1052,8 @@ pub struct Pane {
     /// opens it; `Some` until Esc closes it.  Independent of any
     /// other pane's search state (each pane has its own).
     pub search: Option<PaneSearch>,
+    /// The row a prompt jump put on top, while it is marked.
+    prompt_flash: Option<PromptFlash>,
 }
 
 /// C5 — per-pane bundle of the search overlay state.  Wraps the
@@ -1154,6 +1098,7 @@ impl Pane {
             tools: Vec::new(),
             active_highlight: None,
             search: None,
+            prompt_flash: None,
         }
     }
 
@@ -1233,7 +1178,7 @@ impl Pane {
     /// view back to live like `handle_key` does, since the keystroke's
     /// echo will land at the live tail.
     pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
-        let need_redraw = self.view_offset != 0;
+        let need_redraw = self.view_offset != 0 || self.prompt_flash.take().is_some();
         self.view_offset = 0;
         // Snap L3 back to the live tail too: its echo lands there, and the
         // forward dedups so this is free when already live.
@@ -1616,11 +1561,7 @@ impl Pane {
             cwd,
             top_fixed_h_cells,
             bot_fixed_h_cells,
-            highlight_spans: self
-                .active_highlight
-                .as_ref()
-                .map(|h| h.spans.as_slice())
-                .unwrap_or(&[]),
+            highlight_spans: self.highlight_spans(),
             search_overlay,
             history: self.history_view(focused), session: self.shelld_session_id().unwrap_or(0), strip: None, notice: None,
             seq,

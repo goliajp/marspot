@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.850"  # marspot-term carries a jump to a prompt (not used by the core yet)
-core    = "0.12.750"  # marspot-term carries a jump to a prompt (not used by the core yet)
+shell   = "0.7.851"  # Cmd-Up / Cmd-Down jump to the previous / next command's prompt
+core    = "0.12.751"  # Cmd-Up / Cmd-Down jump to the previous / next command's prompt
 session = "0.11.478"  # the session moves its view to a prompt the core asks for

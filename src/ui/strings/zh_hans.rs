@@ -52,6 +52,8 @@ fn text(m: Msg) -> &'static str {
         Msg::CmdNewPane => "新建窗格",
         Msg::CmdClosePanel => "关闭面板",
         Msg::CmdFind => "查找",
+        Msg::CmdPrevPrompt => "跳到上一个命令",
+        Msg::CmdNextPrompt => "跳到下一个命令",
         Msg::CmdToggleSidebar => "显示或隐藏边栏",
         Msg::CmdLayout => "布局",
         Msg::CmdProcesses => "进程监视器",
