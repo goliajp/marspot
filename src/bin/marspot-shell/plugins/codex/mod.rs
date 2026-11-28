@@ -41,6 +41,8 @@ mod front_tests;
 mod menu_tests;
 #[cfg(test)]
 mod switch_tests;
+#[cfg(test)]
+mod first_frame_tests;
 pub(crate) use update::{install as install_cli, installed_cli, path_with_local_bin, tail};
 
 use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,

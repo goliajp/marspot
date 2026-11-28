@@ -354,3 +354,6 @@ mod quiet_pty_tests;
 
 #[path = "handoff_late_tests.rs"]
 mod handoff_late_tests;
+
+#[path = "first_frame_drive.rs"]
+pub(in crate::plugins) mod first_frame_drive;

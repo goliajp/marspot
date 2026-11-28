@@ -406,12 +406,8 @@ pub(super) fn reclaim_op(
             // no claude and no wake armed, which is strictly worse than
             // waiting.  The wake itself takes ~2 s.
             .escape_hatch(false)
-            // No badge of its own.  A reclamation the user can see is
-            // a reclamation that happened *to* them; this one is
-            // supposed to be indistinguishable from the pane sitting
-            // there untouched, so the corner keeps saying what it said
-            // before (`ClaudecodePlugin::held` re-asserts it).  Which
-            // pane is parked is in the log and in `dormant.tsv`.
+            // No badge of its own: the corner keeps saying what it said before
+            // (`ClaudecodePlugin::held`); the log and `dormant.tsv` name the parked pane.
             // Let the hold reach L3 before anything can draw.  That
             // request crosses two process boundaries; the signal crosses
             // none, and sent together the signal wins — claude's parting
@@ -438,7 +434,10 @@ pub(super) fn reclaim_op(
                     .timeout(WAKE_WATCHDOG)
                     // a session with background work picks it up again
                     // on waking, and its spinner keeps the pane moving
-                    .or_composer(),
+                    .or_composer()
+                    // still repainting a long history is awake, just not typed into
+                    .or_drawn_late()
+                    .named("first_frame"),
             )
             // Their sentence back where they left it.
             .step(pty_op::Step::restore_composer(held)),

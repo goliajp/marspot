@@ -1981,7 +1981,7 @@ impl PtyOps {
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::plugins) mod tests;
 #[cfg(test)]
 mod job_tests;
 
