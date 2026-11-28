@@ -10,7 +10,6 @@ use std::hash::{Hash, Hasher};
 
 use crate::font_cache::FontCache;
 use crate::layout::Layout;
-use crate::render::SidebarEntry;
 use crate::ui::components::sidebar::{self, Sidebar};
 use crate::ui::core::ViewPainter;
 use crate::ui::strings::{self, Arg};
@@ -50,47 +49,9 @@ fn row_id(i: usize) -> WidgetId {
     WidgetId(1 + i as u32)
 }
 
-/// The rows a sidebar lists.
-pub trait Rows {
-    fn count(&self) -> usize;
-    fn label(&self, i: usize) -> &str;
-    fn state(&self, i: usize) -> SessionState;
-    fn code(&self, i: usize) -> Option<u16>;
-}
-
-impl Rows for &[SidebarEntry<'_>] {
-    fn count(&self) -> usize {
-        <[SidebarEntry<'_>]>::len(self)
-    }
-    fn label(&self, i: usize) -> &str {
-        self[i].label
-    }
-    fn state(&self, i: usize) -> SessionState {
-        self[i].state
-    }
-    fn code(&self, i: usize) -> Option<u16> {
-        self[i].code
-    }
-}
-
-/// `n` rows with nothing to show, for laying the sidebar out where
-/// only where its rows are matters.
-pub struct Blank(pub usize);
-
-impl Rows for Blank {
-    fn count(&self) -> usize {
-        self.0
-    }
-    fn label(&self, _: usize) -> &str {
-        ""
-    }
-    fn state(&self, _: usize) -> SessionState {
-        SessionState::Active
-    }
-    fn code(&self, _: usize) -> Option<u16> {
-        None
-    }
-}
+#[path = "sidebar_rows.rs"]
+mod rows;
+pub use rows::{Blank, Rows};
 
 /// What the sidebar shows this frame.
 pub struct SidebarFrame<'a> {

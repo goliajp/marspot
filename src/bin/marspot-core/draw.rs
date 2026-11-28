@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "draw_labels.rs"]
+mod labels;
+
 impl CoreApp {
     /// Where the renderer's last IOSurface frame spent its time —
     /// forwarded so the loop's stall report can carry it.
@@ -33,62 +36,6 @@ impl CoreApp {
         target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
     ) -> Option<(f64, f64, f64, f64)> {
         self.render_inner(wi, target_tex, true)
-    }
-
-    /// What each pane of the window is called on screen.
-    fn pane_labels(&self, wi: usize) -> Vec<String> {
-        // Pane numbers from the static table: this used to be a `Vec`
-        // and one `String` per pane, rebuilt every frame for text that
-        // never changes.
-        let labels = &marspot::ui::PANE_NUMBER_LABELS[..win!(self, wi)
-            .panes
-            .len()
-            .min(marspot::ui::PANE_NUMBER_LABELS.len())];
-        // Title placeholder = basename of the cwd cached in
-        // `pane_cwds`.  Pure read: `sweep_pane_cwds` owns population
-        // (once per CWD_SWEEP_INTERVAL from the main loop's periodic
-        // block, plus a one-shot resolve at pane spawn and on
-        // LayoutModal open).  Nothing here may issue a syscall — this
-        // runs per frame, per window.
-        let cwd_basenames: Vec<Option<&str>> = (0..win!(self, wi).panes.len())
-            .map(|i| {
-                let sid = win!(self, wi).panes[i].shelld_session_id()?;
-                let path = self.pane_cwds.get(&sid)?;
-                std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-            })
-            .collect();
-
-        // Resolved label per cell: the pane's own name (its directory,
-        // with its code when shared — `marspot::pane_name`) → plugin-set
-        // title (MsgType::PaneTitle, cc/...) → ordinal fallback.
-        //
-        // There is no user-set title any more: a pane's name is derived,
-        // never stored, so it cannot disagree with what `--send` will
-        // accept.  A rename would have made the name a second source of
-        // truth about which pane is which.
-        let pane_names = self.pane_names();
-        (0..win!(self, wi).panes.len())
-            .map(|i| {
-                if let Some(name) = win!(self, wi).panes[i]
-                    .shelld_session_id()
-                    .and_then(|sid| pane_names.get(&sid))
-                    .filter(|n| !n.is_empty() && *n != "?")
-                {
-                    name.clone()
-                } else if let Some(plugin_title) = win!(self, wi).panes[i]
-                    .shelld_session_id()
-                    .and_then(|sid| self.pane_titles.get(&sid))
-                {
-                    plugin_title.clone()
-                } else if let Some(Some(name)) = cwd_basenames.get(i) {
-                    (*name).to_string()
-                } else {
-                    labels.get(i).map(|s| (*s).to_string()).unwrap_or_default()
-                }
-            })
-            .collect()
     }
 
     /// Hand the renderer whatever is open over the panes.
@@ -149,12 +96,6 @@ impl CoreApp {
         self.renderer.set_layout_modal(layout_modal);
     }
 
-    /// The code of pane `i` of window `wi`, from memory only: drawing
-    /// never waits on the code file (`note_pane_code` fills it).
-    pub(super) fn pane_code(&self, wi: usize, i: usize) -> Option<u16> {
-        marspot_term::pane_code::known(win!(self, wi).panes.get(i)?.shelld_session_id()?)
-    }
-
     /// Render the full UI into `target_tex` and return the focused-
     /// pane caret rect (view-local physical pixels) for the IME
     /// candidate window, or `None` when the slot takes no input.
@@ -194,15 +135,7 @@ impl CoreApp {
                 s
             })
             .collect();
-        // the code is drawn before the name: a shared name loses its own copy of it
-        let sidebar_labels: Vec<String> = resolved_labels
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let s = self.pane_code(wi, i).map_or(s.as_str(), |c| without_code(s, c));
-                truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS)
-            })
-            .collect();
+        let sidebar_labels = self.sidebar_labels(wi, &resolved_labels);
 
         // the titles say how many helpers only where no strip lists them
         self.place_strips(wi);
@@ -320,22 +253,4 @@ impl CoreApp {
                 .caret_view_phys_rect(focused, col, row, cell_w, cell_h)
         })
     }
-}
-
-/// `label` without a trailing `#<code>` of `code`.
-fn without_code(label: &str, code: u16) -> &str {
-    match label.rsplit_once('#') {
-        Some((base, digits)) if !base.is_empty() && digits.parse::<u16>().ok() == Some(code) => base,
-        _ => label,
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn sidebar_label_drops_only_its_own_code() {
-    assert_eq!(without_code("spg#3381", 3381), "spg");
-    assert_eq!(without_code("spg#0042", 42), "spg");
-    assert_eq!(without_code("spg#3381", 3382), "spg#3381");
-    assert_eq!(without_code("#3381", 3381), "#3381");
-    assert_eq!(without_code("codex · a task", 3381), "codex · a task");
 }
