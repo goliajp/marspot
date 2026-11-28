@@ -106,6 +106,7 @@ pub const ALL: &[Msg] = &[
     Msg::CloseChildrenAsk,
     Msg::CloseChildrenConfirm,
     Msg::CloseChildrenCancel,
+    Msg::CloseAskNowhere,
     Msg::LinkCopyUuid,
     Msg::LinkOpenUrl,
     Msg::LinkCopyUrl,

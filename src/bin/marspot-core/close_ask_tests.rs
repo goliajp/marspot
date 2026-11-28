@@ -168,3 +168,52 @@ fn close_question_names_three_children_and_counts_the_rest() {
     assert!(text.contains(&format!("\n{more}")), "{text:?}");
     assert!(!text.contains("\n…\n") && !text.ends_with("\n…"), "not a bare ellipsis: {text:?}");
 }
+
+#[test]
+fn close_from_a_window_that_shows_no_pane_closes_nothing_and_says_why() {
+    let sb = Sandbox::new();
+    let v = |s| Pane::new_vacant(s, 60, 16);
+    // window 2 holds only the placeholder a moved-out pane left, which has no session
+    let mut app = app_in(sb.dir(), vec![win(1, vec![v(1), v(2)]), win(2, vec![Pane::new_dormant(60, 16)])]);
+    app.shadows.push(v(3));
+    app.pane_control.shadows.family.adopted(3, 1);
+    app.shadows_changed();
+    assert!(app.close_asked(1, 1), "the close was taken");
+    assert_eq!(asked(&app), None, "no question, with nowhere to put it");
+    assert_eq!(app.notices.shell_text(), Some(t(Msg::CloseAskNowhere)), "but a notice says why");
+    let id = win!(app, 1).window_id;
+    assert_eq!(app.notices.over(id, Some(0), true), Some(t(Msg::CloseAskNowhere)), "over the placeholder in use there");
+    assert!(app.find_window_pane_by_sid(1).is_some() && app.shadow_index(3).is_some(), "nothing closed");
+}
+
+#[test]
+fn close_question_lights_the_button_the_pointer_is_on_and_only_on_a_move() {
+    let sb = Sandbox::new();
+    let mut app = with_hidden_child(&sb);
+    let mid = |r: marspot_term::layout::Rect| (r.x + r.w * 0.5, r.y_top + r.h * 0.5);
+    app.close_row(0, 0);
+    let id = win!(app, 0).window_id;
+    assert_eq!(app.notices.hover_over(id, Some(1)), None, "nothing lit before the pointer moves");
+    let [go, stay] = app.close_ask_buttons(0, 1).expect("the buttons");
+
+    app.windows[0].needs_render = false;
+    app.mouse_moved(0, mid(go).0, mid(go).1);
+    assert_eq!(app.notices.hover_over(id, Some(1)), Some(0), "the first button");
+    assert!(app.windows[0].needs_render, "and a frame shows it");
+    app.windows[0].needs_render = false;
+    app.mouse_moved(0, mid(go).0 + 1.0, mid(go).1);
+    assert!(!app.windows[0].needs_render, "a move on the same button draws nothing new");
+
+    app.mouse_moved(0, mid(stay).0, mid(stay).1);
+    assert_eq!(app.notices.hover_over(id, Some(1)), Some(1), "the second button");
+    assert_eq!(app.notices.hover_over(id, Some(2)), None, "over its own pane only");
+    app.mouse_moved(0, 1.0, 1.0);
+    assert_eq!(app.notices.hover_over(id, Some(1)), None, "off the buttons, neither");
+
+    app.mouse_moved(0, mid(stay).0, mid(stay).1);
+    app.mouse_moved(0, -10.0, -10.0);
+    assert_eq!(app.notices.hover_over(id, Some(1)), None, "the pointer leaving the window takes it off");
+    app.mouse_moved(0, mid(go).0, mid(go).1);
+    app.clear_hover(0);
+    assert_eq!(app.notices.hover_over(id, Some(1)), None, "as does the app losing focus");
+}

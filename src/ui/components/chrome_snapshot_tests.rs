@@ -58,8 +58,9 @@ pub(super) struct PaneSpec {
     history: HistoryView,
     /// Rows the pane gives up to a strip.
     strip: u16,
-    /// What the core shows over it.
+    /// What the core shows over it, and the button of it the pointer is on.
     notice: Option<String>,
+    notice_hover: Option<u8>,
 }
 
 pub(super) fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
@@ -74,6 +75,7 @@ pub(super) fn pane(title: &'static str, badge: &'static str, state: SessionState
         history: HistoryView::default(),
         strip: 0,
         notice: None,
+        notice_hover: None,
     }
 }
 
@@ -185,7 +187,7 @@ fn snapshot_on(
             bot_fixed_h_cells: 0,
             highlight_spans: p.hits,
             search_overlay: p.search.clone(),
-            history: p.history, session: 0, notice: p.notice.as_deref(),
+            history: p.history, session: 0, notice: p.notice.as_deref().map(|text| crate::render::NoticeView { text, hover: p.notice_hover }),
             strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_view_tests::strip_under(grid, strip)),
             seq: 1 + i as u64,
         })

@@ -118,7 +118,8 @@ pub struct SidebarEntry<'a> {
     pub code: Option<u16>,
     /// Where the row sits in the tree of panes.
     pub tree: SidebarTree,
-    /// The pane is in no window: its dot is drawn hollow.
+    /// The pane is in no window, or only in a minimized one: its dot is
+    /// drawn hollow.
     pub hollow: bool,
     /// The row of the pane in use.  With none so marked, no row is lit.
     pub selected: bool,
@@ -149,5 +150,27 @@ pub enum SidebarTree {
 impl SidebarTree {
     pub fn is_child(self) -> bool {
         matches!(self, Self::Child | Self::LastChild)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct SelectionView {
+    pub anchor: (u16, u16),
+    pub focus: (u16, u16),
+    pub blockwise: bool,
+}
+
+/// A sentence over the top of a pane, and which of a question's two
+/// buttons the pointer is on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct NoticeView<'a> {
+    pub text: &'a str,
+    pub hover: Option<u8>,
+}
+
+impl<'a> NoticeView<'a> {
+    /// A notice the pointer is on no button of.
+    pub fn text(text: &'a str) -> Self {
+        Self { text, hover: None }
     }
 }

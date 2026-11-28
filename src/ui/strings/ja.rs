@@ -119,6 +119,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CloseChildrenAsk => "このペインを閉じると、次の子ペインも終了します：",
         Msg::CloseChildrenConfirm => "すべて閉じる",
         Msg::CloseChildrenCancel => "キャンセル",
+        Msg::CloseAskNowhere => "このペインには子ペインがあるため閉じる前に確認しますが、このウィンドウには確認を表示できるペインがありません。ペインを表示しているウィンドウから閉じてください",
 
         Msg::LinkCopyUuid => "UUIDをコピー",
         Msg::LinkOpenUrl => "URLを開く",

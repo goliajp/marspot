@@ -203,7 +203,11 @@ impl CoreApp {
                     v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
                 v.strip = self.strips.view(host.shelld_session_id());
-                v.notice = self.notices.over(win!(self, wi).window_id, p.shelld_session_id(), i == focused);
+                let id = win!(self, wi).window_id;
+                v.notice = self.notices.over(id, p.shelld_session_id(), i == focused).map(|text| marspot::render::NoticeView {
+                    text,
+                    hover: self.notices.hover_over(id, p.shelld_session_id()),
+                });
                 v.selection = win!(self, wi)
                     .selection
                     .as_ref()

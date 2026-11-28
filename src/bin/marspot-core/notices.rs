@@ -52,6 +52,17 @@ impl Notices {
         }
     }
 
+    /// The question's button the pointer is on, over the pane showing
+    /// session `sid` in window `window`.
+    pub(super) fn hover_over(&self, window: u32, sid: Option<u64>) -> Option<u8> {
+        self.close.as_ref().filter(|a| a.window == window && sid == Some(a.over)).and_then(|a| a.hover)
+    }
+
+    /// The pointer is on nothing of the question; true when it was.
+    pub(super) fn unhover(&mut self) -> bool {
+        self.close.as_mut().and_then(|a| a.hover.take()).is_some()
+    }
+
     /// How long until a notice comes down.
     pub(super) fn wait(&self, now: Instant) -> Option<Duration> {
         self.shell.as_ref().map(|(_, until)| until.saturating_duration_since(now))

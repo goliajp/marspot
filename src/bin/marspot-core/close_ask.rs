@@ -6,7 +6,8 @@
 //! leaves everything as it was.  While it is up it takes every key of
 //! its window, and only of its window.  It comes down unanswered when
 //! the pane closing or the pane it stands over ends or leaves that
-//! window, or the window closes.
+//! window, or the window closes.  A window that shows no pane cannot
+//! hold it: the pane stays open and a notice says why.
 
 use marspot::input::{KeyState, LogicalKey, NamedKey};
 use marspot::ui::components::pane_notice::{self, PaneNoticeParams};
@@ -25,6 +26,8 @@ pub(crate) struct CloseAsk {
     /// The window it is shown in, by id: indices move as windows close.
     pub(crate) window: u32,
     pub(crate) text: String,
+    /// The button the pointer is on: 0 closes, 1 does not.
+    pub(crate) hover: Option<u8>,
 }
 
 impl CoreApp {
@@ -41,9 +44,10 @@ impl CoreApp {
         }
         let Some(over) = self.ask_place(wi, sid) else {
             // a window that shows no pane has nowhere to ask; the close
-            // does not happen unasked
+            // does not happen unasked, and the notice says why
             lx_warn!("CLOSE_ASK_NOWHERE", "a pane with child panes was to close from a window that shows no pane",
                 session = sid);
+            self.show_notice(t(Msg::CloseAskNowhere).to_string());
             return true;
         };
         children.sort_unstable();
@@ -59,7 +63,7 @@ impl CoreApp {
         }
         let text = pane_notice::ask_text(&body, t(Msg::CloseChildrenConfirm), t(Msg::CloseChildrenCancel));
         let window = win!(self, wi).window_id;
-        self.notices.close = Some(CloseAsk { sid, over, window, text });
+        self.notices.close = Some(CloseAsk { sid, over, window, text, hover: None });
         win!(self, wi).needs_render = true;
         lx_event!("CLOSE_ASKED", "asked before closing a pane with child panes", session = sid,
             children = children.len() as u32, window = window);
@@ -68,14 +72,15 @@ impl CoreApp {
 
     /// The pane in window `wi` the question about closing `sid` stands
     /// over: `sid` when the window shows it, else the pane in use, else
-    /// any pane it shows.
+    /// any pane it shows.  A placeholder (session 0) is no pane: a
+    /// question over it would come down at once, unseen.
     fn ask_place(&self, wi: usize, sid: u64) -> Option<u64> {
         if self.slot_in(wi, sid).is_some() {
             return Some(sid);
         }
         let w = self.windows.get(wi)?;
-        let focused = self.focused_session(wi).filter(|s| self.slot_in(wi, *s).is_some());
-        focused.or_else(|| (0..w.panes.len()).find_map(|i| self.shown(wi, i).shelld_session_id()))
+        let focused = self.focused_session(wi).filter(|s| *s != 0 && self.slot_in(wi, *s).is_some());
+        focused.or_else(|| (0..w.panes.len()).find_map(|i| self.shown(wi, i).shelld_session_id().filter(|s| *s != 0)))
     }
 
     /// The slot of window `wi` that shows `sid`.
@@ -158,6 +163,21 @@ impl CoreApp {
         hit.is_some()
     }
 
+    /// The pointer moved to `(x, y)` in window `wi`: the button under
+    /// it is lit, the other not.  Only a move changes it, so nothing
+    /// ticks.  Whether the pointer is on a button.
+    pub(crate) fn close_ask_hover(&mut self, wi: usize, x: f64, y: f64) -> bool {
+        let Some(over) = self.notices.close.as_ref().map(|a| a.over) else { return false };
+        let hit = self.close_ask_buttons(wi, over).and_then(|b| b.iter().position(|r| r.contains(x, y)));
+        let hover = hit.map(|i| i as u8);
+        if let Some(ask) = self.notices.close.as_mut().filter(|a| a.hover != hover) {
+            ask.hover = hover;
+            // the window it stands in, which may not be the one moved in
+            self.windows.iter_mut().for_each(|w| w.needs_render = true);
+        }
+        hit.is_some()
+    }
+
     /// Where the question's two buttons are in window `wi`, if it is
     /// shown there.
     fn close_ask_buttons(&self, wi: usize, over: u64) -> Option<[marspot_term::layout::Rect; 2]> {
@@ -171,6 +191,7 @@ impl CoreApp {
         let text = self.notices.close.as_ref()?.text.as_str();
         let params = PaneNoticeParams {
             text,
+            hover: None,
             inner_x: (cell.x + l.padding) as f32,
             inner_y: (cell.y_top + l.cell_title_h + l.padding) as f32,
             grid_cols: grid.cols(),
