@@ -15,6 +15,19 @@ use crate::plugins::allocation::rest::{LEAVE_BELOW_H, RESTRICTED_USER, is_keeper
 use crate::plugins::allocation::speed::default_rate;
 use crate::plugins::allocation::{Class, Load, Quant, lasts};
 
+/// How fast pane `p` uses its account's week, as a fraction an hour.
+pub(super) fn pane_rate(a: &CodexAlloc, p: &PaneIn, now: i64) -> f64 {
+    let class = class_of(p);
+    let (f, n, _) = a.used.get(&p.sid).map_or(default_rate(class), |u| u.rate_or_default(now, class));
+    f + n
+}
+
+/// The rate a plain pane nothing has measured is taken at.
+pub(super) fn plain_rate() -> f64 {
+    let (f, n, _) = default_rate(Class::Plain);
+    f + n
+}
+
 /// A reading older than this is pushed forward by the panes' speeds.
 const STALE_ACCOUNT_S: i64 = 30 * 60;
 

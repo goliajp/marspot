@@ -76,6 +76,18 @@ fn hint_of(h: Held) -> Msg {
     }
 }
 
+/// Why peerbus held a move, as the credits rule logs it.
+fn held_word(h: Held) -> &'static str {
+    match h {
+        Held::Busy => "busy",
+        Held::ChildRunning => "sub_agent",
+        Held::Queued => "queued",
+        Held::Moving => "switching",
+        Held::NotBound => "not_bound",
+        Held::Unknown => "state_unknown",
+    }
+}
+
 impl Switches {
     /// A switch is under way in pane `sid`.
     pub(super) fn moving(&self, sid: u64) -> bool {
@@ -140,7 +152,7 @@ impl CodexPlugin {
                 (Some(false), Verdict::Held(h)) => {
                     // a move nobody asked for leaves the badge alone
                     if self.switches.moves.remove(&sid).is_some_and(|m| m.auto) {
-                        self.paying.refused(host, sid, h);
+                        self.paying.refused(host, sid, held_word(h));
                     } else {
                         self.hint(host, sid, hint_of(h));
                     }

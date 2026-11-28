@@ -22,6 +22,11 @@ use marspot::pidtree::ProcId;
 use marspot::settings::{SchedCredits, Settings};
 use marspot_term::test_env::{EnvGuard, TempDir};
 
+/// What peerbus knows of a pane's thread, as the plugin's pass reads it.
+fn bound(sid: u64, codex: ProcId) -> Option<bool> {
+    crate::plugins::peerbus::threads().get(&sid).filter(|v| v.codex == codex).map(|v| v.idle)
+}
+
 fn held_lines(log: &Log) -> Vec<&str> {
     log.iter().filter(|(t, _)| *t == "quota.stop_paying.held").map(|(_, l)| l.as_str()).collect()
 }
@@ -94,14 +99,14 @@ fn a_switch_whose_submit_fails_is_logged_and_not_ordered_again_that_week() {
     marspot::settings::set_for_test(Settings::default());
     let (mut p, asks) = plugin(&home);
     let host = Host { refuse: true, ..Default::default() };
-    p.stop_paying(&host, credit(NOW));
+    p.stop_paying(&host, credit(NOW), bound);
     assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }));
     let old = home.path().join(".codex-profile-2");
     moving::post(SID, CODEX, Verdict::Go { thread: THREAD.into(), home: old, released: Released(pty_op::Job::new()) });
     p.follow_switches(&host);
     let said = |tag: &str, line: &str| host.logs.lock().unwrap().iter().filter(|(t, m)| t == tag && m == line).count();
     assert_eq!(said("quota.stop_paying.held", "sid=487 from=P2 why=switch_failed"), 1);
-    p.stop_paying(&host, credit(NOW + H / 2));
+    p.stop_paying(&host, credit(NOW + H / 2), bound);
     assert!(!std::iter::from_fn(|| asks.next()).any(|a| matches!(a, Ask::Begin { .. })), "not ordered again this week");
     assert_eq!(said("quota.stop_paying.held", "sid=487 from=P2 why=switch_failed"), 1, "said once");
     assert_eq!(host.logs.lock().unwrap().iter().filter(|(t, _)| t == "quota.stop_paying").count(), 1);
@@ -168,15 +173,15 @@ fn a_held_switch_leaves_the_badge_alone_and_may_be_ordered_again_then_goes() {
     marspot::settings::set_for_test(Settings::default());
     let (mut p, asks) = plugin(&home);
     let host = Host::default();
-    p.stop_paying(&host, credit(NOW));
+    p.stop_paying(&host, credit(NOW), bound);
     assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }), "the menu switch's own check");
     moving::post(SID, CODEX, Verdict::Held(Held::ChildRunning));
     p.follow_switches(&host);
     assert_eq!(p.hint_for(SID), None, "no badge hint for a move nobody asked for");
     assert!(host.logs.lock().unwrap().iter().any(|(t, m)| t == "quota.stop_paying.held" && m == "sid=487 from=P2 why=sub_agent"));
-    p.stop_paying(&host, credit(NOW + 60));
+    p.stop_paying(&host, credit(NOW + 60), bound);
     assert_eq!(asks.next(), None, "not asked again within RETRY_S");
-    p.stop_paying(&host, credit(NOW + RETRY_S));
+    p.stop_paying(&host, credit(NOW + RETRY_S), bound);
     assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }), "ordered again");
     let old = home.path().join(".codex-profile-2");
     moving::post(SID, CODEX, Verdict::Go { thread: THREAD.into(), home: old, released: Released(pty_op::Job::new()) });
@@ -194,7 +199,7 @@ fn hold_in_the_settings_file_keeps_the_pane_where_it_is() {
     s.sched.credits = SchedCredits::Hold;
     marspot::settings::set_for_test(s);
     let (mut p, asks) = plugin(&home);
-    p.stop_paying(&Host::default(), credit(NOW));
+    p.stop_paying(&Host::default(), credit(NOW), bound);
     assert_eq!(asks.next(), None);
     marspot::settings::set_for_test(Settings::default());
 }
@@ -207,7 +212,7 @@ fn a_pane_with_text_in_its_input_box_is_not_switched() {
     let (mut p, asks) = plugin(&home);
     p.paying.looks.composer = |_| Some("half a sentence".into());
     let host = Host::default();
-    p.stop_paying(&host, credit(NOW));
+    p.stop_paying(&host, credit(NOW), bound);
     assert_eq!(asks.next(), None);
     assert!(host.logs.lock().unwrap().iter().any(|(_, m)| m == "sid=487 from=P2 why=input_not_empty"));
 }
@@ -223,7 +228,7 @@ fn a_codex_waiting_on_an_approval_is_not_switched() {
     let (mut p, asks) = plugin(&home);
     p.paying.looks.screen = |_| Some(ASKING.into());
     let host = Host::default();
-    p.stop_paying(&host, credit(NOW));
+    p.stop_paying(&host, credit(NOW), bound);
     assert_eq!(asks.next(), None);
     assert!(host.logs.lock().unwrap().iter().any(|(_, m)| m == "sid=487 from=P2 why=terminal_busy"));
     assert!(!asks_approval("  Would you like to know more? I asked earlier.\n› "), "no question at the row's end");
@@ -237,7 +242,7 @@ fn a_thread_peerbus_does_not_know_is_held_as_unknown() {
     let (mut p, asks) = plugin(&home);
     publish_threads(HashMap::new());
     let host = Host::default();
-    p.stop_paying(&host, credit(NOW));
+    p.stop_paying(&host, credit(NOW), bound);
     assert_eq!(asks.next(), None, "the switch refuses an unknown thread; the rule does not ask");
     assert!(host.logs.lock().unwrap().iter().any(|(t, m)| t == "quota.stop_paying.held" && m == "sid=487 from=P2 why=thread_unknown"));
 }

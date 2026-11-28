@@ -362,7 +362,7 @@ impl Plugin for CodexPlugin {
         self.seen.end_pass(live);
         self.refresh_stale(host, &codex_panes);
         let credit = self.alloc.run(host, &alloc_seen, &obs);
-        self.stop_paying(host, credit);
+        self.stop_paying(host, credit, |sid, codex| views.get(&sid).filter(|v| v.codex == codex).map(|v| v.idle));
         super::helpers::used::look_at_codex();
     }
 }

@@ -25,7 +25,6 @@ use marspot::settings::SchedCredits;
 
 use super::credits::{Acct, SPENT};
 use super::stop_paying_screen::Looks;
-use crate::plugins::peerbus::moving::Held;
 use crate::plugins::{LogLevel, PluginHost};
 
 /// Moves ordered across all panes in any hour, at most.
@@ -240,22 +239,12 @@ impl StopPaying {
     }
 }
 
-fn held_word(h: Held) -> &'static str {
-    match h {
-        Held::Busy => "busy",
-        Held::ChildRunning => "sub_agent",
-        Held::Queued => "queued",
-        Held::Moving => "switching",
-        Held::NotBound => "not_bound",
-        Held::Unknown => "state_unknown",
-    }
-}
-
 impl StopPaying {
-    /// Peerbus held an ordered move: it may be ordered again later.
-    pub(super) fn refused(&mut self, host: &dyn PluginHost, sid: u64, h: Held) {
+    /// Peerbus held an ordered move, for `why`: it may be ordered again
+    /// later.
+    pub(super) fn refused(&mut self, host: &dyn PluginHost, sid: u64, why: &'static str) {
         let mut log = Vec::new();
-        self.undo(sid, &mut log, held_word(h));
+        self.undo(sid, &mut log, why);
         say(host, log);
     }
 

@@ -16,7 +16,8 @@ use marspot_peer::registry::Agent;
 
 use super::alloc::{AccountIn, CodexAlloc, PaneIn, Snapshot, events_dir};
 use super::alloc_rollout::rollout_of_thread;
-use super::credits::{accounts as accounts_of, feed_balances, pane_rate, spent_week, Credit};
+use super::alloc_decide::pane_rate;
+use super::credits::{accounts as accounts_of, feed_balances, spent_week, Credit};
 use super::rollout::RolloutIndex;
 use crate::plugins::claudecode::heads_up;
 use crate::plugins::claudecode::quota::Room;

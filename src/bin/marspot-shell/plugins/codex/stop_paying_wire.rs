@@ -3,20 +3,22 @@
 
 use std::collections::HashMap;
 
+use marspot::pidtree::ProcId;
+
 use super::CodexPlugin;
+use super::alloc_decide::plain_rate;
 use super::credits::Credit;
 use super::pane::PaneCodex;
 use super::stop_paying::{COOL_DOWN, Mover, need, say};
 use super::stop_paying_screen::Looks;
 use super::switch::{Switches, movable_argv};
 use crate::plugins::PluginHost;
-use crate::plugins::allocation::speed::default_rate;
-use crate::plugins::allocation::Class;
 
 impl CodexPlugin {
     /// The credits rule over every codex pane, with what the allocation
-    /// pass read of each account and pane.
-    pub(super) fn stop_paying(&mut self, host: &dyn PluginHost, credit: Option<Credit>) {
+    /// pass read of each account and pane; `bound` says whether peerbus
+    /// knows a pane's thread for that codex, and whether it is idle.
+    pub(super) fn stop_paying(&mut self, host: &dyn PluginHost, credit: Option<Credit>, bound: impl Fn(u64, ProcId) -> Option<bool>) {
         let Some(Credit { now, accts, rates }) = credit else { return };
         let mode = marspot::settings::get().sched.credits;
         let stay_h = crate::plugins::claudecode::allocation_level2::limits::current().dwell_h;
@@ -29,13 +31,10 @@ impl CodexPlugin {
         let looks = self.paying.looks;
         for (sid, from) in sids {
             // a pane the allocation has not measured is taken at its default
-            let rate = rates.get(&sid).copied().unwrap_or_else(|| {
-                let (f, n, _) = default_rate(Class::Plain);
-                f + n
-            });
+            let rate = rates.get(&sid).copied().unwrap_or_else(plain_rate);
             let m = Mover { sid, from, need: need(stay_h, rate) };
             let (switches, panes) = (&self.switches, &self.panes);
-            let ready = || auto_ready(host, switches, &looks, panes, sid);
+            let ready = || auto_ready(host, switches, &looks, &bound, panes, sid);
             orders.extend(self.paying.decide(mode, &accts, now, m, ready, &mut log));
         }
         for o in orders {
@@ -55,7 +54,14 @@ impl CodexPlugin {
 
 /// Why pane `sid` may not be switched now by the rule, if it may not:
 /// the menu switch's checks, an empty input box, and the cool-down.
-fn auto_ready(host: &dyn PluginHost, switches: &Switches, looks: &Looks, panes: &HashMap<u64, PaneCodex>, sid: u64) -> Result<(), &'static str> {
+fn auto_ready(
+    host: &dyn PluginHost,
+    switches: &Switches,
+    looks: &Looks,
+    bound: &impl Fn(u64, ProcId) -> Option<bool>,
+    panes: &HashMap<u64, PaneCodex>,
+    sid: u64,
+) -> Result<(), &'static str> {
     let pane = panes.get(&sid).ok_or("gone")?;
     if switches.moving(sid) {
         return Err("switching");
@@ -66,8 +72,7 @@ fn auto_ready(host: &dyn PluginHost, switches: &Switches, looks: &Looks, panes: 
     if !pane.argv.as_deref().is_some_and(movable_argv) {
         return Err("custom_command");
     }
-    let view = crate::plugins::peerbus::threads().get(&sid).filter(|v| v.codex == pane.codex).map(|v| v.idle);
-    match view {
+    match bound(sid, pane.codex) {
         None => return Err("thread_unknown"),
         Some(false) => return Err("busy"),
         Some(true) => {}

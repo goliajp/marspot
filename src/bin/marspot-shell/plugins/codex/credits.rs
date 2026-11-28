@@ -10,8 +10,7 @@ use std::collections::HashMap;
 
 use marspot_peer::json;
 
-use super::alloc::{AccountIn, CodexAlloc, PaneIn, Snapshot, WEEK_S, class_of};
-use crate::plugins::allocation::speed::default_rate;
+use super::alloc::{AccountIn, CodexAlloc, Snapshot, WEEK_S};
 use super::alloc_rollout::balance_of;
 
 /// A week counts as used up from this fraction (the answers give whole
@@ -127,13 +126,6 @@ pub(super) struct Credit {
     pub now: i64,
     pub accts: Vec<Acct>,
     pub rates: HashMap<u64, f64>,
-}
-
-/// How fast pane `p` uses its account's week, as a fraction an hour.
-pub(super) fn pane_rate(a: &CodexAlloc, p: &PaneIn, now: i64) -> f64 {
-    let class = class_of(p);
-    let (f, n, _) = a.used.get(&p.sid).map_or(default_rate(class), |u| u.rate_or_default(now, class));
-    f + n
 }
 
 /// The renewal of `a`'s week when the feed reads it as used up at `now`.
