@@ -21,12 +21,6 @@
 //!   guarantee that is not there.  The design and the precedent are in
 //!   `.dev/rfcs`.
 //!
-//! ## Module layout
-//!
-//! - `mod.rs` (this file) — public trait + types + `PluginRegistry`
-//! - `host.rs` — `PluginHost` impl backed by the shell's state
-//! - `usage/` — collects the account usage feed when nothing else does
-//!
 //! ## API versioning
 //!
 //! Packed `u32`: high 16 = MAJOR, low 16 = MINOR.  Host rejects a
@@ -51,6 +45,9 @@ pub mod codex;
 pub mod gemini;
 pub mod helpers;
 pub mod kimi;
+pub(crate) mod cold_restore;
+#[cfg(test)]
+pub(crate) mod l3_test_support;
 pub(crate) mod launches;
 pub mod peerbus;
 pub mod usage;

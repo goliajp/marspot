@@ -16,10 +16,9 @@ use super::cold_record::{self as record, LastBound, PaneNow, Unbound};
 use super::*;
 use crate::plugins::launches;
 
-/// Between two restores.
-pub(super) const STAGGER: Duration = Duration::from_secs(4);
-/// Restores one process starts, at most.
-pub(super) const CAP: u32 = 32;
+#[cfg(test)]
+pub(super) use crate::plugins::cold_restore::STAGGER;
+use crate::plugins::cold_restore::{Held, Pace, CAP};
 
 const OP_NAME: &str = "cc.cold_restore";
 
@@ -31,9 +30,7 @@ pub(super) struct Cold {
     /// once each.  At most `CAP` of each.
     tried: HashSet<u64>,
     tried_uuids: HashSet<String>,
-    started: u32,
-    pub(super) last_start: Option<Instant>,
-    capped_said: bool,
+    pub(super) pace: Pace,
     /// When a pane last had input; the control hub's record.
     pub(super) last_input: fn(u64) -> Option<SystemTime>,
     pub(super) ends: Arc<Mutex<Vec<(u64, pty_op::OpOutcome)>>>,
@@ -47,10 +44,8 @@ impl Default for Cold {
             gone_since: HashMap::new(),
             tried: HashSet::new(),
             tried_uuids: HashSet::new(),
-            started: 0,
-            last_start: None,
-            capped_said: false,
-            last_input: |sid| crate::pane_control::hub()?.last_input(sid),
+            pace: Pace::default(),
+            last_input: crate::plugins::cold_restore::hub_last_input,
             ends: Arc::default(),
             seen: launches::Seen::default(),
         }
@@ -144,15 +139,15 @@ impl ClaudecodePlugin {
             .filter(|r| !self.cold.tried.contains(&r.sid) && !self.armed.contains(&r.sid))
             .filter(|r| !self.dormant.iter().any(|d| d.shelld_sid == r.sid))
             .collect();
-        if waiting.is_empty() || self.cold.last_start.is_some_and(|t| t.elapsed() < STAGGER) {
+        if waiting.is_empty() {
             return;
         }
-        if self.cold.started >= CAP {
-            if !self.cold.capped_said {
-                host.log(LogLevel::Warn, "cold_restore.cap", &format!("{CAP} restores started; the rest are left to the person"));
-                self.cold.capped_said = true;
+        match self.cold.pace.may_start() {
+            Ok(()) => {}
+            Err(Held::Capped { first: true }) => {
+                return host.log(LogLevel::Warn, "cold_restore.cap", &format!("{CAP} restores started; the rest are left to the person"));
             }
-            return;
+            Err(_) => return,
         }
         waiting.sort_by_key(|r| r.sid);
         let wall = SystemTime::now();
@@ -188,8 +183,7 @@ impl ClaudecodePlugin {
         );
         match host.submit_pty_op(sid, op) {
             Ok(()) => {
-                self.cold.started += 1;
-                self.cold.last_start = Some(Instant::now());
+                self.cold.pace.note_start();
                 host.log(LogLevel::Info, "cold_restore.start", &line);
             }
             Err(e) => host.log(LogLevel::Warn, "cold_restore.submit_failed", &format!("pane {sid}: {e}")),

@@ -40,6 +40,8 @@ fn plugin_with(rows: Vec<LastBound>) -> ClaudecodePlugin {
     let mut plugin = ClaudecodePlugin::new();
     plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
     plugin.cold.rows = rows;
+    // each test's restores are paced on their own
+    plugin.cold.pace = crate::plugins::cold_restore::Pace::own();
     plugin
 }
 
@@ -65,7 +67,7 @@ fn a_new_shell_gets_its_claude_back_on_the_account_it_ran_on() {
     let logged = host.logged.lock().unwrap().clone();
     let start = logged.iter().find(|(e, _)| e == "cold_restore.start").expect("a start line");
     assert!(start.1.contains("on P1 (the account it ran on)"), "{}", start.1);
-    plugin.cold.last_start = None;
+    plugin.cold.pace.set_last_start(None);
     plugin.cold_restore(&host, &unbound_scan(&[483]), new_shell);
     assert_eq!(host.sent.lock().unwrap().len(), 1, "once per pane in one process");
 }
@@ -92,9 +94,9 @@ fn restores_are_staggered_and_leave_parked_and_running_panes_alone() {
     plugin.cold_restore(&host, &scan, new_shell);
     let sids = |h: &FakeHost| h.sent.lock().unwrap().iter().map(|(s, _)| *s).collect::<Vec<_>>();
     assert_eq!(sids(&host), vec![1], "the second waits its turn");
-    plugin.cold.last_start = Some(Instant::now() - STAGGER - Duration::from_secs(1));
+    plugin.cold.pace.set_last_start(Some(Instant::now() - STAGGER - Duration::from_secs(1)));
     plugin.cold_restore(&host, &scan, new_shell);
-    plugin.cold.last_start = Some(Instant::now() - STAGGER - Duration::from_secs(1));
+    plugin.cold.pace.set_last_start(Some(Instant::now() - STAGGER - Duration::from_secs(1)));
     plugin.cold_restore(&host, &scan, new_shell);
     assert_eq!(sids(&host), vec![1, 4]);
 }
@@ -172,7 +174,7 @@ fn a_session_bound_elsewhere_is_not_resumed_again() {
     let mut plugin = plugin_with(vec![row(1, &home, 1), twin]);
     let scan = unbound_scan(&[1, 3]);
     plugin.cold_restore(&host, &scan, new_shell);
-    plugin.cold.last_start = None;
+    plugin.cold.pace.set_last_start(None);
     plugin.cold_restore(&host, &scan, new_shell);
     let sids: Vec<u64> = host.sent.lock().unwrap().iter().map(|(s, _)| *s).collect();
     assert_eq!(sids, vec![1], "the same session is not resumed in pane 3 too");
