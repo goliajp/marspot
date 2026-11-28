@@ -276,6 +276,14 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
              it was put back to {back}"
         ),
         Arg::ModelNowIs(to) => write!(out, "Claude Code's default model for every account is now {to}"),
+        Arg::WebOpening(url) => write!(out, "opening {url}…"),
+        Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
+            write!(out, "madcawl {side} speaks versions {a}–{b}; marspot speaks {c}–{d}")
+        }
+        Arg::WebVersion { side, theirs: None, ours: (c, d) } => {
+            write!(out, "madcawl {side} is older than versions {c}–{d}, which marspot speaks")
+        }
+        Arg::WebFailed(why) => write!(out, "the page cannot be shown: {why}"),
         Arg::InstallAsk { cli, place, megabytes } => write!(
             out,
             "Install {cli} into {place}? It is downloaded from its vendor and takes about {megabytes} MB. \

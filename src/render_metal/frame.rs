@@ -105,6 +105,7 @@ impl MetalRenderer {
             ref settings_panel,
             ref shortcuts_panel,
             ref helpers_panel,
+            ref web_images,
             ..
         } = *self;
 
@@ -178,6 +179,7 @@ impl MetalRenderer {
                 atlas_texture: atlas_texture.texture(),
                 color_atlas_texture: color_atlas_texture.texture(),
                 device,
+                images: web_images,
             },
             cells_scratch,
             dots_scratch,

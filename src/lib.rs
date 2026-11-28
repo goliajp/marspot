@@ -126,6 +126,7 @@ pub mod pane_message;
 pub mod pane_name;
 pub mod pane_read;
 pub mod pane_state;
+pub mod web_pane;
 pub mod selection_tape;
 #[cfg(test)]
 mod snapshot_kit;

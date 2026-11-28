@@ -91,6 +91,8 @@ impl CoreApp {
     /// script as the events the window would have sent for it, so they
     /// are routed and handled like any others.
     pub(super) fn dev_drive_panels(&mut self) {
+        // the web pane seam rides on this one's call: same turn of the loop
+        self.dev_drive_web_pane();
         let now = Instant::now();
         if !self.dev_panels.as_ref().is_some_and(|s| s.due(now)) {
             return;

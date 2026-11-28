@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.919"  # full charges a switch nothing beyond its rewrite, as steady and balanced do
-core    = "0.12.804"  # taking a window's focused undrawn pane leaves it a focus
+core    = "0.12.805"  # web panes: a page madcawl draws into shared memory, shown as a texture in a pane (dev seam only)
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

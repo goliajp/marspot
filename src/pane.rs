@@ -36,6 +36,8 @@ pub use control::ControlReach;
 mod peek;
 pub use peek::Peek;
 mod scrim;
+mod vacant;
+pub use vacant::VacantPane;
 mod view_sync;
 pub use scrim::{ScrimFade, SCRIM_FADE};
 use crate::grid_shm::{
@@ -53,7 +55,6 @@ use crate::shell_proto::{
 };
 use crate::tools::{search_bar::SearchBar, search_list::SearchList};
 use crate::terminal::Terminal;
-use crate::ui::strings::{self, t, Arg, Msg};
 
 /// One pane's backend: a locally forked PTY (the bench / test path)
 /// or an L3 `marspot-session` process (the shipped path).  Same
@@ -82,128 +83,8 @@ pub enum PaneBackend {
     /// path retries a fresh L3 at the same id.  Renders a static
     /// message grid; all I/O is a no-op.
     Vacant(VacantPane),
-}
-
-/// RFC-004 B.2 — the inert backend behind a slot that failed to
-/// assemble.  See `PaneBackend::Vacant`.
-pub struct VacantPane {
-    session_id: u64,
-    grid: Grid,
-    /// RFC-006 — a dormant placeholder: the slot a pane left behind
-    /// when it was MOVED to another window.  Holds the layout open
-    /// but is not a session in any sense: it never revives on a
-    /// keystroke (click only), counts as neither live nor
-    /// resurrectable, and persists as layout (SavedPane flags bit 0).
-    dormant: bool,
-    /// A spawn for this slot is in flight.
-    ///
-    /// "Starting" is not a peer state to "vacant" — it *is* a vacant
-    /// slot (no live session behind it) that additionally has work
-    /// coming.  Modelling it as a flag rather than a second backend
-    /// variant keeps that relationship visible, and keeps the twenty
-    /// match arms that already handle `Vacant` correct by construction.
-    ///
-    /// Two things change while it holds: the slot says "starting"
-    /// instead of "unavailable", and `is_exited` reports false so the
-    /// revive-on-keystroke path can't fire a second spawn on top of the
-    /// one already running.
-    ///
-    /// It is deliberately time-boxed — see `pending_since`.
-    pending: bool,
-    /// When the in-flight spawn started, for the pending state only.
-    ///
-    /// Suppressing `is_exited` is what stops a double spawn, but it also
-    /// means the revive-on-keystroke path — the one affordance a user has
-    /// for waking a dead slot — is disabled while it holds.  If the
-    /// worker never reports back (its thread panicked, the event was
-    /// dropped), the slot would sit at "starting…" forever with the
-    /// guard locking out the only escape.  So the guard expires: past
-    /// `PENDING_MAX`, the slot reports exited again and a keystroke can
-    /// retry.  A late-arriving result is still adopted normally — the
-    /// deadline only re-opens the escape hatch, it doesn't cancel
-    /// anything.
-    pending_since: Instant,
-}
-
-/// How long a slot may claim "a spawn is in flight" before a keystroke
-/// is allowed to start another.  Generously past the 10 s
-/// `wait_and_connect` budget a spawn can legitimately take, so a slow
-/// boot is never cut short.
-const PENDING_MAX: Duration = Duration::from_secs(30);
-
-impl VacantPane {
-    pub fn new(session_id: u64, cols: u16, rows: u16) -> Self {
-        let mut grid = Grid::new(cols.max(20), rows.max(3));
-        Self::paint_message(&mut grid, session_id, false);
-        Self {
-            session_id,
-            grid,
-            dormant: false,
-            pending: false,
-            pending_since: Instant::now(),
-        }
-    }
-
-    /// A slot whose session is being spawned right now.
-    pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
-        let mut grid = Grid::new(cols.max(20), rows.max(3));
-        Self::paint_message(&mut grid, session_id, true);
-        Self {
-            session_id,
-            grid,
-            dormant: false,
-            pending: true,
-            pending_since: Instant::now(),
-        }
-    }
-
-    /// RFC-006 — the placeholder a moved-out pane leaves behind.
-    pub fn new_dormant(cols: u16, rows: u16) -> Self {
-        let mut grid = Grid::new(cols.max(20), rows.max(3));
-        let msg = t(Msg::PaneEmpty);
-        let row = (grid.rows() / 2).min(grid.rows().saturating_sub(1));
-        let start = grid.cols().saturating_sub(crate::pane_message::centring_width(msg)) / 2;
-        crate::pane_message::put(&mut grid, start, row, msg);
-        Self {
-            session_id: 0,
-            grid,
-            dormant: true,
-            pending: false,
-            pending_since: Instant::now(),
-        }
-    }
-
-    pub fn is_dormant(&self) -> bool {
-        self.dormant
-    }
-
-    /// A spawn is in flight *and* still within its deadline.  Past the
-    /// deadline the slot behaves like a plain vacant one so the user can
-    /// retry — see `pending_since`.
-    pub fn is_pending(&self) -> bool {
-        self.pending && self.pending_since.elapsed() < PENDING_MAX
-    }
-
-    fn paint_message(grid: &mut Grid, session_id: u64, pending: bool) {
-        let msg = strings::text(if pending {
-            Arg::SessionStarting(session_id)
-        } else {
-            Arg::SessionUnavailable(session_id)
-        });
-        let row = 1u16.min(grid.rows().saturating_sub(1));
-        crate::pane_message::put(grid, 2, row, &msg);
-    }
-
-    fn resize(&mut self, cols: u16, rows: u16) {
-        let mut grid = Grid::new(cols.max(20), rows.max(3));
-        Self::paint_message(&mut grid, self.session_id, self.pending);
-        self.grid = grid;
-    }
-
-    fn repaint(&mut self) {
-        let (cols, rows) = (self.grid.cols(), self.grid.rows());
-        if self.dormant { self.grid = Self::new_dormant(cols, rows).grid } else { self.resize(cols, rows) }
-    }
+    /// A page madcawl draws into shared memory; no PTY, no terminal.
+    Web(crate::web_pane::WebPane),
 }
 
 impl PaneBackend {
@@ -216,8 +97,8 @@ impl PaneBackend {
     pub fn terminal(&self) -> &Terminal {
         match self {
             PaneBackend::Local(s) => s.terminal(),
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => {
-                unreachable!("L3/Vacant pane has no in-process Terminal")
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) | PaneBackend::Web(_) => {
+                unreachable!("L3/Vacant/Web pane has no in-process Terminal")
             }
         }
     }
@@ -225,8 +106,8 @@ impl PaneBackend {
     pub fn terminal_mut(&mut self) -> &mut Terminal {
         match self {
             PaneBackend::Local(s) => &mut s.terminal,
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => {
-                unreachable!("L3/Vacant pane has no in-process Terminal")
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) | PaneBackend::Web(_) => {
+                unreachable!("L3/Vacant/Web pane has no in-process Terminal")
             }
         }
     }
@@ -238,14 +119,14 @@ impl PaneBackend {
     pub fn terminal_opt(&self) -> Option<&Terminal> {
         match self {
             PaneBackend::Local(s) => Some(s.terminal()),
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => None,
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) | PaneBackend::Web(_) => None,
         }
     }
 
     pub fn terminal_mut_opt(&mut self) -> Option<&mut Terminal> {
         match self {
             PaneBackend::Local(s) => Some(&mut s.terminal),
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => None,
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) | PaneBackend::Web(_) => None,
         }
     }
 
@@ -256,6 +137,7 @@ impl PaneBackend {
             PaneBackend::Local(s) => s.terminal().grid(),
             PaneBackend::L3(c) => &c.grid,
             PaneBackend::Vacant(v) => &v.grid,
+            PaneBackend::Web(w) => w.grid(),
         }
     }
 
@@ -274,6 +156,8 @@ impl PaneBackend {
             // A vacant slot still *names* its session — that's the
             // whole point (sid survives save/restore + revive).
             PaneBackend::Vacant(v) => Some(v.session_id),
+            // not a session: nothing of it is saved or revived
+            PaneBackend::Web(_) => None,
         }
     }
 
@@ -281,7 +165,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_visible(),
             PaneBackend::L3(c) => c.cursor_visible,
-            PaneBackend::Vacant(_) => false,
+            PaneBackend::Vacant(_) | PaneBackend::Web(_) => false,
         }
     }
 
@@ -300,7 +184,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(_) | PaneBackend::L3(_) => Some(self.grid().cursor()),
             // A vacant slot has no PTY to insert into.
-            PaneBackend::Vacant(_) => None,
+            PaneBackend::Vacant(_) | PaneBackend::Web(_) => None,
         }
     }
 
@@ -308,7 +192,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_key_application_mode(),
             PaneBackend::L3(c) => c.app_cursor_keys,
-            PaneBackend::Vacant(_) => false,
+            PaneBackend::Vacant(_) | PaneBackend::Web(_) => false,
         }
     }
 
@@ -316,7 +200,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().bracketed_paste_mode(),
             PaneBackend::L3(c) => c.bracketed_paste,
-            PaneBackend::Vacant(_) => false,
+            PaneBackend::Vacant(_) | PaneBackend::Web(_) => false,
         }
     }
 
@@ -505,7 +389,7 @@ impl PaneBackend {
             // requests a redraw, 0 when nothing changed (so the 1 s
             // heartbeat doesn't force a spurious render).
             PaneBackend::L3(c) => usize::from(c.poll()),
-            PaneBackend::Vacant(_) => 0,
+            PaneBackend::Vacant(_) | PaneBackend::Web(_) => 0,
         }
     }
 
@@ -527,6 +411,7 @@ impl PaneBackend {
             // `is_pending` expires, so a spawn that never reports back
             // can't lock the slot out of that path forever.
             PaneBackend::Vacant(v) => !v.is_pending(),
+            PaneBackend::Web(_) => false,
         }
     }
 
@@ -535,7 +420,7 @@ impl PaneBackend {
             PaneBackend::Local(s) => s.write(bytes),
             // L3 input is forwarded as key events, not raw bytes; the
             // session process owns its own PTY write + response path.
-            PaneBackend::L3(_) | PaneBackend::Vacant(_) => Ok(0),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) | PaneBackend::Web(_) => Ok(0),
         }
     }
 
@@ -547,6 +432,7 @@ impl PaneBackend {
             // new dims, which the mirror picks up on the next `poll`.
             PaneBackend::L3(c) => c.forward_resize(cols, rows),
             PaneBackend::Vacant(v) => v.resize(cols, rows),
+            PaneBackend::Web(w) => w.resize(cols, rows),
         }
     }
 
@@ -561,6 +447,7 @@ impl PaneBackend {
                 }
             }
             PaneBackend::Vacant(_) => SessionState::Exited,
+            PaneBackend::Web(_) => SessionState::Idle,
         }
     }
 
@@ -1136,6 +1023,10 @@ impl Pane {
         self.last_seen_scroll_push = 0;
     }
 
+    pub fn new_web(web: crate::web_pane::WebPane) -> Self {
+        Self::over(PaneBackend::Web(web))
+    }
+
     pub fn new_vacant(session_id: u64, cols: u16, rows: u16) -> Self {
         Self::over(PaneBackend::Vacant(VacantPane::new(session_id, cols, rows)))
     }
@@ -1229,6 +1120,7 @@ impl Pane {
             }
             // Static message grid — never changes after construction.
             PaneBackend::Vacant(_) => 0,
+            PaneBackend::Web(w) => w.rev(),
         }
     }
 
@@ -1578,6 +1470,7 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::vacant::PENDING_MAX;
 
     /// 2026-09-06: codex could not scroll at all.
     ///

@@ -245,6 +245,14 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::RanFor { minutes: m } => write!(out, "{} 小时 {} 分", m / 60, m % 60),
         Arg::ModelPutBack { to, back } => write!(out, "所有账号共用的 Claude Code 默认模型未经确认被改成了 {to}，已改回 {back}"),
         Arg::ModelNowIs(to) => write!(out, "所有账号共用的 Claude Code 默认模型现在是 {to}"),
+        Arg::WebOpening(url) => write!(out, "正在打开 {url}…"),
+        Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
+            write!(out, "madcawl 的 {side} 支持版本 {a}–{b}，marspot 支持 {c}–{d}")
+        }
+        Arg::WebVersion { side, theirs: None, ours: (c, d) } => {
+            write!(out, "madcawl 的 {side} 比 marspot 支持的版本 {c}–{d} 旧")
+        }
+        Arg::WebFailed(why) => write!(out, "无法显示页面：{why}"),
         Arg::InstallAsk { cli, place, megabytes } => write!(
             out,
             "要把 {cli} 安装到 {place} 吗？从发行方下载，约占 {megabytes} MB。按 Ctrl-Option-Y 安装，按 Ctrl-Option-N 以后不装也不更新；其他键照常发给窗格"

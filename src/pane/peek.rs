@@ -34,7 +34,7 @@ impl Pane {
                 std::mem::replace(&mut c.grid, blank)
             }
             PaneBackend::Vacant(v) => std::mem::replace(&mut v.grid, blank),
-            PaneBackend::Local(_) => blank,
+            PaneBackend::Local(_) | PaneBackend::Web(_) => blank,
         };
         Pane::over(PaneBackend::Vacant(VacantPane {
             session_id,
