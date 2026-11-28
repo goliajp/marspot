@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.967"  # a codex pane leaves a used-up week with credits; refused or failed moves back off and are logged
+shell   = "0.7.968"  # only a used-up codex week moves a pane off its credits; a refusing account under 100% keeps its panes
 core    = "0.12.824"  # the codex credits row sits under its own Codex group; its cost line says hold and free move nothing yet
 session = "0.11.501"  # marspot-term: settings carry sched.credits (not used by session)

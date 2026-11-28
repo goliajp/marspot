@@ -1,12 +1,26 @@
 //! The credits rule when a move does not happen, when a week is used up
-//! before any credits are seen spent, and when a target is too short.
+//! before any credits are seen spent, and when a target is too short;
+//! and the rule over a plugin: peerbus's verdict, the switch it starts,
+//! the settings file, and what the pane's screen shows.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use super::credits::Acct;
+use super::pane::PaneCodex;
 use super::stop_paying::{need, target, Log, Mover, StopPaying, MIN_LEFT, MOVES_PER_HOUR, RETRY_S};
-use super::stop_paying_tests::{acct, credit, fleet, mv, ok, plugin, sandbox, Host, CODEX, H, LAST, NOW, SID, THREAD};
-use crate::plugins::peerbus::moving::{self, Ask, Released, Verdict};
-use crate::plugins::pty_op;
-use marspot::settings::Settings;
+use super::stop_paying_screen::asks_approval;
+use super::stop_paying_tests::{acct, credit, fleet, mv, ok, H, LAST, NOW};
+use super::CodexPlugin;
+use crate::plugins::peerbus::moving::{self, Ask, Held, Listener, Released, Verdict};
+use crate::plugins::peerbus::{publish_threads, ThreadView};
+use crate::plugins::{pty_op, LogLevel, PaneStatusView, PluginError, PluginHost};
+use marspot::pane_state::{BusyKind, PaneStatus};
+use marspot::pidtree::ProcId;
+use marspot::settings::{SchedCredits, Settings};
+use marspot_term::test_env::{EnvGuard, TempDir};
 
 fn held_lines(log: &Log) -> Vec<&str> {
     log.iter().filter(|(t, _)| *t == "quota.stop_paying.held").map(|(_, l)| l.as_str()).collect()
@@ -91,4 +105,139 @@ fn a_switch_whose_submit_fails_is_logged_and_not_ordered_again_that_week() {
     assert!(!std::iter::from_fn(|| asks.next()).any(|a| matches!(a, Ask::Begin { .. })), "not ordered again this week");
     assert_eq!(said("quota.stop_paying.held", "sid=487 from=P2 why=switch_failed"), 1, "said once");
     assert_eq!(host.logs.lock().unwrap().iter().filter(|(t, _)| t == "quota.stop_paying").count(), 1);
+}
+
+#[derive(Default)]
+struct Host {
+    pub logs: Mutex<Vec<(String, String)>>,
+    pub submitted: Mutex<Vec<&'static str>>,
+    /// Every submit is refused, as by a pane that went away.
+    pub refuse: bool,
+}
+
+impl PluginHost for Host {
+    fn state_dir(&self) -> Result<PathBuf, PluginError> {
+        Ok(std::env::temp_dir())
+    }
+    fn log(&self, _l: LogLevel, t: &str, m: &str) {
+        self.logs.lock().unwrap().push((t.to_string(), m.to_string()));
+    }
+    fn submit_pty_op_at(&self, _sid: u64, op: pty_op::PtyOp, _start_at: usize) -> Result<(), PluginError> {
+        if self.refuse {
+            return Err(PluginError::Other("no such pane".into()));
+        }
+        self.submitted.lock().unwrap().push(op.name);
+        Ok(())
+    }
+    fn pane_status(&self, _sid: u64) -> Result<Option<PaneStatusView>, PluginError> {
+        let held = Duration::from_secs(60);
+        Ok(Some(PaneStatusView { status: PaneStatus::Busy(BusyKind::ForegroundJob), held, quiescent: true }))
+    }
+}
+
+const SID: u64 = 487;
+const CODEX: ProcId = ProcId { pid: i32::MAX, start_us: 1 };
+const THREAD: &str = "01a133f4-8e7b-7331-9630-9c40ff4b467f";
+
+/// A codex pane on profile 2, bound idle to its thread, with an empty
+/// input box, and a worker that takes asks without answering them.
+fn plugin(home: &TempDir) -> (CodexPlugin, Listener) {
+    let mut p = CodexPlugin::new();
+    p.paying.looks.screen = |_| None;
+    p.paying.looks.composer = |_| Some(String::new());
+    p.panes.insert(SID, PaneCodex { codex: CODEX, shell_pid: i32::MAX, profile: Some(2), argv: Some(vec!["codex".into()]) });
+    let home2 = home.path().join(".codex-profile-2");
+    publish_threads(HashMap::from([(SID, ThreadView { codex: CODEX, home: home2, thread: THREAD.into(), idle: true, ends: Default::default() })]));
+    (p, Listener::connect())
+}
+
+fn sandbox() -> (TempDir, EnvGuard) {
+    let home = TempDir::new("codex-stop-paying");
+    for d in [".codex-profile-1", ".codex-profile-2"] {
+        std::fs::create_dir_all(home.path().join(d)).unwrap();
+    }
+    let mut env = EnvGuard::new();
+    env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", home.join("state"));
+    (home, env)
+}
+
+#[test]
+fn a_held_switch_leaves_the_badge_alone_and_may_be_ordered_again_then_goes() {
+    let _turn = moving::test_turn();
+    let (home, _env) = sandbox();
+    marspot::settings::set_for_test(Settings::default());
+    let (mut p, asks) = plugin(&home);
+    let host = Host::default();
+    p.stop_paying(&host, credit(NOW));
+    assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }), "the menu switch's own check");
+    moving::post(SID, CODEX, Verdict::Held(Held::ChildRunning));
+    p.follow_switches(&host);
+    assert_eq!(p.hint_for(SID), None, "no badge hint for a move nobody asked for");
+    assert!(host.logs.lock().unwrap().iter().any(|(t, m)| t == "quota.stop_paying.held" && m == "sid=487 from=P2 why=sub_agent"));
+    p.stop_paying(&host, credit(NOW + 60));
+    assert_eq!(asks.next(), None, "not asked again within RETRY_S");
+    p.stop_paying(&host, credit(NOW + RETRY_S));
+    assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }), "ordered again");
+    let old = home.path().join(".codex-profile-2");
+    moving::post(SID, CODEX, Verdict::Go { thread: THREAD.into(), home: old, released: Released(pty_op::Job::new()) });
+    p.follow_switches(&host);
+    assert_eq!(*host.submitted.lock().unwrap(), ["codex.profile_switch"]);
+    let ordered = host.logs.lock().unwrap().iter().filter(|(t, _)| t == "quota.stop_paying").count();
+    assert_eq!(ordered, 2);
+}
+
+#[test]
+fn hold_in_the_settings_file_keeps_the_pane_where_it_is() {
+    let _turn = moving::test_turn();
+    let (home, _env) = sandbox();
+    let mut s = Settings::default();
+    s.sched.credits = SchedCredits::Hold;
+    marspot::settings::set_for_test(s);
+    let (mut p, asks) = plugin(&home);
+    p.stop_paying(&Host::default(), credit(NOW));
+    assert_eq!(asks.next(), None);
+    marspot::settings::set_for_test(Settings::default());
+}
+
+#[test]
+fn a_pane_with_text_in_its_input_box_is_not_switched() {
+    let _turn = moving::test_turn();
+    let (home, _env) = sandbox();
+    marspot::settings::set_for_test(Settings::default());
+    let (mut p, asks) = plugin(&home);
+    p.paying.looks.composer = |_| Some("half a sentence".into());
+    let host = Host::default();
+    p.stop_paying(&host, credit(NOW));
+    assert_eq!(asks.next(), None);
+    assert!(host.logs.lock().unwrap().iter().any(|(_, m)| m == "sid=487 from=P2 why=input_not_empty"));
+}
+
+/// codex 0.172's approval prompt, at the bottom of its screen.
+const ASKING: &str = "• Running make\n\n  Would you like to run the following command?\n\n  $ make\n\n› 1. Yes, proceed (y)\n  2. No (esc)\n";
+
+#[test]
+fn a_codex_waiting_on_an_approval_is_not_switched() {
+    let _turn = moving::test_turn();
+    let (home, _env) = sandbox();
+    marspot::settings::set_for_test(Settings::default());
+    let (mut p, asks) = plugin(&home);
+    p.paying.looks.screen = |_| Some(ASKING.into());
+    let host = Host::default();
+    p.stop_paying(&host, credit(NOW));
+    assert_eq!(asks.next(), None);
+    assert!(host.logs.lock().unwrap().iter().any(|(_, m)| m == "sid=487 from=P2 why=terminal_busy"));
+    assert!(!asks_approval("  Would you like to know more? I asked earlier.\n› "), "no question at the row's end");
+}
+
+#[test]
+fn a_thread_peerbus_does_not_know_is_held_as_unknown() {
+    let _turn = moving::test_turn();
+    let (home, _env) = sandbox();
+    marspot::settings::set_for_test(Settings::default());
+    let (mut p, asks) = plugin(&home);
+    publish_threads(HashMap::new());
+    let host = Host::default();
+    p.stop_paying(&host, credit(NOW));
+    assert_eq!(asks.next(), None, "the switch refuses an unknown thread; the rule does not ask");
+    assert!(host.logs.lock().unwrap().iter().any(|(t, m)| t == "quota.stop_paying.held" && m == "sid=487 from=P2 why=thread_unknown"));
 }

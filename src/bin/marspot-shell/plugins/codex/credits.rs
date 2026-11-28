@@ -70,6 +70,15 @@ impl Wallets {
     }
 }
 
+impl CodexAlloc {
+    /// A rollout's balance reading, taken after the week reading it came with.
+    pub(super) fn credit_reading(&mut self, profile: u8, at: i64, balance: Option<f64>) {
+        let Some(balance) = balance else { return };
+        let spent = self.limits.get(&profile).filter(|(_, used, renews)| *used >= SPENT && *renews > at).map(|l| l.2);
+        self.credit_seen.saw(profile, at, balance, spent);
+    }
+}
+
 /// One codex account as the credits rule sees it.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Acct {
@@ -86,9 +95,11 @@ pub(super) struct Acct {
 }
 
 impl Acct {
-    /// Its week is used up (or the feed says it refuses) and not renewed.
+    /// Its week is used up and not renewed.  Only that spends credits: a
+    /// refusal for another reason (the 5-hour window, a login error, a
+    /// stale reading) leaves the week's allowance where it is.
     pub(super) fn exhausted(&self, now: i64) -> bool {
-        self.renews > now && (self.week_used >= SPENT || !self.open)
+        self.renews > now && self.week_used >= SPENT
     }
 
     /// It runs its panes on paid credits.
@@ -127,7 +138,7 @@ pub(super) fn pane_rate(a: &CodexAlloc, p: &PaneIn, now: i64) -> f64 {
 
 /// The renewal of `a`'s week when the feed reads it as used up at `now`.
 pub(super) fn spent_week(a: &AccountIn, now: i64) -> Option<i64> {
-    (a.week_renews > now && (a.week_used >= SPENT || !a.open)).then_some(a.week_renews)
+    (a.week_renews > now && a.week_used >= SPENT).then_some(a.week_renews)
 }
 
 /// Every account of the snapshot, judged by the newer of the feed's and

@@ -2,22 +2,11 @@
 //! moves, between turns, to the account with the most plan left.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::Duration;
 
 use super::alloc_rollout::{notes_of, Note};
 use super::credits::{feed_balances, Acct, Credit, Wallets};
-use super::pane::PaneCodex;
-use super::stop_paying::{target, Log, Mover, StopPaying, MIN_LEFT, MOVES_PER_HOUR, RETRY_S};
-use super::CodexPlugin;
-use crate::plugins::peerbus::moving::{self, Ask, Held, Listener, Released, Verdict};
-use crate::plugins::peerbus::{publish_threads, ThreadView};
-use crate::plugins::{pty_op, LogLevel, PaneStatusView, PluginError, PluginHost};
-use marspot::pane_state::{BusyKind, PaneStatus};
-use marspot::pidtree::ProcId;
-use marspot::settings::{SchedCredits, Settings};
-use marspot_term::test_env::{EnvGuard, TempDir};
+use super::stop_paying::{target, Log, Mover, StopPaying, MIN_LEFT, MOVES_PER_HOUR};
+use marspot::settings::SchedCredits;
 
 pub(super) const NOW: i64 = 1_796_100_000;
 pub(super) const H: i64 = 3600;
@@ -107,7 +96,20 @@ fn paying_needs_both_a_used_up_week_and_a_falling_balance() {
     assert!(!renewed.paying(NOW), "the week renewed");
     let mut refused = acct(2, 0.97, true);
     refused.open = false;
-    assert!(refused.paying(NOW), "the feed says it refuses and the balance falls");
+    assert!(!refused.paying(NOW), "a refusal with the week not used up spends no credits");
+}
+
+#[test]
+fn a_refusing_account_with_its_week_not_used_up_keeps_its_panes() {
+    // a full 5-hour window or a login error refuses, but credits go only at a used-up week
+    let mut on = acct(2, 0.6, false);
+    on.open = false;
+    assert_eq!(on.leave_reason(NOW), None);
+    let mut s = StopPaying::default();
+    let mut log = Log::new();
+    let accts = vec![acct(1, 0.09, false), on];
+    assert_eq!(s.decide(LAST, &accts, NOW, mv(487, 2), || panic!("not asked"), &mut log), None);
+    assert!(log.is_empty(), "nothing to say: {log:?}");
 }
 
 #[test]
@@ -207,109 +209,4 @@ fn the_old_accounts_next_balance_is_logged_once() {
     log.clear();
     s.follow_afters(&later, NOW + 400, &mut log);
     assert!(log.is_empty(), "once");
-}
-
-#[derive(Default)]
-pub(super) struct Host {
-    pub logs: Mutex<Vec<(String, String)>>,
-    pub submitted: Mutex<Vec<&'static str>>,
-    /// Every submit is refused, as by a pane that went away.
-    pub refuse: bool,
-}
-
-impl PluginHost for Host {
-    fn state_dir(&self) -> Result<PathBuf, PluginError> {
-        Ok(std::env::temp_dir())
-    }
-    fn log(&self, _l: LogLevel, t: &str, m: &str) {
-        self.logs.lock().unwrap().push((t.to_string(), m.to_string()));
-    }
-    fn submit_pty_op_at(&self, _sid: u64, op: pty_op::PtyOp, _start_at: usize) -> Result<(), PluginError> {
-        if self.refuse {
-            return Err(PluginError::Other("no such pane".into()));
-        }
-        self.submitted.lock().unwrap().push(op.name);
-        Ok(())
-    }
-    fn pane_status(&self, _sid: u64) -> Result<Option<PaneStatusView>, PluginError> {
-        let held = Duration::from_secs(60);
-        Ok(Some(PaneStatusView { status: PaneStatus::Busy(BusyKind::ForegroundJob), held, quiescent: true }))
-    }
-}
-
-pub(super) const SID: u64 = 487;
-pub(super) const CODEX: ProcId = ProcId { pid: i32::MAX, start_us: 1 };
-pub(super) const THREAD: &str = "01a133f4-8e7b-7331-9630-9c40ff4b467f";
-
-/// A codex pane on profile 2, bound idle to its thread, with an empty
-/// input box, and a worker that takes asks without answering them.
-pub(super) fn plugin(home: &TempDir) -> (CodexPlugin, Listener) {
-    let mut p = CodexPlugin::new();
-    p.paying.looks.screen = |_| None;
-    p.paying.looks.composer = |_| Some(String::new());
-    p.panes.insert(SID, PaneCodex { codex: CODEX, shell_pid: i32::MAX, profile: Some(2), argv: Some(vec!["codex".into()]) });
-    let home2 = home.path().join(".codex-profile-2");
-    publish_threads(HashMap::from([(SID, ThreadView { codex: CODEX, home: home2, thread: THREAD.into(), idle: true, ends: Default::default() })]));
-    (p, Listener::connect())
-}
-
-pub(super) fn sandbox() -> (TempDir, EnvGuard) {
-    let home = TempDir::new("codex-stop-paying");
-    for d in [".codex-profile-1", ".codex-profile-2"] {
-        std::fs::create_dir_all(home.path().join(d)).unwrap();
-    }
-    let mut env = EnvGuard::new();
-    env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", home.join("state"));
-    (home, env)
-}
-
-#[test]
-fn a_held_switch_leaves_the_badge_alone_and_may_be_ordered_again_then_goes() {
-    let _turn = moving::test_turn();
-    let (home, _env) = sandbox();
-    marspot::settings::set_for_test(Settings::default());
-    let (mut p, asks) = plugin(&home);
-    let host = Host::default();
-    p.stop_paying(&host, credit(NOW));
-    assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }), "the menu switch's own check");
-    moving::post(SID, CODEX, Verdict::Held(Held::ChildRunning));
-    p.follow_switches(&host);
-    assert_eq!(p.hint_for(SID), None, "no badge hint for a move nobody asked for");
-    assert!(host.logs.lock().unwrap().iter().any(|(t, m)| t == "quota.stop_paying.held" && m == "sid=487 from=P2 why=sub_agent"));
-    p.stop_paying(&host, credit(NOW + 60));
-    assert_eq!(asks.next(), None, "not asked again within RETRY_S");
-    p.stop_paying(&host, credit(NOW + RETRY_S));
-    assert_eq!(asks.next(), Some(Ask::Begin { sid: SID, codex: CODEX }), "ordered again");
-    let old = home.path().join(".codex-profile-2");
-    moving::post(SID, CODEX, Verdict::Go { thread: THREAD.into(), home: old, released: Released(pty_op::Job::new()) });
-    p.follow_switches(&host);
-    assert_eq!(*host.submitted.lock().unwrap(), ["codex.profile_switch"]);
-    let ordered = host.logs.lock().unwrap().iter().filter(|(t, _)| t == "quota.stop_paying").count();
-    assert_eq!(ordered, 2);
-}
-
-#[test]
-fn hold_in_the_settings_file_keeps_the_pane_where_it_is() {
-    let _turn = moving::test_turn();
-    let (home, _env) = sandbox();
-    let mut s = Settings::default();
-    s.sched.credits = SchedCredits::Hold;
-    marspot::settings::set_for_test(s);
-    let (mut p, asks) = plugin(&home);
-    p.stop_paying(&Host::default(), credit(NOW));
-    assert_eq!(asks.next(), None);
-    marspot::settings::set_for_test(Settings::default());
-}
-
-#[test]
-fn a_pane_with_text_in_its_input_box_is_not_switched() {
-    let _turn = moving::test_turn();
-    let (home, _env) = sandbox();
-    marspot::settings::set_for_test(Settings::default());
-    let (mut p, asks) = plugin(&home);
-    p.paying.looks.composer = |_| Some("half a sentence".into());
-    let host = Host::default();
-    p.stop_paying(&host, credit(NOW));
-    assert_eq!(asks.next(), None);
-    assert!(host.logs.lock().unwrap().iter().any(|(_, m)| m == "sid=487 from=P2 why=input_not_empty"));
 }
