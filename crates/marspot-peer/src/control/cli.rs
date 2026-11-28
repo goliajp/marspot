@@ -21,6 +21,7 @@ pub const USAGE: &str = "usage:
                               | --wait-prompt | --wait-change | --wait-exit] [--since POS] [--timeout S]
   marspot-peer pane resize PANE COLSxROWS
   marspot-peer pane place PANE [--force] window|shadow|peek|unpeek   (peek: shown in its parent's place)
+  marspot-peer pane parent PANE PARENT|--top   (the child of PARENT, or a top pane; where it is shown stays)
   marspot-peer pane close PANE
   marspot-peer pane audit [-n N]
 any of them takes --json for the answer as the app sent it, and -h / --help for this;
@@ -105,6 +106,7 @@ pub fn parse_cmd(args: &[String]) -> Result<(Op, bool), Stop> {
         // options stop at the text's first word: agents send any text
         "send" => Spec { flags: &["--json", "--no-enter", "--force"], values: &[], whole_after: Some(2), text_after: None },
         "keys" | "place" => Spec::flags(&["--json", "--force"]),
+        "parent" => Spec::flags(&["--json", "--top"]),
         // options stop at the command's first word: the rest is the command's own
         "run" => Spec { flags: &["--json", "--force"], values: &["--timeout"], whole_after: Some(2), text_after: None },
         "read" => Spec {
@@ -167,6 +169,11 @@ fn op(sub: &str, a: &Args) -> Result<Op, Stop> {
                 },
                 force,
             },
+            _ => return Err(Stop::Usage(String::new())),
+        },
+        "parent" => match (&words[..], a.flag("--top")) {
+            ([target, parent], false) => Op::Parent { target: target.clone(), parent: Some(parent.clone()) },
+            ([target], true) => Op::Parent { target: target.clone(), parent: None },
             _ => return Err(Stop::Usage(String::new())),
         },
         "close" => match &words[..] {

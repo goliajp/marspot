@@ -57,7 +57,7 @@ impl CoreApp {
     /// Stop a helper, as the helper panel's button does.
     pub(super) fn stop_helper(&mut self, sid: u64) {
         use marspot::shell_proto::{encode_helper_panel_act, CwdControl, HelperPanelAct, PanelAct};
-        let act = HelperPanelAct { sid, act: PanelAct::CloseHelper, want: CwdControl::Flip };
+        let act = HelperPanelAct { sid, act: PanelAct::CloseHelper, want: CwdControl::Flip, parent: 0 };
         self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&act)));
     }
 }

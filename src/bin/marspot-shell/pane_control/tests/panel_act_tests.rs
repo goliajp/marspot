@@ -19,11 +19,11 @@ use crate::observe::Observation;
 use marspot_term::session_registry::SessionEntry;
 
 fn act(sid: u64, act: PanelAct) -> HelperPanelAct {
-    HelperPanelAct { sid, act, want: CwdControl::Flip }
+    HelperPanelAct { sid, act, want: CwdControl::Flip, parent: 0 }
 }
 
 fn control(sid: u64, want: CwdControl) -> HelperPanelAct {
-    HelperPanelAct { sid, act: PanelAct::ToggleCwdControl, want }
+    HelperPanelAct { sid, act: PanelAct::ToggleCwdControl, want, parent: 0 }
 }
 
 /// The panes each closed, in order, with how, and what `run` answered.

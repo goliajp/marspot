@@ -27,7 +27,7 @@ fn pane_control_unknown_enum_values_decode_and_encode_back() {
     assert_eq!(TypedResult::from_u8(9), TypedResult::Unknown(9));
     assert_eq!(WatchReason::from_u8(0), WatchReason::Unknown(0));
     assert_eq!(RetireMode::from_u8(2).to_u8(), 2);
-    assert_eq!(PlaceWhere::from_u8(4), PlaceWhere::Unknown(4));
+    assert_eq!(PlaceWhere::from_u8(5), PlaceWhere::Unknown(5));
     assert_eq!(PanelAct::from_u8(0), PanelAct::Unknown(0));
     assert!(
         WatchBody {

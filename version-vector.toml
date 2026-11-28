@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.876"  # the wire carries a change of parent and the idle timeout constants
-core    = "0.12.763"  # a pane shown in a window keeps its parent, and changes it where it is shown
+shell   = "0.7.877"  # every change of a pane's parent goes through one check, and pane.parent asks for one
+core    = "0.12.764"  # a pick in a pane's menu can ask the shell to change the pane's parent
 session = "0.11.490"  # a child the user made has no idle timeout, and panes nest two levels at most

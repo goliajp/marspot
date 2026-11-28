@@ -38,6 +38,7 @@ const LINES: &[&str] = &[
     "pane read spg",
     "pane resize spg",
     "pane place spg",
+    "pane parent spg",
     "pane close spg",
     "pane audit",
     "helper",

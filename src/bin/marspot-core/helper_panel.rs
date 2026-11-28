@@ -321,7 +321,7 @@ impl CoreApp {
         };
         let Some(sid) = sid else { return };
         lx_event!("HELPER_PANEL_ASKED", "the user pressed a button of the helper panel", session = sid, act = format!("{act:?}"));
-        self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&HelperPanelAct { sid, act, want })));
+        self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&HelperPanelAct { sid, act, want, parent: 0 })));
     }
 
     /// In its parent's place, with the panel out of the way.

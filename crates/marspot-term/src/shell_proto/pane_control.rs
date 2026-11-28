@@ -69,7 +69,7 @@ wire_enum!(RetireMode { Delete = 0, Recycle = 1 });
 wire_enum!(PlaceWhere { Shadow = 0, Window = 1, Peek = 2, Unpeek = 3, Parent = 4 });
 wire_enum!(TypedResult { Written = 0, PtyQueueFull = 1, QueueFull = 2, NotReading = 3, NotAtShell = 4 });
 wire_enum!(DoneCode { Ok = 0, NotAttached = 1, NoSuchSession = 2, WatchTableFull = 3, OldSession = 4, Other = 5 });
-wire_enum!(PanelAct { CloseHelper = 1, CloseAllOfParent = 2, ToggleCwdControl = 3 });
+wire_enum!(PanelAct { CloseHelper = 1, CloseAllOfParent = 2, ToggleCwdControl = 3, SetParent = 4 });
 // `Flip`: a build before this one, which did not say
 wire_enum!(CwdControl { Flip = 0, Deny = 1, Allow = 2 });
 
@@ -291,20 +291,23 @@ pub fn decode_pane_control_caps(p: &[u8]) -> io::Result<u32> {
     Rd::new(p, "pane_control_caps").u32()
 }
 
-/// L2 → L1: a button on the helper panel.
+/// L2 → L1: a button on the helper panel, or a pick in a pane's menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HelperPanelAct {
     pub sid: u64,
     pub act: PanelAct,
     /// What `ToggleCwdControl` is to leave the directory as.
     pub want: CwdControl,
+    /// The pane `SetParent` makes `sid` the child of (0: a top pane).
+    pub parent: u64,
 }
 
 pub fn encode_helper_panel_act(m: &HelperPanelAct) -> Vec<u8> {
-    let mut v = Vec::with_capacity(10);
+    let mut v = Vec::with_capacity(18);
     v.extend_from_slice(&m.sid.to_le_bytes());
     v.push(m.act.to_u8());
     v.push(m.want.to_u8());
+    v.extend_from_slice(&m.parent.to_le_bytes());
     v
 }
 
@@ -314,6 +317,8 @@ pub fn decode_helper_panel_act(p: &[u8]) -> io::Result<HelperPanelAct> {
         sid: r.u64()?,
         act: PanelAct::from_u8(r.u8()?),
         want: CwdControl::from_u8(if p.len() > 9 { r.u8()? } else { 0 }),
+        // a build before this one ends at `want`
+        parent: if p.len() >= 18 { r.u64()? } else { 0 },
     })
 }
 

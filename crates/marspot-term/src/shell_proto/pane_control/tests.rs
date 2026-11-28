@@ -178,6 +178,7 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
                 sid: 4,
                 act: PanelAct::ToggleCwdControl,
                 want: CwdControl::Allow,
+                parent: 0,
             }),
             |p| shown(decode_helper_panel_act(p)),
         ),
@@ -353,14 +354,17 @@ fn pane_control_each_frame_round_trips() {
     );
     let m = HelperPanelAct {
         sid: 4,
-        act: PanelAct::CloseAllOfParent,
+        act: PanelAct::SetParent,
         want: CwdControl::Deny,
+        parent: 77,
     };
     let p = encode_helper_panel_act(&m);
     assert_eq!(decode_helper_panel_act(&p).unwrap(), m);
     // as first laid out, with nothing after the act
-    let old = HelperPanelAct { want: CwdControl::Flip, ..m };
+    let old = HelperPanelAct { want: CwdControl::Flip, parent: 0, ..m };
     assert_eq!(decode_helper_panel_act(&p[..9]).unwrap(), old);
+    // as laid out before the parent
+    assert_eq!(decode_helper_panel_act(&p[..10]).unwrap(), HelperPanelAct { parent: 0, ..m });
 }
 
 #[test]
@@ -382,7 +386,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
         26,
         7 + 3,
         4,
-        10,
+        18,
         19 + 2 * (2 + 53 + 6 + 11 + 4 + "看 parser".len()),
     ];
     assert_eq!(sizes, expected);

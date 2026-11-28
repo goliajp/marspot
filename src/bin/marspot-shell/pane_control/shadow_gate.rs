@@ -147,6 +147,11 @@ impl Tree {
         self.panes.values().filter(|p| p.1).count()
     }
 
+    /// A live pane names `sid` its parent.
+    pub(super) fn has_children(&self, sid: u64) -> bool {
+        self.panes.iter().any(|(s, p)| p.1 && p.0 == sid && *s != sid)
+    }
+
     pub(super) fn shadows(&self) -> Vec<u64> {
         self.panes.iter().filter(|(_, p)| p.1 && p.0 != 0).map(|(sid, _)| *sid).collect()
     }

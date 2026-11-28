@@ -1,6 +1,7 @@
 //! What the user asked for on a window's helper panel
 //! (`HelperPanelAct`): close a shadow pane, close every shadow pane of
-//! a session, deny or allow its directory to control panes.
+//! a session, deny or allow its directory to control panes; and from a
+//! pane's menu, make it the child of another pane or a top pane.
 //!
 //! Done on a thread of its own, one at a time: a close waits for the
 //! core, whose frames the thread that reads these must keep reading.
@@ -76,6 +77,13 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, act: HelperPanelAct, deny: &std::p
         PanelAct::ToggleCwdControl => {
             let ok = set_control(conn, ctx, act, deny);
             return (ok as u32, !ok as u32);
+        }
+        PanelAct::SetParent => {
+            let out = super::ops_parent::set_sid(conn, ctx, act.sid, act.parent);
+            if let Err(r) = &out {
+                marspot::lx_warn!("shell.control.parent_refused", &r.message, session = act.sid, parent = act.parent);
+            }
+            return (out.is_ok() as u32, out.is_err() as u32);
         }
         PanelAct::Unknown(_) => return (0, 0),
     };
