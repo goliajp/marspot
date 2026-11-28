@@ -21,7 +21,7 @@ use madcawl_wire::host::{self, PaneOpen, PaneOpened};
 use madcawl_wire::{os, Frame, FrameError, Hello, MAX_FRAME};
 
 use super::frames::{hello_answer, Commits, Verdict};
-use super::link_input::{page_said, Sending};
+use super::link_input::Sending;
 use super::gpu::{self, Device, Texture};
 use super::{Note, Shared};
 
@@ -52,6 +52,8 @@ pub(super) struct Link {
     pub(super) s: UnixStream,
     buf: Vec<u8>,
     fds: Vec<OwnedFd>,
+    /// The bytes of the frame being sent, kept for the next
+    out: Vec<u8>,
 }
 
 impl Link {
@@ -60,15 +62,15 @@ impl Link {
     /// only after `poll` says there is something.
     fn new(s: UnixStream) -> Result<Link, End> {
         s.set_nonblocking(true).map_err(|e| failed("the socket", e))?;
-        Ok(Link { s, buf: Vec::new(), fds: Vec::new() })
+        Ok(Link { s, buf: Vec::new(), fds: Vec::new(), out: Vec::new() })
     }
 
     /// A frame that does not fit in the socket's buffer now ends the
     /// link: the other side has stopped reading.
-    pub(super) fn send(&self, f: &Frame, fds: &[BorrowedFd]) -> Result<(), End> {
-        let mut out = Vec::new();
-        f.encode(&mut out);
-        os::send(&self.s, &out, fds).map_err(|e| match e.kind() {
+    pub(super) fn send(&mut self, f: &Frame, fds: &[BorrowedFd]) -> Result<(), End> {
+        self.out.clear();
+        f.encode(&mut self.out);
+        os::send(&self.s, &self.out, fds).map_err(|e| match e.kind() {
             io::ErrorKind::WouldBlock => failed("writing", "the other side stopped reading"),
             _ => failed("writing", e),
         })
@@ -177,10 +179,11 @@ fn serve(o: &Open, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), 
     let dh = Hello { range: display::RANGE, role: None, version: None };
     ch.send(&dh.frame(display::kind::HELLO), &[])?;
     let answer = ch.next(wake)?;
-    hello_answer(&answer, display::kind::HELLO, display::RANGE)
+    let version = hello_answer(&answer, display::kind::HELLO, display::RANGE)
         .map_err(|u| End::Failed(Note::Unspoken("content process", display::RANGE, u)))?;
-    let live = attach(&ch, o.px, o.scale, 1, device)?;
-    show(o.session, &mut host_link, &mut ch, live, device, shared, wake)
+    let live = attach(&mut ch, o.px, o.scale, 1, device)?;
+    let sending = Sending::new(o.session, version);
+    show(&mut host_link, &mut ch, live, sending, device, shared, wake)
 }
 
 /// A surface the content process draws into, and a texture over each
@@ -192,7 +195,7 @@ pub(super) struct Live {
 
 /// Make a surface's two buffers of `px` device pixels, a texture over
 /// each, and send them.
-pub(super) fn attach(ch: &Link, px: (u32, u32), scale: u32, epoch: u64, device: &Device) -> Result<Live, End> {
+pub(super) fn attach(ch: &mut Link, px: (u32, u32), scale: u32, epoch: u64, device: &Device) -> Result<Live, End> {
     let (mut fds, mut textures, mut buffers) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..display::MAX_BUFFERS {
         let (fd, m, b) = gpu::make_buffer(px.0, px.1).map_err(|e| failed("no shared memory", e))?;
@@ -207,9 +210,9 @@ pub(super) fn attach(ch: &Link, px: (u32, u32), scale: u32, epoch: u64, device: 
 }
 
 /// Show commits until the pane closes or a side goes away.
-fn show(session: u64, host_link: &mut Link, ch: &mut Link, mut live: Live, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), End> {
+fn show(host_link: &mut Link, ch: &mut Link, mut live: Live, mut sending: Sending, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), End> {
+    let session = sending.session;
     let mut releases = Vec::new();
-    let mut sending = Sending::default();
     loop {
         while let Some(f) = ch.ready()? {
             let Live { textures, commits } = &mut live;
@@ -217,9 +220,9 @@ fn show(session: u64, host_link: &mut Link, ch: &mut Link, mut live: Live, devic
                 Verdict::Show { buffer, seq, scrolled } => {
                     let b = commits.surface().buffers[buffer as usize];
                     shared.show(seq, textures[buffer as usize].clone(), (b.width, b.height), scrolled);
-                    sending.shown(session);
+                    sending.shown();
                 }
-                Verdict::Pass => page_said(&f, shared, session),
+                Verdict::Pass => sending.page_said(&f, shared)?,
                 Verdict::Refused { why, close } => {
                     crate::lx_warn!("web_pane.commit_refused", why, session = session);
                     if close {

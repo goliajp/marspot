@@ -227,9 +227,13 @@ impl CoreApp {
         }
         if let Some(text) = marspot::input::read_clipboard_text() {
             let moved = pane.snap_to_live();
+            let cut = matches!(pane.session(), marspot::pane::PaneBackend::Web(_)) && marspot::web_pane::input::paste_cut(&text);
             pane.session_mut().forward_paste(&text);
             win!(self, wi).needs_render |= moved;
             self.note_typing(wi);
+            if cut {
+                self.show_notice(strings::text(Arg::WebPasteCut(madcawl_wire::input::MAX_TEXT >> 20)));
+            }
         }
         true
     }

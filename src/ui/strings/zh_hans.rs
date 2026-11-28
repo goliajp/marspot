@@ -248,6 +248,7 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::WebOpening(url) => write!(out, "正在打开 {url}…"),
         Arg::WebPageRow(url) => write!(out, "网页 {url}"),
         Arg::WebOpenRow(url) => write!(out, "打开网页 {url}"),
+        Arg::WebPasteCut(mb) => write!(out, "只有剪贴板里的前 {mb} MB 粘贴进了网页"),
         Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
             write!(out, "madcawl 的 {side} 支持版本 {a}–{b}，marspot 支持 {c}–{d}")
         }

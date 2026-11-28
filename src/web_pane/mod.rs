@@ -66,6 +66,10 @@ struct Inner {
     /// Where the page shown is scrolled to, CSS px
     scrolled: (u32, u32),
     out: std::collections::VecDeque<input::Out>,
+    /// Whether the pane is shown and its size (device pixels, scale),
+    /// the latest of each not yet sent
+    visible: Option<bool>,
+    resize: Option<((f64, f64), u32)>,
     said: input::Said,
 }
 
@@ -132,6 +136,12 @@ pub struct WebPane {
     pub pressed: bool,
     /// The pointer is over the page
     pub hovered: bool,
+    /// The copy last asked for and not yet answered, by number
+    copy_seq: u64,
+    awaiting_copy: Option<u64>,
+    stray_copies: u64,
+    /// A press with Command held lets one link open in a pane of its own
+    open_allowed: bool,
 }
 
 impl WebPane {
@@ -154,6 +164,10 @@ impl WebPane {
             px: None,
             pressed: false,
             hovered: false,
+            copy_seq: 0,
+            awaiting_copy: None,
+            stray_copies: 0,
+            open_allowed: false,
         };
         p.paint();
         p

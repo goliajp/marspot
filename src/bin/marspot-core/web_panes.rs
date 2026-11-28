@@ -51,11 +51,17 @@ impl CoreApp {
     }
 
     /// Add a web pane for `url` to window `wi`, focused, and open it at
-    /// the size the layout gives it.
-    pub(super) fn open_web_pane(&mut self, wi: usize, url: String) {
+    /// the size the layout gives it; whether a pane was added.
+    pub(super) fn open_web_pane(&mut self, wi: usize, url: String) -> bool {
+        if self.window_full(wi) {
+            return false;
+        }
         let id = match allocate_next_session_id() {
             Ok(id) => id,
-            Err(e) => return lx_warn!("web_pane.no_id", &e.to_string()),
+            Err(e) => {
+                lx_warn!("web_pane.no_id", &e.to_string());
+                return false;
+            }
         };
         let tx = self.event_tx.clone();
         let notify = Box::new(move || {
@@ -72,7 +78,8 @@ impl CoreApp {
         self.rebuild_layout(wi);
         let idx = win!(self, wi).panes.len() - 1;
         let Some((_, _, pw, ph)) = page_rect(&win!(self, wi).layout, idx) else {
-            return lx_warn!("web_pane.no_cell", "the layout gave the web pane no cell", session = id);
+            lx_warn!("web_pane.no_cell", "the layout gave the web pane no cell", session = id);
+            return true;
         };
         let scale = (marspot::layout::density() * 100.0).round() as u32;
         let socket = marspot_term::paths::state_root().join(marspot::web_pane::HOST_SOCKET);
@@ -82,6 +89,7 @@ impl CoreApp {
             web.open(socket, Opening { url, px: (pw, ph), scale }, device);
         }
         win!(self, wi).needs_render = true;
+        true
     }
 
     /// The connection thread of web pane `id` published something.

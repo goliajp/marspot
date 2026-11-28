@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.933"  # the lib: the menu rows that open a web pane
-core    = "0.12.812"  # web pane entry points (Replace with…, a sidebar slot menu row, Command and a click on a link), offered only where MARSPOT_DEV_WEB_ENTRY asks
+shell   = "0.7.934"  # the lib: a notice when text pasted into a web page is cut
+core    = "0.12.813"  # web pane: copied text only for the copy asked, a link opens only after a Command press and as a page address, nothing of input to a version 2 page, bad input frames end the page, size and shown as latest-value slots
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

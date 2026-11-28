@@ -69,6 +69,7 @@ impl CoreApp {
         }
         if let Some(page) = win!(self, wi).panes.get_mut(i).and_then(web) {
             page.pressed = true;
+            page.allow_open(mods.super_);
             page.pointer(Action::Down, cx, cy, mods);
         }
         true
@@ -140,10 +141,15 @@ impl CoreApp {
     pub(crate) fn web_said(&mut self, id: u64) {
         let found = self.windows.iter_mut().enumerate().find_map(|(wi, w)| {
             let id_of = w.window_id;
-            w.panes.iter_mut().filter_map(web).find(|p| p.id() == id).map(|p| (wi, id_of, p.hovered, p.take_said()))
+            w.panes.iter_mut().filter_map(web).find(|p| p.id() == id).map(|p| {
+                let said = p.take_said();
+                let copied = said.copied.filter(|(seq, _)| p.copy_answers(*seq)).map(|(_, text)| text);
+                let open = said.open.filter(|_| p.take_open());
+                (wi, id_of, p.hovered, said.cursor, copied, open, p.stray_copies())
+            })
         });
-        let Some((wi, window_id, hovered, said)) = found else { return };
-        if let Some(c) = said.cursor.filter(|_| hovered) {
+        let Some((wi, window_id, hovered, cursor, copied, open, strays)) = found else { return };
+        if let Some(c) = cursor.filter(|_| hovered) {
             let shape = match c {
                 Cursor::Default => PointerShape::Arrow,
                 Cursor::Pointer => PointerShape::Hand,
@@ -152,15 +158,26 @@ impl CoreApp {
             lx_info!("web_pane.cursor", "the pointer's shape over a web pane", session = id, shape = format!("{shape:?}"));
             self.pending_to_shell.push((MsgType::PointerShape, encode_pointer_shape(shape, window_id)));
         }
-        if let Some(text) = said.copied {
+        if let Some(text) = copied {
             lx_event!("WEB_PANE_COPIED", "a web pane's selection went to the clipboard", session = id, chars = text.chars().count());
             marspot::input::write_clipboard_text(&text);
+        } else if strays > 0 {
+            lx_info!("web_pane.stray_copied", "copied text no copy asked for was dropped", session = id, dropped = strays);
         }
-        if let Some(url) = said.open {
-            lx_event!("WEB_PANE_OPEN_LINK", "a link asked to open in a web pane of its own", session = id);
-            if marspot::web_pane::entry_points() {
-                self.open_web_pane(wi, url);
-            }
+        if let Some(url) = open {
+            self.web_open_link(wi, id, &url);
+        }
+    }
+
+    /// A link a page asked to open in a pane of its own, after a press
+    /// with Command held: opened only when it is a whole page address.
+    fn web_open_link(&mut self, wi: usize, id: u64, url: &str) {
+        let Some(url) = super::web_entry::page_address(url) else {
+            return lx_warn!("web_pane.open_refused", "a page asked to open what is not a page address", session = id);
+        };
+        lx_event!("WEB_PANE_OPEN_LINK", "a link asked to open in a web pane of its own", session = id);
+        if marspot::web_pane::entry_points() {
+            self.open_web_pane(wi, url);
         }
     }
 
