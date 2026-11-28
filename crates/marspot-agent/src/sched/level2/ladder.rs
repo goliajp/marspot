@@ -11,20 +11,31 @@
 //! - `B`: the executor's dry run, writing what it would switch and
 //!   notify.  Entered once `A` is live.
 //! - `C`: the executor switches unattended panes, at most
-//!   `UNATTENDED_PER_DAY` a day.  Entered once `DRY_RECORDS` dry-run
-//!   records replayed to the same decision, `DRY_NOTICES` of them notices.
+//!   `UNATTENDED_PER_DAY` a day.  Entered once `DRY_RECORDS` rehearsed
+//!   switches in a row replayed to the decision recorded with them,
+//!   `DRY_NOTICES` of them switches after a notice; a record that does
+//!   not replay starts the count again.
 //! - `D`: every pane, within the profile's limits.  Entered after
 //!   `UNATTENDED_DONE` switches at `C` with no rollback.
 //! - `E`: the live plan protects what only Fable can use.  Entered after
 //!   a day at `D`.  Making unattended panes wait stays a rehearsal; one
 //!   that would make an attended pane wait is recorded.
 //!
-//! Any of the five rollback conditions (`exec_gate::rollback`) at `C`,
-//! `D` or `E` sends the ladder back to `B`.  A ladder that rolled back
-//! does not advance again until a person has looked (`reset`).
+//! Every advance is capped by the caller (`LADDER_MAX` in this build):
+//! the steps above it are kept here, tested, and not entered.  Any of
+//! the five rollback conditions (`exec_gate::rollback`) at `C`, `D` or
+//! `E` sends the ladder back to `B`.  A ladder that rolled back, or
+//! whose file could not be read, does not advance again until a person
+//! has looked (`reset`).
 
 use super::exec_gate::{DRY_NOTICES, DRY_RECORDS, Done, Rollback, UNATTENDED_DONE, rollback};
 
+#[path = "ladder_text.rs"]
+mod text;
+
+/// The highest step this build enters.  The executor stays a dry run
+/// until a later build raises it.
+pub const LADDER_MAX: Step = Step::B;
 /// Shadow placements in a row that `A` needs.
 pub const ROUTE_RECORDS: u32 = 20;
 /// `A`'s rollback counts refusals in its first day, of panes placed
@@ -68,6 +79,9 @@ impl Step {
 pub enum Why {
     PlacedRefused,
     Exec(Rollback),
+    /// The kept ladder could not be read: whatever it held, it may have
+    /// held a rollback.
+    Unreadable,
 }
 
 impl Why {
@@ -75,11 +89,16 @@ impl Why {
         match self {
             Why::PlacedRefused => "placed_refused",
             Why::Exec(r) => r.word(),
+            Why::Unreadable => "unreadable",
         }
     }
 
     pub fn of(word: &str) -> Option<Why> {
-        if word == "placed_refused" { Some(Why::PlacedRefused) } else { Rollback::of(word).map(Why::Exec) }
+        match word {
+            "placed_refused" => Some(Why::PlacedRefused),
+            "unreadable" => Some(Why::Unreadable),
+            _ => Rollback::of(word).map(Why::Exec),
+        }
     }
 }
 
@@ -113,8 +132,9 @@ pub struct Ladder {
     pub route_bad: u32,
     /// Refusals of panes `A` placed, in its first day.
     pub placed_refused: Vec<i64>,
-    /// Dry-run records that replayed to the same decision, notices among
-    /// them, and those that did not.
+    /// Rehearsed switches in a row that replayed to their recorded
+    /// decision, those after a notice among them, and the records that
+    /// did not replay.
     pub dry: u32,
     pub dry_notices: u32,
     pub dry_mismatch: u32,
@@ -124,9 +144,16 @@ pub struct Ladder {
     pub refusals_before: u32,
     /// A rehearsed wait would have made an attended pane wait.
     pub attended_wait: bool,
+    /// The person's last reset (`reset`), as they stamped it.
+    pub reset_at: i64,
 }
 
 impl Ladder {
+    /// The ladder put in place of a kept one that could not be read.
+    pub fn unreadable(now: i64) -> Ladder {
+        Ladder { since: now, rolled: Some((Step::Shadow, Why::Unreadable)), ..Ladder::default() }
+    }
+
     fn go(&mut self, to: Step, why: Option<Why>, now: i64) -> Option<Change> {
         let from = self.step;
         self.step = to;
@@ -138,11 +165,12 @@ impl Ladder {
     }
 
     /// A shadow placement; `bad`: it put an other-model newcomer on an
-    /// account with nothing but Fable-usable quota left.
-    pub fn routed(&mut self, bad: bool, now: i64) -> Option<Change> {
+    /// account with nothing but Fable-usable quota left.  Advances no
+    /// higher than `max`.
+    pub fn routed(&mut self, bad: bool, now: i64, max: Step) -> Option<Change> {
         self.route_bad += u32::from(bad);
         self.route_run = if bad { 0 } else { self.route_run.saturating_add(1) };
-        if self.step == Step::Shadow && self.rolled.is_none() && self.route_run >= ROUTE_RECORDS {
+        if self.step == Step::Shadow && max >= Step::A && self.rolled.is_none() && self.route_run >= ROUTE_RECORDS {
             self.a_at = Some(now);
             return self.go(Step::A, None, now);
         }
@@ -162,8 +190,9 @@ impl Ladder {
         None
     }
 
-    /// A dry-run record; `same`: replayed from what it recorded, it gave
-    /// the same decision; `notice`: it was a notice.
+    /// A rehearsed switch; `same`: decided again from its record alone,
+    /// it gave the decision recorded with it; `notice`: a switch after a
+    /// notice.  A record that does not replay starts the count again.
     pub fn dry_record(&mut self, same: bool, notice: bool) {
         if self.step != Step::B {
             return;
@@ -173,14 +202,16 @@ impl Ladder {
             self.dry_notices += u32::from(notice);
         } else {
             self.dry_mismatch += 1;
+            self.dry = 0;
+            self.dry_notices = 0;
         }
     }
 
     /// A switch the executor made live.
-    pub fn switched(&mut self, now: i64) -> Option<Change> {
+    pub fn switched(&mut self, now: i64, max: Step) -> Option<Change> {
         self.executes()?;
         self.done += 1;
-        if self.step == Step::C && self.done >= UNATTENDED_DONE {
+        if self.step == Step::C && max >= Step::D && self.done >= UNATTENDED_DONE {
             return self.go(Step::D, None, now);
         }
         None
@@ -193,22 +224,27 @@ impl Ladder {
         self.go(Step::B, Some(Why::Exec(why)), now)
     }
 
-    /// The advances that wait on nothing but the step's own state;
-    /// `unforeseen_24h`: refusals the plan did not foresee in the last day.
-    pub fn tick(&mut self, unforeseen_24h: u32, now: i64) -> Option<Change> {
+    /// The advances that wait on nothing but the step's own state, no
+    /// higher than `max`; `unforeseen_24h`: refusals the plan did not
+    /// foresee in the last day.
+    pub fn tick(&mut self, unforeseen_24h: u32, now: i64, max: Step) -> Option<Change> {
         if self.rolled.is_some() {
             return None;
         }
-        match self.step {
-            Step::A => self.go(Step::B, None, now),
-            Step::B if self.dry >= DRY_RECORDS && self.dry_notices >= DRY_NOTICES => {
-                self.refusals_before = unforeseen_24h;
-                self.done = 0;
-                self.go(Step::C, None, now)
-            }
-            Step::D if now - self.since >= DAY_S => self.go(Step::E, None, now),
-            _ => None,
+        let next = match self.step {
+            Step::A => Step::B,
+            Step::B if self.dry >= DRY_RECORDS && self.dry_notices >= DRY_NOTICES => Step::C,
+            Step::D if now - self.since >= DAY_S => Step::E,
+            _ => return None,
+        };
+        if next > max {
+            return None;
         }
+        if next == Step::C {
+            self.refusals_before = unforeseen_24h;
+            self.done = 0;
+        }
+        self.go(next, None, now)
     }
 
     /// A rehearsed wait would have made an attended pane wait.
@@ -236,88 +272,11 @@ impl Ladder {
         self.step == Step::E
     }
 
-    /// A person looked at a rollback: the step it fell to counts afresh.
-    pub fn reset(&mut self, now: i64) {
+    /// A person looked at a rollback, stamping it `stamp`: the step it
+    /// fell to counts afresh.
+    pub fn reset(&mut self, now: i64, stamp: i64) {
         let step = self.step;
-        *self = Ladder { step, since: now, a_at: (step >= Step::A).then_some(now), ..Ladder::default() };
-    }
-
-    /// The step and every count, one line.
-    pub fn words(&self) -> String {
-        let rolled = self.rolled.map_or("-".to_string(), |(s, w)| format!("{}:{}", s.word(), w.word()));
-        format!(
-            "step={} since={} rolled={rolled} route={}/{} bad={} placed_refused={} dry={}/{} notices={}/{} mismatch={} done={} refusals_before={} attended_wait={}",
-            self.step.word(),
-            self.since,
-            self.route_run,
-            ROUTE_RECORDS,
-            self.route_bad,
-            self.placed_refused.len(),
-            self.dry,
-            DRY_RECORDS,
-            self.dry_notices,
-            DRY_NOTICES,
-            self.dry_mismatch,
-            self.done,
-            self.refusals_before,
-            u8::from(self.attended_wait),
-        )
-    }
-
-    /// What is kept across a restart, one `key=value` a line.
-    pub fn encode(&self) -> String {
-        let refused: Vec<String> = self.placed_refused.iter().map(i64::to_string).collect();
-        let rolled = self.rolled.map_or("-".to_string(), |(s, w)| format!("{}:{}", s.word(), w.word()));
-        format!(
-            "step={}\nsince={}\na_at={}\nrolled={rolled}\nroute_run={}\nroute_bad={}\nplaced_refused={}\ndry={}\ndry_notices={}\ndry_mismatch={}\ndone={}\nrefusals_before={}\nattended_wait={}\n",
-            self.step.word(),
-            self.since,
-            self.a_at.map_or("-".to_string(), |a| a.to_string()),
-            self.route_run,
-            self.route_bad,
-            if refused.is_empty() { "-".into() } else { refused.join(",") },
-            self.dry,
-            self.dry_notices,
-            self.dry_mismatch,
-            self.done,
-            self.refusals_before,
-            u8::from(self.attended_wait),
-        )
-    }
-
-    /// `encode`'s text back; `None` when any line is missing or wrong.
-    pub fn decode(text: &str) -> Option<Ladder> {
-        let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('='));
-        let num = |k: &str| get(k)?.parse::<u32>().ok();
-        let rolled = match get("rolled")? {
-            "-" => None,
-            w => {
-                let (s, why) = w.split_once(':')?;
-                Some((Step::of(s)?, Why::of(why)?))
-            }
-        };
-        let refused = match get("placed_refused")? {
-            "-" => Vec::new(),
-            v => v.split(',').map(|x| x.parse().ok()).collect::<Option<Vec<i64>>>()?,
-        };
-        Some(Ladder {
-            step: Step::of(get("step")?)?,
-            since: get("since")?.parse().ok()?,
-            a_at: match get("a_at")? {
-                "-" => None,
-                v => Some(v.parse().ok()?),
-            },
-            rolled,
-            route_run: num("route_run")?,
-            route_bad: num("route_bad")?,
-            placed_refused: refused,
-            dry: num("dry")?,
-            dry_notices: num("dry_notices")?,
-            dry_mismatch: num("dry_mismatch")?,
-            done: num("done")?,
-            refusals_before: num("refusals_before")?,
-            attended_wait: get("attended_wait")? == "1",
-        })
+        *self = Ladder { step, since: now, a_at: (step >= Step::A).then_some(now), reset_at: stamp, ..Ladder::default() };
     }
 }
 

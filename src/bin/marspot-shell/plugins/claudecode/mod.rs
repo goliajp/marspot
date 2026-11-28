@@ -75,6 +75,7 @@ mod allocation_usage;
 mod allocation_view;
 pub(in crate::plugins) mod allocation_route;
 mod alloc_moves;
+mod alloc_order;
 mod worker_loop;
 pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;
@@ -312,15 +313,7 @@ pub(crate) fn config_dir_or_default(config_dir: Option<&str>) -> PathBuf {
 /// Encode a filesystem path into claude's project directory naming
 /// convention (`/Users/foo/bar` → `-Users-foo-bar`).
 fn encode_project_dir(cwd: &std::path::Path) -> String {
-    let mut s = String::with_capacity(cwd.as_os_str().len());
-    for c in cwd.to_string_lossy().chars() {
-        if c == '/' {
-            s.push('-');
-        } else {
-            s.push(c);
-        }
-    }
-    s
+    cwd.to_string_lossy().replace('/', "-")
 }
 
 /// Heuristic: is this descendant the `claude` CLI?  Walks argv —

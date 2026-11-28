@@ -11,7 +11,6 @@
 //! mode, and not taken from here.
 
 use super::allocation_adapter::class_word;
-use super::allocation_exec::{self, Order};
 use super::allocation_events::{Event, EventLog};
 use super::allocation_inputs::snapshot;
 use super::allocation_view::View;
@@ -22,7 +21,6 @@ use crate::plugins::allocation::Class;
 use crate::plugins::allocation::replay::{Inputs, Rule, Why};
 use crate::agentsvc::sched;
 use marspot::agent::AgentKind;
-use marspot_agent::sched::level2::Kind;
 use marspot::settings::Rebalance;
 
 /// One pane's resting move, as the sweep hands it over.
@@ -91,8 +89,9 @@ impl ClaudecodePlugin {
     pub(super) fn follow_core(&mut self, host: &dyn PluginHost, view: &mut View, plan: &mut leave_early::Plan, result: &ScanResult, p: Resting) -> bool {
         let sid = p.sid;
         let from = p.meta.profile_num;
-        // once the planner's executor is live, it alone moves panes to save lapsing quota
-        let decided = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue) || (*why == Why::Waste && !result.plan_live)).cloned();
+        // once the planner's executor acts, it alone moves panes to save lapsing quota
+        let waste = super::alloc_order::waste_is_today_s(result.plan_live, p.mode);
+        let decided = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue) || (*why == Why::Waste && waste)).cloned();
         let transcript_rests = matches!(result.new_activity.get(&sid), Some(CcActivity::AwaitingUser));
         let status = host.pane_status(sid).ok().flatten();
         let rest = status.as_ref().filter(|v| matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)).map(|v| v.held);
@@ -168,47 +167,6 @@ impl ClaudecodePlugin {
         plan.place(target, p.model, plan.speed_of(sid));
         view.placed(sid, target);
         self.record_moved(host, sid, from, target, inputs.mover.class, word, Some(&inputs), None);
-        true
-    }
-
-    /// Make a switch the planner's executor ordered, unless the pane has
-    /// changed since the scan: it works again, the user came to it, a
-    /// move is on its way, a clean switch now finds work running, or the
-    /// target refused it.  True when the switch was started.
-    #[allow(clippy::too_many_arguments)] // one order and the pane's state around it
-    pub(super) fn follow_plan(&mut self, host: &dyn PluginHost, view: &mut View, plan: &mut leave_early::Plan, result: &ScanResult, meta: &BindMeta, model: Option<&str>, choice: &CliChoice, in_flight: bool, o: Order) -> bool {
-        let (sid, from) = (o.sid, meta.profile_num);
-        if from != o.from {
-            return false;
-        }
-        let status = host.pane_status(sid).ok().flatten();
-        let pane = self.resting(status.as_ref(), sid, meta, result, in_flight, None);
-        let clean = matches!(o.kind, Kind::Clean | Kind::Short);
-        let refused = plan.rooms().iter().find(|(n, _)| *n == o.to).is_none_or(|(_, r)| r.refused_for(model));
-        let held = [
-            (pane.move_in_flight, Veto::MoveOnItsWay),
-            (!pane.awaiting_user, Veto::Working),
-            (pane.user_here, Veto::UserHere),
-            (clean && pane.work_in_flight, Veto::WorkInFlight),
-            (pane.own_timer, Veto::OwnTimer),
-            (pane.host_load.is_some_and(|l| l > marspot::host_load::BUSY), Veto::Overloaded),
-            (refused, Veto::RefusedThere),
-        ]
-        .into_iter()
-        .find_map(|(on, v)| on.then_some(v));
-        let line = format!("sid={sid} P{from} → P{} kind={}", o.to, o.kind.word());
-        if let Some(v) = held {
-            host.log(LogLevel::Info, "sched.switch.held", &format!("{line}: {}", v.phrase()));
-            return false;
-        }
-        if !self.start_profile_cycle_to(host, sid, meta.clone(), o.to, Some(allocation_exec::say::after_switch(from, o.to)), choice.clone()) {
-            return false;
-        }
-        host.log(LogLevel::Info, "sched.switch.done", &line);
-        self.rebalanced.insert(sid, (Instant::now(), o.to));
-        plan.place(o.to, model, plan.speed_of(sid));
-        view.placed(sid, o.to);
-        self.record_moved(host, sid, from, o.to, allocation_view::class_of_judged(model), "plan", None, None);
         true
     }
 

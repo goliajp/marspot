@@ -5,11 +5,10 @@
 use super::*;
 use super::fable_need::Judged;
 
-const HEADS_UP_FILE: &str = "heads_up.tsv";
-const REFUSED_FILE: &str = "refused.tsv";
-
 #[path = "refused_choice.rs"]
 pub(super) mod refused_choice;
+#[path = "switching_persist.rs"]
+mod persist;
 
 impl ClaudecodePlugin {
     /// Every pane sitting on an account that cannot answer moves to
@@ -148,9 +147,7 @@ impl ClaudecodePlugin {
             if !out_for(sid, &meta, as_judged) {
                 let part = plan.part(sid);
                 self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged, part);
-                if let Some(o) = result.plan_orders.iter().find(|o| o.sid == sid).copied()
-                    && self.follow_plan(host, &mut view, &mut plan, result, &meta, as_judged, &choice, in_flight, o)
-                {
+                if self.follow_plan(host, &mut view, &mut plan, result, sid, &meta, as_judged, &choice, in_flight, mode) {
                     rebalanced_this_pass = true;
                     continue;
                 }
@@ -203,36 +200,6 @@ impl ClaudecodePlugin {
                 let event = if r.logged_out { "quota.logged_out" } else { "quota.refused" };
                 host.log(LogLevel::Info, event, &format!("P{} {what} at {}", meta.profile_num, r.at));
             }
-        }
-    }
-
-    pub(super) fn load_heads_up(&mut self, host: &dyn PluginHost) {
-        let Ok(dir) = host.state_dir() else { return };
-        if let Ok(text) = fs::read_to_string(dir.join(HEADS_UP_FILE)) {
-            self.heads_up = heads_up::Ledger::decode(&text);
-        }
-    }
-
-    pub(super) fn load_refused(&mut self, host: &dyn PluginHost) {
-        let Ok(dir) = host.state_dir() else { return };
-        if let Ok(text) = fs::read_to_string(dir.join(REFUSED_FILE)) {
-            self.refused = seen::Seen::decode(&text);
-        }
-    }
-
-    fn persist_refused(&mut self, host: &dyn PluginHost) {
-        let Some(text) = self.refused.changed() else { return };
-        let Ok(dir) = host.state_dir() else { return };
-        if let Err(e) = fs::write(dir.join(REFUSED_FILE), text) {
-            host.log(LogLevel::Warn, "quota.refused_persist_failed", &format!("{e}"));
-        }
-    }
-
-    fn persist_heads_up(&mut self, host: &dyn PluginHost) {
-        let Some(text) = self.heads_up.changed() else { return };
-        let Ok(dir) = host.state_dir() else { return };
-        if let Err(e) = fs::write(dir.join(HEADS_UP_FILE), text) {
-            host.log(LogLevel::Warn, "quota.heads_up_persist_failed", &format!("{e}"));
         }
     }
 

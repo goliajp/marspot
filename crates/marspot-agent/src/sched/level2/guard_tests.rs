@@ -41,3 +41,24 @@ fn sched_guard_sends_a_mixed_pane_where_both_classes_last() {
     j.limits = Limits::BALANCED;
     assert!(Grid::new(&j).admits(&j, 0, 1), "no account holds both: treated as a Fable pane");
 }
+
+/// Under full (strict protection) other-model panes wait only once no
+/// account has anything but Fable-usable quota left, and only while
+/// Fable is short.
+#[test]
+fn sched_guard_strict_waits_other_models_once_nothing_else_is_left() {
+    let p = [pane(441, 3, false, 0.0, 0.004), pane(442, 3, true, 0.004, 0.0)];
+    let spent = [acct(3, 0.5, 0.5, 30.0), acct(8, 0.3, 0.3, 140.0)];
+    let mut i = input(&spent, &p);
+    i.limits = Limits::FULL;
+    assert_eq!(guard::waits(&i), vec![441]);
+    i.limits = Limits::BALANCED;
+    assert!(guard::waits(&i).is_empty(), "protect does not make panes wait");
+    i.limits = Limits::FULL;
+    i.pi = 0.0;
+    assert!(guard::waits(&i).is_empty(), "fable not short");
+    let room = [acct(3, 0.5, 0.5, 30.0), acct(8, 0.9, 0.3, 140.0)];
+    let mut j = input(&room, &p);
+    j.limits = Limits::FULL;
+    assert!(guard::waits(&j).is_empty(), "p8 has other-model room");
+}

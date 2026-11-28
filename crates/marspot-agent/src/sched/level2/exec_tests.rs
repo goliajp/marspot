@@ -64,3 +64,25 @@ fn sched_exec_a_record_replays_to_the_same_decision() {
     assert_eq!(decide(&w2, &b2, &Limits::FULL), decide(&w, &b, &Limits::FULL));
     assert_eq!(parse("open=1"), None);
 }
+
+#[test]
+fn sched_exec_replay_compares_with_the_decision_recorded() {
+    let w = Watched { noticed_at: Some(77), ..watched() };
+    let b = Boundary { live: true, quiet_s: 0, ..at(4 * H) };
+    let lim = Limits::BALANCED;
+    let would = decide(&w, &b, &lim);
+    let rec = record(&w, &b, &lim, would);
+    assert_eq!(replay(&format!("to=P7 {rec}")), Some(true));
+    // a record whose decision is not what its fields decide fails
+    assert_ne!(would, Would::Cancel);
+    assert_eq!(replay(&record(&w, &b, &lim, Would::Cancel)), Some(false));
+    // the limits travel with the record: steady does not notice a
+    // working pane near its deadline, balanced does
+    let fresh = Watched { noticed_at: None, ..w };
+    let near = Boundary { at: fresh.dead_at - 60, ..b };
+    let (s, bal) = (decide(&fresh, &near, &Limits::STEADY), decide(&fresh, &near, &Limits::BALANCED));
+    assert_ne!(s, bal);
+    assert_eq!(replay(&record(&fresh, &near, &Limits::STEADY, bal)), Some(false));
+    assert_eq!(replay(&record(&fresh, &near, &Limits::STEADY, s)), Some(true));
+    assert_eq!(replay("decided=switch:sideways open=1"), None);
+}

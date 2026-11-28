@@ -27,7 +27,7 @@ pub mod exec_gate;
 mod finish;
 mod fit;
 mod grid;
-mod guard;
+pub mod guard;
 pub mod ladder;
 pub mod limits;
 pub mod line;
