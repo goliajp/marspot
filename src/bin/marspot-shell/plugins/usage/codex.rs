@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::agentsvc::accounts::wallet::Cap;
 use marspot::agent_resets::AccountResets;
 use marspot_peer::json::{self, Value};
 
@@ -178,11 +179,9 @@ pub(super) fn outcome(replies: &Replies, now: i64) -> Outcome {
     let Some(rate) = limits.at(&["result", "rateLimits"]) else {
         return Outcome::Nothing;
     };
-    let mut reading = Reading {
-        limit_reached: present(rate, "rateLimitReachedType").is_some(),
-        credits: present(rate, "credits").map(credits_of),
-        ..Reading::default()
-    };
+    let cap = Cap::of(rate, CAP_KEYS);
+    let credits = present(rate, "credits").map(|c| Credits { cap, observed_at: Some(now), ..credits_of(c) });
+    let mut reading = Reading { limit_reached: present(rate, "rateLimitReachedType").is_some(), credits, ..Reading::default() };
     for key in ["primary", "secondary"] {
         let Some(w) = present(rate, key) else { continue };
         let (Some(percent), Some(minutes)) = (f64_at(w, "usedPercent"), w.get("windowDurationMins").and_then(Value::i64))
@@ -209,9 +208,16 @@ fn credits_of(c: &Value) -> Credits {
             Some(Value::Num(n)) => Some(*n),
             _ => None,
         },
+        unit: Some("credits".into()),
+        // codex takes credits on its own once the week is used up
+        spend: Some("auto".into()),
+        expiry_source: Some("none".into()),
         ..Credits::default()
     }
 }
+
+/// The app-server's spelling of the cap fields.
+const CAP_KEYS: [&str; 5] = ["individualLimit", "spendControlReached", "rateLimitReachedType", "limit", "remainingPercent"];
 
 /// An auth error marks a home that has been read before; one that
 /// never was stays out of the feed, since there is nothing to say whose
@@ -309,6 +315,8 @@ mod tests {
         assert!(reading.limit_reached, "rateLimitReachedType is set");
         let c = reading.credits.expect("credits");
         assert_eq!((c.enabled, c.unlimited, c.balance), (Some(true), Some(false), Some(60_460.536_725)));
+        assert_eq!((c.unit.as_deref(), c.spend.as_deref(), c.observed_at), (Some("credits"), Some("auto"), Some(NOW)));
+        assert_eq!(c.cap, None, "a plain rate limit is no credits cap");
     }
 
     #[test]

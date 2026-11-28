@@ -9,6 +9,8 @@ use std::path::Path;
 
 use marspot_peer::json::{obj, Value};
 
+use crate::agentsvc::accounts::wallet::Cap;
+
 pub(in crate::plugins) use super::iso_time::iso_utc;
 
 /// A window nobody has read for this long is dropped.
@@ -59,6 +61,22 @@ pub(super) struct Credits {
     pub limit: Option<f64>,
     pub utilization: Option<f64>,
     pub disabled_reason: Option<String>,
+    /// `credits`, `usd` or `cny`: what `balance` counts.
+    pub unit: Option<String>,
+    /// When `balance` was read, unix seconds.
+    pub observed_at: Option<i64>,
+    /// What the provider does with the balance once the plan's
+    /// allowance is used up: `auto`, `asks` or `off`.
+    pub spend: Option<String>,
+    pub spending: Option<bool>,
+    pub spent_24h: Option<f64>,
+    pub rate_per_h: Option<f64>,
+    /// `none`, `api`, `manual` or `inferred`: where the expiry of the
+    /// balance comes from.
+    pub expiry_source: Option<String>,
+    pub cap: Option<Cap>,
+    /// `(at, amount)` of each drop with the allowance not used up.
+    pub drops: Option<Vec<(i64, f64)>>,
 }
 
 /// What one successful read of an account returned.
@@ -224,6 +242,26 @@ fn credits_value(c: &Credits) -> Value {
         ("disabled_reason", text(&c.disabled_reason)),
         ("resets_available", Value::Null),
         ("resets_expire_at", Value::Null),
+        ("unit", text(&c.unit)),
+        ("observed_at", int(c.observed_at)),
+        ("spend", text(&c.spend)),
+        ("spending", flag(c.spending)),
+        ("spent_24h", num(c.spent_24h)),
+        ("rate_per_h", num(c.rate_per_h)),
+        // no source gives the expiry of a balance yet: unknown
+        ("lots", Value::Null),
+        ("expiry_source", text(&c.expiry_source)),
+        ("cap", c.cap.as_ref().map_or(Value::Null, cap_value)),
+        ("unexplained_drops", c.drops.as_ref().map_or(Value::Null, |d| Value::Arr(d.iter().map(|(at, amount)| obj([("at", (*at).into()), ("amount", Value::Num(*amount))])).collect()))),
+    ])
+}
+
+fn cap_value(c: &Cap) -> Value {
+    obj([
+        ("reached", flag(c.reached)),
+        ("limit", num(c.limit)),
+        ("remaining_percent", num(c.remaining_percent)),
+        ("reached_type", text(&c.reached_type)),
     ])
 }
 
@@ -316,7 +354,9 @@ mod tests {
                 r#""reset":1794538799,"window_minutes":10080,"severity":"critical","is_active":false}],"#,
                 r#""credits":{"enabled":false,"unlimited":null,"balance":null,"used":0,"limit":null,"#,
                 r#""utilization":0,"disabled_reason":"user_disabled","resets_available":null,"#,
-                r#""resets_expire_at":null},"tier":"default_claude_max_20x","#,
+                r#""resets_expire_at":null,"unit":null,"observed_at":null,"spend":null,"spending":null,"#,
+                r#""spent_24h":null,"rate_per_h":null,"lots":null,"expiry_source":null,"cap":null,"#,
+                r#""unexplained_drops":null},"tier":"default_claude_max_20x","#,
                 r#""collected_at":"2026-11-10T05:55:08+00:00"}]}"#
             )
         );

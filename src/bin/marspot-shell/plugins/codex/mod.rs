@@ -16,8 +16,12 @@
 
 mod alloc;
 mod alloc_decide;
+mod alloc_per_point;
 mod alloc_rebuild;
 mod alloc_rollout;
+mod alloc_wallet;
+#[cfg(test)]
+mod alloc_wallet_tests;
 #[cfg(test)]
 mod alloc_tests;
 #[cfg(test)]

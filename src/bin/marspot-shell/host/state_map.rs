@@ -177,6 +177,9 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     // and kept past the events it was summed from
     e("plugins/claudecode/alloc_hours/<n>.tsv", Fact, "claudecode allocation_hours (alloc)", "60 days, one file a month", true),
     e("plugins/codex/alloc_events/<date>.tsv", Fact, "codex alloc (claudecode allocation_events)", "15 days", true),
+    // one line per account and ended week, measured from the readings
+    e("plugins/codex/per_point.tsv", Fact, "codex alloc_per_point", "256 lines", true),
+    e("plugins/codex/wallet_periods.tsv", Draft, "codex alloc_per_point", "one row per account", true),
     e("plugins/gemini/alloc_events/<date>.tsv", Fact, "gemini alloc (claudecode allocation_events)", "15 days", true),
     e("plugins/kimi/alloc_events/<date>.tsv", Fact, "kimi alloc (claudecode allocation_events)", "15 days", true),
     e("plugins/claudecode/refused.tsv", Derived, "claudecode switching (accounts)", "one row per account", true),
@@ -251,7 +254,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
 /// The fact rows whose files are consumed: taken whole and removed, and
 /// a new file of the same name started later.  The run audit does not
 /// hold them to "only appended".
-pub(crate) const NOT_APPEND_ONLY: &[&str] = &["peerbus/gemini/*.jsonl", "peerbus/kimi/*.jsonl"];
+pub(crate) const NOT_APPEND_ONLY: &[&str] = &["peerbus/gemini/*.jsonl", "peerbus/kimi/*.jsonl", "plugins/codex/per_point.tsv"];
 
 /// The fact rows rotated by a rename, and the rows of the files their
 /// bytes move to (`.gz` ones compressed).  The run audit lets such a
