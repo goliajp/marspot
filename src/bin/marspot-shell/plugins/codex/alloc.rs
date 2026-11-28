@@ -273,7 +273,7 @@ impl CodexAlloc {
                     {
                         self.limits.insert(p.profile, (at, used, renews));
                     }
-                    self.wallets.seen(super::alloc_wallet::Seen { at, sid: p.sid, profile: p.profile, class, week, balance, cap, tokens });
+                    self.wallets.seen(super::alloc_wallet::Seen { at, sid: p.sid, profile: p.profile, class: class_word(class), week, balance, cap, tokens });
                 }
                 Note::Model { model } => self.wallets.model(p.sid, model),
                 // what a first look finds was used before this pane was watched

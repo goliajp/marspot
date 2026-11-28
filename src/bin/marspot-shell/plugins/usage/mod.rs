@@ -26,6 +26,7 @@ mod resets;
 mod resets_store;
 mod samples;
 mod sha256;
+pub(in crate::plugins) mod wallets;
 pub(in crate::plugins) mod for_helpers;
 
 use std::path::{Path, PathBuf};
@@ -201,7 +202,7 @@ impl Collector {
         if !by_devops || flat {
             self.codex = codex::pass(home, std::mem::take(&mut self.codex), now, &mut own_resets);
         }
-        let views = crate::agentsvc::accounts::wallet::all("codex");
+        let views = wallets::all("codex");
         if !by_devops {
             credits::enrich(&mut self.codex, &views, now);
             sample(&mut self.samples, "codex", &self.codex, now);

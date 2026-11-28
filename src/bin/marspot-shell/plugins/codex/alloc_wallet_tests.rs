@@ -8,7 +8,7 @@
 
 use super::alloc::{CodexAlloc, PaneIn, Snapshot};
 use super::alloc_tests::{H, accounts, append, iso, rows, world};
-use crate::agentsvc::accounts::wallet;
+use crate::plugins::usage::wallets;
 
 const CROSS: &str = include_str!("fixtures/codex-credits-cross.jsonl");
 const RENEWS: i64 = 1_796_051_701;
@@ -55,7 +55,7 @@ fn a_week_running_out_and_the_balance_falling_makes_one_spend_per_drop() {
     assert_eq!((first[2].as_str(), first[4].as_str()), ("487", "2"));
     assert!(first[6].contains("balance=59773.903605") && first[6].contains("model=gpt-6.2-astra") && first[6].contains(" in="), "{}", first[6]);
 
-    let (_, view) = wallet::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
+    let (_, view) = wallets::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
     assert!((view.balance - 59_769.088_765).abs() < 1e-6 && view.week_full && view.spending(AFTER));
     assert!((view.spent_24h - sum).abs() < 1e-6 && view.last_spend == Some(view.at), "{view:?}");
     // the first balance seen is one lot, ending 180 days on at the latest
@@ -73,7 +73,7 @@ fn a_week_running_out_and_the_balance_falling_makes_one_spend_per_drop() {
     again.observe(&snap(&w.rollout, AFTER + 120, 0));
     assert_eq!(amounts(&w.dir, "spend").last().map(String::as_str), Some("amount=1.000000"), "it goes on from the last balance");
     assert_eq!(lots().lines().count(), 1, "the lot is written once, a restart reads it back");
-    let (_, view) = wallet::all("codex").into_iter().find(|(p, _)| *p == 2).unwrap();
+    let (_, view) = wallets::all("codex").into_iter().find(|(p, _)| *p == 2).unwrap();
     assert_eq!(view.lot, Some(lot));
 }
 
@@ -99,7 +99,7 @@ fn a_balance_that_does_not_read_is_no_reading() {
     append(&w.rollout, &[reading(now - 300, 100.0, r#""100.0""#), reading(now - 200, 100.0, "null"), reading(now - 100, 100.0, r#""99.0""#)]);
     a.observe(&snap(&w.rollout, now, now - H));
     assert_eq!(amounts(&w.dir, "spend"), ["amount=1.000000"], "the drop is counted from the last balance that read");
-    let (_, view) = wallet::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
+    let (_, view) = wallets::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
     assert_eq!(view.balance, 99.0);
 }
 

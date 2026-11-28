@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.954"  # the reset kinds and what each brings back are read from the lib, the scheduler names no agent
+shell   = "0.7.955"  # the codex wallet types move to marspot-agent; the wallet table is a Published in the usage service
 core    = "0.12.820"  # the lib says what each kind of stored reset brings back
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

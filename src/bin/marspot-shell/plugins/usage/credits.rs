@@ -16,7 +16,7 @@ use marspot_term::{lx_info, lx_warn};
 use super::feed::Account;
 use super::samples::{profile_of, Balance, Samples};
 use super::feed::Credits;
-use crate::agentsvc::accounts::wallet::{Cap, Lot, View};
+use marspot_agent::types::wallet::{Cap, Lot, View};
 
 /// The window the spend rate is taken over; `View::spent_1h` is summed
 /// over it.
