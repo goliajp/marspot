@@ -8,7 +8,7 @@ use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::plugins::l3_test_support::{spawn_l3, until, Proxy, Root};
+use crate::plugins::l3_support_tests::{spawn_l3, until, Proxy, Root};
 
 fn now() -> Arc<Observation> {
     crate::observe::shared().fresh(crate::observe::NOW)
@@ -90,7 +90,7 @@ fn a_restarted_session_gets_its_codex_thread_back_under_the_home_it_ran_on() {
     let first = spawn_l3(sid, &shell, &path, &[]);
     let old_shell = until("the first shell", || shell_of(sid));
     let mut before = CodexPlugin::new();
-    let host = OpsHost::new(plugin_state.clone(), Arc::new(crate::plugins::l3_test_support::NoPane));
+    let host = OpsHost::new(plugin_state.clone(), Arc::new(crate::plugins::l3_support_tests::NoPane));
     let ran = Bound { sid, thread: thread.into(), home: account.display().to_string(), cwd: Some(work.display().to_string()), model: Some("gpt-5.5".into()) };
     before.note_threads(&host, &now(), &[ran], &[sid].into());
     let saved = fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap();

@@ -7,7 +7,7 @@
 use super::*;
 use std::time::Instant;
 
-use crate::plugins::l3_test_support::{spawn_l3, until, Proxy, Root};
+use crate::plugins::l3_support_tests::{spawn_l3, until, Proxy, Root};
 
 /// Start what was queued and step what runs, as the supervisor does.
 fn drive(host: &FakeHost, sid: u64) {
