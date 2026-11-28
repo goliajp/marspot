@@ -107,6 +107,10 @@ fn detail(o: &Out) {
     let cycles: Vec<String> = o.cycles.iter().map(|c| format!("+{:.1}h P{} week {:.1} fable {:.1} taken {:.1} (reserve {:.1})", (c.0 - fixture().t0) as f64 / 3600.0, c.1, 100.0 * c.2, 100.0 * c.3, 100.0 * c.4, 100.0 * c.5)).collect();
     println!("  cycles: {}", cycles.join("; "));
     println!("  reserve taken {:.1} pts (a mixed pane's where nothing held both classes {:.1}); phi taken while another account had other-model room {:.1} pts; other-model use held by strict waits {:.1} pts", 100.0 * o.reserve_taken, 100.0 * o.unavoidable, 100.0 * o.phi_taken_room, 100.0 * o.waited);
+    let mut by: Vec<(&(u8, u64), &f64)> = o.taken_by.iter().filter(|x| *x.1 >= 0.005).collect();
+    by.sort_by(|a, b| b.1.total_cmp(a.1));
+    let by: Vec<String> = by.iter().map(|((id, sid), x)| format!("{sid} on P{id} {:.1}", 100.0 * **x)).collect();
+    println!("  reserve taken by pane: {}", by.join(", "));
     println!("  boundaries with a watched switch {} (user at it {}, before open {}), answered wait {} notify {} switch {}", o.diag[0], o.diag[1], o.diag[2], o.diag[3], o.diag[4], o.diag[5]);
 }
 
@@ -156,7 +160,6 @@ fn sched_replay_balanced_halves_the_refusals_and_switches_at_most_sixteen_a_day(
 /// renewal or was stranded, and, inside that, those lapsed for want of
 /// what other models took beyond level 1's spare.
 #[test]
-#[ignore = "measures total Fable lapsed and Fable lapsed for want of the reserve other models took, both against 20 points; run explicitly for the numbers"]
 fn sched_replay_balanced_lapses_under_twenty() {
     let (_, s) = profile(Limits::BALANCED);
     assert!(s.lapsed <= 20.0, "{:.1} Fable points lapsed in all", s.lapsed);
@@ -179,18 +182,20 @@ fn sched_replay_full_never_switches_a_pane_twice_in_an_hour() {
     assert_eq!(s.within_hour, 0, "changes of account of one pane within an hour");
 }
 
-/// Full's bar on lapsed Fable does not hold on these records: 428, a
-/// Fable session whose agents run Opus, takes P4's and P3's reserve
-/// where no account holds both its classes for the stay (the guard then
-/// treats it as a Fable pane); 488 takes P4's before the first recorded
-/// boundary with no switch planned off it (level 2 prices P4's window
-/// as lapsing at its renewal a day later, level 1 as reserve); and 488
-/// takes P5's after it while its planned switch waits on a boundary
-/// without the user at it.  Making strict protection's waits instead of
-/// rehearsing them changes nothing here: some account always had
-/// other-model room.
+/// Full's bar on lapsed Fable does not hold on these records: 22.8
+/// points lapse, 19.3 of them on P4 at its renewal 67 hours in, and 13.2
+/// of those were taken by 428, a Fable session whose agents run Opus.
+/// Another account held both its classes for the stay, so the mixed-pane
+/// rule would not send it to P4 now, but that rule only filters targets:
+/// a mixed pane already on an account whose week is all Fable-usable is
+/// moved only when the plan's money says so, and no plan moved it (its
+/// Fable use there draws on a window that lapses at that renewal; which
+/// term of the money keeps it was not traced).  The rest is 5.8 points
+/// of P4's window no Fable pane used, 2.6 on P1 and 0.9 on P6.  Making
+/// strict protection's waits instead of rehearsing
+/// them changes nothing: some account always had other-model room.
 #[test]
-#[ignore = "measures total Fable lapsed and Fable lapsed for want of the reserve other models took, both against 10 points; run explicitly for the numbers"]
+#[ignore = "measures total Fable lapsed and Fable lapsed for want of the reserve other models took, both against 10 points: 22.8 and 14.2 on these records, see the comment"]
 fn sched_replay_full_lapses_under_ten() {
     let (_, s) = profile_holding(Limits::FULL, true);
     assert!(s.lapsed <= 10.0, "{:.1} Fable points lapsed in all", s.lapsed);

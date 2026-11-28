@@ -50,6 +50,16 @@ impl W<'_> {
         served
     }
 
+    fn serve_for(&mut self, sid: u64, id: u8, class: Class, amount: f64) -> f64 {
+        let before = self.out.reserve_taken;
+        let served = self.serve(id, class, amount);
+        let took = self.out.reserve_taken - before;
+        if took > 0.0 {
+            *self.out.taken_by.entry((id, sid)).or_default() += took;
+        }
+        served
+    }
+
     /// Another open account holds both of `sid`'s classes for the stay.
     fn holds_both(&self, now: i64, sid: u64, on: u8) -> bool {
         let sp = self.speeds(sid, now);
@@ -83,14 +93,14 @@ impl W<'_> {
         }
         let (on, own, stalled) = (p.on, p.class, p.stalled);
         self.stuck = own == Class::Restricted && class == Class::Plain && !self.holds_both(now, sid, on);
-        let mut rest = amount - self.serve(on, class, amount);
+        let mut rest = amount - self.serve_for(sid, on, class, amount);
         if rest > EPS && class == own && !stalled {
             self.out.refusals.push((now, on, sid));
             self.refused = true;
             self.panes.get_mut(&sid).expect("the pane").stalled = true;
             if let Some(to) = matches!(self.mode, Mode::Planner(_)).then(|| self.place_refused(now, sid)).flatten() {
                 self.switch(now, sid, to, None);
-                rest -= self.serve(to, class, rest);
+                rest -= self.serve_for(sid, to, class, rest);
             }
         } else if rest <= EPS && class == own {
             self.panes.get_mut(&sid).expect("the pane").stalled = false;
