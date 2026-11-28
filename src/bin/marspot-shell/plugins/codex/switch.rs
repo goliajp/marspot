@@ -105,6 +105,13 @@ pub(super) fn asks_approval(screen: &str) -> bool {
     near.iter().any(|r| r.trim_start().starts_with(CODEX_ASKS) && r.trim_end().ends_with('?'))
 }
 
+impl Switches {
+    /// A switch is under way in pane `sid`.
+    pub(super) fn moving(&self, sid: u64) -> bool {
+        self.moves.contains_key(&sid)
+    }
+}
+
 impl CodexPlugin {
     /// A pick of profile `profile` (at `dir`) on pane `sid`'s badge.
     pub(super) fn switch_profile(&mut self, host: &dyn PluginHost, sid: u64, profile: u8, dir: PathBuf) {

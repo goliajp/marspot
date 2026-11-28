@@ -26,6 +26,8 @@ mod alloc_wire;
 #[cfg(test)]
 mod alloc_wire_tests;
 mod badge;
+mod cold_record;
+mod cold_restore;
 mod declare;
 mod pane;
 pub(in crate::plugins) mod context;
@@ -100,6 +102,7 @@ pub struct CodexPlugin {
     alloc: alloc_wire::AllocPass,
     /// The codex processes seen in front of panes, for `launch.observed`.
     seen: crate::plugins::launches::Seen,
+    cold: cold_restore::Cold,
 }
 
 impl CodexPlugin {
@@ -116,6 +119,7 @@ impl CodexPlugin {
             switches: Default::default(),
             alloc: Default::default(),
             seen: Default::default(),
+            cold: Default::default(),
         }
     }
 }
@@ -138,7 +142,8 @@ impl Plugin for CodexPlugin {
         }
     }
 
-    fn init(&mut self, _host: &dyn PluginHost) -> Result<(), PluginError> {
+    fn init(&mut self, host: &dyn PluginHost) -> Result<(), PluginError> {
+        self.load_last_bound(host);
         self.initialised = true;
         Ok(())
     }
@@ -235,10 +240,8 @@ impl Plugin for CodexPlugin {
         if !self.initialised {
             return super::TickDue::Event;
         }
-        if !self.last_badge.is_empty()
-            || !self.panes.is_empty()
-            || crate::observe::shared().latest().live().any(|s| pane_codex(s).is_some())
-        {
+        let obs = crate::observe::shared().latest();
+        if !self.last_badge.is_empty() || !self.panes.is_empty() || obs.live().any(|s| pane_codex(s).is_some()) || self.cold_pending(&obs) {
             return super::TickDue::Cadence;
         }
         self.follower.due_at().map_or(super::TickDue::Cadence, super::TickDue::At)
@@ -260,6 +263,7 @@ impl Plugin for CodexPlugin {
         }
         let live = |sid: u64| obs.sessions.iter().any(|s| s.entry.id == sid);
         if self.last_badge.is_empty() && !obs.live().any(|s| pane_codex(s).is_some()) {
+            self.cold_tick(host, &obs, &[], &std::collections::HashSet::new());
             self.seen.end_pass(live);
             self.refresh_stale(host, &[]);
             return;
@@ -272,6 +276,9 @@ impl Plugin for CodexPlugin {
         let (cfg_model, cfg_effort) = read_model_and_effort(&home);
         let mut codex_panes = Vec::new();
         let mut alloc_seen = Vec::new();
+        let mut threads_bound = Vec::new();
+        let mut with_codex = std::collections::HashSet::new();
+        let views = crate::plugins::peerbus::threads();
 
         // Sessions come from the registry, not from pane indices: a
         // pane index is a position in a layout that moves when panes
@@ -309,9 +316,24 @@ impl Plugin for CodexPlugin {
                 ),
                 None => (pane_model, pane_effort),
             };
+            let home_set = codex_env.as_ref().is_some_and(Option::is_some);
             let profile = codex_env.and_then(profile_from);
             let text = self.hinted(sid, badge_text(profile, model.as_deref(), effort.as_deref()));
             if let Some(p) = codex {
+                with_codex.insert(sid);
+                // the thread by peerbus's binding of this very process,
+                // else the one its command line resumes
+                // (an argv's thread only when the home is known: an
+                // unreadable environment says nothing of the profile)
+                let env_read = home_set || self.env.value(&p.row, "HOME").is_some();
+                let thread = views.get(&sid).filter(|v| v.codex == p.row.id()).map(|v| (v.thread.clone(), v.home.clone()));
+                let argv_thread = || p.argv.as_deref().and_then(cold_record::argv_thread).map(|t| (t.to_string(), pane_home.clone()));
+                let thread = thread.or_else(|| env_read.then(argv_thread).flatten());
+                if let Some((thread, home)) = thread.and_then(|(t, h)| Some((t, h.to_str()?.to_string()))) {
+                    // the thread's own model, never the badge's fallback
+                    let model = cwd.as_deref().and_then(|c| self.rollouts.thread_model(c, &thread));
+                    threads_bound.push(cold_restore::Bound { sid, thread, home, cwd: cwd.clone(), model });
+                }
                 codex_panes.push((sid, p.row.id(), p.argv.as_deref().map(<[String]>::to_vec)));
                 alloc_seen.push(alloc_wire::Seen::new(sid, p, &pane_home, cwd.clone(), &self.rollouts, model.clone(), profile));
             }
@@ -332,6 +354,7 @@ impl Plugin for CodexPlugin {
             }
             declare::declare(host, &mut self.last_badge, sid, has_codex, &text);
         }
+        self.cold_tick(host, &obs, &threads_bound, &with_codex);
         self.seen.end_pass(live);
         self.refresh_stale(host, &codex_panes);
         self.alloc.run(host, &alloc_seen, &obs);

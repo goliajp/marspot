@@ -36,11 +36,23 @@ pub(crate) fn account_model(home: &Path) -> Option<String> {
 /// the same list.
 pub(crate) fn thread_model(home: &Path, thread: &str) -> Option<String> {
     let all = recent_rollouts(home);
+    own_model(&all, thread).or_else(|| all.iter().take(NEWEST).find_map(|p| rollout_model(p))).filter(|m| plain(m))
+}
+
+/// The model thread `thread`'s own rollout under `home` last recorded;
+/// None when it has none, never another thread's.
+pub(crate) fn own_thread_model(home: &Path, thread: &str) -> Option<String> {
+    own_model(&recent_rollouts(home), thread).filter(|m| plain(m))
+}
+
+fn own_model(all: &[std::path::PathBuf], thread: &str) -> Option<String> {
     let suffix = format!("-{thread}.jsonl");
     let own = all.iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)));
     own.and_then(|p| rollout_model(p))
-        .or_else(|| all.iter().take(NEWEST).find_map(|p| rollout_model(p)))
-        .filter(|m| m.chars().all(|c| c.is_ascii_alphanumeric() || "-._:/".contains(c)))
+}
+
+fn plain(m: &str) -> bool {
+    m.chars().all(|c| c.is_ascii_alphanumeric() || "-._:/".contains(c))
 }
 
 #[cfg(test)]
@@ -67,6 +79,8 @@ mod tests {
         std::fs::write(&p, format!("{turn}\n{pick}\n")).unwrap();
         assert_eq!(thread_model(home.path(), thread).as_deref(), Some("gpt-5.5"));
         assert_eq!(thread_model(home.path(), "0000").as_deref(), Some("gpt-5.5-mini"), "no rollout: the account's");
+        assert_eq!(own_thread_model(home.path(), thread).as_deref(), Some("gpt-5.5"));
+        assert_eq!(own_thread_model(home.path(), "0000"), None, "no rollout of its own: none, not the account's");
         std::fs::remove_file(&own).unwrap();
         std::fs::write(&p, "{\"type\":\"session_meta\"}\n").unwrap();
         assert_eq!(thread_model(home.path(), thread), None);

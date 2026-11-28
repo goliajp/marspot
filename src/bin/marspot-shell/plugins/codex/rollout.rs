@@ -235,6 +235,9 @@ pub(super) fn tail_of(path: &std::path::Path) -> Option<String> {
 pub(crate) struct RolloutIndex {
     by_cwd: std::collections::HashMap<String, PathBuf>,
     facts: std::collections::HashMap<String, (std::time::SystemTime, SessionFacts)>,
+    /// The file each cwd's facts were last read from: they stand while
+    /// a newer file of the same cwd has not said any yet.
+    facts_from: std::collections::HashMap<String, PathBuf>,
     /// When a cwd was last searched for, so a pane whose session
     /// cannot be found does not pay for a search every tick.
     searched_at: std::collections::HashMap<String, std::time::Instant>,
@@ -260,6 +263,7 @@ pub(crate) struct RolloutIndex {
 /// What a backward scan found, addressed to the cwd that asked.
 struct DeepScan {
     cwd: String,
+    path: PathBuf,
     mtime: std::time::SystemTime,
     facts: Option<SessionFacts>,
 }
@@ -298,9 +302,19 @@ impl RolloutIndex {
         for d in done {
             self.deep_inflight = false;
             if let Some(f) = d.facts {
+                self.facts_from.insert(d.cwd.clone(), d.path);
                 self.facts.insert(d.cwd, (d.mtime, f));
             }
         }
+    }
+
+    /// The model thread `thread` last named, when the facts known for
+    /// `cwd` were read from that thread's own rollout; None when they
+    /// came from another thread's in the same directory, or none yet.
+    pub(super) fn thread_model(&self, cwd: &str, thread: &str) -> Option<String> {
+        let name = self.facts_from.get(cwd)?.file_name()?.to_str()?;
+        let own = name.strip_suffix(".jsonl")?.strip_suffix(thread)?.ends_with('-');
+        own.then(|| self.facts.get(cwd)?.1.model.clone()).flatten()
     }
 
     /// The rollout matched to `cwd`, once one was found.
@@ -363,6 +377,7 @@ impl RolloutIndex {
             .and_then(last_fact_line)
             .and_then(|l| facts_from_line(l, cwd))
         {
+            self.facts_from.insert(cwd.to_string(), path.to_path_buf());
             self.facts.insert(
                 cwd.to_string(),
                 (mtime, SessionFacts { model: f.model.clone(), effort: f.effort.clone() }),
@@ -392,7 +407,7 @@ impl RolloutIndex {
             .name("codex-rollout-scan".into())
             .spawn(move || {
                 let facts = deep_fact_line(&path).and_then(|l| facts_from_line(&l, &cwd));
-                let _ = tx.send(DeepScan { cwd, mtime, facts });
+                let _ = tx.send(DeepScan { cwd, path, mtime, facts });
             })
             .is_ok()
         {

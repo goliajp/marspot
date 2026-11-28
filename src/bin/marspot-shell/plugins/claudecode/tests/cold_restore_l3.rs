@@ -5,104 +5,9 @@
 //! records what it was started with.
 
 use super::*;
-use std::io::Read;
-use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
 use std::time::Instant;
 
-use marspot_term::shell_proto::{Frame, MsgType, encode_inject_input, encode_pane_hold_grid};
-
-/// A state root with a short path: a session binds its socket under it
-/// and macOS caps a socket path at 104 bytes.
-struct Root(PathBuf);
-
-impl Drop for Root {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-/// One session process, killed and reaped when dropped.
-struct L3 {
-    child: std::process::Child,
-    control: UnixStream,
-}
-
-impl Drop for L3 {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn no_cloexec(fd: i32) {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    assert!(flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } >= 0);
-}
-
-/// Session `sid` on the built session binary, its shell `shell`.
-fn spawn_l3(sid: u64, shell: &Path, path: &str) -> L3 {
-    let region = marspot_term::grid_shm::create_region(80, 24).unwrap();
-    let (control, child_end) = UnixStream::pair().unwrap();
-    no_cloexec(region.as_raw_fd());
-    no_cloexec(child_end.as_raw_fd());
-    let child = std::process::Command::new(marspot_term::test_env::built_binary("marspot-session"))
-        .env("MARSPOT_SHELL_CONTROL_FD", child_end.as_raw_fd().to_string())
-        .env("MARSPOT_SHM_FD", region.as_raw_fd().to_string())
-        .env("MARSPOT_SESSION_ID", sid.to_string())
-        .env("SHELL", shell)
-        .env("PATH", path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    // what the session says on its socket is not read here; left unread
-    // it would fill the socket and stall the session
-    let mut drain = control.try_clone().unwrap();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        while drain.read(&mut buf).is_ok_and(|n| n > 0) {}
-    });
-    L3 { child, control }
-}
-
-/// Typing into the session the way the core forwards it.
-struct Proxy(Mutex<UnixStream>);
-
-impl Proxy {
-    fn frame(&self, t: MsgType, payload: Vec<u8>) -> std::io::Result<()> {
-        Frame::new(t, payload).write_to(&mut *self.0.lock().unwrap()).map(|_| ())
-    }
-}
-
-impl InjectInputProxy for Proxy {
-    fn inject_input(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()> {
-        self.frame(MsgType::InjectInput, encode_inject_input(sid, bytes))
-    }
-    fn hold_grid(&self, sid: u64, on: bool) -> std::io::Result<()> {
-        self.frame(MsgType::PaneHoldGrid, encode_pane_hold_grid(sid, on))
-    }
-    fn paste(&self, sid: u64, text: &str) -> std::io::Result<()> {
-        self.inject_input(sid, text.as_bytes())
-    }
-    fn reset_mouse_reporting(&self, _: u64) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
-    eprintln!("waiting for {what}");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(v) = f() {
-            return v;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
+use crate::plugins::l3_test_support::{spawn_l3, until, Proxy, Root};
 
 /// Start what was queued and step what runs, as the supervisor does.
 fn drive(host: &FakeHost, sid: u64) {
@@ -175,9 +80,10 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     let plugin_state = state.join("plugins/claudecode");
 
     // before the restart: claude ran in the pane, and the scan saw it
-    let first = spawn_l3(sid, &shell, &path);
+    let first = spawn_l3(sid, &shell, &path, &[]);
     let old_shell = until("the first shell", || shell_of(sid));
     let mut before = ClaudecodePlugin::new();
+    before.cold.pace = crate::plugins::cold_restore::Pace::own();
     let host = FakeHost::new(plugin_state.clone());
     before.note_bindings(&host, &bound(sid, live_claude(), 3, &home, uuid), &now());
     let saved = fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap();
@@ -208,15 +114,16 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     assert!(fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap().contains(uuid), "the row outlives the revival");
 
     // it comes back on the same id, from the saved screen, with a new shell
-    let second = spawn_l3(sid, &shell, &path);
+    let second = spawn_l3(sid, &shell, &path, &[]);
     let new_shell = until("the new shell", || shell_of(sid).filter(|s| *s != old_shell));
     until("the saved screen to be applied", || (!state_bin.exists()).then_some(()));
 
     // a new process of the shell starts: it has only what is on disk
-    let proxy = Arc::new(Proxy(Mutex::new(second.control.try_clone().unwrap())));
+    let proxy = Arc::new(Proxy::of(&second));
     let client = Arc::new(ShelldClient::new(Some(proxy.clone() as Arc<dyn InjectInputProxy>)));
     let host = FakeHost::with_io(plugin_state.clone(), client.clone() as Arc<dyn pty_op::PtyIo>);
     let mut plugin = ClaudecodePlugin::new();
+    plugin.cold.pace = crate::plugins::cold_restore::Pace::own();
     plugin.shelld = Some(client.clone());
     plugin.load_last_bound(&host);
     let mut idle = scan_of(sid, CcActivity::Absent);
@@ -229,6 +136,7 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     fs::copy(plugin_state.join("last_bound.tsv"), typed_state.join("last_bound.tsv")).unwrap();
     let typed_host = FakeHost::with_io(typed_state.clone(), client.clone() as Arc<dyn pty_op::PtyIo>);
     let mut typed = ClaudecodePlugin::new();
+    typed.cold.pace = crate::plugins::cold_restore::Pace::own();
     typed.shelld = Some(client.clone());
     typed.cold.last_input = |_| Some(std::time::SystemTime::now());
     typed.load_last_bound(&typed_host);
