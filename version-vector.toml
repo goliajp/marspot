@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.889"  # an idle wake bounds its loading by the wake watchdog for retry answers
-core    = "0.12.772"  # pane labels and sidebar rows move out of draw.rs and sidebar_view.rs
+core    = "0.12.773"  # the hidden-panes record is taken by a name clippy does not read as a conversion
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

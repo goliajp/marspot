@@ -76,7 +76,7 @@ impl CoreApp {
         let shown: Vec<u64> = self.windows.iter().flat_map(|w| w.panes.iter()).filter_map(Pane::shelld_session_id).collect();
         hidden.iter().for_each(|sid| Self::note_pane_code(*sid));
         self.pane_control.shadows.family.recount(&hidden, &shown);
-        if let Some(record) = self.pane_control.shadows.family.to_record(&hidden) {
+        if let Some(record) = self.pane_control.shadows.family.take_record(&hidden) {
             super::shadow_boot::write_hidden_record(&record);
         }
         for w in &mut self.windows {

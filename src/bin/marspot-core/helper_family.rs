@@ -51,7 +51,7 @@ impl Family {
 
     /// `hidden` sorted, when it is not what was last written for the
     /// next boot; it is taken as written.
-    pub(crate) fn to_record(&mut self, hidden: &[u64]) -> Option<Vec<u64>> {
+    pub(crate) fn take_record(&mut self, hidden: &[u64]) -> Option<Vec<u64>> {
         let mut now = hidden.to_vec();
         now.sort_unstable();
         (self.recorded.as_ref() != Some(&now)).then(|| {
