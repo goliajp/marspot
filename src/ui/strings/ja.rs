@@ -248,6 +248,7 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::Helpers(n) => write!(out, "ヘルパー（{n}）"),
         Arg::HelpersOf(n) => write!(out, "ヘルパー（{n}）…"),
         Arg::ChildOf(code) => write!(out, "（#{code:04} の子ペイン）"),
+        Arg::MoreChildren(n) => write!(out, "…ほか {n} 件"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}分"),
         Arg::RanFor { minutes: m } => write!(out, "{}時間{}分", m / 60, m % 60),
         Arg::ModelPutBack { to, back } => {

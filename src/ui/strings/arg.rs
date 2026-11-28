@@ -53,6 +53,8 @@ pub enum Arg<'a> {
     HelpersOf(u32),
     /// After a child pane's name in a menu: whose child it is.
     ChildOf(u16),
+    /// After the child panes a question names: how many more there are.
+    MoreChildren(usize),
     /// Helper panel: how long a pane has run.
     RanFor { minutes: u64 },
     /// The shared default model changed without confirmation and was put back.

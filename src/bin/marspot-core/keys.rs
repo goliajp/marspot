@@ -52,7 +52,7 @@ impl CoreApp {
 
         // an open context menu takes every key: the arrows, Enter and
         // Esc are its, and nothing typed reaches the pane under it
-        if self.menu_key(wi, &event) || self.close_ask_key(&event) {
+        if self.menu_key(wi, &event) || self.close_ask_key(wi, &event) {
             return;
         }
 

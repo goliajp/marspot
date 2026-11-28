@@ -106,7 +106,7 @@ impl CoreApp {
     }
 
     /// The pane whose session is `sid`, in a window or not.
-    pub(super) fn pane_of(&self, sid: u64) -> Option<&Pane> {
+    pub(crate) fn pane_of(&self, sid: u64) -> Option<&Pane> {
         self.windows.iter().flat_map(|w| w.panes.iter()).chain(&self.shadows).find(|p| p.shelld_session_id() == Some(sid))
     }
 }

@@ -40,9 +40,10 @@ impl Notices {
         self.shell.as_ref().map(|(t, _)| t.as_str())
     }
 
-    /// What is shown over the pane showing session `sid`, if anything.
-    pub(super) fn over(&self, sid: Option<u64>, focused: bool) -> Option<&str> {
-        if let Some(ask) = self.close.as_ref().filter(|a| sid == Some(a.over)) {
+    /// What is shown over the pane showing session `sid` in window
+    /// `window` (its id), if anything.
+    pub(super) fn over(&self, window: u32, sid: Option<u64>, focused: bool) -> Option<&str> {
+        if let Some(ask) = self.close.as_ref().filter(|a| a.window == window && sid == Some(a.over)) {
             return Some(ask.text.as_str());
         }
         match &self.guard {
@@ -77,6 +78,7 @@ impl CoreApp {
     /// Once per loop turn: a notice whose time is up comes down.
     pub(super) fn notices_tick(&mut self) {
         self.install_ask_tick();
+        self.close_ask_tick();
         if self.notices.expire(Instant::now()) {
             lx_event!("NOTICE_GONE", "the shell's notice came down");
             self.windows.iter_mut().for_each(|w| w.needs_render = true);
