@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.901"  # the codex installer can be a local script under a sandbox state dir (MARSPOT_DEV_CODEX_INSTALLER)
+shell   = "0.7.902"  # a run's shell lines are shown to a hook registered when the pane queue is built; the queue moves to a file of its own
 core    = "0.12.798"  # process rows carry the exec flag; process samples move to a file of their own
 session = "0.11.497"  # marspot-term: settings carry sched.profile and numeric sched.* overrides (not used by session)
