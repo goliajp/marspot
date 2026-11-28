@@ -112,7 +112,7 @@ impl ClaudecodePlugin {
         }
         let u = Unbound {
             bound: &|sid| result.new_meta.contains_key(&sid),
-            listed: &|sid| obs.session(sid).is_some(),
+            listed: &record::pane_open,
             shell: &shell,
             last_input: &self.cold.last_input,
             now: Instant::now(),

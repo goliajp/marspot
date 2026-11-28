@@ -154,13 +154,20 @@ pub(super) fn restorable(shell: pidtree::ProcId, now: SystemTime, last_input: Op
     now.duration_since(from).unwrap_or_default() < WINDOW && last_input.is_none_or(|t| t < from)
 }
 
+/// Whether pane `sid` is still open.  A close marks the session closed
+/// before it signals it and removes its directory once it has exited; a
+/// session process that ended with the machine keeps both.  Its entry
+/// alone says nothing: the core removes it while it starts a dead pane's
+/// session process again, which writes it back.
+pub(super) fn pane_open(sid: u64) -> bool {
+    use marspot_term::session_registry::{is_closed, session_dir};
+    session_dir(sid).exists() && !is_closed(sid)
+}
+
 /// What a scan says about panes with no claude bound now.
 pub(super) struct Unbound<'a> {
     pub(super) bound: &'a dyn Fn(u64) -> bool,
-    /// The registry has an entry for the pane.  A closed pane's entry
-    /// is removed; a session process that ended with the machine keeps
-    /// it, so the pane is not taken for closed when its process is
-    /// gone before this one.
+    /// The pane is still open; see `pane_open`.
     pub(super) listed: &'a dyn Fn(u64) -> bool,
     /// The pane's shell, when its session process runs.
     pub(super) shell: &'a dyn Fn(u64) -> Option<pidtree::ProcId>,

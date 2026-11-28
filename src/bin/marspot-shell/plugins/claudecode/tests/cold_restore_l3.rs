@@ -196,6 +196,17 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     before.note_bindings(&host, &scan_of(sid, CcActivity::Absent), &gone);
     assert!(fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap().contains(uuid), "the row is kept");
 
+    // the core starting it again removes its entry first, and the new
+    // session process writes it back: a scan in between keeps the row
+    let entry = marspot_term::session_registry::session_entry_path(sid);
+    fs::remove_file(&entry).unwrap();
+    let reviving = until("an observation without the entry", || {
+        let o = now();
+        o.session(sid).is_none().then_some(o)
+    });
+    before.note_bindings(&host, &scan_of(sid, CcActivity::Absent), &reviving);
+    assert!(fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap().contains(uuid), "the row outlives the revival");
+
     // it comes back on the same id, from the saved screen, with a new shell
     let second = spawn_l3(sid, &shell, &path);
     let new_shell = until("the new shell", || shell_of(sid).filter(|s| *s != old_shell));
@@ -276,4 +287,10 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     }
     unsafe { libc::kill(typed.pid, libc::SIGKILL) };
     drop(second);
+
+    // a pane the app closed is marked so before its directory goes: the
+    // row goes with the mark
+    marspot_term::session_registry::mark_closed(sid).unwrap();
+    plugin.note_bindings(&host, &scan_of(sid, CcActivity::Absent), &now());
+    assert!(!fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap().contains(uuid), "a closed pane's row goes");
 }
