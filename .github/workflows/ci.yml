@@ -11,7 +11,8 @@ name: ci
 # and which a second platform reuses whole. Nothing above that layer
 # compiles there yet (Metal, AppKit), so the Linux leg is not a weaker
 # copy of the macOS one: it is the only thing that can say the core
-# stayed portable.
+# stayed portable. It also tests `marspot-agent`, the pure planner, whose
+# closed-loop replay has to give the same bits on every platform.
 #
 # It can say it because the core did not used to be. Measured
 # 2026-10-01: seven errors, four Darwin-only libc calls across three
@@ -44,8 +45,8 @@ jobs:
             full: true
           - os: ubuntu-26.04
             name: Linux x86_64 (core)
-            # Everything above these two is macOS-only today.
-            scope: -p marspot-term -p marspot-linkify
+            # Everything else is macOS-only today.
+            scope: -p marspot-term -p marspot-linkify -p marspot-agent
             nextest: linux
             full: false
     runs-on: ${{ matrix.os }}

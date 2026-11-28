@@ -1,6 +1,6 @@
 # marspot-agent perf budgets
 
-Each time budget is three times the largest P95 of nine runs on mini2 (Apple Silicon M6, the test profile `bin/test.sh` builds, the perf gates alone on the test runner; three runs with mini2 otherwise idle, six with load1 4.9 to 6.9 from other jobs, as the gate meets it), held by `perf_gate.rs`. Re-set on mini2 on 2026-11-28 when tests moved off mini; the mini readings stay in the Measured column for history. On a hosted CI runner (`CI` set) the times are printed and not held, since those runners are shared and of unknown speed (GitHub's macOS runner read 20 to 24 ms for the exact-mode search that takes 4.7 ms on mini2); the work counts (simulations, switches, bytes) are held everywhere.
+Each time budget is three times the largest P95 of nine runs on mini2 (Apple Silicon M6, the test profile `bin/test.sh` builds, the perf gates alone on the test runner; three runs with mini2 otherwise idle, six with load1 4.9 to 6.9 from other jobs, as the gate meets it), held by `perf_gate.rs`. Re-set on mini2 on 2026-11-28 when tests moved off mini; the mini readings stay in the Measured column for history. On a hosted CI runner (`CI` set), and on any platform other than macOS arm64 (the Linux CI job), the times are printed and not held, since those runners are shared and of unknown speed (GitHub's macOS runner read 20 to 24 ms for the exact-mode search that takes 4.7 ms on mini2); the work counts (simulations, switches, bytes) are held everywhere.
 
 | Gate | One sample | Measured P95 | Budget | Measured |
 |---|---|---|---|---|

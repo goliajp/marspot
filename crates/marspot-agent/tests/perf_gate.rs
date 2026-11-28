@@ -30,12 +30,17 @@ fn loads(n: usize) -> Vec<Load> {
     (0..n).map(|i| Load { restricted: 0.002 * (i % 3) as f64, plain: 0.004 + 0.001 * (i % 5) as f64 }).collect()
 }
 
-/// A wall-clock budget holds on the machines it was measured against.  A
-/// hosted CI runner (`CI` set) is shared and of unknown speed: there the
-/// time is printed and the work counts are still held.
+/// A wall-clock budget holds on the machines it was measured against,
+/// which are macOS arm64 ones.  A hosted CI runner (`CI` set) is shared
+/// and of unknown speed, and another platform is another machine: there
+/// the time is printed and the work counts are still held.
 fn within(what: &str, p: Duration, budget: Duration) {
     if std::env::var_os("CI").is_some() {
         println!("{what}: {p:?} against {budget:?} not held on a hosted CI runner");
+        return;
+    }
+    if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        println!("{what}: {p:?} against {budget:?} not held off macOS arm64");
         return;
     }
     assert!(p < budget, "{what}: P95 {p:?} over {budget:?}");
