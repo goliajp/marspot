@@ -44,7 +44,7 @@ pub(super) struct AccountIn {
     pub open: bool,
     pub measured_at: i64,
     /// What its stored resets bring back before they end.
-    pub supply: Vec<marspot_agent::sched::reset::Supply>,
+    pub supply: Vec<marspot_agent::types::reset::Supply>,
 }
 
 /// One codex pane.
@@ -169,7 +169,7 @@ impl CodexAlloc {
             self.rebuild(snap.now);
         }
         self.forget_gone(snap, &mut log);
-        crate::agentsvc::reset::idle::publish("codex", snap.panes.iter().map(|p| (p.profile, p.idle)));
+        crate::agentsvc::accounts::reset::idle::publish("codex", snap.panes.iter().map(|p| (p.profile, p.idle)));
         let mut keep = HashSet::new();
         for p in &snap.panes {
             self.facts(p, snap.now, &mut log);

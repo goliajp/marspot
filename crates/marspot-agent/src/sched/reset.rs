@@ -1,5 +1,6 @@
-//! Stored resets as supply with a deadline, when an account counts as
-//! idle, and whether two readings of an account's resets agree.
+//! Stored resets as supply with a deadline, and when an account counts
+//! as idle.  What a reset is and how two readings of one compare are
+//! types every agent shares (`types::reset`).
 //!
 //! An account's quota is what is left of it plus what its resets can
 //! bring back before they end.  A reset that may be used only once the
@@ -11,35 +12,13 @@
 //! on, nothing more.
 
 use crate::quota::{EPS, Load, Quant};
+pub use crate::types::reset::{AGREE_WITHIN_S, Agreement, Count, Supply, agree};
 
 const WEEK_H: f64 = 168.0;
 
 /// No account has more than this many resets counted at once; more
 /// cannot be used inside one week anyway.
 const MAX_UNITS: usize = 16;
-
-/// One kind of stored reset of one account, as the allocation counts it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Supply {
-    /// Brings the week back.
-    pub week: bool,
-    /// Brings the restricted window back.
-    pub window: bool,
-    /// What the restricted window used comes back to the week as well.
-    pub gives_back_week: bool,
-    /// Using it moves the week's renewal to a week after the use.
-    pub moves_week: bool,
-    /// Usable only once the account is at the limit of what it brings back.
-    pub requires_limit: bool,
-    /// Hours until it may be used; 0 when it may be used now.
-    pub starts_h: f64,
-    /// Hours until it ends; `None` when it does not.
-    pub ends_h: Option<f64>,
-    pub left: u32,
-    /// Usable only while the limit it brings back has less than this
-    /// share of a full one left; `None` when any amount will do.
-    pub usable_below_left: Option<f64>,
-}
 
 /// When one reset may be used and what it brings back.
 #[derive(Clone, Copy)]
@@ -160,37 +139,6 @@ pub fn with_supply(q: &Quant, load: &Load, window_full: f64, supply: &[Supply]) 
 /// with no pane is idle.
 pub fn account_idle(resting: impl IntoIterator<Item = bool>) -> bool {
     resting.into_iter().all(|r| r)
-}
-
-/// Two readings this far apart are not compared: a reset may have been
-/// used or granted between them.
-pub const AGREE_WITHIN_S: i64 = 15 * 60;
-
-/// What one reading says about an account's resets, for comparison.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Count {
-    pub observed_at: i64,
-    pub left: u32,
-    /// The earliest end of one with any left, where the reading says.
-    pub next_expiry: Option<i64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Agreement {
-    Same,
-    Differs,
-    /// Too far apart in time to say.
-    Apart,
-}
-
-/// Whether two readings of one account agree.  An end only one of them
-/// gives is not compared.
-pub fn agree(a: Count, b: Count) -> Agreement {
-    if (a.observed_at - b.observed_at).abs() > AGREE_WITHIN_S {
-        return Agreement::Apart;
-    }
-    let ends_differ = matches!((a.next_expiry, b.next_expiry), (Some(x), Some(y)) if x != y);
-    if a.left != b.left || ends_differ { Agreement::Differs } else { Agreement::Same }
 }
 
 #[cfg(test)]

@@ -100,8 +100,8 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
         Op::Parent { target, parent } => super::ops_parent::set(conn, ctx, target, parent.as_deref()),
         Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::helpers_port::serve(conn, ctx, op),
         Op::ProcStop(a) => super::ops_proc::stop(conn, ctx, a),
-        Op::ResetClaim(a) => Ok(crate::agentsvc::reset::from_socket(a)),
-        Op::ResetStatus => Ok(crate::agentsvc::reset::status()),
+        Op::ResetClaim(a) => Ok(crate::agentsvc::accounts::reset::from_socket(a)),
+        Op::ResetStatus => Ok(crate::agentsvc::accounts::reset::status()),
     }
 }
 

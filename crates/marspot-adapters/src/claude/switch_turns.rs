@@ -6,7 +6,7 @@
 //! (agents running inside the session) are not the conversation's own
 //! prompt and are left out.
 
-use marspot_agent::sched::switch_cost::Turn;
+use marspot_agent::types::turn::Turn;
 use marspot_json::Value;
 
 use super::text::record_time;

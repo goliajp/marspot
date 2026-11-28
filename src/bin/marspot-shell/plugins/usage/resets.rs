@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use marspot::agent_resets::{AccountResets, Resets as Reading};
-use marspot_agent::sched::reset::{Agreement, Count};
+use marspot_agent::types::reset::{Agreement, Count};
 use marspot_term::{lx_info, lx_warn};
 
 use super::codex_resets;

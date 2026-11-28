@@ -10,7 +10,7 @@ use marspot_peer::json;
 use super::super::codex::{Credit, below_usable, claim, cli_exe, consumed, pick};
 use super::super::{Grant, Res};
 
-const RL_1: &str = include_str!("../../../plugins/usage/fixtures/codex-1-rate-limits.json");
+const RL_1: &str = include_str!("../../../../plugins/usage/fixtures/codex-1-rate-limits.json");
 const ANSWERS: &str = include_str!("../fixtures/codex-consume-answers.jsonl");
 
 fn second_credit() -> Grant {
