@@ -211,6 +211,7 @@ impl ShellApp {
                 }
                 None => self.draw_core_icons(),
             },
+            ShellInbox::WindowRaise(window_id) => marspot::app::raise_window(window_id),
             ShellInbox::WindowCloseRequest(window_id) => {
                 // The core asked because this window emptied out — its
                 // last pane was closed, or moved away.  Either way

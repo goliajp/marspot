@@ -2,127 +2,96 @@
 //! node per row.
 //!
 //! Where the menu stands and how large it is are `context_menu`'s;
-//! this file says what is in it and paints its frame, its rows and
-//! its dividers.  A press on a row comes back as [`ROW`] with the
-//! row's index.
+//! this file says what is in it (`context_menu_paint` paints it).  A
+//! press on a row comes back as [`ROW`] with the row's index.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::font_cache::FontCache;
-use crate::frame_build::color::rgba8_of_f32;
-use crate::glyph_atlas::GlyphKey;
 use crate::ui::components::context_menu::{self, ContextMenuHit, MenuItem};
-use crate::ui::components::panel_palette as palette;
 use crate::ui::core::ViewPainter;
-use crate::ui::theme::PanelText;
-use crate::ui::theme::spec::{card, chrome, panel};
+use crate::ui::theme::spec::chrome;
 use crate::ui::tree::kept::Place;
 use crate::ui::tree::{KeptSurface, preset};
-use golia_ui_core::scene::UiRectInstance;
-use golia_ui_core::{Action, Edges, GroupKind, Length, NodeId, Ui, WidgetId, WidgetState};
+use golia_ui_core::{Action, Edges, GroupKind, Length, NodeId, Ui, WidgetId};
 use marspot_term::layout::Rect;
+
+#[path = "context_menu_paint.rs"]
+mod paint;
+use paint::HINT_MARK;
+pub(crate) use paint::{paint_divider, paint_frame, paint_row, paint_tip};
 
 /// A row was pressed: the argument is its index among the items.
 pub const ROW: u32 = 1;
-/// The rows, as one widget.
+/// A row of the menu opened beside a row was pressed: the argument is
+/// its index among that row's `submenu`.
+pub const SUB_ROW: u32 = 2;
+/// The rows, as one widget, and the rows of the menu beside.
 const ROWS: WidgetId = WidgetId(1);
-/// Between a row's label and its shortcut in the node's text.
-const HINT_MARK: char = '\u{1f}';
-/// The label's ascent as a fraction of its point size: what the row
-/// centres the capitals against.
-const LABEL_ASCENT_RATIO: f64 = 0.75;
+const SUB_ROWS: WidgetId = WidgetId(2);
+/// Where a shortcut goes on a row that opens a menu beside it.
+const OPENS_MARK: &str = "▸";
+
+/// What stands beside the menu: the menu row `.0` opened, at its
+/// frame, and the reason a disabled row is off, in its box.
+#[derive(Clone, Copy, Default)]
+pub struct Beside<'a> {
+    pub sub: Option<(usize, Rect)>,
+    pub tip: Option<(Rect, &'a str)>,
+}
 
 /// The menu standing at `frame`, device pixels from the window's
-/// corner.  The menu's spec is in window units, half a point each.
-pub fn describe(ui: &mut Ui<'_>, frame: Rect, items: &[MenuItem]) {
+/// corner, and what stands beside it.  The menu's spec is in window
+/// units, half a point each.
+pub fn describe(ui: &mut Ui<'_>, frame: Rect, items: &[MenuItem], beside: Beside<'_>) {
+    ui.vstack(|ui| {
+        menu_float(ui, frame, items, ROWS, ROW, beside.sub.map(|s| s.0));
+        if let Some((row, at)) = beside.sub
+            && let Some(it) = items.get(row)
+        {
+            menu_float(ui, at, &it.submenu, SUB_ROWS, SUB_ROW, None);
+        }
+        if let Some((at, why)) = beside.tip {
+            ui.float(at.x, at.y_top, |ui| {
+                ui.leaf(preset::MENU_TIP, Length::Px(at.w), Length::Px(at.h)).label_copy(why);
+            });
+        }
+    });
+}
+
+/// One menu's frame and rows at `frame`; a row pressed acts as
+/// `action` with its index.  A row that opens a menu shows a mark where
+/// a shortcut goes, and the row `open` whose menu is open stays lit.
+fn menu_float(ui: &mut Ui<'_>, frame: Rect, items: &[MenuItem], id: WidgetId, action: u32, open: Option<usize>) {
     let none = Length::ZERO;
     let w = Length::Px(frame.w);
-    ui.vstack(|ui| {
-        ui.float(frame.x, frame.y_top, |ui| {
-            ui.group(ROWS, GroupKind::List, true, |ui| {
-                for (i, it) in items.iter().enumerate() {
-                    if it.divider {
-                        ui.leaf(preset::MENU_DIVIDER, w, Length::Pt(chrome::MENU_DIVIDER_H));
-                        continue;
-                    }
-                    ui.leaf(preset::MENU_ROW, w, Length::Pt(chrome::MENU_ROW_H))
-                        .label_with(|text| {
-                            text.push_str(&it.label);
-                            if !it.shortcut_hint.is_empty() {
-                                text.push(HINT_MARK);
-                                text.push_str(&it.shortcut_hint);
-                            }
-                        })
-                        .item(Action::new(ROW, i as u32))
-                        .disabled(!it.enabled);
+    ui.float(frame.x, frame.y_top, |ui| {
+        ui.group(id, GroupKind::List, true, |ui| {
+            for (i, it) in items.iter().enumerate() {
+                if it.divider {
+                    ui.leaf(preset::MENU_DIVIDER, w, Length::Pt(chrome::MENU_DIVIDER_H));
+                    continue;
                 }
-            });
-        })
-        .width(w)
-        .height(Length::Px(frame.h))
-        .padding(Edges { top: Length::Pt(chrome::MENU_PAD_Y), right: none, bottom: none, left: none })
-        .leaf(preset::MENU_FRAME, [0, 0]);
-    });
-}
-
-/// The menu's frame: the fill, the hairline round it and the shadow
-/// under it.
-pub(crate) fn paint_frame(p: &mut ViewPainter<'_>, r: Rect) {
-    p.ui_rects.push(UiRectInstance {
-        origin: [r.x as f32, r.y_top as f32],
-        size: [r.w as f32, r.h as f32],
-        fill: rgba8_of_f32(palette::frame_bg()),
-        border: rgba8_of_f32(palette::frame_border()),
-        radius: chrome::px(chrome::POPOVER_RADIUS) as f32,
-        border_width: panel::BORDER_PX,
-        shadow_offset: [0.0, 0.0],
-        shadow_color: rgba8_of_f32(palette::frame_shadow()),
-        shadow_blur: chrome::px(chrome::POPOVER_SHADOW_BLUR) as f32,
-    });
-}
-
-/// A divider: the frame's own border colour across the middle of its
-/// row.
-pub(crate) fn paint_divider(p: &mut ViewPainter<'_>, r: Rect) {
-    let pad = chrome::px(chrome::MENU_PAD_X);
-    let (from, to) = (r.x + pad, r.x + r.w - pad);
-    let line = Rect { x: from, y_top: r.y_top + r.h * 0.5 - card::SEPARATOR_PX * 0.5, w: to - from, h: card::SEPARATOR_PX };
-    p.fill_rounded_rect(line, palette::frame_border(), 0.0, (palette::none(), 0.0));
-}
-
-/// A row: the band behind it while the pointer is on it, its label,
-/// and its shortcut against the right edge.
-pub(crate) fn paint_row(p: &mut ViewPainter<'_>, r: Rect, text: &str, state: WidgetState) {
-    let (label, hint) = text.split_once(HINT_MARK).unwrap_or((text, ""));
-    let pad = chrome::px(chrome::MENU_PAD_X);
-    if state.hovered {
-        let inset = chrome::px(chrome::POPOVER_ROW_INSET);
-        let band = Rect { x: r.x + inset, y_top: r.y_top, w: r.w - 2.0 * inset, h: r.h };
-        p.fill_rounded_rect(band, palette::row_hover(), chrome::px(chrome::POPOVER_ROW_RADIUS) as f32, (palette::none(), 0.0));
-    }
-    // The label is prose, in the role every panel sets an item in.
-    // Its capitals are centred on the row from the top of its em box:
-    // `centre - (ascent - cap / 2)`, then down by the ascent the font
-    // itself reports.
-    let role = PanelText::Item;
-    let px = ViewPainter::px_per_pt();
-    let size_pt = GlyphKey::size_q_for(role.pt()) as f64 / 4.0;
-    let top = r.y_top + r.h * 0.5 - (LABEL_ASCENT_RATIO * role.pt() - role.cap() * 0.5) * px;
-    let opts = crate::font_shape::ShapeOptions::default();
-    if let Some(at) = p.font.shape_ui_kept(label, role.weight(), opts, size_pt) {
-        let face = p.font.shaped_ui(label, at, opts).first().map_or(0, |g| g.font_id as usize);
-        let ascent = (p.font.font_ascent(face) * px) as f32;
-        let fg = if state.disabled { palette::disabled_fg() } else { palette::fg() };
-        p.ui_text_at((r.x + pad) as f32, top as f32 + ascent, label, size_pt, role.weight(), fg);
-    }
-    if !hint.is_empty() {
-        // a cluster of key symbols, not prose: in the mono cell, where
-        // each keeps its own width
-        let w = hint.chars().count() as f64 * p.cell_w as f64;
-        let top = r.y_top + (r.h - p.cell_h as f64) * 0.5;
-        p.text((r.x + r.w - pad - w) as f32, top as f32 + p.ascent, hint, palette::fg_muted());
-    }
+                ui.leaf(preset::MENU_ROW, w, Length::Pt(chrome::MENU_ROW_H))
+                    .leaf(preset::MENU_ROW, [u32::from(open == Some(i)), 0])
+                    .label_with(|text| {
+                        text.push_str(&it.label);
+                        let hint = if it.submenu.is_empty() { it.shortcut_hint.as_str() } else { OPENS_MARK };
+                        if !hint.is_empty() {
+                            text.push(HINT_MARK);
+                            text.push_str(hint);
+                        }
+                    })
+                    .item(Action::new(action, i as u32))
+                    .disabled(!it.enabled);
+            }
+        });
+    })
+    .width(w)
+    .height(Length::Px(frame.h))
+    .padding(Edges { top: Length::Pt(chrome::MENU_PAD_Y), right: none, bottom: none, left: none })
+    .leaf(preset::MENU_FRAME, [0, 0]);
 }
 
 /// An open menu's render data: where it was opened, what is in it,
@@ -158,16 +127,25 @@ struct Described {
     top_inset: f64,
     window: (f64, f64),
     scale: f64,
+    open: Option<usize>,
+    tip: Option<usize>,
 }
 
-/// The menu's surface: its tree, its layout, what the pointer has done
-/// to it, and the instances it last painted.
+/// The menu's surface: its tree, its layout, what the pointer and the
+/// keyboard have done to it, and the instances it last painted.
 pub struct MenuSurface {
     pub kept: KeptSurface,
     described: Option<Described>,
     data_rev: u64,
-    /// Where the menu stands in the window.
+    /// Where the menu stands in the window, and each of its rows.
     frame: Rect,
+    rows: Vec<Rect>,
+    /// The row whose menu is open beside it, and where that stands.
+    open: Option<usize>,
+    sub_frame: Option<Rect>,
+    /// The disabled row whose reason is said, and where it is said.
+    tip: Option<usize>,
+    tip_frame: Option<Rect>,
     /// Moved each time the kept instances are painted again.
     painted_rev: u64,
     /// The kept instances as the renderer last uploaded them.
@@ -181,6 +159,11 @@ impl Default for MenuSurface {
             described: None,
             data_rev: 0,
             frame: Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 },
+            rows: Vec::new(),
+            open: None,
+            sub_frame: None,
+            tip: None,
+            tip_frame: None,
             painted_rev: 0,
             buffers: Default::default(),
         }
@@ -196,21 +179,35 @@ impl MenuSurface {
                 && d.top_inset == m.top_inset
                 && d.window == window
                 && d.scale == scale
+                && d.open == self.open
+                && d.tip == self.tip
         });
         if !same {
             self.frame = context_menu::frame_of(
                 window.0, window.1, scale, m.anchor_phys.0, m.anchor_phys.1, m.top_inset, &m.items,
             );
+            context_menu::rows_into(self.frame, scale, &m.items, &mut self.rows);
+            self.place_beside(&m.items, window, m.top_inset);
             self.described = Some(Described {
                 items: m.items.clone(),
                 anchor: m.anchor_phys,
                 top_inset: m.top_inset,
                 window,
                 scale,
+                open: self.open,
+                tip: self.tip,
             });
             self.data_rev += 1;
         }
         Place { data_rev: self.data_rev, origin: (0.0, 0.0), avail: window }
+    }
+
+    /// What stands beside the menu of `items` as last placed.
+    fn beside<'a>(&self, items: &'a [MenuItem]) -> Beside<'a> {
+        Beside {
+            sub: self.open.zip(self.sub_frame),
+            tip: self.tip.zip(self.tip_frame).and_then(|(i, f)| items.get(i).map(|it| (f, it.tooltip.as_str()))),
+        }
     }
 
     /// Bring the tree and its layout up to `m` without painting, so
@@ -218,8 +215,8 @@ impl MenuSurface {
     /// next frame will show it.
     pub fn lay_out(&mut self, font: &mut FontCache, m: &MenuRender, window: (f64, f64)) {
         let at = self.place(m, window);
-        let frame = self.frame;
-        self.kept.lay_out(font, at, |ui, _| describe(ui, frame, &m.items));
+        let (frame, beside) = (self.frame, self.beside(&m.items));
+        self.kept.lay_out(font, at, |ui, _| describe(ui, frame, &m.items, beside));
     }
 
     /// Bring the kept instances up to `m`, adding nothing to the frame
@@ -227,8 +224,8 @@ impl MenuSurface {
     /// [`Self::kept`].
     pub fn refresh(&mut self, p: &mut ViewPainter<'_>, m: &MenuRender) {
         let at = self.place(m, (p.window_w, p.window_h));
-        let frame = self.frame;
-        if self.kept.refresh(p, at, m.pointer, |ui, _| describe(ui, frame, &m.items)) {
+        let (frame, beside) = (self.frame, self.beside(&m.items));
+        if self.kept.refresh(p, at, m.pointer, |ui, _| describe(ui, frame, &m.items, beside)) {
             self.painted_rev += 1;
         }
     }
@@ -236,8 +233,8 @@ impl MenuSurface {
     /// Add the menu to the frame `p` is painting.
     pub fn frame(&mut self, p: &mut ViewPainter<'_>, m: &MenuRender) {
         let at = self.place(m, (p.window_w, p.window_h));
-        let frame = self.frame;
-        self.kept.frame(p, at, m.pointer, |ui, _| describe(ui, frame, &m.items));
+        let (frame, beside) = (self.frame, self.beside(&m.items));
+        self.kept.frame(p, at, m.pointer, |ui, _| describe(ui, frame, &m.items, beside));
     }
 
     /// Where the menu stands in the window it was last laid out in.
@@ -248,8 +245,19 @@ impl MenuSurface {
     /// The middle of row `i` in the layout last made: where to put the
     /// pointer to have it on that row.
     pub fn row_centre(&self, i: usize) -> Option<(f64, f64)> {
+        self.centre_of(ROW, i)
+    }
+
+    /// The middle of row `i` of the menu open beside the menu.
+    pub fn sub_row_centre(&self, i: usize) -> Option<(f64, f64)> {
+        self.centre_of(SUB_ROW, i)
+    }
+
+    fn centre_of(&self, action: u32, i: usize) -> Option<(f64, f64)> {
         let s = &self.kept.surface;
-        let at = s.tree().nodes().iter().position(|n| n.leaf_tag == preset::MENU_ROW && n.action.arg == i as u32)?;
+        let at = s.tree().nodes().iter().position(|n| {
+            n.leaf_tag == preset::MENU_ROW && n.action.id == action && n.action.arg == i as u32
+        })?;
         let r = s.layout().rect(NodeId(at as u32));
         Some((r.x + r.w * 0.5, r.y + r.h * 0.5))
     }
@@ -258,24 +266,8 @@ impl MenuSurface {
     pub fn painted_rev(&self) -> u64 {
         self.painted_rev
     }
-
-    /// The pointer is at `(x, y)`.  True when the picture changed.
-    pub fn pointer_move(&mut self, x: f64, y: f64) -> bool {
-        self.kept.surface.pointer_move((x, y))
-    }
-
-    /// What a press at `(x, y)` lands on: a row that acts, the menu
-    /// where nothing acts (a divider, a disabled row, its padding), or
-    /// the window outside it.
-    pub fn press(&mut self, x: f64, y: f64) -> ContextMenuHit {
-        if !self.frame.contains(x, y) {
-            return ContextMenuHit::Outside;
-        }
-        let s = &mut self.kept.surface;
-        s.pointer_down((x, y));
-        match s.pointer_up((x, y)) {
-            Some(a) if a.id == ROW => ContextMenuHit::Item(a.arg as usize),
-            _ => ContextMenuHit::Frame,
-        }
-    }
 }
+
+#[path = "context_menu_beside.rs"]
+mod beside;
+pub use beside::MenuKey;

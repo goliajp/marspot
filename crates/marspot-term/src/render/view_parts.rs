@@ -106,9 +106,9 @@ pub struct HistoryView {
     pub len: u16,
 }
 
-/// One row of the sidebar — what the user sees on the left.  Length
-/// of the slice passed to `MetalRenderer::render_layout` should match
-/// `views.len()`; entry `i` describes session `i`.
+/// One row of the sidebar — what the user sees on the left: a pane of
+/// the window, a child listed under its parent, or the grey row of a
+/// parent shown elsewhere above its children shown here.
 pub struct SidebarEntry<'a> {
     /// Short label drawn after the state dot, e.g. `"1"`, `"build"`.
     pub label: &'a str,
@@ -116,4 +116,38 @@ pub struct SidebarEntry<'a> {
     pub state: SessionState,
     /// The pane's four-digit code, drawn as `#4145` before the label.
     pub code: Option<u16>,
+    /// Where the row sits in the tree of panes.
+    pub tree: SidebarTree,
+    /// The pane is in no window: its dot is drawn hollow.
+    pub hollow: bool,
+    /// The row of the pane in use.  With none so marked, no row is lit.
+    pub selected: bool,
+}
+
+impl<'a> SidebarEntry<'a> {
+    /// The row of a pane with no parent, on screen.
+    pub fn top(label: &'a str, state: SessionState, code: Option<u16>) -> Self {
+        Self { label, state, code, tree: SidebarTree::Top, hollow: false, selected: false }
+    }
+}
+
+/// Where a sidebar row sits: panes nest two deep.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SidebarTree {
+    /// A pane with no parent.
+    #[default]
+    Top,
+    /// A child with more children of the same parent below it.
+    Child,
+    /// The last child of its parent.
+    LastChild,
+    /// The grey row of a parent shown elsewhere, above its children
+    /// shown here.
+    Parent,
+}
+
+impl SidebarTree {
+    pub fn is_child(self) -> bool {
+        matches!(self, Self::Child | Self::LastChild)
+    }
 }

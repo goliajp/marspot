@@ -23,11 +23,11 @@ const NAMES: [&str; 9] = [
 const STATES: [SessionState; 3] = [SessionState::Active, SessionState::Idle, SessionState::Exited];
 
 fn rows(n: usize) -> Vec<SidebarEntry<'static>> {
-    (0..n).map(|i| SidebarEntry { label: NAMES[i % NAMES.len()], state: STATES[i % 3], code: Some(4100 + i as u16) }).collect()
+    (0..n).map(|i| SidebarEntry::top(NAMES[i % NAMES.len()], STATES[i % 3], Some(4100 + i as u16))).collect()
 }
 
 fn rows_of(r: &[SidebarEntry<'static>]) -> Vec<SidebarEntry<'static>> {
-    r.iter().map(|e| SidebarEntry { label: e.label, state: e.state, code: e.code }).collect()
+    r.iter().map(|e| SidebarEntry::top(e.label, e.state, e.code)).collect()
 }
 
 fn layout(stage: &Stage, (w, h): (f64, f64), scale: f64, n: usize) -> Layout {
@@ -62,7 +62,7 @@ fn sidebar_surface_frame() {
         let mut surface = SidebarSurface::default();
         let mut out: Frame = Default::default();
         let (rows, renamed): (&[SidebarEntry], &[SidebarEntry]) = (&rows, &renamed);
-        let rest = SidebarFrame { layout: &l, rows: &rows, focused_idx: 4, quiet: false, cell_w };
+        let rest = SidebarFrame { layout: &l, rows: &rows, selected: Some(4), quiet: false, cell_w };
         let other = SidebarFrame { rows: &renamed, ..rest };
         let c = l.close_session_rects[2];
         let (on, off) = ((c.x + c.w * 0.5, c.y_top + c.h * 0.5), (900.0, 600.0));
@@ -107,7 +107,7 @@ fn helper_panel_count_is_on_top_of_the_rows_that_reach_it() {
                 let l = layout(&stage, window, scale, n);
                 let rows = rows(n);
                 let rows: &[SidebarEntry] = &rows;
-                let f = SidebarFrame { layout: &l, rows: &rows, focused_idx: n, quiet: false, cell_w };
+                let f = SidebarFrame { layout: &l, rows: &rows, selected: Some(n), quiet: false, cell_w };
                 let mut s = SidebarSurface::default();
                 s.set_helpers(3);
                 let mut out: Frame = Default::default();

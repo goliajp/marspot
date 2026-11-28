@@ -59,6 +59,8 @@ mod toolbar_view_tests;
 #[cfg(test)]
 mod context_menu_view_tests;
 #[cfg(test)]
+mod context_menu_beside_tests;
+#[cfg(test)]
 pub(crate) mod density_kit;
 #[cfg(test)]
 mod density_tests;

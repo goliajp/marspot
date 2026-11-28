@@ -8,15 +8,20 @@ use marspot::ui::components::title_strip_view::BadgesOnly;
 
 use super::*;
 
+#[path = "sidebar_press.rs"]
+mod sidebar_press;
+
 impl CoreApp {
     /// Run `f` on window `wi`'s chrome with the shape its next frame
-    /// has: the layout, a sidebar row per pane, a strip per pane that
+    /// has: the layout, the sidebar's rows, a strip per pane that
     /// has a cell, with the badge each strip will show.
     fn with_chrome<T>(
         &mut self,
         wi: usize,
         f: impl FnOnce(&mut marspot::render_metal::WindowRender, &mut marspot::font_cache::FontCache, &ChromeShape<'_>) -> T,
     ) -> T {
+        self.sidebar_fresh(wi);
+        let rows = self.sidebar_rows(wi).len();
         let w = &mut self.windows[wi];
         let badges = &self.pane_badges;
         let panes = &w.panes;
@@ -24,7 +29,7 @@ impl CoreApp {
             panes[i].shelld_session_id().and_then(|sid| badges.get(&sid)).map_or("", String::as_str)
         };
         let strips = BadgesOnly(panes.len().min(w.layout.cells.len()), badge);
-        let shape = ChromeShape { layout: &w.layout, rows: panes.len(), strips: &strips };
+        let shape = ChromeShape { layout: &w.layout, rows, strips: &strips };
         f(&mut w.render, self.renderer.font_mut(), &shape)
     }
 
@@ -65,14 +70,7 @@ impl CoreApp {
             }
             ChromeTarget::Add => self.add_pane(wi),
             // the last pane closes too: see `close_window_if_emptied`
-            ChromeTarget::Close(idx) => {
-                if idx < win!(self, wi).panes.len() {
-                    self.close_session(wi, idx);
-                    if wi < self.windows.len() {
-                        self.rebuild_layout(wi);
-                    }
-                }
-            }
+            ChromeTarget::Close(row) => self.close_row(wi, row),
             // the plugin owns what the prefix means and what cycling it
             // does
             ChromeTarget::Badge(i) => {

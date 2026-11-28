@@ -38,6 +38,12 @@ pub(super) struct Shadows {
     pub(super) places: super::shadow_place::Places,
     pub(super) peeks: super::peek::Peeks,
     pub(super) family: super::helper_panel::Family,
+    /// Each window's sidebar rows.
+    pub(super) trees: super::draw::sidebar_tree::Trees,
+    /// The panes the open menu lists to belong to, and the hidden ones
+    /// it lists to show, by their place in it.
+    pub(super) menu_panes: Vec<u64>,
+    pub(super) menu_hidden: Vec<u64>,
     new_windows: spawn_window::NewWindows,
     /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
     /// to open under the first pane, and when.
@@ -225,31 +231,11 @@ impl CoreApp {
     fn retire_pane(&mut self, m: PaneRetire) -> Route {
         let PaneRetire { req_id, sid, mode, shadow_only } = m;
         let recycle = mode == RetireMode::Recycle;
-        let in_window = self.find_window_pane_by_sid(sid);
-        if shadow_only && in_window.is_some() {
+        if shadow_only && self.find_window_pane_by_sid(sid).is_some() {
             lx_event!("SHADOW_RETIRE_REFUSED", "a close asked of a shadow pane found it in a window", session = sid);
             return self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::Other, IN_A_WINDOW_TEXT);
         }
-        if let Some((wi, idx)) = in_window {
-            if recycle {
-                recycle_session(sid);
-            }
-            self.close_session(wi, idx);
-            if wi < self.windows.len() {
-                self.rebuild_layout(wi);
-            }
-        } else if let Some(i) = self.shadow_index(sid) {
-            if recycle {
-                recycle_session(sid);
-            }
-            let pane = self.take_shadow(i);
-            if !pane.is_l3() {
-                self.pane_control.shadows.closed.note(sid);
-            }
-            self.retire_pane_session(sid, pane.is_l3());
-            self.shadows_changed();
-            lx_event!("SHADOW_RETIRED", "closed a shadow pane", session = sid, recycled = recycle as u32);
-        } else {
+        if !self.close_anywhere(sid, recycle) {
             return self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::NoSuchSession, "");
         }
         self.answer(MsgType::PaneRetire, req_id, sid, DoneCode::Ok, "")
@@ -276,7 +262,7 @@ impl CoreApp {
 /// Stop the session and move its directory to the recycle dir, where
 /// it is kept for the recycle period; the close that follows finds
 /// nothing left to delete.
-fn recycle_session(sid: u64) {
+pub(super) fn recycle_session(sid: u64) {
     let entry = session_registry::read_session_entry(sid).ok();
     let regions = entry.as_ref().and_then(grid_shm::SessionRegions::of_entry);
     match session_registry::retire_session_dir(sid) {

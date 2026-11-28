@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.889"  # an idle wake bounds its loading by the wake watchdog for retry answers
-core    = "0.12.773"  # the hidden-panes record is taken by a name clippy does not read as a conversion
-session = "0.11.492"  # the thread import moves to the tests that use it
+shell   = "0.7.890"  # marspot-term: the core can ask the shell to bring a window to the front
+core    = "0.12.786"  # every sidebar row's menu offers replace with, a row of no slot here replacing the slot in use
+session = "0.11.493"  # marspot-term: the core can ask the shell to bring a window to the front

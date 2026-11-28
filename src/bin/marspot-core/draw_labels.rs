@@ -1,11 +1,14 @@
 //! What each pane of a window is called on screen, in its title and in
 //! the sidebar.
 
+use std::collections::HashMap;
+
 use super::*;
 
 impl CoreApp {
-    /// What each pane of the window is called on screen.
-    pub(super) fn pane_labels(&self, wi: usize) -> Vec<String> {
+    /// What each pane of the window is called on screen, given every
+    /// pane's name (`pane_names`).
+    pub(super) fn pane_labels(&self, wi: usize, pane_names: &HashMap<u64, String>) -> Vec<String> {
         // Pane numbers from the static table: this used to be a `Vec`
         // and one `String` per pane, rebuilt every frame for text that
         // never changes.
@@ -37,7 +40,6 @@ impl CoreApp {
         // never stored, so it cannot disagree with what `--send` will
         // accept.  A rename would have made the name a second source of
         // truth about which pane is which.
-        let pane_names = self.pane_names();
         (0..win!(self, wi).panes.len())
             .map(|i| {
                 if let Some(name) = win!(self, wi).panes[i]
@@ -62,26 +64,55 @@ impl CoreApp {
 
     /// The code of pane `i` of window `wi`, from memory only: drawing
     /// never waits on the code file (`note_pane_code` fills it).
+    #[cfg(test)]
     pub(crate) fn pane_code(&self, wi: usize, i: usize) -> Option<u16> {
         marspot_term::pane_code::known(win!(self, wi).panes.get(i)?.shelld_session_id()?)
     }
 
-    /// The sidebar's label of each pane: the code is drawn before the
-    /// name, so a shared name loses its own copy of it.
-    pub(super) fn sidebar_labels(&self, wi: usize, resolved: &[String]) -> Vec<String> {
-        resolved
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let s = self.pane_code(wi, i).map_or(s.as_str(), |c| without_code(s, c));
-                truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS)
+    /// Each sidebar row's label, state and code.  The code is drawn
+    /// before the name, so a shared name loses its own copy of it.
+    /// `resolved` and `names` are what `pane_labels` and `pane_names`
+    /// gave this frame.
+    pub(super) fn sidebar_texts(
+        &self,
+        wi: usize,
+        resolved: &[String],
+        names: &HashMap<u64, String>,
+    ) -> Vec<(String, SessionState, Option<u16>)> {
+        use super::sidebar_tree::RowPane;
+        let rows = self.sidebar_rows(wi);
+        rows.iter()
+            .map(|r| {
+                let (label, pane) = match r.pane {
+                    RowPane::Slot(i) => (resolved.get(i).map_or("", |s| s.as_str()), win!(self, wi).panes.get(i)),
+                    RowPane::Other(sid) => (self.label_of(sid, names), self.pane_of(sid)),
+                };
+                let code = pane.and_then(Pane::shelld_session_id).and_then(marspot_term::pane_code::known);
+                let s = code.map_or(label, |c| without_code(label, c));
+                let state = pane.map_or(SessionState::Exited, |p| p.session().state());
+                (truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS), state, code)
             })
             .collect()
+    }
+
+    /// What a pane of no slot of this window is called on screen.
+    fn label_of<'a>(&'a self, sid: u64, names: &'a HashMap<u64, String>) -> &'a str {
+        let named = names.get(&sid).filter(|n| !n.is_empty() && *n != "?");
+        let basename = || {
+            let path = self.pane_cwds.get(&sid)?;
+            std::path::Path::new(path).file_name()?.to_str()
+        };
+        named.or_else(|| self.pane_titles.get(&sid)).map(|s| s.as_str()).or_else(basename).unwrap_or("")
+    }
+
+    /// The pane whose session is `sid`, in a window or not.
+    pub(crate) fn pane_of(&self, sid: u64) -> Option<&Pane> {
+        self.windows.iter().flat_map(|w| w.panes.iter()).chain(&self.shadows).find(|p| p.shelld_session_id() == Some(sid))
     }
 }
 
 /// `label` without a trailing `#<code>` of `code`.
-fn without_code(label: &str, code: u16) -> &str {
+pub(crate) fn without_code(label: &str, code: u16) -> &str {
     match label.rsplit_once('#') {
         Some((base, digits)) if !base.is_empty() && digits.parse::<u16>().ok() == Some(code) => base,
         _ => label,

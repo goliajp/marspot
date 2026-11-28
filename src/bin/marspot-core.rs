@@ -132,26 +132,6 @@ const CWD_SAVE_MIN_GAP: Duration = Duration::from_secs(5);
 
 const PROCESS_PANEL_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
-/// F3+1 — read `sessions/<sid>/entry.toml`'s `shell_child_pid` field.
-/// Returns None on missing file, parse error, or absent field; the
-/// caller renders the pane's tree as "no root pid" in that case.
-/// Cheap one-shot read (typical entry.toml ~200 bytes); we don't
-/// cache because panel refresh is already throttled to ≥ 2 s.
-fn read_shell_child_pid(shelld_session_id: u64) -> Option<i32> {
-    let path = marspot_term::session_registry::session_dir(shelld_session_id)
-        .join("entry.toml");
-    let body = std::fs::read_to_string(&path).ok()?;
-    for line in body.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("shell_child_pid") {
-            // tolerate "= 1234" or "=1234"
-            let v = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
-            return v.parse::<i32>().ok();
-        }
-    }
-    None
-}
-
 // F3+9 — right-click context menu plumbing.  Mirrors the standalone
 // `src/main.rs` shape so the menu behaviour is identical across the
 // split-arch (L1→L2 wire) and single-binary paths.
@@ -159,6 +139,8 @@ fn read_shell_child_pid(shelld_session_id: u64) -> Option<i32> {
 enum ContextRegion {
     Pane(usize),
     SidebarSlot(usize),
+    /// A sidebar row of a pane of another window, or of none.
+    SidebarPane(u64),
     TitleStrip,
     /// Menu opened on a pane-badge prefix; the items came from an L1
     /// plugin via `PaneBadgeMenu` and their tags are plugin-opaque —
@@ -2320,6 +2302,7 @@ mod card_slots;
 mod dev_drive;
 #[path = "marspot-core/layout_state.rs"]
 mod layout_state;
+use layout_state::read_shell_child_pid;
 #[path = "marspot-core/pane_forward.rs"]
 mod pane_forward;
 #[path = "marspot-core/panels.rs"]

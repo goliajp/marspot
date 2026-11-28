@@ -59,6 +59,8 @@ pub(crate) enum ShellInbox {
     /// L2 → L1: close this window (RFC-005 step 5 — its last pane was
     /// just moved out).  Runs the exact red-button path.
     WindowCloseRequest(u32),
+    /// L2 → L1: bring this window to the front.
+    WindowRaise(u32),
     /// The core wants a toolbar icon drawn: `(symbol, point_px)`.
     IconMaskWanted(u16, u16),
     /// The keyboard confirmed a `/model` in this pane, and it was sent.
@@ -134,6 +136,9 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
                         marspot::shell_proto::decode_window_close_request(&frame.payload)
                             .ok()
                             .map(ShellInbox::WindowCloseRequest)
+                    }
+                    MsgType::WindowRaise => {
+                        marspot::shell_proto::decode_window_raise(&frame.payload).ok().map(ShellInbox::WindowRaise)
                     }
                     MsgType::IconMaskWanted => marspot::shell_proto::decode_icon_mask_wanted(&frame.payload)
                         .ok()

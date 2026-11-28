@@ -50,14 +50,11 @@ impl CoreApp {
             return;
         }
 
-        // F3+9 — Esc closes the context menu if open.  Swallowed so the
-        // \e doesn't reach the focused pane.
-        if pressed && win!(self, wi).context_menu.is_some()
-            && let LogicalKey::Named(NamedKey::Escape) = event.logical {
-                win!(self, wi).context_menu = None;
-                win!(self, wi).needs_render = true;
-                return;
-            }
+        // an open context menu takes every key: the arrows, Enter and
+        // Esc are its, and nothing typed reaches the pane under it
+        if self.menu_key(wi, &event) || self.close_ask_key(wi, &event) {
+            return;
+        }
 
         // A command's chord.  One that answers now runs, and both its
         // press and its release end here.  One that does not answer —

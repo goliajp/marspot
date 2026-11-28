@@ -50,7 +50,7 @@ impl CoreApp {
 
     pub(super) fn mouse_down(&mut self, wi: usize, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
         self.strip_keys_interrupted();
-        if self.menu_takes_press(wi, x_phys, y_phys) {
+        if self.menu_takes_press(wi, x_phys, y_phys) || self.close_ask_press(wi, x_phys, y_phys) {
             return;
         }
 
@@ -111,7 +111,11 @@ impl CoreApp {
             win!(self, wi).needs_render = true;
         }
 
-        let new_focus = sidebar_hit.or(cell_hit);
+        if let Some(row) = sidebar_hit {
+            self.sidebar_row_pressed(wi, row);
+            return;
+        }
+        let new_focus = cell_hit;
         if let Some(idx) = new_focus {
             // F3+3.0 — click on an empty cell (idx >= panes.len(),
             // which means the grid has more cells than sessions

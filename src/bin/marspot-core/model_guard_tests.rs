@@ -48,8 +48,8 @@ fn enter_on_model_is_held_until_y_and_then_sent_with_the_shell_told() {
     let (mut app, mut s, _front) = showing(&sb, "/model opus", CcModel::Managed);
     key(&mut app, ENTER);
     assert_eq!(s.keys(&app.windows[0].panes[0]), 0, "the Enter is held");
-    assert_eq!(app.notices.over(Some(s.sid), true), Some(t(Msg::ModelGuardNotice)));
-    assert_eq!(app.notices.over(Some(s.sid + 1), true), None, "over its own pane only");
+    assert_eq!(app.notices.over(0, Some(s.sid), true), Some(t(Msg::ModelGuardNotice)));
+    assert_eq!(app.notices.over(0, Some(s.sid + 1), true), None, "over its own pane only");
     key(&mut app, LogicalKey::Char('x'));
     assert_eq!(s.keys(&app.windows[0].panes[0]), 0, "other keys are swallowed while it asks");
     assert!(confirmed(&mut app).is_empty());
@@ -57,7 +57,7 @@ fn enter_on_model_is_held_until_y_and_then_sent_with_the_shell_told() {
     assert_eq!(s.keys(&app.windows[0].panes[0]), 2, "the held Enter, pressed and let go");
     assert_eq!(confirmed(&mut app), [s.sid]);
     assert!(app.notices.guard.is_none());
-    assert_eq!(app.notices.over(Some(s.sid), true), None);
+    assert_eq!(app.notices.over(0, Some(s.sid), true), None);
 }
 
 #[test]

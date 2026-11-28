@@ -3,7 +3,13 @@
 use super::*;
 
 #[path = "menus.rs"]
-mod menus;
+pub(crate) mod menus;
+#[path = "menu_pick.rs"]
+pub(crate) mod menu_pick;
+#[path = "menu_family.rs"]
+mod menu_family;
+#[path = "slot_replace.rs"]
+pub(crate) mod slot_replace;
 
 impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
@@ -136,8 +142,13 @@ impl CoreApp {
     pub(super) fn resolve_context_region(&mut self, wi: usize, x_phys: f64, y_phys: f64) -> ContextRegion {
         // Sidebar row check first — wins over the cell-area hit when
         // both overlap (the sidebar overlays the title-strip band).
-        if let Some(idx) = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row) {
-            return ContextRegion::SidebarSlot(idx);
+        if let Some(row) = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row) {
+            use super::draw::sidebar_tree::RowPane;
+            match self.sidebar_row(wi, row).map(|r| r.pane) {
+                Some(RowPane::Slot(idx)) => return ContextRegion::SidebarSlot(idx),
+                Some(RowPane::Other(sid)) => return ContextRegion::SidebarPane(sid),
+                None => {}
+            }
         }
         if let Some(idx) = win!(self, wi).layout.hit_test(x_phys, y_phys) {
             return ContextRegion::Pane(idx);
@@ -146,13 +157,30 @@ impl CoreApp {
     }
 
     pub(super) fn build_menu_items(
-        &self, wi: usize,
+        &mut self, wi: usize,
         region: ContextRegion,
     ) -> Vec<marspot::ui::components::MenuItem> {
-        let moves = || menus::move_items(self.windows.len(), wi, win!(self, wi).panes.len());
+        let moves = |app: &Self| menus::move_items(app.windows.len(), wi, win!(app, wi).panes.len());
         match region {
-            ContextRegion::Pane(_) => menus::pane_menu(win!(self, wi).selection.is_some(), moves()),
-            ContextRegion::SidebarSlot(_) => menus::sidebar_menu(moves()),
+            ContextRegion::Pane(_) => {
+                let mut moves = moves(self);
+                moves.push(self.replace_row());
+                menus::pane_menu(win!(self, wi).selection.is_some(), moves)
+            }
+            ContextRegion::SidebarSlot(i) => {
+                let sid = win!(self, wi).panes.get(i).and_then(Pane::shelld_session_id);
+                let kin = sid.map_or_else(Vec::new, |sid| self.kin_of(sid));
+                let mut moves = moves(self);
+                moves.push(self.replace_row());
+                menus::sidebar_menu(kin, moves)
+            }
+            ContextRegion::SidebarPane(sid) => {
+                let kin = self.kin_of(sid);
+                // replaces what the window's focused slot shows
+                let mut moves = self.moves_of(sid);
+                moves.push(self.replace_row());
+                menus::sidebar_menu(kin, moves)
+            }
             ContextRegion::TitleStrip => menus::title_menu(),
             // Badge menus never come through here — their items
             // arrive from L1 via PaneBadgeMenu and open through
@@ -200,6 +228,11 @@ impl CoreApp {
                     pane.session_mut().forward_inject_input(b"\x1b[3J");
                 }
             }
+            ContextMenuAction::ClosePane if let ContextRegion::SidebarPane(sid) = region => {
+                if !self.close_asked(wi, sid) {
+                    self.close_anywhere(sid, false);
+                }
+            }
             ContextMenuAction::ClosePane => {
                 let idx = match region {
                     ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
@@ -207,6 +240,10 @@ impl CoreApp {
                 };
                 // on a viewed shadow pane: back to the pane under it
                 if matches!(region, ContextRegion::Pane(_)) && self.unview(wi, idx) {
+                    return;
+                }
+                // a pane with children asks first
+                if self.region_sid(wi, region).is_some_and(|sid| self.close_asked(wi, sid)) {
                     return;
                 }
                 // No floor on the pane count: closing the last pane of

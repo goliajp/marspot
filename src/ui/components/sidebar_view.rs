@@ -18,21 +18,11 @@ use crate::ui::tree::{KeptSurface, preset};
 use crate::ui::SESSION_COUNT_HARD_CAP;
 use golia_ui_core::{Action, Length, Ui, WidgetId, WidgetState};
 use marspot_term::layout::Rect;
-use marspot_term::session::SessionState;
+use marspot_term::render::SidebarTree;
 
-/// `data[0]` of a row: it is the pane in use.
-const SELECTED: u32 = 1;
-/// `data[0]` of anything: the pointer is not to light it, because a
-/// panel or a menu lies over the window.
-const QUIET: u32 = 2;
-/// `data[0]` of the add button: no more panes can be added.
-const FULL: u32 = 4;
-/// `data[0]` of a row: its pane is not the last, so it can be closed.
-const CAN_CLOSE: u32 = 8;
-/// `data[0]` of a row, from this bit up: its session's state.
-const STATE_SHIFT: u32 = 4;
-/// `data[1]` of a row: its low 16 bits are the pane's code.
-const HAS_CODE: u32 = 1 << 16;
+#[path = "sidebar_bits.rs"]
+mod bits;
+use bits::*;
 
 /// The actions: the add button's, and row `n`'s or its close button's
 /// with `arg: n`.
@@ -51,13 +41,14 @@ fn row_id(i: usize) -> WidgetId {
 
 #[path = "sidebar_rows.rs"]
 mod rows;
-pub use rows::{Blank, Rows};
+pub use rows::{selected_row, Blank, Rows};
 
 /// What the sidebar shows this frame.
 pub struct SidebarFrame<'a> {
     pub layout: &'a Layout,
     pub rows: &'a dyn Rows,
-    pub focused_idx: usize,
+    /// The row of the pane in use, if it has one.
+    pub selected: Option<usize>,
     /// A panel or a menu lies over the window: nothing lights under
     /// the pointer, though what the pointer is on is still followed.
     pub quiet: bool,
@@ -82,8 +73,9 @@ impl SidebarFrame<'_> {
             self.rows.label(i).hash(&mut h);
             state_bits(self.rows.state(i)).hash(&mut h);
             self.rows.code(i).hash(&mut h);
+            (self.rows.tree(i), self.rows.hollow(i)).hash(&mut h);
         }
-        (self.focused_idx, helpers).hash(&mut h);
+        (self.selected, helpers).hash(&mut h);
         (self.quiet, self.cell_w.to_bits()).hash(&mut h);
         let (measures, add) = self.hit_shape();
         measures.map(f64::to_bits).hash(&mut h);
@@ -123,26 +115,6 @@ impl HitShape {
         self.measures = Some(f.hit_shape());
         self.closes.clear();
         self.closes.extend_from_slice(&f.layout.close_session_rects);
-    }
-}
-
-fn rect_bits(r: &Rect) -> [u64; 4] {
-    [r.x.to_bits(), r.y_top.to_bits(), r.w.to_bits(), r.h.to_bits()]
-}
-
-fn state_bits(s: SessionState) -> u32 {
-    match s {
-        SessionState::Active => 0,
-        SessionState::Idle => 1,
-        SessionState::Exited => 2,
-    }
-}
-
-fn state_of(bits: u32) -> SessionState {
-    match bits {
-        0 => SessionState::Active,
-        1 => SessionState::Idle,
-        _ => SessionState::Exited,
     }
 }
 
@@ -204,17 +176,21 @@ fn describe_rows(ui: &mut Ui<'_>, f: &SidebarFrame<'_>, column: &Sidebar, bottom
     ui.float(first.x, first.y_top, |ui| {
         for i in 0..shown {
             let rect = column.row_rect(i);
-            let selected = if i == f.focused_idx { SELECTED } else { 0 };
+            let selected = if Some(i) == f.selected { SELECTED } else { 0 };
             let close = l.close_session_rects.get(i);
-            let code = f.rows.code(i);
-            let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, code.is_some(), f.cell_w));
+            let (code, tree) = (f.rows.code(i), f.rows.tree(i));
+            let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, code.is_some(), tree, f.cell_w));
             let state = selected | quiet | can_close | state_bits(f.rows.state(i)) << STATE_SHIFT;
+            let hollow = if f.rows.hollow(i) { HOLLOW } else { 0 };
+            let look = code.map_or(0, |c| HAS_CODE | u32::from(c)) | hollow | tree_bits(tree) << TREE_SHIFT;
             let row = ui
                 .leaf(preset::SIDEBAR_ROW, Length::Px(rect.w), Length::Px(rect.h))
-                .leaf(preset::SIDEBAR_ROW, [state, code.map_or(0, |c| HAS_CODE | u32::from(c))])
+                .leaf(preset::SIDEBAR_ROW, [state, look])
                 .label_copy(name)
                 .pressable(row_id(i), Action::new(ROW, i as u32));
-            if let Some(c) = close {
+            // a parent's grey row closes nothing: it stands for a pane
+            // of another window
+            if let Some(c) = close.filter(|_| tree != SidebarTree::Parent) {
                 let spot = golia_ui_core::Rect::new(c.x - rect.x, c.y_top - rect.y_top, c.w, c.h);
                 row.spot(spot, Action::new(CLOSE, i as u32));
             }
@@ -240,10 +216,17 @@ pub(crate) fn paint_helpers(p: &mut ViewPainter, rect: Rect, label: &str, data: 
 /// A row, and its close button where the row's spot is: shown on the
 /// pane in use and on the row under the pointer, hot under the pointer.
 pub(crate) fn paint_row(p: &mut ViewPainter<'_>, rect: Rect, close: Option<Rect>, name: &str, data: [u32; 2], state: WidgetState) {
-    let session = state_of(data[0] >> STATE_SHIFT);
-    let (selected, lit) = (data[0] & SELECTED != 0, lit(data[0], state));
+    let (selected, hovered) = (data[0] & SELECTED != 0, lit(data[0], state));
     let code = (data[1] & HAS_CODE != 0).then_some(data[1] as u16);
-    sidebar::paint_row(p, rect, code, name, session, selected, lit);
+    let look = sidebar::RowLook {
+        state: state_of((data[0] >> STATE_SHIFT) & 3),
+        tree: tree_of(data[1] >> TREE_SHIFT),
+        hollow: data[1] & HOLLOW != 0,
+        selected,
+        hovered,
+    };
+    sidebar::paint_row(p, rect, code, name, look);
+    let lit = hovered;
     if let Some(close) = close.filter(|_| selected || lit) {
         let hot = lit && state.hovered_spot;
         sidebar::paint_close(p, close, sidebar::close_look(data[0] & CAN_CLOSE != 0, hot));
@@ -301,7 +284,7 @@ impl SidebarSurface {
             return;
         }
         self.ready_for = Some((layout.generation, rows));
-        let f = SidebarFrame { layout, rows: &Blank(rows), focused_idx: 0, quiet: false, cell_w: font.cell_w as f32 };
+        let f = SidebarFrame { layout, rows: &Blank(rows), selected: None, quiet: false, cell_w: font.cell_w as f32 };
         if self.hit.is(&f, self.helpers > 0) {
             return;
         }

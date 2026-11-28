@@ -65,6 +65,14 @@ pub const SIDEBAR_DOT_GAP: f64 = space::S4;
 /// or not the button is showing: a name must not jump when the pointer
 /// arrives.
 pub const SIDEBAR_LABEL_GAP: f64 = space::S2;
+/// How far a child's row is indented past its parent's.
+pub const SIDEBAR_INDENT: f64 = space::S8;
+/// Thickness of the tree line before a child, and of a hollow dot's
+/// ring.
+pub const SIDEBAR_TREE_LINE: f64 = 0.5;
+pub const SIDEBAR_DOT_RING: f64 = 0.75;
+/// The tree line stops this far short of the child's dot.
+pub const SIDEBAR_TREE_GAP: f64 = space::S2;
 /// Point size of the `+` in the add button.
 pub const SIDEBAR_ADD_ICON: f64 = 6.5;
 

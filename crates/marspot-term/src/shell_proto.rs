@@ -558,6 +558,8 @@ pub enum MsgType {
     /// session whose frames carry `grid_shm::FLAG_POINTER_GATED`; an
     /// older one gets the encoded bytes as `InjectInput`, as before.
     PanePointerInput = 88,
+    /// core → shell: bring this window to the front; see `window_frames`.
+    WindowRaise = 89,
     // ── frame pacing (90..=92), see `frame_pace` ──
     FramePace = 90,
     FramePaceAck = 91,
@@ -711,6 +713,7 @@ impl MsgType {
             84 => MsgType::PaneTerminalFocus,
             85 => MsgType::SessionUpdate,
             88 => MsgType::PanePointerInput,
+            89 => MsgType::WindowRaise,
             90 => MsgType::FramePace,
             91 => MsgType::FramePaceAck,
             92 => MsgType::FrameShown,
@@ -775,6 +778,8 @@ mod file_drop;
 pub use file_drop::{decode_file_drop, encode_file_drop};
 mod surface_attach;
 pub use surface_attach::*;
+mod window_frames;
+pub use window_frames::*;
 mod pointer;
 pub use pointer::{PointerInput, PointerKind, decode_pane_pointer_input, encode_pane_pointer_input};
 
@@ -1038,40 +1043,6 @@ pub fn decode_window_chrome(payload: &[u8]) -> io::Result<(u32, f64)> {
     ))
 }
 
-/// A window closed.  The core drops that `WindowState` — and with it
-/// the panes it held, which are closed the same way the sidebar's
-/// `[x]` closes one.
-pub fn encode_window_closed(window_id: u32) -> Vec<u8> {
-    window_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_window_closed(payload: &[u8]) -> io::Result<u32> {
-    if payload.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "WINDOW_CLOSED payload < 4 bytes",
-        ));
-    }
-    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
-}
-
-/// Which window became key.  Keyboard and IME follow this rather than
-/// tagging every keystroke: they are by definition delivered to the
-/// key window, and the frames share one ordered socket.
-pub fn encode_window_focus(window_id: u32) -> Vec<u8> {
-    window_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_window_focus(payload: &[u8]) -> io::Result<u32> {
-    if payload.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "WINDOW_FOCUS payload < 4 bytes",
-        ));
-    }
-    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
-}
-
 /// Ask L1 to reopen a saved window, restoring its geometry from entry
 /// `frame_index` of `window-state.bin`.  An index past the end of that
 /// file is not an error — the window opens at the default rect.
@@ -1121,20 +1092,6 @@ pub fn decode_icon_mask(payload: &[u8]) -> io::Result<(u16, u16, u16, Vec<u8>)> 
         side,
         mask.to_vec(),
     ))
-}
-
-pub fn encode_window_close_request(window_id: u32) -> Vec<u8> {
-    window_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_window_close_request(payload: &[u8]) -> io::Result<u32> {
-    if payload.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "WINDOW_CLOSE_REQUEST payload < 4 bytes",
-        ));
-    }
-    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
 }
 
 pub fn encode_window_open_request(frame_index: u32) -> Vec<u8> {

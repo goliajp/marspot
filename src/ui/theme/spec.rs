@@ -341,6 +341,8 @@ mod tests {
             ("chrome::SIDEBAR_PAD_X", chrome::SIDEBAR_PAD_X),
             ("chrome::SIDEBAR_DOT_GAP", chrome::SIDEBAR_DOT_GAP),
             ("chrome::SIDEBAR_LABEL_GAP", chrome::SIDEBAR_LABEL_GAP),
+            ("chrome::SIDEBAR_INDENT", chrome::SIDEBAR_INDENT),
+            ("chrome::SIDEBAR_TREE_GAP", chrome::SIDEBAR_TREE_GAP),
             ("chrome::TITLE_GAP", chrome::TITLE_GAP),
             ("chrome::POPOVER_ROW_INSET", chrome::POPOVER_ROW_INSET),
             ("chrome::MENU_DIVIDER_H", chrome::MENU_DIVIDER_H),

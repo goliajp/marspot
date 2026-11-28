@@ -36,7 +36,7 @@ pub fn run(arg: &str) {
     let (mut renderer, target, layout, terminals) = scene();
     let views = views(&terminals);
     let sidebar = sidebar();
-    let focused = 4;
+    let focused = FOCUSED;
 
     let mut wr = WindowRender::new();
     for _ in 0..5 {
@@ -114,7 +114,7 @@ pub(crate) fn scene() -> (MetalRenderer, Retained<ProtocolObject<dyn MTLTexture>
 
 /// A view per pane, the fifth in use.
 pub(crate) fn views(terminals: &[Terminal]) -> Vec<SessionView<'_>> {
-    let focused = 4;
+    let focused = FOCUSED;
     terminals
         .iter()
         .enumerate()
@@ -142,8 +142,18 @@ pub(crate) fn views(terminals: &[Terminal]) -> Vec<SessionView<'_>> {
         .collect()
 }
 
+/// The pane in use in the bench's window.
+pub(crate) const FOCUSED: usize = 4;
+
 /// A sidebar row per pane.
 pub(crate) fn sidebar() -> Vec<SidebarEntry<'static>> {
     let states = [SessionState::Active, SessionState::Idle, SessionState::Exited];
-    NAMES.iter().enumerate().map(|(i, (label, _))| SidebarEntry { label, state: states[i % 3], code: Some(4100 + i as u16) }).collect()
+    NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| SidebarEntry {
+            selected: i == FOCUSED,
+            ..SidebarEntry::top(label, states[i % 3], Some(4100 + i as u16))
+        })
+        .collect()
 }

@@ -29,6 +29,9 @@ impl CoreApp {
         } else {
             CELL_TITLE_PT * win!(self, wi).scale
         };
+        // a row per pane of the window and per child listed with them
+        self.refresh_sidebar_tree(wi);
+        let rows = self.sidebar_rows(wi).len();
         let layout = Layout::build(
             win!(self, wi).w_phys,
             win!(self, wi).h_phys,
@@ -40,11 +43,7 @@ impl CoreApp {
             cell_w,
             cell_h,
         )
-        .with_chrome(
-            win!(self, wi).scale,
-            win!(self, wi).panes.len(),
-            win!(self, wi).lights_right_phys,
-        );
+        .with_chrome(win!(self, wi).scale, rows, win!(self, wi).lights_right_phys);
         let layout = self.take_strip_rows(wi, layout);
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
@@ -251,4 +250,24 @@ impl CoreApp {
             );
         }
     }
+}
+
+/// F3+1 — read `sessions/<sid>/entry.toml`'s `shell_child_pid` field.
+/// Returns None on missing file, parse error, or absent field; the
+/// caller renders the pane's tree as "no root pid" in that case.
+/// Cheap one-shot read (typical entry.toml ~200 bytes); we don't
+/// cache because panel refresh is already throttled to ≥ 2 s.
+pub(super) fn read_shell_child_pid(shelld_session_id: u64) -> Option<i32> {
+    let path = marspot_term::session_registry::session_dir(shelld_session_id)
+        .join("entry.toml");
+    let body = std::fs::read_to_string(&path).ok()?;
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("shell_child_pid") {
+            // tolerate "= 1234" or "=1234"
+            let v = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+            return v.parse::<i32>().ok();
+        }
+    }
+    None
 }

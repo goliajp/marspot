@@ -13,7 +13,7 @@
 
 use super::density_kit;
 use super::panel_snapshot_tests::terminal_text;
-use crate::grid::{Cell, CellAttrs, Color, Grid};
+use crate::grid::{Cell, Grid};
 use crate::render::{HighlightSpan, HistoryView, SelectionView};
 use crate::layout::Layout;
 use crate::render::{SearchHitView, SearchOverlayView, SessionView, SidebarEntry};
@@ -26,8 +26,27 @@ use crate::ui::strings::{t, Msg};
 use crate::ui::components::context_menu_view::MenuRender;
 use crate::ui::components::{ContextMenu, MenuItem};
 
+#[cfg(test)]
+#[path = "chrome_ansi_snapshot_tests.rs"]
+mod ansi;
+use ansi::ansi_scene;
+#[cfg(test)]
+#[path = "sidebar_tree_snapshot_tests.rs"]
+mod sidebar_tree;
+#[cfg(test)]
+#[path = "menu_beside_snapshot_tests.rs"]
+mod menu_beside;
+#[cfg(test)]
+#[path = "close_ask_snapshot_tests.rs"]
+mod close_ask;
+
+thread_local! {
+    /// The sidebar rows of the next scene, when they are not one per pane.
+    static ROWS: std::cell::RefCell<Option<Vec<SidebarEntry<'static>>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// One pane of a scene.
-struct PaneSpec {
+pub(super) struct PaneSpec {
     title: &'static str,
     badge: &'static str,
     state: SessionState,
@@ -43,7 +62,7 @@ struct PaneSpec {
     notice: Option<String>,
 }
 
-fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
+pub(super) fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSpec {
     PaneSpec {
         title,
         badge,
@@ -56,44 +75,6 @@ fn pane(title: &'static str, badge: &'static str, state: SessionState) -> PaneSp
         strip: 0,
         notice: None,
     }
-}
-
-/// A screen that uses every terminal colour: the sixteen as text and
-/// as backgrounds, the SGR attributes, and a line each for a
-/// selection, a search hit and a link to land on.
-fn ansi_scene(cols: u16, rows: u16) -> Grid {
-    const NAMES: [&str; 8] = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
-    let mut g = Grid::new(cols, rows);
-    let mut put = |row: u16, col: u16, text: &str, attrs: CellAttrs| {
-        for (i, ch) in text.chars().enumerate() {
-            g.set_cell(col + i as u16, row, Cell { ch, attrs });
-        }
-        col + text.chars().count() as u16
-    };
-    let plain = CellAttrs::default();
-    put(0, 0, "$ colours", plain);
-    for bright in [0u8, 8] {
-        let row = 1 + bright as u16 / 8;
-        let mut col = 0;
-        for (i, name) in NAMES.iter().enumerate() {
-            let fg = Color::indexed(bright + i as u8);
-            col = put(row, col, name, CellAttrs { fg, ..plain }) + 1;
-        }
-    }
-    for i in 0..16u8 {
-        put(3, i as u16 * 3, "   ", CellAttrs { bg: Color::indexed(i), ..plain });
-    }
-    let mut col = put(4, 0, "bold", CellAttrs { bold: true, ..plain }) + 1;
-    col = put(4, col, "dim", CellAttrs { dim: true, ..plain }) + 1;
-    col = put(4, col, "underline", CellAttrs { underline: true, ..plain }) + 1;
-    col = put(4, col, "reverse", CellAttrs { reverse: true, ..plain }) + 1;
-    put(4, col, "red on yellow", CellAttrs { fg: Color::indexed(1), bg: Color::indexed(3), ..plain });
-    put(5, 0, "select: the quick brown fox", plain);
-    put(6, 0, "search: a needle in a haystack", plain);
-    put(7, 0, "link: https://example.com/docs/themes", plain);
-    put(8, 0, "$ ", plain);
-    g.set_cursor(2, 8);
-    g
 }
 
 /// `ansi_scene` with "quick brown" selected and "needle" a search hit.
@@ -110,7 +91,7 @@ fn ansi_pane(title: &'static str) -> PaneSpec {
 /// panes with the sidebar shown, `focused` the pane in use, and hold
 /// it to `bench/ui/snapshots/<name>.png`.  `open` sets whatever else
 /// the scene has on the renderer.
-fn snapshot(
+pub(super) fn snapshot(
     name: &str,
     (w, h): (u32, u32),
     (cols, rows): (usize, usize),
@@ -152,6 +133,15 @@ fn snapshot_on(
     // The app's own numbers at the display scale in force.
     let scale = crate::ui::chrome_scale();
     let title_h = if panes.len() > 1 { crate::ui::CELL_TITLE_PT * scale } else { 0.0 };
+    // the codes of the panes in the screenshot the sidebar's design was drawn from
+    const CODES: [u16; 5] = [4145, 5528, 8654, 6004, 8590];
+    let sidebar: Vec<SidebarEntry> = ROWS.with(|r| r.borrow_mut().take()).unwrap_or_else(|| {
+        panes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| SidebarEntry { selected: i == focused, ..SidebarEntry::top(p.title, p.state, Some(CODES[i % CODES.len()])) })
+            .collect()
+    });
     let layout = Layout::build(
         w as f64,
         h as f64,
@@ -163,7 +153,7 @@ fn snapshot_on(
         cell_w,
         cell_h,
     )
-    .with_chrome(scale, panes.len(), None)
+    .with_chrome(scale, sidebar.len(), None)
     .with_strips(&panes.iter().map(|p| p.strip).collect::<Vec<_>>(), cell_w, cell_h);
     let strip_grids: Vec<Option<Grid>> = panes
         .iter()
@@ -199,13 +189,6 @@ fn snapshot_on(
             strip: strip_grids[i].as_ref().map(|strip| super::helper_strip_view_tests::strip_under(grid, strip)),
             seq: 1 + i as u64,
         })
-        .collect();
-    // the codes of the panes in the screenshot the sidebar's design was drawn from
-    const CODES: [u16; 5] = [4145, 5528, 8654, 6004, 8590];
-    let sidebar: Vec<SidebarEntry> = panes
-        .iter()
-        .enumerate()
-        .map(|(i, p)| SidebarEntry { label: p.title, state: p.state, code: Some(CODES[i % CODES.len()]) })
         .collect();
     renderer.set_window_focused(true);
     let strips: &[SessionView] = &views;

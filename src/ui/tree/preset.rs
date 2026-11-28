@@ -51,6 +51,8 @@ pub const MENU_FRAME: u32 = 11;
 pub const MENU_ROW: u32 = 12;
 /// The line between two groups of a context menu's rows.
 pub const MENU_DIVIDER: u32 = 13;
+/// Why a disabled row of a context menu is off; its label is the reason.
+pub const MENU_TIP: u32 = 22;
 /// A toolbar button.  `data[0]` is its place in the row, `data[1]` its
 /// state: see `toolbar_view`.
 pub const TOOLBAR_SLOT: u32 = 14;
@@ -247,8 +249,9 @@ pub(super) fn paint(
         FRAME => PanelChrome::new(rect, f32::from_bits(data[0]) as f64).frame_view().paint(p, |_| {}),
         KEYS => crate::ui::components::shortcuts_view::paint_keys(p, rect, label, data[0]),
         MENU_FRAME => crate::ui::components::context_menu_view::paint_frame(p, rect),
-        MENU_ROW => crate::ui::components::context_menu_view::paint_row(p, rect, label, state),
+        MENU_ROW => crate::ui::components::context_menu_view::paint_row(p, rect, label, state, on),
         MENU_DIVIDER => crate::ui::components::context_menu_view::paint_divider(p, rect),
+        MENU_TIP => crate::ui::components::context_menu_view::paint_tip(p, rect, label),
         TOOLBAR_SLOT => crate::ui::components::toolbar_view::paint_button(p, rect, data, state),
         VERSION => crate::ui::components::toolbar_view::paint_version(p, data),
         SIDEBAR_ADD => crate::ui::components::sidebar_view::paint_add(p, rect, data, state),
