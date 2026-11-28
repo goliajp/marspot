@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.894"  # marspot-term: std's socket path limit off macOS is 107 bytes
+shell   = "0.7.895"  # cc: a switch is priced from what switches measured on this machine cost
 core    = "0.12.794"  # marspot-term: std's socket path limit off macOS is 107 bytes
 session = "0.11.496"  # marspot-term: std's socket path limit off macOS is 107 bytes

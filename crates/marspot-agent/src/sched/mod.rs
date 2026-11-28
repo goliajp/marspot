@@ -22,6 +22,7 @@ pub mod level2;
 pub mod price;
 pub mod reset;
 pub mod state;
+pub mod switch_cost;
 
 pub use choose::{Choice, POLICY, Policy, Terms, Tier, choose};
 pub use price::{Price, price};

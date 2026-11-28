@@ -47,6 +47,12 @@ pub(super) struct Spent {
     pub at: i64,
     pub model: String,
     pub tokens: Tokens,
+    /// Of the session's own conversation, not of a background agent.
+    pub main: bool,
+    /// The reply's counts so far, and whether an earlier record of it
+    /// was counted already.
+    pub whole: Tokens,
+    pub repeat: bool,
 }
 
 #[derive(Debug, Default)]
@@ -58,17 +64,17 @@ struct Cursor {
 
 impl Cursor {
     /// What this record adds: a reply seen before counts only its growth.
-    fn add(&mut self, id: &str, t: Tokens) -> Tokens {
+    fn add(&mut self, id: &str, t: Tokens) -> (Tokens, Tokens, bool) {
         if let Some((_, was)) = self.ids.iter_mut().find(|(i, _)| i == id) {
             let more = t.beyond(was);
             *was = was.max(&t);
-            return more;
+            return (more, *was, true);
         }
         if self.ids.len() == IDS_KEPT {
             self.ids.pop_front();
         }
         self.ids.push_back((id.to_string(), t));
-        t
+        (t, t, false)
     }
 }
 
@@ -110,7 +116,7 @@ impl Readers {
         } else if let Some(cur) = self.main.get_mut(transcript) {
             self.stats += 1;
             if let Ok(m) = fs::metadata(transcript) {
-                follow(transcript, m.len(), cur, &mut out);
+                follow(transcript, m.len(), cur, true, &mut out);
             }
         }
         self.read_agents(transcript, !first, now, &mut out);
@@ -159,7 +165,7 @@ impl Readers {
             if m.modified().is_ok_and(|t| now - secs(t) >= FOLLOW_S) {
                 return false;
             }
-            follow(path, m.len(), cur, out);
+            follow(path, m.len(), cur, false, out);
             true
         });
     }
@@ -180,7 +186,7 @@ impl Readers {
 }
 
 /// Parse what was appended to `path` beyond `cur`, `len` long now.
-fn follow(path: &Path, len: u64, cur: &mut Cursor, out: &mut Vec<Spent>) {
+fn follow(path: &Path, len: u64, cur: &mut Cursor, main: bool, out: &mut Vec<Spent>) {
     if len < cur.offset {
         cur.offset = len;
         return;
@@ -199,13 +205,13 @@ fn follow(path: &Path, len: u64, cur: &mut Cursor, out: &mut Vec<Spent>) {
     let Some(end) = buf.iter().rposition(|b| *b == b'\n') else { return };
     cur.offset += end as u64 + 1;
     for line in String::from_utf8_lossy(&buf[..end]).lines() {
-        if let Some(s) = spent(line, cur) {
+        if let Some(s) = spent(line, cur, main) {
             out.push(s);
         }
     }
 }
 
-fn spent(line: &str, cur: &mut Cursor) -> Option<Spent> {
+fn spent(line: &str, cur: &mut Cursor, main: bool) -> Option<Spent> {
     if !line.contains(r#""usage""#) || !line.contains(r#""assistant""#) {
         return None;
     }
@@ -220,9 +226,10 @@ fn spent(line: &str, cur: &mut Cursor) -> Option<Spent> {
     }
     let t = Tokens::of(msg.get("usage")?);
     let id = msg.str_at("id").unwrap_or("");
-    let tokens = if id.is_empty() { t } else { cur.add(id, t) };
+    let (tokens, whole, repeat) = if id.is_empty() { (t, t, false) } else { cur.add(id, t) };
     let at = marspot::cc_usage::parse_iso_utc(v.str_at("timestamp")?.to_string())?;
-    (!tokens.is_empty()).then(|| Spent { at, model: model.to_string(), tokens })
+    let main = main && !line.contains(r#""isSidechain":true"#);
+    (!tokens.is_empty()).then(|| Spent { at, model: model.to_string(), tokens, main, whole, repeat })
 }
 
 #[cfg(test)]

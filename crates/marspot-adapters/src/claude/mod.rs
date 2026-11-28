@@ -2,6 +2,7 @@
 
 use marspot_agent::types::{FoldSink, RecordFold};
 
+pub mod switch_turns;
 mod tasks;
 pub mod text;
 mod usage;

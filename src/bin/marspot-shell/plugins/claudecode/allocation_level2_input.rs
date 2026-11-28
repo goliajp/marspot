@@ -8,8 +8,10 @@
 //! the band's bottom when the three-hour speed lies below it (a pane
 //! idle for three hours is not planned at nothing), and the scan's
 //! measured speed before it has a mean; its high band is
-//! the level times the pane band's high multiplier.  A switch rewrites the context the
-//! pane's last reply read (the typical one where none was read).  Lost
+//! the level times the pane band's high multiplier.  A switch costs what
+//! this machine measured a switch to cost (`allocation_switch_cost`) for
+//! the context the pane's last reply read (the typical one where none
+//! was read), so a long session is dearer to move.  Lost
 //! background work is the pane's plain speed times its background-work
 //! length.  The dwell runs from the pane's last change of account,
 //! whoever made it; a pin from the standing plan comes on top.
@@ -25,9 +27,9 @@ use super::allocation_adapter::{Allocation, WEEK_S};
 use super::allocation_decide::STALE_FEED_S;
 use super::allocation_inputs::Snapshot;
 use super::allocation_level1::Inputs as ClassInputs;
+use super::allocation_switch_cost::switch_weeks;
 use super::allocation_view::View;
 use crate::plugins::allocation::rest::MOVES_PER_WEEK;
-use crate::plugins::allocation::waste::switch_cost;
 use crate::plugins::allocation::Class;
 
 /// Background work this long or longer is long, seconds.
@@ -89,7 +91,7 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             restricted: cls == Class::Restricted,
             speed,
             high: [speed[0] * band[0], speed[1] * band[1]],
-            rewrite: switch_cost(cls, tokens),
+            rewrite: switch_weeks(a.switch.fit.shares(), cls, tokens),
             lost_work: speed[1] * f64::from(fp.background_s.unwrap_or(0)) / 3600.0,
             clean_per_h: fp.clean_per_h,
             long_background: fp.background_s.is_some_and(|s| s >= LONG_BACKGROUND_S),
