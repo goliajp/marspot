@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.905"  # a pane run can require that nobody typed into the pane since a given moment
+shell   = "0.7.906"  # a pane whose session process started afresh gets its claude resumed on the account and model it ran on, while its new shell is minutes old and untouched
 core    = "0.12.798"  # process rows carry the exec flag; process samples move to a file of their own
 session = "0.11.497"  # marspot-term: settings carry sched.profile and numeric sched.* overrides (not used by session)

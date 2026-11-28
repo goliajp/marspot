@@ -69,6 +69,15 @@ pub(crate) fn account_of_home(home: Option<&str>) -> String {
     }
 }
 
+/// The account a claude binding is on, by its profile number.
+pub(crate) fn account_of_profile(profile: u8) -> String {
+    match profile {
+        0 => "default".into(),
+        u8::MAX => "unknown".into(),
+        n => format!("P{n}"),
+    }
+}
+
 /// `(agent, account, argv)` of a command line marspot built, the
 /// conversation text it carries left out.
 pub(crate) fn describe(line: &str) -> Option<(&'static str, String, String)> {

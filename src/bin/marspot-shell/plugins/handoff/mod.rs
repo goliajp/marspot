@@ -21,5 +21,6 @@ pub use carried::remember_gemini_model;
 pub(crate) use resume::resume_word;
 pub use menu::{menu_rows, profiles};
 pub use switch::{switch_op, Leaving};
+pub(crate) use ledger::write_atomic;
 pub use tags::{parse_tag, profile_tag, Pick};
 pub use transcript::Agent;
