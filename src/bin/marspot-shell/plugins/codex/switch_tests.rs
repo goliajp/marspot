@@ -121,7 +121,6 @@ fn job_of(op: &pty_op::PtyOp, capture: bool) -> Option<std::sync::Arc<pty_op::Jo
     })
 }
 
-
 fn line_of(op: &pty_op::PtyOp) -> String {
     op.steps
         .iter()

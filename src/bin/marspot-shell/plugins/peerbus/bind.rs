@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use marspot_peer::envelope::Mode;
 use marspot_peer::json::Value;
+use super::bind_settled::settled_titles;
 
 /// A pane with a Codex process, as the worker resolved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +71,7 @@ const FIRST_THREAD_MS: u64 = 10_000;
 /// an earlier process names a thread nobody shows any more, and Codex
 /// unloads that after half an hour; the rest is for a machine that
 /// slept through part of it.
-const TITLE_SETTLED_MS: u64 = 2 * 3600 * 1000;
+pub(super) const TITLE_SETTLED_MS: u64 = 2 * 3600 * 1000;
 
 /// When `assign` may next answer otherwise for a pane that waits for
 /// its title, with nothing having changed but the time: in so many
@@ -120,45 +121,30 @@ pub(super) fn assign(
     // seen under it.  So a title counts once this process is known to
     // have written it: it names a thread created after the process
     // started, or the thread the command line resumes, or it has
-    // changed since the process was first seen.  Failing those, it
-    // counts once the process has run under it for hours with its
-    // configuration showing the thread there: a TUI that shows its
-    // thread rewrites the title as it draws, so one that still names an
-    // older thread by then is showing that thread, however many other
-    // Codex processes have been in its directory meanwhile.
-    let written = |p: &Pane, prefix: &str| {
-        created_ms(prefix).is_some_and(|c| c > p.started_ms)
-            || p.argv_thread.as_ref().is_some_and(|t| t.starts_with(prefix))
-            || p.title_moved
-    };
-    let settled = |p: &Pane| p.title_expected && p.up_ms >= TITLE_SETTLED_MS;
-    for pass in [Pass::Written, Pass::Settled] {
-        for p in panes {
-            let Some(prefix) = p.title_thread.as_ref().filter(|_| !out.contains_key(&p.sid)) else { continue };
-            let own = match pass {
-                Pass::Written => written(p, prefix),
-                Pass::Settled => settled(p),
-            };
-            if !own {
-                continue;
-            }
-            let named: Vec<&str> = threads.get(&p.home).map_or(Vec::new(), |ts| {
-                ts.iter().map(|(id, _)| id.as_str()).filter(|id| id.starts_with(prefix.as_str())).collect()
-            });
-            let claimed = |t: &str| taken.iter().any(|(h, x)| *h == p.home && x == t);
-            let r = match named.as_slice() {
-                [] => Err(Unbound::NoThread),
-                // shown in another pane by a title that process wrote
-                [one] if pass == Pass::Settled && claimed(one) => Err(Unbound::AwaitingTitle),
-                [one] => Ok(one.to_string()),
-                many => Err(Unbound::Ambiguous { panes: 1, threads: many.len() }),
-            };
-            if let Ok(t) = &r {
-                taken.push((p.home.clone(), t.clone()));
-            }
-            out.insert(p.sid, r);
+    // changed since the process was first seen.  Failing those, a title
+    // the process has run under for hours (`settled_titles`).
+    for p in panes {
+        let Some(prefix) = &p.title_thread else { continue };
+        let own = created_ms(prefix).is_some_and(|c| c > p.started_ms)
+            || p.argv_thread.as_ref().is_some_and(|t| t.starts_with(prefix.as_str()))
+            || p.title_moved;
+        if !own {
+            continue;
         }
+        let named: Vec<&str> = threads.get(&p.home).map_or(Vec::new(), |ts| {
+            ts.iter().map(|(id, _)| id.as_str()).filter(|id| id.starts_with(prefix.as_str())).collect()
+        });
+        let r = match named.as_slice() {
+            [] => Err(Unbound::NoThread),
+            [one] => Ok(one.to_string()),
+            many => Err(Unbound::Ambiguous { panes: 1, threads: many.len() }),
+        };
+        if let Ok(t) = &r {
+            taken.push((p.home.clone(), t.clone()));
+        }
+        out.insert(p.sid, r);
     }
+    settled_titles(panes, threads, current, &mut out, &mut taken);
     // Then other certain answers: a binding that still holds, then a
     // thread named on the command line.
     let by_title: Vec<u64> = out.keys().copied().collect();
@@ -255,15 +241,6 @@ fn without_the_title(p: &Pane, thread: &str) -> bool {
         && !p.title_moved
         && p.up_ms >= TITLE_SILENT_MS
         && created_ms(thread).is_some_and(|c| c > p.started_ms && c - p.started_ms <= FIRST_THREAD_MS)
-}
-
-/// Which title pass of `assign` a pane is looked at in.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Pass {
-    /// The title is known to be this process's.
-    Written,
-    /// The process has run under the title for hours.
-    Settled,
 }
 
 /// A loaded thread's cwd, if it is one a person is talking to in a
@@ -535,6 +512,48 @@ mod tests {
         // before its hours were up it waited, and said so
         let young = Pane { up_ms: TITLE_SETTLED_MS - 1, ..p };
         assert_eq!(assign(&[young], &ts, &HashMap::new())[&487], Err(Unbound::AwaitingTitle));
+    }
+
+    /// A pane whose hours-old title an earlier codex left names the
+    /// thread another pane runs, before that pane's title says so.
+    fn stale_title_pane(thread: &str) -> Pane {
+        Pane {
+            title_expected: true,
+            title_thread: thread_in_title(&format!("p | {thread}")),
+            started_ms: 1_795_008_854_000,
+            up_ms: TITLE_SETTLED_MS,
+            alone: false,
+            ..pane(1, "/p", None)
+        }
+    }
+
+    #[test]
+    fn a_settled_title_does_not_take_a_thread_another_pane_resumes_or_is_bound_to() {
+        let x = "01a0bca3-87a2-7aa2-8d42-d84a71b8539a";
+        let ts = loaded(&[(x, "/q")]);
+        let a = stale_title_pane(x);
+        // the other pane runs `codex resume <x>`, its title not yet seen
+        let resumes = Pane { started_ms: 1_795_008_900_000, ..pane(2, "/q", Some(x)) };
+        let r = assign(&[a.clone(), resumes], &ts, &HashMap::new());
+        assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Ok(x.to_string())));
+        // the other pane is bound to it from an earlier scan
+        let bound = Pane { title_expected: true, started_ms: 1_795_008_900_000, ..pane(2, "/q", None) };
+        let cur = HashMap::from([(2, x.to_string())]);
+        let r = assign(&[a.clone(), bound.clone()], &ts, &cur);
+        assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Ok(x.to_string())));
+        // a binding whose thread has left that pane's directory holds nothing
+        let r = assign(&[a, bound], &loaded(&[(x, "/r")]), &cur);
+        assert_eq!(r[&1], Ok(x.to_string()));
+    }
+
+    #[test]
+    fn two_settled_titles_naming_one_thread_bind_neither() {
+        let x = "01a0bca3-87a2-7aa2-8d42-d84a71b8539a";
+        let ts = loaded(&[(x, "/p")]);
+        let a = stale_title_pane(x);
+        let c = Pane { sid: 2, cwd: "/q".into(), ..a.clone() };
+        let r = assign(&[a, c], &ts, &HashMap::new());
+        assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Err(Unbound::AwaitingTitle)));
     }
 
     /// The title a killed Codex left in the pane names its thread, and
