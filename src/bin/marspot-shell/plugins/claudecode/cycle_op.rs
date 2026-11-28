@@ -205,6 +205,10 @@ pub(super) fn profile_cycle_op(
                     // asked to carry on, it starts working at once and
                     // its spinner never lets the pane go still
                     .or_composer()
+                    // a resumed claude that took the terminal and is still
+                    // repainting a long history has resumed; only the
+                    // composer is left unrestored, not typed mid-redraw
+                    .or_drawn_late()
                     .named("first_frame"),
             )
             // Their sentence last. If there was one, it goes back and
