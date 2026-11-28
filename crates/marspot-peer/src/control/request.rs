@@ -266,26 +266,9 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
     Ok(Request { op, caller_thread })
 }
 
-fn open(a: &Args) -> Result<Op, Reject> {
-    let new_window = a.bool("new_window", false)?;
-    let o = OpenArgs {
-        cwd: a.str("cwd")?,
-        shadow: a.bool("shadow", !new_window)?,
-        new_window,
-        parent: a.str("parent")?,
-        cols: a.size("cols", 120)?,
-        rows: a.size("rows", 40)?,
-        command: a.str("command")?,
-    };
-    if new_window && (o.shadow || o.parent.is_some()) {
-        return Err(bad("a pane in a new window is not a shadow and has no `parent`"));
-    }
-    Ok(Op::Open(o))
-}
-
 #[path = "request_args.rs"]
 mod args;
-use args::{input, run_command, wait};
+use args::{input, open, run_command, wait};
 
 #[path = "request_helper.rs"]
 pub mod helper;

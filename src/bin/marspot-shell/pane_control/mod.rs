@@ -23,7 +23,7 @@ use marspot::shell_proto::MsgType;
 use marspot_peer::control::Reject;
 
 mod audit;
-mod audit_log;
+pub(crate) mod audit_log;
 pub(crate) mod caller;
 mod config;
 mod conn;
@@ -122,11 +122,6 @@ pub(crate) fn key_pressed() {
     if let Some(h) = HUB.get() {
         h.key_pressed();
     }
-}
-
-/// Rotate a log as the audit log is: `log` becomes `log.1`, and so on.
-pub(crate) fn rotate_log(path: &std::path::Path) {
-    audit_log::rotate(path);
 }
 
 /// The hub, once [`start`] ran.

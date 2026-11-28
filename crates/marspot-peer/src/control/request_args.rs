@@ -1,9 +1,26 @@
-//! The arguments of a request that take more than a lookup: an input
-//! to send, a command to run, a wait.
+//! The arguments of a request that take more than a lookup: a pane to
+//! open, an input to send, a command to run, a wait.
 
-use super::{Args, Input, MAX_WAIT_TEXT, Wait, bad};
+use super::{Args, Input, MAX_WAIT_TEXT, Op, OpenArgs, Wait, bad};
 use crate::control::{ErrorCode, MAX_SEND_BYTES, Reject, b64, keys};
 use crate::json::Value;
+
+pub(super) fn open(a: &Args) -> Result<Op, Reject> {
+    let new_window = a.bool("new_window", false)?;
+    let o = OpenArgs {
+        cwd: a.str("cwd")?,
+        shadow: a.bool("shadow", !new_window)?,
+        new_window,
+        parent: a.str("parent")?,
+        cols: a.size("cols", 120)?,
+        rows: a.size("rows", 40)?,
+        command: a.str("command")?,
+    };
+    if new_window && (o.shadow || o.parent.is_some()) {
+        return Err(bad("a pane in a new window is not a shadow and has no `parent`"));
+    }
+    Ok(Op::Open(o))
+}
 
 pub(super) fn input(a: &Args) -> Result<Input, Reject> {
     let text = a.str("text")?;

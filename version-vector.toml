@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.883"  # a helper panel act cut inside its parent is refused
+shell   = "0.7.884"  # opening a pane is read beside the other arguments, and the audit log rotates by its own path
 core    = "0.12.772"  # pane labels and sidebar rows move out of draw.rs and sidebar_view.rs
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

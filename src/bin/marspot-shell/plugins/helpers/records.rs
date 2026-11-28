@@ -256,7 +256,7 @@ pub(super) fn append(path: &Path, rotate_at: u64, table: &Table, sid: u64, at_ms
     let mut body = line(now, at_ms, sid, ev);
     body.push('\n');
     if std::fs::metadata(path).is_ok_and(|m| m.len() + body.len() as u64 > rotate_at) {
-        crate::pane_control::rotate_log(path);
+        crate::pane_control::audit_log::rotate(path);
         let mut carried: String = table.map.values().map(|h| line(now, now, h.sid, &Event::Carried(Box::new(h.clone()))) + "\n").collect();
         carried.push_str(&body);
         body = carried;
