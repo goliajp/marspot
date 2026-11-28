@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.937"  # under protection an attended pane keeps its quota first in a gap; strict never makes it wait
+shell   = "0.7.938"  # under protection a refused unattended pane waits rather than take an attended pane's account
 core    = "0.12.815"  # the switching row no longer says the planner is in trial: it goes live in checked steps
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

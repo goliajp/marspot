@@ -16,11 +16,14 @@ fn scene() -> (Vec<Account>, Vec<Pane>) {
     (a, p)
 }
 
-/// The first refusal of an attended pane, hours, and when the last
-/// account stops serving.
-fn attended_refused(plan: &Plan, panes: &[Pane]) -> (Option<f64>, f64) {
-    let first = plan.refusals.iter().filter(|(sid, _)| panes.iter().any(|p| p.sid == *sid && p.attended)).map(|r| r.1).fold(None, |m: Option<f64>, h| Some(m.map_or(h, |x| x.min(h))));
-    let last = plan.empty.iter().map(|e| e[0].unwrap_or(H2)).fold(0.0, f64::max);
+/// The first refusal of an attended pane, hours, and the last refusal
+/// of an unattended one: a pane refused for the last time has stopped
+/// for want of quota it may use, so after that moment no unattended
+/// pane holds any.
+fn refused(plan: &Plan, panes: &[Pane]) -> (Option<f64>, Option<f64>) {
+    let at = |attended: bool| plan.refusals.iter().filter(move |(sid, _)| panes.iter().any(|p| p.sid == *sid && p.attended == attended)).map(|r| r.1);
+    let first = at(true).fold(None, |m: Option<f64>, h| Some(m.map_or(h, |x| x.min(h))));
+    let last = at(false).fold(None, |m: Option<f64>, h| Some(m.map_or(h, |x| x.max(h))));
     (first, last)
 }
 
@@ -31,16 +34,15 @@ fn sched_gap_balanced_refuses_no_attended_pane_while_others_hold_quota() {
     i.limits = Limits::BALANCED;
     i.pi = i.limits.pi(0.5);
     let bal = plan(&i, None);
-    let (first, last) = attended_refused(&bal, &p);
-    println!("balanced: attended first refused at {first:?} h, last account empty at {last:.2} h, refusals {:?}, switches {:?}", bal.refusals, bal.switches.iter().map(|s| (s.sid, s.from, s.to, s.t_open)).collect::<Vec<_>>());
-    // refused only once every account has stopped serving: no quota is
-    // left for an unattended pane to hold
-    assert!(first.is_none_or(|h| h >= last - 0.25), "attended refused at {first:?} h, accounts serve until {last:.2} h");
+    let (first, last) = refused(&bal, &p);
+    println!("balanced: attended first refused at {first:?} h, unattended last refused at {last:?} h, refusals {:?}, switches {:?}", bal.refusals, bal.switches.iter().map(|s| (s.sid, s.from, s.to, s.t_open)).collect::<Vec<_>>());
+    // every unattended pane has stopped by the time the first attended one is refused
+    let first = first.expect("demand twice the supply refuses the attended panes in the end");
+    assert!(last.is_some_and(|l| l <= first + 1e-6), "attended refused at {first:.2} h, an unattended pane still worked until {last:?} h");
     let mut s = input(&a, &p);
     s.limits = Limits::STEADY;
-    let steady = plan(&s, None);
-    let (first, last) = attended_refused(&steady, &p);
-    println!("steady, which keeps no quota for anyone: attended first refused at {first:?} h, last account empty at {last:.2} h");
+    let (first, last) = refused(&plan(&s, None), &p);
+    println!("steady, which keeps no quota for anyone: attended first refused at {first:?} h, unattended last refused at {last:?} h");
 }
 
 /// Every account down to what only Fable can use, Fable short: under

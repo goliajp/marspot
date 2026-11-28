@@ -90,9 +90,14 @@ impl Sim {
         }
     }
 
-    /// Where pane `k` refused on `from` goes, among `open` that take its class.
+    /// Where pane `k` refused on `from` goes, among `open` that take its
+    /// class.  Under protection an unattended pane does not go where an
+    /// attended one is: it waits instead, and the quota stays for the
+    /// person.
     fn fallback(&self, c: &Ctx, k: usize, from: usize, band: usize, open: &[usize]) -> Option<usize> {
         let p = &c.input.panes[k];
+        let keep = !p.attended && c.input.limits.fable != FableGuard::Price;
+        let held = |j: usize| keep && self.at.panes[j].iter().any(|&o| c.input.panes[o].attended);
         let s = if band == 0 { p.speed } else { p.high };
         let lasts = |j: usize| {
             let [a, b] = self.load[j];
@@ -104,7 +109,7 @@ impl Sim {
         };
         // the longest lasting, the lowest index among equals
         let mut best: Option<(usize, f64)> = None;
-        for &j in open.iter().filter(|&&j| j != from) {
+        for &j in open.iter().filter(|&&j| j != from && !held(j)) {
             let h = lasts(j);
             if best.is_none_or(|b| h.total_cmp(&b.1).is_gt()) {
                 best = Some((j, h));
