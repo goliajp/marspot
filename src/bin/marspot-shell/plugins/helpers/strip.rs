@@ -101,8 +101,14 @@ pub(super) fn above(obs: &Observation, sid: u64) -> Option<u64> {
 }
 
 /// Each running helper and its parent pane, as `(helper, parent)`.
+/// Asked before the plugin started, it reads the log first: which panes
+/// are helpers does not depend on which plugin starts first.
 pub(crate) fn parents() -> Vec<(u64, u64)> {
-    SHARED.get().map_or_else(Vec::new, |s| s.table().map.iter().map(|(sid, h)| (*sid, h.started.parent)).collect())
+    let s = super::shared();
+    if s.lock().began_ms == 0 {
+        super::rebuild::reload(s, &|| crate::observe::shared().fresh(crate::observe::INTERVAL));
+    }
+    s.table().map.iter().map(|(sid, h)| (*sid, h.started.parent)).collect()
 }
 
 /// True once everything there is to say was declared.  `host` has the

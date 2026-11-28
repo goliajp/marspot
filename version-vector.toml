@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.885"  # input from an agent wakes a pane whose agent sleeps
+shell   = "0.7.886"  # which panes are helpers is read from the log before the helpers plugin starts
 core    = "0.12.772"  # pane labels and sidebar rows move out of draw.rs and sidebar_view.rs
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX
