@@ -30,4 +30,4 @@
 
 shell   = "0.7.875"  # a handoff whose first frame comes late fails before its ledger is committed
 core    = "0.12.761"  # a core attaching to a session counts its view asks on from the number the session last applied
-session = "0.11.487"  # a turn of a kilobyte or more leaves the bytelog buffer to fill
+session = "0.11.488"  # a pty reader whose asks find the pty dry lets ever more chances to ask go

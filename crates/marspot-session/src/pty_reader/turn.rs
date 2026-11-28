@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::gather::Asking;
 use super::lease::{Lease, Leases};
 
 /// How much of a burst is read before the reader queues for a turn.
@@ -19,11 +20,14 @@ pub(super) struct Turn {
     flooding: bool,
     /// Some other pane held a lease this flood wanted.
     crowded: bool,
+    /// Kept across floods: a writer short of a core ends one every
+    /// few kilobytes.
+    pub(super) asking: Asking,
 }
 
 impl Turn {
     pub(super) fn new(leases: Leases) -> Self {
-        Self { leases, held: None, flooding: false, crowded: false }
+        Self { leases, held: None, flooding: false, crowded: false, asking: Asking::default() }
     }
 
     /// In bulk output that has not paused since it took a turn.
