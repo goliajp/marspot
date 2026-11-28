@@ -34,6 +34,8 @@ pub(super) struct ShellWindow {
     /// presenter swap to the ready id.  A later resize replaces the
     /// pending entry; the dropped one is abandoned (`release`).
     pub(super) pending_surfaces: Option<SurfacePair>,
+    /// Minimized to the Dock: said again to a core that takes over.
+    pub(super) minimized: bool,
     /// What puts a surface on this window's view.
     pub(super) layers: Option<FrameLayers>,
     /// True after the core has confirmed at least one SurfaceReady for
@@ -148,6 +150,7 @@ impl ShellWindow {
             frame_index,
             surfaces: None,
             pending_surfaces: None,
+            minimized: false,
             layers: None,
             first_frame_ready: false,
             frame_pending: false,

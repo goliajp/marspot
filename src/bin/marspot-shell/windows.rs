@@ -172,6 +172,9 @@ impl ShellApp {
                 window_id = self.windows[i].window_id
             );
         }
+        for w in self.windows.iter().filter(|w| w.minimized) {
+            self.send(MsgType::WindowMinimized, marspot::shell_proto::encode_window_minimized(w.window_id, true));
+        }
     }
 
     /// Index of the window carrying `window_id`.
