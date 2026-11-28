@@ -384,6 +384,7 @@ mod tests {
     mod idle_rules;
     mod dormant_records;
     mod reclaim_runs;
+    mod reclaim_first_frame;
     mod idle_loop;
     mod session_binding;
     mod model_read;

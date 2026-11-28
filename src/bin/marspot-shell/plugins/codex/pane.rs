@@ -188,6 +188,10 @@ pub(super) fn resume_op(name: &'static str, badge: String, pane: &PaneCodex, hom
                 pty_op::Step::await_quiet(Duration::from_millis(1500))
                     .after_bytes(2048)
                     .timeout(Duration::from_secs(30))
+                    // a resumed thread still at work keeps its spinner
+                    // going; past the floor the codex is up, and only the
+                    // composer is left unrestored rather than typed mid-redraw
+                    .or_drawn_late()
                     .named("first_frame"),
             )
             .step(pty_op::Step::await_process(pane.shell_pid, looks_like_codex).timeout(Duration::from_secs(5)))

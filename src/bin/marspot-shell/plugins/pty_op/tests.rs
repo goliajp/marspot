@@ -1664,4 +1664,4 @@ mod wake_tests;
 mod badge_tests;
 
 #[path = "quiet_tests.rs"]
-mod quiet_tests;
+pub(in crate::plugins) mod quiet_tests;
