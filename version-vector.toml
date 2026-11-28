@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.922"  # cold restores of every agent share one pace and the rules for when a pane is owed one
+shell   = "0.7.923"  # the state map registers plugins/codex/last_bound.tsv
 core    = "0.12.808"  # web pane: writes to madcawl never block, the GPU linear-texture alignment is checked, the dev seam URL is read once
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

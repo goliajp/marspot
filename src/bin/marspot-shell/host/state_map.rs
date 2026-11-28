@@ -183,6 +183,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("plugins/claudecode/heads_up.tsv", Draft, "claudecode switching", "one row per pane", true),
     e("plugins/claudecode/dormant.tsv", Draft, "claudecode dormant", "one row per pane", true),
     e("plugins/claudecode/last_bound.tsv", Draft, "claudecode cold_restore", "128 rows", true),
+    e("plugins/codex/last_bound.tsv", Draft, "codex cold_restore", "128 rows", true),
     e("plugins/claudecode/fable_need.tsv", Draft, "claudecode fable_need", "one row per session", true),
     e("plugins/claudecode/usage_trend.tsv", Derived, "claudecode burn", "one row per account", true),
     e("plugins/claudecode/model/<sid>", Derived, "marspot-shell --cc-statusline (claude's hook)", "3 days", true),
