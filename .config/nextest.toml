@@ -62,3 +62,14 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.default.overrides]]
 filter = 'package(marspot-agent) & test(/closed_loop/)'
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# The Linux job on a shared runner: at nice 19 beside a dozen other
+# heavy jobs, the scheduler's simulations get a sliver of a core, and
+# ones that take 6 to 8 s alone in a debug build passed their minute
+# there.  Their limit is ten minutes on that runner; it still ends a
+# hang.
+[profile.shared-runner]
+
+[[profile.shared-runner.overrides]]
+filter = 'package(marspot-agent)'
+slow-timeout = { period = "60s", terminate-after = 10 }

@@ -40,9 +40,13 @@ job_mac() {
 
 job_linux() {
   set -e
-  local s=(-p marspot-term -p marspot-linkify)
+  # marspot-agent: the planner's closed-loop digest must read the same here
+  local s=(-p marspot-term -p marspot-linkify -p marspot-agent)
   cargo build "${s[@]}" --all-targets
-  cargo nextest run "${s[@]}" --no-fail-fast
+  # its share of the runner's cores, and the limits of a job that runs
+  # at nice 19 beside the runner's other heavy jobs
+  cargo nextest run "${s[@]}" --profile shared-runner \
+    --test-threads "$(bin/_runner-jobs.sh)" --no-fail-fast
   cargo clippy "${s[@]}" --all-targets -- -D warnings
 }
 
@@ -188,7 +192,8 @@ echo "==> macOS job on $MAC, Linux job on $LINUX"
 run_job "$MAC" mac 'export PATH=$HOME/.cargo/bin:/usr/local/bin:$PATH' \
   "/usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $(lock_until "$TIMEOUT" ci "$NAME")" > "$LOGS/mac.log" 2>&1 &
 mac=$!
-run_job "$LINUX" linux 'source ~/.cargo/env' "nice -n 10" > "$LOGS/linux.log" 2>&1 &
+run_job "$LINUX" linux 'source ~/.cargo/env' \
+  "/usr/local/bin/bench-lock heavy --max-wait $MAX_WAIT $(lock_until "$TIMEOUT" ci "$NAME") nice -n 19" > "$LOGS/linux.log" 2>&1 &
 linux=$!
 
 rc=0
