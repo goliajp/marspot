@@ -115,7 +115,11 @@ impl CoreApp {
         } else {
             lines
         };
+        let program = self.shown(wi, idx).program_owns_scroll();
         if self.shown_mut(wi, idx).apply_scroll_lines(lines) {
+            if program {
+                self.user_wrote_into(wi, idx);
+            }
             // The program just repainted at a new position.  A tape
             // following this pane reads the shift off the next frame
             // and carries the selection with it; without one there is

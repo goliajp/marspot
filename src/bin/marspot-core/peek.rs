@@ -129,6 +129,7 @@ impl CoreApp {
             if let Some(pane) = self.shown_pane_mut(wi, idx) {
                 pane.session_mut().l3_inject_mouse_button(0, false, c1, r1);
             }
+            self.user_wrote_into(wi, idx);
         }
         self.scrollbar_drag.take_if(|d| d.is_of(wi, idx));
         let w = &mut win!(self, wi);

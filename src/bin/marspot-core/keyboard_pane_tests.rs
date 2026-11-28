@@ -13,6 +13,29 @@ fn keyboard_frames(app: &mut CoreApp) -> Vec<Option<u64>> {
         .collect()
 }
 
+/// Focus moving repaints both windows: the focus ring leaves one and
+/// arrives in the other.  A frame for a window that already closed
+/// changes nothing.
+#[test]
+fn focusing_a_window_repaints_the_one_it_left() {
+    let sb = Sandbox::new();
+    let mut app = app_in(sb.dir(), vec![win(1, Vec::new()), win(2, Vec::new())]);
+    app.windows[0].needs_render = false;
+    app.windows[1].needs_render = false;
+
+    assert_eq!(app.focus_window(2), Some(1));
+    assert_eq!(app.key_window, 1);
+    assert!(app.windows[0].needs_render, "the window that lost focus");
+    assert!(app.windows[1].needs_render, "the window that gained it");
+
+    app.windows[0].needs_render = false;
+    app.windows[1].needs_render = false;
+    assert_eq!(app.focus_window(99), None, "unknown window");
+    assert_eq!(app.key_window, 1);
+    assert!(!app.windows[0].needs_render);
+    assert!(!app.windows[1].needs_render);
+}
+
 #[test]
 fn the_keyboard_pane_follows_the_key_window_and_the_app_focus() {
     let sb = Sandbox::new();

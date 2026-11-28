@@ -1,5 +1,5 @@
-//! Which pane the user's attention and keyboard are in, core → shell.
-//! Each payload is `session_id u64 LE`.
+//! What the user did with or in a pane, as far as the shell needs to
+//! know, core → shell.  Each payload is `session_id u64 LE`.
 
 use std::io;
 
@@ -8,6 +8,16 @@ fn session_id(payload: &[u8], what: &str) -> io::Result<u64> {
         Ok(b) => Ok(u64::from_le_bytes(b)),
         Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("{what} payload != 8 bytes"))),
     }
+}
+
+/// The user clicked the badge of the pane (`PaneBadgeClicked`); the
+/// badge text itself is the shell's plugins' state.
+pub fn encode_pane_badge_clicked(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_badge_clicked(payload: &[u8]) -> io::Result<u64> {
+    session_id(payload, "PANE_BADGE_CLICKED")
 }
 
 /// The focused pane of one window changed (`PaneFocused`).
@@ -30,6 +40,17 @@ pub fn decode_keyboard_pane(payload: &[u8]) -> io::Result<Option<u64>> {
     session_id(payload, "KEYBOARD_PANE").map(|s| (s != 0).then_some(s))
 }
 
+/// The user put input into the pane other than by a key
+/// (`PaneUserInput`): a file dropped on it, the mouse or the wheel
+/// reported to its program.  At most one a second for the same pane.
+pub fn encode_pane_user_input(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_user_input(payload: &[u8]) -> io::Result<u64> {
+    session_id(payload, "PANE_USER_INPUT")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +61,6 @@ mod tests {
         assert_eq!(decode_keyboard_pane(&encode_keyboard_pane(None)).unwrap(), None);
         assert!(decode_keyboard_pane(&[1, 2, 3]).is_err());
         assert_eq!(decode_pane_focused(&encode_pane_focused(7)).unwrap(), 7);
+        assert_eq!(decode_pane_user_input(&encode_pane_user_input(9)).unwrap(), 9);
     }
 }

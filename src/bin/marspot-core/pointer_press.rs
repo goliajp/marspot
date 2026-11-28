@@ -186,6 +186,7 @@ impl CoreApp {
                 // Both encodings count from one.
                 pane.session_mut().l3_inject_mouse_button(0, true, c1, r1);
             }
+            self.user_wrote_into(wi, idx);
             self.mouse_report_press = Some((wi, idx, c1, r1));
             self.mouse_report_last_cell = Some((wi, idx, c1, r1));
             return true;

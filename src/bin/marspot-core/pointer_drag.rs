@@ -48,6 +48,7 @@ impl CoreApp {
             return;
         }
         self.shown_mut(wi, idx).session_mut().forward_paste(&text);
+        self.user_wrote_into(wi, idx);
         if let Some(sid) = win!(self, wi).panes[idx].shelld_session_id() {
             self.strips.typed(sid);
         }
@@ -135,7 +136,10 @@ impl CoreApp {
             };
             if may_step {
                 let up = raw_row < 0;
-                self.shown_mut(wi, target_idx).apply_scroll_lines(if up { 1 } else { -1 });
+                let program = self.shown(wi, target_idx).program_owns_scroll();
+                if self.shown_mut(wi, target_idx).apply_scroll_lines(if up { 1 } else { -1 }) && program {
+                    self.user_wrote_into(wi, target_idx);
+                }
             }
         }
 
@@ -187,6 +191,7 @@ impl CoreApp {
             if let Some(pane) = self.shown_pane_mut(at, idx) {
                 pane.session_mut().l3_inject_mouse_button(0, false, c1, r1);
             }
+            self.user_wrote_into(at, idx);
             return;
         }
         // RFC-005 step 5 / RFC-006 — resolve an armed title press.

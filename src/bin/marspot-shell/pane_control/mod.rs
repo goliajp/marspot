@@ -237,7 +237,8 @@ impl Hub {
         self.typed.last_input(sid, self.key_at())
     }
 
-    /// Something was written into pane `sid` through this socket.
+    /// Something was written into pane `sid` through this socket, or the
+    /// core says the user put something into it other than by a key.
     fn input_sent(&self, sid: u64) {
         self.typed.sent(sid, SystemTime::now());
     }
@@ -336,6 +337,12 @@ impl Hub {
             // land after the keyboard frame it precedes
             if let Ok(sid) = marspot::shell_proto::decode_keyboard_pane(payload) {
                 self.keyboard(sid);
+            }
+            return true;
+        }
+        if msg == MsgType::PaneUserInput {
+            if let Ok(sid) = marspot::shell_proto::decode_pane_user_input(payload) {
+                self.input_sent(sid);
             }
             return true;
         }

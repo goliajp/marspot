@@ -74,3 +74,14 @@ fn an_older_core_is_followed_by_pane_focused_and_a_new_core_starts_from_none() {
     hub.key_pressed();
     assert!(hub.last_input(5).is_some(), "until it does, PaneFocused is followed again");
 }
+
+/// A file dropped on a pane, or the mouse reported to its program, is
+/// that pane's input, wherever the keyboard is.
+#[test]
+fn input_the_core_reports_is_the_panes_it_names() {
+    let (hub, _rx) = hub_at(&temp("keyboard-drop"));
+    assert!(hub.take_core_frame(MsgType::KeyboardPane, &encode_keyboard_pane(Some(4))));
+    assert!(hub.take_core_frame(MsgType::PaneUserInput, &marspot::shell_proto::encode_pane_user_input(7)));
+    assert!(hub.last_input(7).is_some());
+    assert_eq!(hub.last_input(4), None);
+}

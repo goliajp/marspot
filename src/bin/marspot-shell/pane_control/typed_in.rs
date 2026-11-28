@@ -1,5 +1,6 @@
-//! When each pane last had input: a key while it had the focus, or a
-//! send through the control socket.
+//! When each pane last had input: a key while it had the keyboard, a
+//! send through the control socket, or a file drop or mouse report the
+//! core told of.
 //!
 //! The key path pays only its one clock store (`Hub::key_pressed`).
 //! Which pane a key went to is settled when the keyboard moves (the

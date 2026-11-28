@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.908"  # the control hub credits each key to the pane the core says keys go to (KeyboardPane), across windows
-core    = "0.12.799"  # the core tells the shell which pane keys go to on every change, also when only the key window changes
-session = "0.11.498"  # marspot-term: KeyboardPane frame; PaneFocused coding moves to a file of its own (not used by session)
+shell   = "0.7.909"  # a file drop or mouse report the core tells of counts as the pane's input
+core    = "0.12.800"  # the core tells the shell of a file drop or a mouse or wheel report into a pane, once a second per pane at most
+session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)
