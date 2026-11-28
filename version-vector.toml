@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.890"  # marspot-term: the core can ask the shell to bring a window to the front
-core    = "0.12.782"  # a focused slot with no sidebar row lights no row
+core    = "0.12.783"  # a test holds the sidebar's tree line to at least one physical pixel
 session = "0.11.493"  # marspot-term: the core can ask the shell to bring a window to the front

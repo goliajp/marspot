@@ -295,6 +295,15 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_tree_line_is_at_least_one_physical_pixel() {
+        use crate::ui::components::density_kit::at_scale;
+        // a spec point is two physical pixels at scale 1 (`px_per_pt`)
+        let line = || chrome::px(chrome::SIDEBAR_TREE_LINE);
+        assert_eq!(at_scale(1.0, line), 1.0, "one pixel on a 1x screen");
+        assert_eq!(at_scale(2.0, line), 2.0);
+    }
+
+    #[test]
     fn sidebar_names_are_cut_on_a_character_boundary() {
         assert_eq!(clip_chars("insight-mono", 7), "insight");
         assert_eq!(clip_chars("alt", 7), "alt");
