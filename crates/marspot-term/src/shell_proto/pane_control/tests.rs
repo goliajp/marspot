@@ -178,6 +178,7 @@ pub(super) fn samples() -> Vec<(MsgType, Vec<u8>, Decode)> {
                 sid: 4,
                 act: PanelAct::ToggleCwdControl,
                 want: CwdControl::Allow,
+                parent: 0,
             }),
             |p| shown(decode_helper_panel_act(p)),
         ),
@@ -268,6 +269,7 @@ fn pane_control_each_frame_round_trips() {
         PlaceWhere::Window,
         PlaceWhere::Peek,
         PlaceWhere::Unpeek,
+        PlaceWhere::Parent,
     ] {
         let m = PanePlace {
             req_id: 1,
@@ -352,14 +354,17 @@ fn pane_control_each_frame_round_trips() {
     );
     let m = HelperPanelAct {
         sid: 4,
-        act: PanelAct::CloseAllOfParent,
+        act: PanelAct::SetParent,
         want: CwdControl::Deny,
+        parent: 77,
     };
     let p = encode_helper_panel_act(&m);
     assert_eq!(decode_helper_panel_act(&p).unwrap(), m);
     // as first laid out, with nothing after the act
-    let old = HelperPanelAct { want: CwdControl::Flip, ..m };
+    let old = HelperPanelAct { want: CwdControl::Flip, parent: 0, ..m };
     assert_eq!(decode_helper_panel_act(&p[..9]).unwrap(), old);
+    // as laid out before the parent
+    assert_eq!(decode_helper_panel_act(&p[..10]).unwrap(), HelperPanelAct { parent: 0, ..m });
 }
 
 #[test]
@@ -381,7 +386,7 @@ fn pane_control_layouts_have_the_documented_sizes() {
         26,
         7 + 3,
         4,
-        10,
+        18,
         19 + 2 * (2 + 53 + 6 + 11 + 4 + "看 parser".len()),
     ];
     assert_eq!(sizes, expected);
@@ -427,12 +432,15 @@ fn pane_control_truncated_payloads_are_refused_at_every_length() {
         assert!(decode(&p).is_ok(), "{t:?} decodes whole");
         // the last byte came later, and may be missing
         let late = match t {
-            MsgType::HelperPanelAct | MsgType::PanePlace | MsgType::PaneRetire => 1,
+            MsgType::PanePlace | MsgType::PaneRetire => 1,
             MsgType::PaneSpawned => 4,
             _ => 0,
         };
+        // as laid out by builds before a field came last: before `want`
+        // and before `parent`
+        let older: &[usize] = if matches!(t, MsgType::HelperPanelAct) { &[9, 10] } else { &[] };
         let least = p.len() - late;
-        for n in 0..least {
+        for n in (0..least).filter(|n| !older.contains(n)) {
             assert!(
                 decode(&p[..n]).is_err(),
                 "{t:?} cut to {n} of {} bytes decoded",
@@ -454,4 +462,22 @@ fn pane_control_trailing_bytes_are_ignored() {
             "{t:?} with a later build's tail"
         );
     }
+}
+
+/// The idle timeout on the wire between images of two ages: 0 is the
+/// default to both, and "never" is a value an older L3 reads as a
+/// timeout far past any session's life.
+#[test]
+fn pane_control_shadow_idle_wire_values_read_the_same_by_old_and_new() {
+    assert_eq!(SHADOW_IDLE_DEFAULT_S, 6 * 3600);
+    assert_ne!(SHADOW_IDLE_NEVER, 0, "0 keeps meaning the default");
+    let years = u64::from(SHADOW_IDLE_NEVER) / (365 * 24 * 3600);
+    assert!(years >= 100, "an older L3 times it out after {years} years");
+    let m = SessionShadow { req_id: 9, parent_sid: 5, idle_s: SHADOW_IDLE_NEVER };
+    let p = encode_session_shadow(&m);
+    assert_eq!(&p[12..16], &[0xFF; 4], "all ones on the wire");
+    assert_eq!(decode_session_shadow(&p).unwrap(), m);
+    assert_eq!(parse_shadow_was(&shadow_was_text(SHADOW_IDLE_NEVER)), Some(SHADOW_IDLE_NEVER));
+    assert_eq!(parse_shadow_was(&shadow_was_text(2)), Some(2));
+    assert_eq!(parse_shadow_was(""), None, "an older L3's answer says nothing");
 }

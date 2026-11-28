@@ -77,8 +77,8 @@ fn helper_panel_buttons_ask_the_shell_and_move_the_pane() {
         app.find_window_pane_by_sid(a).is_some()
     });
     assert!(acts(&mut app).is_empty(), "moving is the core's own");
-    assert_eq!(app.pane_control.shadows.family.count(psid), 0);
-    assert_eq!(app.pane_control.shadows.family.count(a), 1, "what was below it is now its own");
+    assert_eq!(app.pane_control.shadows.family.count(psid), 2, "shown in the window, still its child");
+    assert_eq!(app.pane_control.shadows.family.count(a), 0);
     assert!(app.pane_control.reports.frames().all(|f| f.msg_type != MsgType::PaneDone), "nobody asked");
 }
 
@@ -191,53 +191,29 @@ fn helper_panel_a_title_of_an_ended_session_is_not_kept() {
 
 /// A move asked on the panel that failed is said on the pane's row,
 /// until it is asked again.
+/// A move to a window asks the session nothing, now that the pane keeps
+/// its parent there: it is done at once, for a session that cannot
+/// answer or is being reattached too, and the row says nothing failed.
 #[test]
-fn helper_panel_says_on_the_row_a_move_that_failed() {
+fn helper_panel_move_to_a_window_needs_no_answer_from_its_session() {
     let sb = sandbox();
     let (mut app, rx, psid) = app_with_parent(&sb);
     let a = open_shadow(&mut app, &rx, 7, psid);
-    app.set_pane_title(a, "codex · a task".into());
+    let b = open_shadow(&mut app, &rx, 8, psid);
+    let pid = marspot_term::session_registry::read_session_entry(a).unwrap().pid;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
     app.open_helpers(0, psid);
     press(&mut app, Ask::Move(0));
-    // the session did not answer in time
-    app.expire_places(Instant::now() + Duration::from_secs(4));
-    let failed = format!("{} · codex · a task", marspot::ui::strings::t(marspot::ui::strings::Msg::HelperNotMoved));
-    assert_eq!(draw(&mut app)[0].rows[0].doing, failed);
-    wait_for("its late answer is undone", || {
-        drive(&mut app, &rx);
-        app.pane_control.shadows.places.expired.is_empty()
-    });
-    assert!(app.find_window_pane_by_sid(a).is_none());
-    assert_eq!(draw(&mut app)[0].rows[0].doing, failed, "still said");
-
-    press(&mut app, Ask::Move(0));
-    assert_eq!(draw(&mut app)[0].rows[0].doing, "codex · a task", "asked again");
-    wait_for("the pane is in the window", || {
-        drive(&mut app, &rx);
-        app.find_window_pane_by_sid(a).is_some()
-    });
-}
-
-/// A move the core cannot even ask of the session fails at once, and is
-/// said on the row the same way.
-#[test]
-fn helper_panel_says_on_the_row_a_move_its_session_could_not_be_asked() {
-    let sb = sandbox();
-    let (mut app, rx, psid) = app_with_parent(&sb);
-    let a = open_shadow(&mut app, &rx, 7, psid);
-    app.set_pane_title(a, "codex · a task".into());
-    app.open_helpers(0, psid);
-    app.reconnecting.insert(a);
-    press(&mut app, Ask::Move(0));
-    let failed = format!("{} · codex · a task", marspot::ui::strings::t(marspot::ui::strings::Msg::HelperNotMoved));
-    assert_eq!(draw(&mut app)[0].rows[0].doing, failed);
+    assert!(app.find_window_pane_by_sid(a).is_some(), "moved at once");
     assert!(app.pane_control.shadows.places.placing.is_empty(), "nothing waits on the session");
-    app.reconnecting.remove(&a);
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+    app.reconnecting.insert(b);
+    app.set_pane_title(b, "codex · a task".into());
+    app.open_helpers(0, psid);
     press(&mut app, Ask::Move(0));
-    wait_for("the pane is in the window", || {
-        drive(&mut app, &rx);
-        app.find_window_pane_by_sid(a).is_some()
-    });
+    assert!(app.find_window_pane_by_sid(b).is_some(), "moved while it is being reattached");
+    assert_eq!(marspot_term::session_registry::read_session_entry(a).unwrap().shadow_of, psid, "still the parent's child");
+    drive(&mut app, &rx);
 }
 
 /// A close the panel asked of a shadow pane that the core reads after

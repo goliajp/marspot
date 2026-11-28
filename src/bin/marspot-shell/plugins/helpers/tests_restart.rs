@@ -247,3 +247,20 @@ fn helpers_a_second_start_ends_the_first_worker_and_loses_no_fact() {
     s.park();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Who the helpers are does not wait for the plugin: the account rules
+/// may ask before the helpers plugin has started, and they get what the
+/// log says, not an empty list.
+#[test]
+fn helpers_parents_are_known_before_the_plugin_starts() {
+    let dir = temp("order");
+    let mut env = marspot_term::test_env::EnvGuard::new();
+    env.set("MARSPOT_STATE_DIR", &dir);
+    std::fs::create_dir_all(records::dir()).unwrap();
+    let (last_shell, _rx) = shared_at(&records::dir());
+    feed(&last_shell, 7, vec![Event::started(started(10, "claude", AgentKind::Codex)), Event::TaskDelivered]);
+    assert!(super::SHARED.get().is_none(), "the plugin has not started");
+    assert_eq!(super::strip::parents(), vec![(7, 10)]);
+    drop(env);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

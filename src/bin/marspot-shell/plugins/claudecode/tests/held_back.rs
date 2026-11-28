@@ -91,7 +91,7 @@ fn helpers_switch_a_helper_is_not_held_back_for_fable_either() {
 fn helpers_switch_a_reset_claim_s_pane_is_never_moved() {
     rebalance_mode(marspot::settings::Rebalance::DryRun);
     let (_home, host, mut plugin, mut result) = scene("hbr", 76);
-    result.helpers = HelperRoles::of_with_claims([(50, 0), (76, 50)], &[50]);
+    result.helpers = HelperRoles::of_with_claims([(50, 0), (76, 50)], &[], &[50]);
     view(&plugin, &mut result);
     sweep(&mut plugin, &host, &mut result);
     assert!(host.submitted.lock().unwrap().is_empty(), "{:?}", host.logged.lock().unwrap());

@@ -55,6 +55,31 @@ impl MenuItem {
     }
 }
 
+/// A menu made of `groups`: a divider only between two groups that both
+/// have rows, so none opens or ends a menu and no two meet.  Every menu
+/// is put together here.
+pub fn grouped<G: IntoIterator<Item = MenuItem>>(groups: impl IntoIterator<Item = G>) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::new();
+    for g in groups {
+        let mut rows = g.into_iter().filter(|it| !it.divider).peekable();
+        if rows.peek().is_none() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(MenuItem::divider());
+        }
+        out.extend(rows);
+    }
+    out
+}
+
+/// `items` neither opens nor ends with a divider, and no two meet.
+pub fn dividers_sound(items: &[MenuItem]) -> bool {
+    items.first().is_none_or(|i| !i.divider)
+        && items.last().is_none_or(|i| !i.divider)
+        && items.windows(2).all(|w| !(w[0].divider && w[1].divider))
+}
+
 /// What a press lands on: a row that acts, the menu where nothing acts
 /// (a divider, a disabled row, its padding), or the window outside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +263,19 @@ mod tests {
             MenuItem::entry("Clear scrollback", 3),
             MenuItem::entry("Close pane", 4),
         ]
+    }
+
+    /// Empty groups vanish and dividers stand only between rows.
+    #[test]
+    fn grouped_puts_dividers_only_between_groups_with_rows() {
+        let row = |t| MenuItem::entry("x", t);
+        let m = grouped([vec![], vec![row(1)], vec![], vec![MenuItem::divider()], vec![row(2), row(3)], vec![]]);
+        assert_eq!(m.iter().map(|i| if i.divider { 0 } else { i.action_tag }).collect::<Vec<_>>(), [1, 0, 2, 3]);
+        assert!(dividers_sound(&m));
+        assert!(grouped(Vec::<Vec<MenuItem>>::new()).is_empty());
+        assert!(!dividers_sound(&[MenuItem::divider(), row(1)]));
+        assert!(!dividers_sound(&[row(1), MenuItem::divider()]));
+        assert!(!dividers_sound(&[row(1), MenuItem::divider(), MenuItem::divider(), row(2)]));
     }
 
     #[test]

@@ -19,6 +19,8 @@ impl CoreApp {
     /// Every pane's display name by session id.  Every window and the
     /// shadows: whether a name is shared cannot be known from one
     /// window alone, and a shadow pane is named the way L1 names it.
+    /// Drawing asks this every frame, so only codes already known are
+    /// used (`note_pane_code`).
     pub(super) fn pane_names(&self) -> std::collections::HashMap<u64, String> {
         let drawn = self.windows.iter().flat_map(|w| w.panes.iter()).map(|p| (p, false));
         let refs: Vec<marspot::pane_name::PaneRef> = drawn
@@ -26,10 +28,18 @@ impl CoreApp {
             .filter_map(|(p, shadow)| {
                 let sid = p.shelld_session_id()?;
                 let cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
-                Some(marspot::pane_name::PaneRef::new(sid, cwd).with_shadow(shadow))
+                Some(marspot::pane_name::PaneRef::known(sid, cwd).with_shadow(shadow))
             })
             .collect();
         marspot::pane_name::assign(&refs).into_iter().collect()
+    }
+
+    /// Learn pane `sid`'s code, which may read and write the code file,
+    /// so that drawing finds it in memory.  Done where a pane comes or
+    /// its directory is looked up, never while drawing.
+    pub(super) fn note_pane_code(sid: u64) {
+        // a failure leaves it unknown, and the next look tries again
+        let _ = marspot_term::pane_code::code_for(sid);
     }
 
     /// The pane whose L3 is session `sid`, drawn or not.

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.875"  # a handoff whose first frame comes late fails before its ledger is committed
-core    = "0.12.761"  # a core attaching to a session counts its view asks on from the number the session last applied
-session = "0.11.489"  # quiescing for an execv moves to a file of its own
+shell   = "0.7.889"  # an idle wake bounds its loading by the wake watchdog for retry answers
+core    = "0.12.773"  # the hidden-panes record is taken by a name clippy does not read as a conversion
+session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

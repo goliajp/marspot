@@ -1,17 +1,16 @@
 //! The helper panel, and what the chrome says about shadow panes: the
 //! `+N` after a pane's title and the sidebar's count.
 //!
-//! The sidebar's is derived from `shadows` and whose shadow each one
-//! is, the `+N` from the strips' records (`helper_strip/count.rs`).  The
-//! counts are worked out when the shadows change, the panel's rows when
-//! the shadows, a title or the deny list do; how long a pane has run is
-//! worked out when the panel is drawn.  Nothing here wakes the loop by
-//! itself.
+//! The sidebar's is derived from whose child each pane is, shown or not
+//! (`helper_family.rs`), the `+N` from the strips' records
+//! (`helper_strip/count.rs`).  The counts are worked out when the
+//! shadows or a parent change, the panel's rows when the shadows, a
+//! title or the deny list do, and how long a pane has run when the
+//! panel is drawn.  Nothing here wakes the loop by itself.
 //!
 //! The core moves a pane to a window itself; closing and denying are
 //! the shell's (`HelperPanelAct`).
 
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,8 +21,11 @@ use marspot::ui::components::helpers_view::{self, Ask, Control, HelperGroup, Hel
 
 use super::*;
 
+#[path = "helper_family.rs"]
+mod family;
 #[path = "helper_panel_move.rs"]
 mod moves;
+pub(super) use family::Family;
 
 /// The badge menu's row that opens the panel: the core's own, outside
 /// every plugin's range.
@@ -31,52 +33,8 @@ pub(super) const MENU_TAG: u32 = 0x6000_0000;
 /// The badge menu's row that leaves the pane's view.
 pub(super) const BACK_TAG: u32 = MENU_TAG + 1;
 
-/// Shadow panes nest two deep by default; a chain that loops ends here.
-const WALK_MAX: usize = 16;
-
 /// Set by the deny list's watcher.
 static DENY_CHANGED: AtomicBool = AtomicBool::new(false);
-
-/// Whose shadow each shadow pane is, and what follows from it.
-#[derive(Default)]
-pub(super) struct Family {
-    parents: HashMap<u64, u64>,
-    /// Each pane with shadows below it that is no shadow itself, and
-    /// how many.
-    counts: Vec<(u64, u32)>,
-    /// The counts are those of the shadows now.
-    counted: bool,
-    /// What the panel about to open is of.
-    opening: u64,
-    /// Shadow panes the panel failed to move to a window, until tried again.
-    unmoved: std::collections::HashSet<u64>,
-}
-
-impl Family {
-    pub(super) fn adopted(&mut self, sid: u64, parent: u64) {
-        self.parents.insert(sid, parent);
-    }
-
-    /// The pane at the top of `sid`'s chain of parents.
-    pub(super) fn root(&self, sid: u64) -> u64 {
-        let mut at = sid;
-        for _ in 0..WALK_MAX {
-            match self.parents.get(&at) {
-                Some(p) => at = *p,
-                None => break,
-            }
-        }
-        at
-    }
-
-    pub(super) fn counted(&self) -> bool {
-        self.counted
-    }
-
-    pub(super) fn count(&self, sid: u64) -> u32 {
-        self.counts.iter().find(|c| c.0 == sid).map_or(0, |c| c.1)
-    }
-}
 
 /// The open panel's data.
 pub(super) struct HelperPanelState {
@@ -111,31 +69,16 @@ fn full_name(sid: u64, cwd: &str) -> String {
 }
 
 impl CoreApp {
-    /// A shadow pane came, went or moved: count again, and draw what
-    /// says so.
+    /// A shadow pane came, went or moved, or a pane's parent changed:
+    /// count again, and draw what says so.
     pub(super) fn shadows_changed(&mut self) {
-        let sids: Vec<u64> = self.shadows.iter().filter_map(Pane::shelld_session_id).collect();
-        let fam = &mut self.pane_control.shadows.family;
-        fam.parents.retain(|sid, _| sids.contains(sid));
-        fam.unmoved.retain(|sid| sids.contains(sid));
-        for sid in &sids {
-            // one the registry alone knows about: adopted at boot
-            if let std::collections::hash_map::Entry::Vacant(v) = fam.parents.entry(*sid)
-                && let Ok(e) = session_registry::read_session_entry(*sid)
-                && e.shadow_of != 0
-            {
-                v.insert(e.shadow_of);
-            }
+        let hidden: Vec<u64> = self.shadows.iter().filter_map(Pane::shelld_session_id).collect();
+        let shown: Vec<u64> = self.windows.iter().flat_map(|w| w.panes.iter()).filter_map(Pane::shelld_session_id).collect();
+        hidden.iter().for_each(|sid| Self::note_pane_code(*sid));
+        self.pane_control.shadows.family.recount(&hidden, &shown);
+        if let Some(record) = self.pane_control.shadows.family.take_record(&hidden) {
+            super::shadow_boot::write_hidden_record(&record);
         }
-        fam.counts.clear();
-        for sid in sids {
-            let root = fam.root(sid);
-            match fam.counts.iter_mut().find(|c| c.0 == root) {
-                Some(c) => c.1 += 1,
-                None => fam.counts.push((root, 1)),
-            }
-        }
-        fam.counted = true;
         for w in &mut self.windows {
             w.needs_render = true;
         }
@@ -321,7 +264,7 @@ impl CoreApp {
         };
         let Some(sid) = sid else { return };
         lx_event!("HELPER_PANEL_ASKED", "the user pressed a button of the helper panel", session = sid, act = format!("{act:?}"));
-        self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&HelperPanelAct { sid, act, want })));
+        self.pending_to_shell.push((MsgType::HelperPanelAct, encode_helper_panel_act(&HelperPanelAct { sid, act, want, parent: 0 })));
     }
 
     /// In its parent's place, with the panel out of the way.

@@ -150,9 +150,9 @@ fn a_row_and_its_close_button_light_together_with_a_paint_and_nothing_else() {
         let window = (1400.0, 900.0);
         let l = layout(&stage.font, 3);
         let names = [
-            SidebarEntry { label: "smix", state: SessionState::Active },
-            SidebarEntry { label: "devops", state: SessionState::Idle },
-            SidebarEntry { label: "alt", state: SessionState::Exited },
+            SidebarEntry { label: "smix", state: SessionState::Active, code: Some(4145) },
+            SidebarEntry { label: "devops", state: SessionState::Idle, code: Some(5528) },
+            SidebarEntry { label: "alt", state: SessionState::Exited, code: Some(6004) },
         ];
         let rows: &[SidebarEntry] = &names;
         let cell_w = stage.font.cell_w as f32;
@@ -211,7 +211,7 @@ fn under_a_panel_the_sidebar_follows_the_pointer_and_lights_nothing() {
         let Some(mut stage) = Stage::new() else { return };
         let window = (1400.0, 900.0);
         let l = layout(&stage.font, 3);
-        let entry = |label| SidebarEntry { label, state: SessionState::Active };
+        let entry = |label| SidebarEntry { label, state: SessionState::Active, code: None };
         let names = [entry("smix"), entry("devops"), entry("alt")];
         let rows: &[SidebarEntry] = &names;
         let cell_w = stage.font.cell_w as f32;

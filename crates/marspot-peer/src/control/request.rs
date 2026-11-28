@@ -28,6 +28,9 @@ pub enum Op {
     Read(ReadArgs),
     Resize { target: String, cols: u16, rows: u16 },
     Place { target: String, place: Where, force: bool },
+    /// Make `target` the child of `parent`, or a top pane (`None`),
+    /// where it is shown.
+    Parent { target: String, parent: Option<String> },
     Close { target: String },
     Audit { limit: u32 },
     HelperStart(HelperStartArgs),
@@ -136,6 +139,7 @@ impl Op {
             Op::Read(_) => "pane.read",
             Op::Resize { .. } => "pane.resize",
             Op::Place { .. } => "pane.place",
+            Op::Parent { .. } => "pane.parent",
             Op::Close { .. } => "pane.close",
             Op::Audit { .. } => "pane.audit",
             Op::HelperStart(_) => "helper.start",
@@ -243,6 +247,7 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
             },
             force: a.bool("force", false)?,
         },
+        "pane.parent" => Op::Parent { target: a.target()?, parent: a.str("parent")? },
         "pane.close" => Op::Close { target: a.target()? },
         "pane.audit" => Op::Audit { limit: a.uint("limit")?.map_or(50, |n| n.clamp(1, 1000) as u32) },
         "helper.start" => Op::HelperStart(helper::start(&a)?),
@@ -261,26 +266,9 @@ pub fn parse(line: &str) -> Result<Request, Reject> {
     Ok(Request { op, caller_thread })
 }
 
-fn open(a: &Args) -> Result<Op, Reject> {
-    let new_window = a.bool("new_window", false)?;
-    let o = OpenArgs {
-        cwd: a.str("cwd")?,
-        shadow: a.bool("shadow", !new_window)?,
-        new_window,
-        parent: a.str("parent")?,
-        cols: a.size("cols", 120)?,
-        rows: a.size("rows", 40)?,
-        command: a.str("command")?,
-    };
-    if new_window && (o.shadow || o.parent.is_some()) {
-        return Err(bad("a pane in a new window is not a shadow and has no `parent`"));
-    }
-    Ok(Op::Open(o))
-}
-
 #[path = "request_args.rs"]
 mod args;
-use args::{input, run_command, wait};
+use args::{input, open, run_command, wait};
 
 #[path = "request_helper.rs"]
 pub mod helper;

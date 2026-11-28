@@ -604,6 +604,8 @@ pub struct PtyOp {
     pub on_end: Option<OnEnd>,
     /// Whose input the run types: see [`Origin`].
     pub origin: Origin,
+    /// The longest bringing a pane back may take once woken.
+    pub wake_bound: Option<Duration>,
 }
 
 /// See [`PtyOp::on_end`].
@@ -634,6 +636,7 @@ impl PtyOp {
             badge: None,
             on_end: None,
             origin: Origin::Marspot,
+            wake_bound: None,
         }
     }
     pub fn on_end(mut self, f: OnEnd) -> Self {
@@ -891,6 +894,8 @@ pub struct OpRunner {
     started: bool,
     /// When the badge was last sent — see the throttle in `on_tick`.
     badge_at: SystemTime,
+    /// When an `AwaitUser` step was moved on.
+    woken_at: Option<SystemTime>,
     on_finish: Option<Box<dyn FnMut(&dyn PaneSessionHost, &OpOutcome) + Send>>,
 }
 
@@ -918,6 +923,7 @@ impl OpRunner {
             cleaned: false,
             started: false,
             badge_at: SystemTime::UNIX_EPOCH,
+            woken_at: None,
             on_finish: None,
         }
     }
@@ -1510,32 +1516,6 @@ impl OpRunner {
             self.finish(host, OpOutcome::Failed { step: self.at, label, err });
         }
     }
-
-    /// The user is back — moves an `AwaitUser` step on.  Returns true
-    /// if that is what it did.
-    pub fn wake(&mut self, host: &dyn PaneSessionHost, trigger: &str) -> bool {
-        if !matches!(
-            self.op.steps.get(self.at).map(|s| &s.kind),
-            Some(StepKind::AwaitUser)
-        ) {
-            return false;
-        }
-        host.log(
-            LogLevel::Info,
-            &format!("{}.woken", self.op.name),
-            &format!("pane {} by {trigger}", host.shelld_session_id()),
-        );
-        self.advance(host);
-        true
-    }
-
-    /// Is the run parked on its `AwaitUser` step?
-    pub fn is_awaiting_user(&self) -> bool {
-        matches!(
-            self.op.steps.get(self.at).map(|s| &s.kind),
-            Some(StepKind::AwaitUser)
-        )
-    }
 }
 
 impl PaneSession for OpRunner {
@@ -1559,6 +1539,14 @@ impl PaneSession for OpRunner {
 
     fn parked(&self) -> bool {
         self.is_awaiting_user()
+    }
+
+    fn wake_for_input(&mut self, host: &dyn PaneSessionHost) -> bool {
+        self.wake(host, "input")
+    }
+
+    fn waking_for(&self) -> Option<Duration> {
+        self.wake_left()
     }
 
     fn on_user_key(
@@ -1756,6 +1744,7 @@ mod quiet;
 use quiet::composer_on_screen;
 mod real_env;
 mod typing;
+mod wake;
 pub use typing::{Origin, PtyIo, Typed};
 pub use real_env::RealEnv;
 #[cfg(test)]

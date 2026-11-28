@@ -89,6 +89,10 @@ impl Request {
                 put(&mut a, "where", place.as_str());
                 put(&mut a, "force", *force);
             }
+            Op::Parent { target, parent } => {
+                put(&mut a, "target", target.as_str());
+                put(&mut a, "parent", parent.as_deref().map_or(Value::Null, Value::from));
+            }
             Op::Close { target } => put(&mut a, "target", target.as_str()),
             Op::Audit { limit } => put(&mut a, "limit", *limit as i64),
         }

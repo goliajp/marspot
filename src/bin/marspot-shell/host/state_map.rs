@@ -64,8 +64,7 @@ const fn e(path: &'static str, kind: Kind, writer: &'static str, cap: &'static s
     Entry { path, kind, writer, cap, across_images }
 }
 
-/// Written by no current code: what earlier builds left in an
-/// installed app's state root.
+/// Written by no current code: left in an installed app by older builds.
 const LEFT_BEHIND: &str = "none (left by an older build)";
 
 pub(crate) const STATE_MAP: &[Entry] = &[
@@ -73,6 +72,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("settings.toml", UserConfig, "settings panel (marspot_term::settings), the user", "the known keys", true),
     e("shell-state.bin", Draft, "L2 marspot::state (layout)", "one record per window", true),
     e("window-state.bin", Draft, "L2 marspot::state (geometry)", "one record per window", true),
+    e("hidden-panes", Draft, "L2 shadow_boot (the panes in no window)", "one row per pane", true),
     e("sessions/.next_id", Draft, "marspot_term::session_registry", "one number", true),
     e("sessions/<id>/entry.toml", Draft, "L3, L2 (session_registry::entry)", "one per pane", true),
     // L2 of any build connects to the L3 that bound it

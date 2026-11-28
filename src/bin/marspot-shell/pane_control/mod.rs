@@ -23,7 +23,7 @@ use marspot::shell_proto::MsgType;
 use marspot_peer::control::Reject;
 
 mod audit;
-mod audit_log;
+pub(crate) mod audit_log;
 pub(crate) mod caller;
 mod config;
 mod conn;
@@ -33,10 +33,11 @@ pub(crate) mod helpers_port;
 mod links;
 mod matched;
 mod limits;
-mod mainloop;
+pub(crate) mod mainloop;
 pub(crate) mod names;
 mod ops_input;
 mod ops_pane;
+mod ops_parent;
 mod ops_proc;
 mod ops_read;
 mod panel_act;
@@ -49,7 +50,7 @@ mod shadow_tree;
 mod wait;
 
 pub(crate) use mainloop::MainSide;
-pub(crate) use panes::PaneView;
+pub(crate) use panes::{PaneView, in_window};
 
 /// A frame for the main loop to send to the core, with how to answer
 /// when it cannot.
@@ -121,11 +122,6 @@ pub(crate) fn key_pressed() {
     if let Some(h) = HUB.get() {
         h.key_pressed();
     }
-}
-
-/// Rotate a log as the audit log is: `log` becomes `log.1`, and so on.
-pub(crate) fn rotate_log(path: &std::path::Path) {
-    audit_log::rotate(path);
 }
 
 /// The hub, once [`start`] ran.

@@ -182,7 +182,7 @@ impl CoreApp {
             helper: false,
             new_window: false,
             parent_sid: parent,
-            idle_s: 0,
+            idle_s: marspot::shell_proto::SHADOW_IDLE_DEFAULT_S,
             cols: 0,
             rows: 0,
             cwd: String::new(),

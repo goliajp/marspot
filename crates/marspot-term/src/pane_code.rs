@@ -26,17 +26,26 @@ const LOCK_TIMEOUT: Duration = Duration::from_millis(500);
 /// the pane gets its code, and until then the code looks unowned.
 const PRUNE_GRACE: Duration = Duration::from_secs(10);
 
+fn seen() -> &'static Mutex<HashMap<u64, u16>> {
+    static SEEN: OnceLock<Mutex<HashMap<u64, u16>>> = OnceLock::new();
+    SEEN.get_or_init(Mutex::default)
+}
+
 /// The code of pane `sid`, allocated on first ask.
 pub fn code_for(sid: u64) -> io::Result<u16> {
-    static SEEN: OnceLock<Mutex<HashMap<u64, u16>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(Mutex::default);
-    if let Some(code) = seen.lock().unwrap().get(&sid) {
-        return Ok(*code);
+    if let Some(code) = known(sid) {
+        return Ok(code);
     }
     let path = crate::paths::state_root().join("pane-codes");
     let code = code_in(&path, sid, PRUNE_GRACE, crate::session_registry::list_session_dir_ids, entropy)?;
-    seen.lock().unwrap().insert(sid, code);
+    seen().lock().unwrap().insert(sid, code);
     Ok(code)
+}
+
+/// The code of pane `sid` if this process has asked for it before; no
+/// file is touched, for a caller that must not wait, such as drawing.
+pub fn known(sid: u64) -> Option<u16> {
+    seen().lock().unwrap().get(&sid).copied()
 }
 
 fn code_in(path: &Path, sid: u64, grace: Duration, live: impl FnOnce() -> Vec<u64>, rand: impl FnOnce() -> u64) -> io::Result<u16> {

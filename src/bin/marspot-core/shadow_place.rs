@@ -1,12 +1,13 @@
-//! Moving a pane between a window and the shadows (`PanePlace`).
+//! Moving a pane between a window and the shadows, and changing whose
+//! child it is (`PanePlace`).
 //!
-//! The session is told first (`SessionShadow`), and the pane moves only
-//! once the session has answered: a pane moved into a window whose
-//! session still took itself for a shadow would end with its old
-//! parent.  The loop does not wait for that answer; it sleeps toward
-//! the earliest deadline, and a session silent for 3 s leaves the pane
-//! where it was and L1 is told nothing is known (`UNANSWERED`).  An
-//! answer that comes after that is undone with a second `SessionShadow`.
+//! Whose child a pane is and whether it is shown are two things: one
+//! moved into a window keeps its parent, and `Parent` leaves it where
+//! it is shown.  A change of parent, which a move out of a window is,
+//! is told to the session first (`SessionShadow`) and done once it has
+//! answered; the loop sleeps toward the deadline, a session silent for
+//! 3 s leaves the pane as it was (`UNANSWERED`), and a later answer is
+//! undone, its timeout put back as the session said it was.
 //!
 //! The core's own `SessionShadow`s carry request ids from a range L1
 //! never reaches; their answers stop here and never go on to L1.
@@ -15,7 +16,8 @@ use super::pane_control::Route;
 use super::*;
 use marspot::pane::ControlReach;
 use marspot::shell_proto::{
-    DoneCode, PanePlace, PlaceWhere, SessionShadow, decode_pane_done, encode_session_shadow,
+    DoneCode, PanePlace, PlaceWhere, SHADOW_IDLE_DEFAULT_S, SHADOW_IDLE_NEVER, SessionShadow, decode_pane_done,
+    encode_session_shadow, parse_shadow_was,
 };
 use std::collections::VecDeque;
 
@@ -41,7 +43,8 @@ pub(super) struct Placing {
     to: PlaceWhere,
     /// The parent it was asked to take (0: none).
     parent: u64,
-    /// The parent the session had before it was asked (0: none).
+    /// The parent the session had before it was asked (0: none), and
+    /// for a move into a window, the pane whose window it goes to.
     was: u64,
     deadline: Instant,
 }
@@ -68,16 +71,16 @@ impl Places {
     }
 }
 
-/// A `SessionShadow` the core sends on its own account, whose answer
-/// nobody waits for.
-pub(super) fn session_shadow_frame(req_id: u32, parent: u64) -> Frame {
-    Frame::new(
-        MsgType::SessionShadow,
-        encode_session_shadow(&SessionShadow { req_id, parent_sid: parent, idle_s: 0 }),
-    )
+/// A `SessionShadow` of the core's own (timeouts: `idle_for`, `idle_before`).
+pub(super) fn session_shadow_frame(req_id: u32, parent: u64, idle_s: u32) -> Frame {
+    Frame::new(MsgType::SessionShadow, encode_session_shadow(&SessionShadow { req_id, parent_sid: parent, idle_s }))
 }
 
-/// `req_id` is the core's own: nobody in the shell asked it.
+/// Whose child `sid` is, as its registry entry says (0: none).
+fn parent_in_registry(sid: u64) -> u64 {
+    session_registry::read_session_entry(sid).map_or(0, |e| e.shadow_of)
+}
+
 pub(super) fn is_own(req_id: u32) -> bool {
     (L2_REQ_BASE..L2_REQ_END).contains(&req_id)
 }
@@ -87,8 +90,9 @@ pub(super) const L2_REQ_UNTRACKED: u32 = L2_REQ_BASE;
 
 impl CoreApp {
     /// `PanePlace`: 0 into the shadows under `host_sid`, 1 into a
-    /// window (the one holding the pane's parent, else the key window).
-    /// Viewing one in its parent's place is `peek`'s.
+    /// window (the one holding `host_sid`, else the key window), keeping
+    /// its parent; `Parent` makes it the child of `host_sid` (0: of
+    /// none) where it is.  Viewing one in its parent's place is `peek`'s.
     pub(super) fn place_pane(&mut self, m: PanePlace) -> Route {
         let in_window = self.find_window_pane_by_sid(m.sid).is_some();
         let in_shadows = self.shadow_index(m.sid).is_some();
@@ -100,7 +104,13 @@ impl CoreApp {
                 answer(self, DoneCode::NoSuchSession, "")
             }
             PlaceWhere::Window if self.windows.is_empty() => answer(self, DoneCode::Other, "no window is open"),
-            PlaceWhere::Window => self.start_place(m, 0, m.host_sid),
+            PlaceWhere::Window => self.place_in_window(m),
+            PlaceWhere::Parent if !in_window && !in_shadows => answer(self, DoneCode::NoSuchSession, ""),
+            PlaceWhere::Parent if m.host_sid == m.sid => answer(self, DoneCode::Other, "a pane cannot be its own parent"),
+            PlaceWhere::Parent if m.host_sid != 0 && !self.panes_mut().any(|p| p.shelld_session_id() == Some(m.host_sid)) => {
+                answer(self, DoneCode::Other, "no such parent pane")
+            }
+            PlaceWhere::Parent => self.start_place(m, m.host_sid, parent_in_registry(m.sid)),
             PlaceWhere::Shadow if m.host_sid == 0 || m.host_sid == m.sid => {
                 answer(self, DoneCode::Other, "a shadow pane needs a parent")
             }
@@ -110,7 +120,7 @@ impl CoreApp {
             PlaceWhere::Shadow if self.last_drawn_pane(m.sid) => {
                 answer(self, DoneCode::Other, LAST_PANE_STAYS)
             }
-            PlaceWhere::Shadow => self.start_place(m, m.host_sid, 0),
+            PlaceWhere::Shadow => self.start_place(m, m.host_sid, parent_in_registry(m.sid)),
             PlaceWhere::Peek => self.place_peek(m, true),
             PlaceWhere::Unpeek => self.place_peek(m, false),
             PlaceWhere::Unknown(_) => answer(self, DoneCode::Other, "not_supported"),
@@ -126,6 +136,13 @@ impl CoreApp {
             .any(|p| !p.is_dormant() && p.shelld_session_id() != Some(sid))
     }
 
+    /// A hidden pane shown in a window, its parent kept: nothing to ask
+    /// its session.
+    fn place_in_window(&mut self, m: PanePlace) -> Route {
+        let p = Placing { l2_req: 0, l1_req: m.req_id, sid: m.sid, to: m.to, parent: 0, was: m.host_sid, deadline: Instant::now() };
+        self.finish_place(p, DoneCode::Ok, "")
+    }
+
     fn start_place(&mut self, m: PanePlace, parent: u64, was: u64) -> Route {
         let reconnecting = self.reconnecting.contains(&m.sid);
         if self.pane_control.shadows.places.placing.len() >= PLACING_CAP {
@@ -136,7 +153,7 @@ impl CoreApp {
             Some(_) if reconnecting => ControlReach::NotAttached,
             None => ControlReach::NotAttached,
             Some(p) => match p.session().pane_control_reach() {
-                ControlReach::Reads if !p.session().send_pane_control(session_shadow_frame(l2_req, parent)) => {
+                ControlReach::Reads if !p.session().send_pane_control(session_shadow_frame(l2_req, parent, idle_for(m.to))) => {
                     return self.answer(MsgType::PanePlace, m.req_id, m.sid, DoneCode::Other, "session queue full");
                 }
                 r => r,
@@ -173,13 +190,13 @@ impl CoreApp {
         let places = &mut self.pane_control.shadows.places;
         if let Some(i) = places.placing.iter().position(|p| p.l2_req == done.req_id && p.sid == sid) {
             let p = places.placing.remove(i);
-            self.finish_place(p, done.code, &done.text);
+            let _ = self.finish_place(p, done.code, &done.text);
         } else if let Some(i) = places.expired.iter().position(|p| p.l2_req == done.req_id && p.sid == sid) {
             let p = places.expired.remove(i).unwrap_or_else(|| unreachable!());
             if done.code == DoneCode::Ok {
                 // the pane stayed where it was; so does the session
                 if let Some(pane) = self.pane_by_sid_mut(sid) {
-                    pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was));
+                    pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was, idle_before(&done.text)));
                 }
                 lx_warn!("core.shadow.late_answer_undone", "a session answered a move after its time; undone",
                     session = sid);
@@ -206,12 +223,17 @@ impl CoreApp {
         }
     }
 
-    fn finish_place(&mut self, p: Placing, code: DoneCode, text: &str) {
+    fn finish_place(&mut self, p: Placing, code: DoneCode, text: &str) -> Route {
         if code != DoneCode::Ok {
-            self.answer(MsgType::PanePlace, p.l1_req, p.sid, code, text);
-            return;
+            return self.answer(MsgType::PanePlace, p.l1_req, p.sid, code, text);
         }
         let moved = match p.to {
+            PlaceWhere::Parent => {
+                self.pane_control.shadows.family.adopted(p.sid, p.parent);
+                lx_event!("PANE_PARENT_SET", "a pane is the child of another now, or of none", session = p.sid,
+                    parent = p.parent, was = p.was);
+                Some(())
+            }
             PlaceWhere::Window => self.shadow_index(p.sid).map(|i| {
                 let mut pane = self.take_shadow(i);
                 unwatched::set(p.sid, false);
@@ -230,16 +252,14 @@ impl CoreApp {
             _ if self.find_window_pane_by_sid(p.sid).is_some() && self.last_drawn_pane(p.sid) => {
                 let sent = self
                     .pane_by_sid_mut(p.sid)
-                    .is_some_and(|pane| pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, 0)));
+                    .is_some_and(|pane| pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was, idle_before(text))));
                 if !sent {
-                    // the session keeps its parent until the next boot puts it back by the layout
-                    lx_warn!("core.shadow.unshadow_unsent", "SessionShadow(0) for the pane that stays was not sent",
+                    lx_warn!("core.shadow.unshadow_unsent", "the parent back for the pane that stays was not sent",
                         session = p.sid);
                 }
                 lx_warn!("core.shadow.place_last_pane", "the pane became the last one in the windows while it moved; it stays",
                     session = p.sid);
-                self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::Other, LAST_PANE_STAYS);
-                return;
+                return self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::Other, LAST_PANE_STAYS);
             }
             _ => self.find_window_pane_by_sid(p.sid).map(|(wi, idx)| {
                 self.unview(wi, idx);
@@ -252,15 +272,25 @@ impl CoreApp {
             }),
         };
         if moved.is_none() {
-            self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::NoSuchSession, "the pane went while it moved");
-            return;
+            return self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::NoSuchSession, "the pane went while it moved");
         }
         self.shadows_changed();
         self.save_session_state();
-        lx_event!("PANE_PLACED", "moved a pane between a window and the shadows", session = p.sid,
-            to = format!("{:?}", p.to));
-        self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::Ok, "");
+        lx_event!("PANE_PLACED", "moved a pane between a window and the shadows, or changed its parent",
+            session = p.sid, to = format!("{:?}", p.to));
+        self.answer(MsgType::PanePlace, p.l1_req, p.sid, DoneCode::Ok, "")
     }
+}
+
+/// The timeout a session had before a move it answered `text` to; one
+/// that does not say had the default, the only kind an older L3 knows.
+fn idle_before(text: &str) -> u32 {
+    parse_shadow_was(text).unwrap_or(SHADOW_IDLE_DEFAULT_S)
+}
+
+/// A move into the shadows asks for the default timeout, `Parent` none.
+fn idle_for(to: PlaceWhere) -> u32 {
+    if to == PlaceWhere::Shadow { SHADOW_IDLE_DEFAULT_S } else { SHADOW_IDLE_NEVER }
 }
 
 #[cfg(test)]

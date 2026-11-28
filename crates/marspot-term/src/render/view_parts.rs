@@ -1,7 +1,9 @@
-//! The parts of a `SessionView` that are types of their own.
+//! The parts of a `SessionView` that are types of their own, and a
+//! sidebar row.
 
 use super::SessionView;
 use crate::grid::Grid;
+use crate::session::SessionState;
 
 /// A pane's strip: a grid of its own, in the pane's cells.
 #[derive(Copy, Clone)]
@@ -102,4 +104,16 @@ pub struct SearchHitView {
 pub struct HistoryView {
     pub offset: u16,
     pub len: u16,
+}
+
+/// One row of the sidebar — what the user sees on the left.  Length
+/// of the slice passed to `MetalRenderer::render_layout` should match
+/// `views.len()`; entry `i` describes session `i`.
+pub struct SidebarEntry<'a> {
+    /// Short label drawn after the state dot, e.g. `"1"`, `"build"`.
+    pub label: &'a str,
+    /// Drives the colour of the state dot.
+    pub state: SessionState,
+    /// The pane's four-digit code, drawn as `#4145` before the label.
+    pub code: Option<u16>,
 }

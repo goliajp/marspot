@@ -97,6 +97,7 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, op: &Op) -> Result<Value, Reject> 
         Op::Close { target } => ops_pane::close(conn, ctx, target),
         Op::Resize { target, cols, rows } => ops_pane::resize(conn, ctx, target, *cols, *rows),
         Op::Place { target, place, force } => ops_pane::place(conn, ctx, target, *place, *force),
+        Op::Parent { target, parent } => super::ops_parent::set(conn, ctx, target, parent.as_deref()),
         Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::helpers_port::serve(conn, ctx, op),
         Op::ProcStop(a) => super::ops_proc::stop(conn, ctx, a),
         Op::ResetClaim(a) => Ok(crate::agentsvc::reset::from_socket(a)),
@@ -113,6 +114,7 @@ fn static_name(op: &Op) -> &'static str {
         Op::Read(_) => "pane.read",
         Op::Resize { .. } => "pane.resize",
         Op::Place { .. } => "pane.place",
+        Op::Parent { .. } => "pane.parent",
         Op::Close { .. } => "pane.close",
         Op::Audit { .. } => "pane.audit",
         Op::HelperStart(_) => "helper.start",
@@ -129,7 +131,7 @@ fn target_of(op: &Op) -> Option<&str> {
         Op::Send(a) => Some(&a.target),
         Op::Run(a) => Some(&a.target),
         Op::Read(a) => Some(&a.target),
-        Op::Resize { target, .. } | Op::Place { target, .. } | Op::Close { target } => Some(target),
+        Op::Resize { target, .. } | Op::Place { target, .. } | Op::Parent { target, .. } | Op::Close { target } => Some(target),
         _ => None,
     }
 }

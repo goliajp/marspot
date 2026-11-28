@@ -20,8 +20,11 @@ use crate::host::published::Published;
 pub(in crate::plugins) const NOTICE_HEAD: &str = "[marspot helper notice]";
 
 /// The live sessions that are helpers, and those with live helpers.
-/// Rebuilt from the registry on every scan, so it holds no more than
-/// the sessions do.
+/// Rebuilt on every scan, so it holds no more than the sessions do.
+///
+/// A helper is a pane `helper.start` runs an agent in, by the helpers'
+/// table: a pane that is only a child, such as one the user made a
+/// child and shows in a window, is reclaimed and moved like any other.
 #[derive(Debug, Default, Clone)]
 pub(in crate::plugins) struct HelperRoles {
     shadows: Vec<u64>,
@@ -31,20 +34,27 @@ pub(in crate::plugins) struct HelperRoles {
 }
 
 impl HelperRoles {
-    /// From each live session's `(id, shadow_of)`.
+    /// From each live session's `(id, helper's parent)`, 0 for a pane no
+    /// helper runs in.
     #[cfg(test)]
     pub(in crate::plugins) fn of(live: impl IntoIterator<Item = (u64, u64)>) -> Self {
-        Self::of_with_claims(live, &[])
+        let live: Vec<(u64, u64)> = live.into_iter().collect();
+        Self::of_with_claims(live.iter().copied(), &live, &[])
     }
 
-    /// The same, with the windows reset claims have open.
-    pub(in crate::plugins) fn of_with_claims(live: impl IntoIterator<Item = (u64, u64)>, claim_windows: &[u64]) -> Self {
+    /// From each live session's `(id, shadow_of)`, the running helpers'
+    /// `(helper, parent)`, and the windows reset claims have open.
+    pub(in crate::plugins) fn of_with_claims(
+        live: impl IntoIterator<Item = (u64, u64)>,
+        helpers: &[(u64, u64)],
+        claim_windows: &[u64],
+    ) -> Self {
         let mut roles = Self::default();
-        for (sid, parent) in live {
-            if claim_windows.contains(&sid) || claim_windows.contains(&parent) {
+        for (sid, shadow_of) in live {
+            if claim_windows.contains(&sid) || claim_windows.contains(&shadow_of) {
                 roles.claims.push(sid);
             }
-            if parent != 0 {
+            if let Some(&(_, parent)) = helpers.iter().find(|h| h.0 == sid && h.1 != 0) {
                 roles.shadows.push(sid);
                 if !roles.hosts.contains(&parent) {
                     roles.hosts.push(parent);
@@ -55,7 +65,11 @@ impl HelperRoles {
     }
 
     pub(in crate::plugins) fn of_observation(obs: &crate::observe::Observation) -> Self {
-        Self::of_with_claims(obs.live().map(|s| (s.entry.id, s.entry.shadow_of)), &crate::agentsvc::reset::panes::windows())
+        Self::of_with_claims(
+            obs.live().map(|s| (s.entry.id, s.entry.shadow_of)),
+            &crate::plugins::helpers::strip::parents(),
+            &crate::agentsvc::reset::panes::windows(),
+        )
     }
 
     pub(in crate::plugins) fn is_helper(&self, sid: u64) -> bool {
@@ -153,9 +167,22 @@ mod tests {
         assert!(HelperRoles::of([(2, 0)]).hosts.is_empty(), "a pane whose helpers have gone takes part again");
     }
 
+    /// A child pane no helper runs in, such as one the user made a child
+    /// and shows in a window, takes part like any pane, and so does its
+    /// parent; a helper, shown or not, sits out.
+    #[test]
+    fn helpers_a_child_that_is_no_helper_takes_part() {
+        let roles = HelperRoles::of_with_claims([(1, 0), (2, 1), (3, 0), (4, 3)], &[(4, 3)], &[]);
+        assert!(!roles.sits_out(2) && !roles.is_helper(2), "a child the user made");
+        assert!(!roles.sits_out(1), "its parent waits on no helper");
+        assert!(roles.is_helper(4) && roles.has_helpers(3));
+        let gone = HelperRoles::of_with_claims([(1, 0)], &[(9, 1)], &[]);
+        assert!(gone.hosts.is_empty(), "a helper no longer live counts for nobody");
+    }
+
     #[test]
     fn helpers_a_reset_claim_s_window_and_cli_pane_sit_out() {
-        let roles = HelperRoles::of_with_claims([(1, 0), (40, 0), (41, 40), (5, 1)], &[40]);
+        let roles = HelperRoles::of_with_claims([(1, 0), (40, 0), (41, 40), (5, 1)], &[(5, 1)], &[40]);
         assert!(roles.is_reset_claim(40) && roles.is_reset_claim(41));
         assert!(roles.sits_out(41) && roles.sits_out(40));
         assert!(!roles.is_reset_claim(1) && !roles.is_reset_claim(5), "an ordinary helper is no claim");

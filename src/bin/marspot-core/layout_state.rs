@@ -82,6 +82,7 @@ impl CoreApp {
     /// mid-execv has no live child for a moment, and blanking the title
     /// for that moment would be a worse lie than a slightly old one.
     pub(super) fn resolve_pane_cwd(&mut self, sid: u64) -> bool {
+        Self::note_pane_code(sid);
         let cached_pid = self.shell_child_pids.get(&sid).copied();
         let mut path = cached_pid.and_then(marspot::pidtree::pane_cwd);
         if path.is_none() {

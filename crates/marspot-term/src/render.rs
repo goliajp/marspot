@@ -22,7 +22,6 @@
 
 use crate::grid::Grid;
 use crate::input_core::{MarspotKeyEvent, Modifiers};
-use crate::session::SessionState;
 
 /// C1 — where a `PaneTool` claims pane real estate.  TopFixed /
 /// BottomFixed tools each subtract their `fixed_height_rows()` worth
@@ -197,7 +196,7 @@ pub struct SessionView<'a> {
 }
 
 mod view_parts;
-pub use view_parts::{ActiveHighlight, HighlightSpan, HistoryView, SearchHitView, SearchOverlayView, StripView};
+pub use view_parts::{ActiveHighlight, HighlightSpan, HistoryView, SearchHitView, SearchOverlayView, SidebarEntry, StripView};
 
 #[derive(Copy, Clone, Debug)]
 pub struct SelectionView {
@@ -356,16 +355,6 @@ pub fn grid_selection_text(
 
 #[cfg(test)]
 mod selection_tests;
-
-/// One row of the sidebar — what the user sees on the left.  Length
-/// of the slice passed to `MetalRenderer::render_layout` should match
-/// `views.len()`; entry `i` describes session `i`.
-pub struct SidebarEntry<'a> {
-    /// Short label drawn after the state dot, e.g. `"1"`, `"build"`.
-    pub label: &'a str,
-    /// Drives the colour of the state dot.
-    pub state: SessionState,
-}
 
 // ─── Box-drawing arms ─────────────────────────────────────────────────────
 

@@ -1364,52 +1364,6 @@ fn a_startup_trickle_then_a_pause_is_not_a_finished_frame() {
     assert!(*host.ended.lock().unwrap(), "drawn, and still — now release");
 }
 
-/// A run that exists to bring something back must not do it twice.
-///
-/// The gap between parking a session and typing it back holds the
-/// user's own click, and in that gap the session can return by
-/// other means — a second wake armed on the same pane, or the user
-/// starting it themselves.  Typing then puts `claude --resume …`
-/// into the running session's prompt, as text they have to delete.
-/// Seen on the real machine twice in one day, which is what this
-/// step is for.
-#[test]
-fn a_run_stops_when_what_it_was_arranging_has_already_happened() {
-    let (state, env, host) = setup();
-    let op = PtyOp::new("test.wake")
-        .step(Step::await_user())
-        .step(Step::stop_if_process(1, |_| true))
-        .step(Step::send(b"resume\r".to_vec()));
-    let mut r = OpRunner::new(op, env);
-    run(&mut r, &host, &state, 100);
-    assert!(r.is_awaiting_user());
-
-    // It came back on its own while we were parked.
-    state.present.lock().unwrap().push(99);
-    r.on_focus(&host);
-    run(&mut r, &host, &state, 100);
-    assert!(
-        state.sent.lock().unwrap().is_empty(),
-        "nothing to type — it is already back"
-    );
-    assert!(*host.ended.lock().unwrap(), "and the run is over, successfully");
-}
-
-/// …and when it has not, the run carries on as before.
-#[test]
-fn a_run_carries_on_when_nothing_has_come_back() {
-    let (state, env, host) = setup();
-    let op = PtyOp::new("test.wake")
-        .step(Step::await_user())
-        .step(Step::stop_if_process(1, |_| true))
-        .step(Step::send(b"resume\r".to_vec()));
-    let mut r = OpRunner::new(op, env);
-    run(&mut r, &host, &state, 100);
-    r.on_focus(&host);
-    run(&mut r, &host, &state, 100);
-    assert_eq!(*state.sent.lock().unwrap(), vec![b"resume\r".to_vec()]);
-}
-
 /// A signal that doesn't take gets escalated, and the wait that
 /// follows is the one that notices.
 #[test]
@@ -1702,6 +1656,9 @@ fn submit_paste_drops_end_marker_in_the_text() {
 
 #[path = "origin_tests.rs"]
 mod origin_tests;
+
+#[path = "wake_tests.rs"]
+mod wake_tests;
 
 #[path = "badge_tests.rs"]
 mod badge_tests;

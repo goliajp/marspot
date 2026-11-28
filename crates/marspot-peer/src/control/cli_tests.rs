@@ -36,6 +36,9 @@ fn pane_control_cli_reads_every_subcommand() {
     );
     assert_eq!(p("resize 3 100x30"), Ok(Op::Resize { target: "3".into(), cols: 100, rows: 30 }));
     assert_eq!(p("place 3 peek"), Ok(Op::Place { target: "3".into(), place: Where::Peek, force: false }));
+    assert_eq!(p("parent 3 #4145"), Ok(Op::Parent { target: "3".into(), parent: Some("#4145".into()) }));
+    assert_eq!(p("parent 3 --top"), Ok(Op::Parent { target: "3".into(), parent: None }));
+    assert!(p("parent 3").is_err() && p("parent 3 4 --top").is_err());
     assert_eq!(p("place 3 --force unpeek"), Ok(Op::Place { target: "3".into(), place: Where::Unpeek, force: true }));
     assert_eq!(p("close 3"), Ok(Op::Close { target: "3".into() }));
     assert_eq!(p("audit -n 5"), Ok(Op::Audit { limit: 5 }));

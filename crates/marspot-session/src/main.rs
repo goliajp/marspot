@@ -466,9 +466,7 @@ fn main() {
     let mut resumed_marks = pane_ctl::Marks::default();
     let mut session: SessionImpl = {
         let wake_tx = ev_tx.clone();
-        let wake = move || {
-            let _ = wake_tx.send(SessionEvent::Wake);
-        };
+        let wake = move || drop(wake_tx.send(SessionEvent::Wake));
         let id = match std::env::var("MARSPOT_SESSION_ID")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -481,6 +479,7 @@ fn main() {
                 }),
         };
         regions::sign(frames.shm(), id);
+        shadow_cfg = shadow::flattened(id, shadow_cfg);
         // RFC-003 §6 Amendment 16 — two boot modes:
         //   * Resume: env `MARSPOT_L3_HANDOFF_MANIFEST=<path>` set →
         //             we're the post-execv image of a self-update.
@@ -493,7 +492,7 @@ fn main() {
         let local = if let Some(h) = try_resume_handoff() {
             resumed = true;
             resumed_marks = h.marks;
-            shadow_cfg = h.shadow;
+            shadow_cfg = shadow::flattened(id, h.shadow);
             session_end::end_if_over(id, h.child_pid, || {});
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
             let state_path = session_state_bin_path(id);

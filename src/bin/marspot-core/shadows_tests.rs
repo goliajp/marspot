@@ -84,6 +84,29 @@ pub(crate) fn app_with_parent(sb: &Sandbox) -> (CoreApp, Receiver<CoreEvent>, u6
 /// its session reads pane control.
 pub(crate) fn open_shadow(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64) -> u64 {
     assert_eq!(app.dev_open_shadow(req_id, parent), Route::Forwarded);
+    shadow_opened(app, rx, req_id)
+}
+
+/// As [`open_shadow`], with an idle timeout of `idle_s`.
+pub(crate) fn open_shadow_idle(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64, idle_s: u32) -> u64 {
+    let m = marspot::shell_proto::PaneSpawn {
+        req_id,
+        shadow: true,
+        no_focus: true,
+        helper: false,
+        new_window: false,
+        parent_sid: parent,
+        idle_s,
+        cols: 0,
+        rows: 0,
+        cwd: String::new(),
+    };
+    let f = frame(MsgType::PaneSpawn, marspot::shell_proto::encode_pane_spawn(&m).unwrap());
+    assert_eq!(app.route_pane_control(f), Route::Forwarded);
+    shadow_opened(app, rx, req_id)
+}
+
+fn shadow_opened(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32) -> u64 {
     let mut spawned = None;
     wait_for("the shadow pane's spawn was answered", || {
         drive(app, rx);
@@ -181,12 +204,9 @@ fn shadow_sessions_go_back_to_the_shadows_at_boot_and_a_saved_window_wins() {
 
     let mut app = app_in(sb.dir(), vec![win(1, panes)]);
     app.shadows = shadows;
-    wait_for("the session in the window is a shadow no longer", || {
-        drive(&mut app, &rx);
-        reg::read_session_entry(bsid).is_ok_and(|e| e.shadow_of == 0)
-    });
     std::thread::sleep(Duration::from_millis(200));
     drive(&mut app, &rx);
+    assert_eq!(reg::read_session_entry(bsid).unwrap().shadow_of, psid, "shown in the window, still the parent's child");
     assert!(
         app.pane_control.reports.frames().all(|f| f.msg_type != MsgType::PaneDone),
         "the session's answer to the core's own request did not go on to L1"

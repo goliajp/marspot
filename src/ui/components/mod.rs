@@ -111,4 +111,4 @@ pub use grid_item::{GridItem, GridEdges, Outline};
 pub use sidebar::Sidebar;
 pub use table::{Align, Column, ColumnWidth, SortDir, TableGeometry};
 pub use layout_modal::{LayoutModal, GRID_MIN, GRID_MAX};
-pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};
+pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem, dividers_sound, grouped};

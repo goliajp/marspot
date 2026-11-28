@@ -16,11 +16,13 @@ mod input;
 mod reset_panel;
 mod retire;
 mod run_trailer;
+mod session_shadow;
 mod wire;
 
 pub use input::*;
 pub use reset_panel::*;
 pub use retire::*;
+pub use session_shadow::*;
 pub use run_trailer::{RUN_END_MARK, run_trailer};
 use wire::{Rd, finish, put_text};
 
@@ -66,10 +68,10 @@ pub use helper_strip::*;
 wire_enum!(WatchKind { Cancel = 0, Text = 1, Quiet = 2, Prompt = 3, Exit = 4, Change = 5, CommandEnd = 6 });
 wire_enum!(WatchReason { Met = 1, SessionEnded = 2, Restarting = 3 });
 wire_enum!(RetireMode { Delete = 0, Recycle = 1 });
-wire_enum!(PlaceWhere { Shadow = 0, Window = 1, Peek = 2, Unpeek = 3 });
+wire_enum!(PlaceWhere { Shadow = 0, Window = 1, Peek = 2, Unpeek = 3, Parent = 4 });
 wire_enum!(TypedResult { Written = 0, PtyQueueFull = 1, QueueFull = 2, NotReading = 3, NotAtShell = 4 });
 wire_enum!(DoneCode { Ok = 0, NotAttached = 1, NoSuchSession = 2, WatchTableFull = 3, OldSession = 4, Other = 5 });
-wire_enum!(PanelAct { CloseHelper = 1, CloseAllOfParent = 2, ToggleCwdControl = 3 });
+wire_enum!(PanelAct { CloseHelper = 1, CloseAllOfParent = 2, ToggleCwdControl = 3, SetParent = 4 });
 // `Flip`: a build before this one, which did not say
 wire_enum!(CwdControl { Flip = 0, Deny = 1, Allow = 2 });
 
@@ -159,8 +161,9 @@ pub fn decode_pane_spawned(p: &[u8]) -> io::Result<PaneSpawned> {
     Ok(PaneSpawned { req_id, ok, sid, err, window_id })
 }
 
-/// L1 → L2: move a pane between a window and the shadows, or show it
-/// inside `host_sid`'s pane; answered by `PaneDone`.
+/// L1 → L2: move a pane between a window and the shadows, show it
+/// inside `host_sid`'s pane, or (`Parent`) make it the child of
+/// `host_sid` (0: of none) where it is; answered by `PaneDone`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PanePlace {
     pub req_id: u32,
@@ -193,32 +196,6 @@ pub fn decode_pane_place(p: &[u8]) -> io::Result<PanePlace> {
         host_sid: r.u64()?,
         // a build before this one, which did not say
         force: p.len() > 21 && r.u8()? != 0,
-    })
-}
-
-/// L2 → L3: the session's shadow parent (0: no longer a shadow);
-/// answered by `PaneDone`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SessionShadow {
-    pub req_id: u32,
-    pub parent_sid: u64,
-    pub idle_s: u32,
-}
-
-pub fn encode_session_shadow(m: &SessionShadow) -> Vec<u8> {
-    let mut v = Vec::with_capacity(16);
-    v.extend_from_slice(&m.req_id.to_le_bytes());
-    v.extend_from_slice(&m.parent_sid.to_le_bytes());
-    v.extend_from_slice(&m.idle_s.to_le_bytes());
-    v
-}
-
-pub fn decode_session_shadow(p: &[u8]) -> io::Result<SessionShadow> {
-    let mut r = Rd::new(p, "session_shadow");
-    Ok(SessionShadow {
-        req_id: r.u32()?,
-        parent_sid: r.u64()?,
-        idle_s: r.u32()?,
     })
 }
 
@@ -284,20 +261,23 @@ pub fn decode_pane_control_caps(p: &[u8]) -> io::Result<u32> {
     Rd::new(p, "pane_control_caps").u32()
 }
 
-/// L2 → L1: a button on the helper panel.
+/// L2 → L1: a button on the helper panel, or a pick in a pane's menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HelperPanelAct {
     pub sid: u64,
     pub act: PanelAct,
     /// What `ToggleCwdControl` is to leave the directory as.
     pub want: CwdControl,
+    /// The pane `SetParent` makes `sid` the child of (0: a top pane).
+    pub parent: u64,
 }
 
 pub fn encode_helper_panel_act(m: &HelperPanelAct) -> Vec<u8> {
-    let mut v = Vec::with_capacity(10);
+    let mut v = Vec::with_capacity(18);
     v.extend_from_slice(&m.sid.to_le_bytes());
     v.push(m.act.to_u8());
     v.push(m.want.to_u8());
+    v.extend_from_slice(&m.parent.to_le_bytes());
     v
 }
 
@@ -307,6 +287,9 @@ pub fn decode_helper_panel_act(p: &[u8]) -> io::Result<HelperPanelAct> {
         sid: r.u64()?,
         act: PanelAct::from_u8(r.u8()?),
         want: CwdControl::from_u8(if p.len() > 9 { r.u8()? } else { 0 }),
+        // a build before this one ends at `want`; one cut inside the
+        // parent is refused
+        parent: if p.len() > 10 { r.u64()? } else { 0 },
     })
 }
 

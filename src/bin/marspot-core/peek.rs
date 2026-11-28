@@ -194,7 +194,7 @@ impl CoreApp {
             Some(title) => title.clone(),
             None => {
                 let cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
-                marspot::pane_name::PaneRef::new(sid, cwd).full_name()
+                marspot::pane_name::PaneRef::known(sid, cwd).full_name()
             }
         }
     }

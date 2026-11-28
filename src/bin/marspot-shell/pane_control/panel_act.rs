@@ -1,6 +1,7 @@
 //! What the user asked for on a window's helper panel
 //! (`HelperPanelAct`): close a shadow pane, close every shadow pane of
-//! a session, deny or allow its directory to control panes.
+//! a session, deny or allow its directory to control panes; and from a
+//! pane's menu, make it the child of another pane or a top pane.
 //!
 //! Done on a thread of its own, one at a time: a close waits for the
 //! core, whose frames the thread that reads these must keep reading.
@@ -77,6 +78,13 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, act: HelperPanelAct, deny: &std::p
             let ok = set_control(conn, ctx, act, deny);
             return (ok as u32, !ok as u32);
         }
+        PanelAct::SetParent => {
+            let out = super::ops_parent::set_sid(conn, ctx, act.sid, act.parent);
+            if let Err(r) = &out {
+                marspot::lx_warn!("shell.control.parent_refused", &r.message, session = act.sid, parent = act.parent);
+            }
+            return (out.is_ok() as u32, out.is_err() as u32);
+        }
         PanelAct::Unknown(_) => return (0, 0),
     };
     let mut counts = (0, 0);
@@ -95,19 +103,22 @@ pub(super) fn run(conn: &mut Conn, ctx: &Ctx, act: HelperPanelAct, deny: &std::p
 }
 
 /// The panes were listed a while ago: one that has gone to a window
-/// meanwhile, or to another pane when all of `top`'s are closed, is no
-/// longer one the user meant.
+/// meanwhile, one that is a child no longer, or one moved to another
+/// pane when all of `top`'s are closed, is no longer one the user meant.
 ///
-/// Whose shadow it is, a window's included, is read from its registry
-/// entry: its session writes that before the core moves the pane, and a
-/// view of the sessions may be older than a move just done.  Either
+/// A child keeps its parent in a window, so being in one is read from
+/// the layout the core saves.  Whose child it is is read from its
+/// registry entry: its session writes that before the core answers, and
+/// a view of the sessions may be older than a change just made.  Either
 /// saying it is no longer below `top` is enough.
 fn still_to_close(conn: &Conn, ctx: &Ctx, sid: u64, top: Option<u64>) -> Result<(), Reject> {
     let obs = ctx.view_now();
     let parent = marspot_term::session_registry::read_session_entry(sid).ok().map(|e| e.shadow_of);
     let below = |top| shadow_tree::is_under(&parent_now(&obs, sid, parent), sid, top) && shadow_tree::is_under(&parent_in(&obs), sid, top);
-    let why = if parent.or_else(|| obs.session(sid).map(|s| s.entry.shadow_of)) == Some(0) {
+    let why = if super::panes::in_window(sid) {
         "refused: in a window"
+    } else if parent.or_else(|| obs.session(sid).map(|s| s.entry.shadow_of)) == Some(0) {
+        "refused: no longer a child pane"
     } else if top.is_some_and(|top| !below(top)) {
         "refused: no longer below that pane"
     } else {

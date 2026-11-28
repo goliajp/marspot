@@ -18,12 +18,10 @@ use super::dispatch::{Ctx, audit, target, typed_into, view_typing_reject};
 use super::limits::{SpawnCounts, check_spawn, session_cap};
 use super::recent::Opened;
 use super::shadow_gate::{GATE_WITHIN, Tree};
-use super::{Reply, names, panes, shadow_tree};
+use super::{Reply, names, ops_parent, panes, shadow_tree};
 
 /// How long a new pane may take to be answered for.
 const SPAWN_WITHIN: Duration = Duration::from_secs(10);
-/// A shadow pane nobody types into or reads output from ends after this.
-const SHADOW_IDLE_S: u32 = 6 * 3600;
 
 /// How a request may be asked again when nothing came back.
 #[derive(Clone, Copy, PartialEq)]
@@ -40,7 +38,7 @@ pub(super) fn ask_done(conn: &mut Conn, sid: u64, msg: MsgType, build: impl Fn(u
     ask_done_within(conn, sid, msg, build, again, ANSWER_WITHIN)
 }
 
-fn ask_done_within(
+pub(super) fn ask_done_within(
     conn: &mut Conn,
     sid: u64,
     msg: MsgType,
@@ -116,16 +114,18 @@ pub(super) fn open_within(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Dura
 }
 
 fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: bool) -> Result<Value, Reject> {
-    let parent = open_parent(ctx, a)?;
+    let asked = open_parent(ctx, a)?;
     conn.need_caps(CAP_SHADOWS)?;
     if a.new_window {
         conn.need_caps(CAP_NEW_WINDOW)?;
     }
     let gate = conn.hub.shadow_gate.enter(GATE_WITHIN)?;
     // the view from before the wait in the gate can be far behind
-    check_open(conn, ctx, &gate.tree(&ctx.view_now()), parent, a.shadow)?;
+    let tree = gate.tree(&ctx.view_now());
+    let parent = if a.shadow { ops_parent::for_new_pane(&tree, asked) } else { asked };
+    check_open(conn, ctx, &tree, parent, a.shadow)?;
     // a pane in a new window has no parent, but starts where the caller is
-    let cwd_of = if a.new_window { ctx.caller.sid().unwrap_or(0) } else { parent };
+    let cwd_of = if a.new_window { ctx.caller.sid().unwrap_or(0) } else { asked };
     let cwd = a.cwd.clone().or_else(|| names::cwd_of(cwd_of, &ctx.obs)).unwrap_or_default();
     let spawn = PaneSpawn {
         req_id: 0,
@@ -135,7 +135,8 @@ fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: b
         new_window: a.new_window,
         // a pane for a window opens in the window holding this one
         parent_sid: parent,
-        idle_s: SHADOW_IDLE_S,
+        // an agent's pane ends when nobody types into it or reads it for this
+        idle_s: marspot::shell_proto::SHADOW_IDLE_DEFAULT_S,
         cols: a.cols,
         rows: a.rows,
         cwd,
@@ -198,9 +199,10 @@ pub(super) fn close_shadow(conn: &mut Conn, ctx: &Ctx, sid: u64) -> Result<Value
 
 fn close_as(conn: &mut Conn, ctx: &Ctx, sid: u64, shadow_only: bool) -> Result<Value, Reject> {
     conn.need_caps(CAP_SHADOWS)?;
-    let shadow = ctx.obs.session(sid).is_some_and(|s| panes::shadow_of(&s.entry) != 0);
+    // a child the user put into a window is recycled as any pane there
+    let hidden_child = ctx.obs.session(sid).is_some_and(|s| panes::shadow_of(&s.entry) != 0) && !panes::in_window(sid);
     let mine = conn.hub.limits.lock().unwrap_or_else(|p| p.into_inner()).opened_by(sid) == Some(ctx.caller);
-    let mode = if shadow && mine { RetireMode::Delete } else { RetireMode::Recycle };
+    let mode = if hidden_child && mine { RetireMode::Delete } else { RetireMode::Recycle };
     let out = ask_done(conn, sid, MsgType::PaneRetire, |req_id| Ok(encode_pane_retire(&PaneRetire { req_id, sid, mode, shadow_only })), Again::Gone);
     if out.is_ok() {
         conn.hub.recent.lock().unwrap_or_else(|p| p.into_inner()).closed(sid, Instant::now());
@@ -268,8 +270,7 @@ pub(super) fn place_sid(conn: &mut Conn, ctx: &Ctx, sid: u64, w: Where, force: b
         // checked even when the registry already names it a shadow, which
         // can run ahead of where the core holds it
         (Where::Shadow, CallerKey::Pane(c), Some(g)) if c != sid => {
-            let tree = g.tree(&ctx.view_now());
-            shadow_tree::check_adopt(&ctx.cfg, &|s| tree.parent_of(s), &tree.shadows(), c, sid)?;
+            ops_parent::check(&ctx.cfg, &g.tree(&ctx.view_now()), sid, c)?;
             c
         }
         (Where::Shadow, ..) => return Err(Reject::new(ErrorCode::BadRequest, "a shadow pane needs a parent: call from another pane")),

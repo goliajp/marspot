@@ -150,7 +150,7 @@ fn write_lines(path: &Path, rotate_at: u64, lines: &[String], dropped: &AtomicU6
 }
 
 /// `log` → `log.1` → … → `log.7`; the oldest goes.
-pub(super) fn rotate(path: &Path) {
+pub(crate) fn rotate(path: &Path) {
     let numbered = |n: usize| PathBuf::from(format!("{}.{n}", path.display()));
     let _ = std::fs::remove_file(numbered(KEEP_FILES - 1));
     for n in (1..KEEP_FILES - 1).rev() {

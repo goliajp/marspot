@@ -148,21 +148,29 @@ impl ShellApp {
     /// the user looks at the pane is the difference between "it came
     /// back" and "it took forever".
     pub(super) fn dispatch_pane_session_focus(&mut self, sid: u64) {
-        let Some(active) = self.active_pane_sessions.get_mut(&sid) else {
-            return;
-        };
-        let plugin_name = active.plugin_name;
+        self.with_pane_session(sid, |s, host| s.on_focus(host));
+    }
+
+    /// Run `f` on the pane's own session, if it has one, and end the
+    /// session after when it asked to end.
+    pub(super) fn with_pane_session<R>(
+        &mut self,
+        sid: u64,
+        f: impl FnOnce(&mut dyn plugins::PaneSession, &dyn plugins::PaneSessionHost) -> R,
+    ) -> Option<R> {
+        let active = self.active_pane_sessions.get_mut(&sid)?;
         let end_flag = std::cell::Cell::new(false);
         let host = ConcretePaneSessionHost {
             sid,
-            plugin_name,
+            plugin_name: active.plugin_name,
             plugin_host: &self.plugin_host,
             end_requested: &end_flag,
         };
-        active.session.on_focus(&host);
+        let out = f(active.session.as_mut(), &host);
         if end_flag.get() {
             self.end_pane_session(sid, plugins::EndReason::PluginRequested);
         }
+        Some(out)
     }
 
     pub(super) fn dispatch_pane_session_key(

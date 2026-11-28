@@ -105,6 +105,8 @@ impl CoreApp {
         // fresh resolve.
         unwatched::set(id, false);
         self.pane_cwds.remove(&id);
+        // a child in a window counts too; counted again on the next turn
+        self.pane_control.shadows.family.counted = false;
         self.shell_child_pids.remove(&id);
         self.pane_badges.remove(&id);
         self.strips.forget(id);

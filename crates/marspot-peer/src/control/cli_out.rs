@@ -47,7 +47,7 @@ pub fn print(op: &Op, v: &Value) {
                 println!("{}", r.str().unwrap_or(""));
             }
         }
-        Op::Resize { .. } | Op::Place { .. } | Op::Close { .. } => println!("ok"),
+        Op::Resize { .. } | Op::Place { .. } | Op::Parent { .. } | Op::Close { .. } => println!("ok"),
         Op::HelperStart(_) | Op::HelperList { .. } | Op::HelperStop(_) => super::cli_helper::print(op, v),
         Op::ProcStop(_) => super::cli_proc::print(v),
         Op::ResetClaim(_) | Op::ResetStatus => println!("{}", v.to_json()),
