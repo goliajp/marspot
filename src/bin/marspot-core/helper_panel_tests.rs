@@ -77,8 +77,8 @@ fn helper_panel_buttons_ask_the_shell_and_move_the_pane() {
         app.find_window_pane_by_sid(a).is_some()
     });
     assert!(acts(&mut app).is_empty(), "moving is the core's own");
-    assert_eq!(app.pane_control.shadows.family.count(psid), 0);
-    assert_eq!(app.pane_control.shadows.family.count(a), 1, "what was below it is now its own");
+    assert_eq!(app.pane_control.shadows.family.count(psid), 2, "shown in the window, still its child");
+    assert_eq!(app.pane_control.shadows.family.count(a), 0);
     assert!(app.pane_control.reports.frames().all(|f| f.msg_type != MsgType::PaneDone), "nobody asked");
 }
 

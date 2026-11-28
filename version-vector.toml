@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.878"  # an agent's pane gets the shared default idle timeout constant
-core    = "0.12.766"  # a move undone puts back the timeout the session had
+core    = "0.12.767"  # the +N counts a child shown in a window as the strip lists it
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

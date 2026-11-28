@@ -229,9 +229,7 @@ impl CoreApp {
         }
         let moved = match p.to {
             PlaceWhere::Parent => {
-                if self.shadow_index(p.sid).is_some() {
-                    self.pane_control.shadows.family.adopted(p.sid, p.parent);
-                }
+                self.pane_control.shadows.family.adopted(p.sid, p.parent);
                 lx_event!("PANE_PARENT_SET", "a pane is the child of another now, or of none", session = p.sid,
                     parent = p.parent, was = p.was);
                 Some(())
