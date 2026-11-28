@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.879"  # the code table answers what it knows without touching the file
-core    = "0.12.768"  # drawing reads pane codes from memory; they are learnt off the draw
+core    = "0.12.769"  # the sidebar row type moves out of render.rs
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX
