@@ -34,6 +34,19 @@ fn sched_level2_the_p8_scene_moves_the_opus_and_the_mixed_pane_off_p8() {
             100.0 * plan.idle.reserve_taken,
         );
         if lim.profile == Profile::Steady {
+            // steady plans the same drain switch, since doing nothing lets
+            // other models take 21.8 points of Fable-usable quota, but its
+            // executor does not notice a working pane for a switch that
+            // averts no refusal within two hours (P8 lasts 7.0): 488's
+            // background work never stops, so steady never takes it
+            let s = of(488).unwrap_or_else(|| panic!("steady: 488 stays on P8"));
+            assert!(!s.exempt && s.kind == Kind::Drain, "steady: {s:?}");
+            let w = exec::Watched { open_at: 0, dead_at: (s.t_dead * 3600.0) as i64, exempt: s.exempt, clean_per_h: 0.09, long_background: true, lost_work: 0.002, gain: s.gain, noticed_at: None };
+            for t in [0, 3600, (s.t_dead * 3600.0) as i64 - 60] {
+                let b = exec::Boundary { at: t, live: true, quiet_s: 600, ..exec::Boundary::default() };
+                assert_eq!(exec::decide(&w, &b, &lim), exec::Would::Wait, "steady at {t}");
+                assert_eq!(exec::decide(&w, &b, &Limits::BALANCED), exec::Would::Notify(Kind::Drain));
+            }
             continue;
         }
         let s = of(488).unwrap_or_else(|| panic!("{}: 488 stays on P8", lim.profile.word()));

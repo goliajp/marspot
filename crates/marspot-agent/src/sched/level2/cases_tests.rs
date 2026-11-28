@@ -193,7 +193,6 @@ fn sched_level2_a_band_twice_as_wide_flips_few_decisions() {
     assert!(flips * 10 <= decisions * 3, "{flips} of {decisions}");
 }
 
-
 #[test]
 fn sched_level2_a_long_session_is_switched_less() {
     // a slow plain pane on an account with no spare: the reserve it takes
@@ -201,9 +200,9 @@ fn sched_level2_a_long_session_is_switched_less() {
     // conversation is written again whole on the other account
     let mut a = [acct(1, 0.4, 0.4, 100.0), acct(2, 0.6, 0.0, 120.0)];
     a[0].spare = 0.0;
-    let sh = crate::sched::switch_cost::Shares { rewrite: 1.0, one_hour: 1.0, regen: 0.005 };
+    let priced = super::loop_price::Pricing::Context(super::loop_price::MEASURED);
     let at = |ctx: u64| {
-        let p = [Pane { rewrite: crate::sched::switch_cost::weeks(Some(sh), crate::quota::Class::Plain, ctx), ..pane(10, 1, false, 0.0, 0.0001) }];
+        let p = [Pane { rewrite: super::loop_price::cost(priced, crate::quota::Class::Plain, ctx), ..pane(10, 1, false, 0.0, 0.0001) }];
         plan(&input(&a, &p), None).switches.len()
     };
     println!("switches at 50k: {}, at 800k: {}", at(50_000), at(800_000));
