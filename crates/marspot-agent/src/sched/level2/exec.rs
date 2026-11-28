@@ -4,20 +4,18 @@
 //! 1. A clean rest (nothing live, a minute of quiet): switch.
 //! 2. A short boundary (nothing live, five seconds): switch once the
 //!    chance of a clean rest before the deadline is under `SHORT_CHANCE`.
-//! 3. Otherwise a notice: a drain notice at the window's opening for a
-//!    session with long background work ("do not start the next one"),
-//!    else the five-minute notice: at once for a working pane when a
-//!    clean rest before the deadline is unlikely (under `SHORT_CHANCE`),
-//!    else timed so the
-//!    notice and the profile's longest wait for a boundary end at the
-//!    deadline.  After a notice
-//!    the switch is taken at the first boundary with nothing live, or,
-//!    once the notice's five minutes are over, at the first boundary
-//!    over background work worth less than the switch's gain;
-//!    background work worth more cancels it and the session is told to
-//!    carry on.  A pane whose agent always has a process under it would
-//!    otherwise wait out the whole wait and then need one more boundary
-//!    before the deadline.
+//! 3. Otherwise a notice, timed so the notice's five minutes and the
+//!    profile's longest wait for a boundary end at the deadline: a drain
+//!    notice ("do not start the next one") for a session with long
+//!    background work, else the five-minute notice.  After either the
+//!    switch is taken at the first boundary with nothing live.  Over
+//!    background work a five-minute notice switches at the first
+//!    boundary once its five minutes are over, and a drain notice once
+//!    the wait is over too, if the work is worth less than the switch's
+//!    gain; work worth more cancels it and the session is told to carry
+//!    on.  A profile that does not notice working panes never switches
+//!    over background work: it cancels once the wait is over, inside the
+//!    half hour a notice must be answered in.
 //!
 //! Never inside a turn, never while the user is at the pane.  A profile
 //! that does not notice working panes notices only for a switch that
@@ -97,14 +95,7 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     }
     let wait_s = i64::from(lim.notice_wait_min) * 60;
     if let Some(at) = w.noticed_at {
-        let kind = if w.long_background { Kind::Drain } else { Kind::Notice };
-        if !b.live {
-            return Would::Switch(kind);
-        }
-        if b.at < at + NOTICE_S {
-            return Would::Wait;
-        }
-        return if w.lost_work >= w.gain { Would::Cancel } else { Would::Switch(kind) };
+        return after_notice(w, b, lim, at, wait_s);
     }
     if !b.live && b.quiet_s >= CLEAN_S {
         return Would::Switch(Kind::Clean);
@@ -112,15 +103,22 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     if !b.live && b.quiet_s >= SHORT_S && clean_chance(w.clean_per_h, w.dead_at - b.at) < SHORT_CHANCE {
         return Would::Switch(Kind::Short);
     }
-    if !lim.notice_working && !w.exempt {
+    if !lim.notice_working && !w.exempt || b.at < w.dead_at - NOTICE_S - wait_s {
         return Would::Wait;
     }
-    if w.long_background {
-        return Would::Notify(Kind::Drain);
+    Would::Notify(if w.long_background { Kind::Drain } else { Kind::Notice })
+}
+
+fn after_notice(w: &Watched, b: &Boundary, lim: &Limits, at: i64, wait_s: i64) -> Would {
+    let kind = if w.long_background { Kind::Drain } else { Kind::Notice };
+    if !b.live {
+        return Would::Switch(kind);
     }
-    // a resting pane is left to reach a short or clean boundary first
-    let unlikely = b.live && clean_chance(w.clean_per_h, w.dead_at - b.at) < SHORT_CHANCE;
-    if unlikely || b.at >= w.dead_at - NOTICE_S - wait_s { Would::Notify(Kind::Notice) } else { Would::Wait }
+    let over = at + NOTICE_S + if kind == Kind::Drain || !lim.notice_working { wait_s } else { 0 };
+    if b.at < over {
+        return Would::Wait;
+    }
+    if !lim.notice_working || w.lost_work >= w.gain { Would::Cancel } else { Would::Switch(kind) }
 }
 
 #[path = "exec_record.rs"]

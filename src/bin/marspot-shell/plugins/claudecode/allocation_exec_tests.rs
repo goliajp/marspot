@@ -34,10 +34,12 @@ fn watch() -> Watch {
     watch_of(441)
 }
 
-/// A pane with long background work that a switch now would end.
+/// A pane with long background work that a switch now would end, its
+/// deadline so near that the drain notice goes at `NOW + 5`.
 fn busy_watch() -> Watch {
     let mut w = watch();
     w.w.long_background = true;
+    w.w.dead_at = NOW + 5 + exec::NOTICE_S + i64::from(Limits::BALANCED.notice_wait_min) * 60;
     w
 }
 
