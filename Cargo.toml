@@ -106,6 +106,14 @@ marspot-peer = { path = "crates/marspot-peer" }
 # simulator).  In-tree, ours, no deps beyond marspot-term.  Only the
 # shell names it.
 marspot-agent = { path = "crates/marspot-agent" }
+# The wire contract between marspot and madcawl, the browser engine
+# that draws web panes: the frame format, the host connection's and the
+# display channel's frames, version ranges, the shared-memory surface
+# header and descriptor passing.  Our own crate, zero deps; both sides
+# must decode the same bytes, so a second copy written here would be a
+# second implementation of one trust boundary.  Pinned to a commit so a
+# clean checkout builds the same thing.
+madcawl-wire = { version = "0.0.1", git = "https://github.com/goliajp/madcawl", rev = "75f06f3931b91436e34efb3e7a3d741e134e455f" }
 libc = "0.2"
 objc2 = "0.6"
 # 0.3 framework crates dropped the "all" feature — the defaults now
