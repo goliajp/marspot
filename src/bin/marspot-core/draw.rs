@@ -149,6 +149,12 @@ impl CoreApp {
         self.renderer.set_layout_modal(layout_modal);
     }
 
+    /// The code of pane `i` of window `wi`, known after its first ask.
+    fn pane_code(&self, wi: usize, i: usize) -> Option<u16> {
+        let sid = win!(self, wi).panes.get(i)?.shelld_session_id()?;
+        marspot_term::pane_code::code_for(sid).ok()
+    }
+
     /// Render the full UI into `target_tex` and return the focused-
     /// pane caret rect (view-local physical pixels) for the IME
     /// candidate window, or `None` when the slot takes no input.
@@ -188,9 +194,14 @@ impl CoreApp {
                 s
             })
             .collect();
+        // the code is drawn before the name: a shared name loses its own copy of it
         let sidebar_labels: Vec<String> = resolved_labels
             .iter()
-            .map(|s| truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS))
+            .enumerate()
+            .map(|(i, s)| {
+                let s = self.pane_code(wi, i).map_or(s.as_str(), |c| without_code(s, c));
+                truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS)
+            })
             .collect();
 
         // the titles say how many helpers only where no strip lists them
@@ -269,9 +280,11 @@ impl CoreApp {
         let entries: Vec<SidebarEntry> = sidebar_labels
             .iter()
             .zip(states.iter())
-            .map(|(label, state)| SidebarEntry {
+            .enumerate()
+            .map(|(i, (label, state))| SidebarEntry {
                 label: label.as_str(),
                 state: *state,
+                code: self.pane_code(wi, i),
             })
             .collect();
         let (cell_w, cell_h) = self.renderer.cell_dims();
@@ -307,4 +320,22 @@ impl CoreApp {
                 .caret_view_phys_rect(focused, col, row, cell_w, cell_h)
         })
     }
+}
+
+/// `label` without a trailing `#<code>` of `code`.
+fn without_code(label: &str, code: u16) -> &str {
+    match label.rsplit_once('#') {
+        Some((base, digits)) if !base.is_empty() && digits.parse::<u16>().ok() == Some(code) => base,
+        _ => label,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn sidebar_label_drops_only_its_own_code() {
+    assert_eq!(without_code("spg#3381", 3381), "spg");
+    assert_eq!(without_code("spg#0042", 42), "spg");
+    assert_eq!(without_code("spg#3381", 3382), "spg#3381");
+    assert_eq!(without_code("#3381", 3381), "#3381");
+    assert_eq!(without_code("codex · a task", 3381), "codex · a task");
 }

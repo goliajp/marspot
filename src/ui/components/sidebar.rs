@@ -1,6 +1,7 @@
 //! The sidebar's list: one row per pane — a status dot, the pane's
-//! name, and a close button that shows only on the row the pointer is
-//! in and on the row of the pane in use.
+//! code (`#4145`, in the secondary text colour), its name, and a close
+//! button that shows only on the row the pointer is in and on the row
+//! of the pane in use.  A long name is cut; the code never is.
 //!
 //! Paint only.  Where the rows and their close buttons are is the
 //! layout's business (`marspot_term::layout`), and so is hit-testing;
@@ -96,18 +97,43 @@ fn status_dot(row: Rect) -> Rect {
     }
 }
 
-/// How many mono cells of a name fit in the row `row`.  The name stops
-/// short of where the close button goes, shown or not.
-pub(crate) fn name_room(row: Rect, close: Option<&Rect>, cell_w: f32) -> usize {
+/// The mono cells a code takes before the name: `#` and four digits,
+/// and one more between it and the name.
+const CODE_CELLS: usize = 6;
+
+/// `#` and the four digits of `code`, written into `buf`.
+pub(crate) fn code_text(code: u16, buf: &mut [u8; 5]) -> &str {
+    buf[0] = b'#';
+    let mut n = code % 10_000;
+    for b in buf[1..].iter_mut().rev() {
+        *b = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    std::str::from_utf8(buf).unwrap_or("")
+}
+
+/// How many mono cells of a name fit in the row `row`, after a code
+/// when it has one.  The name stops short of where the close button
+/// goes, shown or not.
+pub(crate) fn name_room(row: Rect, close: Option<&Rect>, has_code: bool, cell_w: f32) -> usize {
     let dot = status_dot(row);
     let label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
     let label_right = close.map_or(row.x + row.w, |c| c.x) - chrome::px(chrome::SIDEBAR_LABEL_GAP);
-    ((label_right - label_x) / cell_w as f64).floor().max(0.0) as usize
+    let cells = ((label_right - label_x) / cell_w as f64).floor().max(0.0) as usize;
+    if has_code { cells.saturating_sub(CODE_CELLS) } else { cells }
 }
 
-/// One row in `rect`: its fill, its status dot and `name`, already cut
-/// to the room it has.
-pub(crate) fn paint_row(p: &mut ViewPainter, rect: Rect, name: &str, state: SessionState, selected: bool, hovered: bool) {
+/// One row in `rect`: its fill, its status dot, its code and `name`,
+/// already cut to the room it has.
+pub(crate) fn paint_row(
+    p: &mut ViewPainter,
+    rect: Rect,
+    code: Option<u16>,
+    name: &str,
+    state: SessionState,
+    selected: bool,
+    hovered: bool,
+) {
     let radius = chrome::px(chrome::SIDEBAR_ROW_RADIUS) as f32;
     if selected {
         p.fill_rounded_rect(row_fill(rect), palette::chrome_on(), radius, (palette::none(), 0.0));
@@ -121,8 +147,12 @@ pub(crate) fn paint_row(p: &mut ViewPainter, rect: Rect, name: &str, state: Sess
         SessionState::Exited => palette::danger(),
     };
     p.fill_rounded_rect(dot, dot_color, (chrome::px(chrome::SIDEBAR_DOT) * 0.5) as f32, (palette::none(), 0.0));
-    let label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
+    let mut label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
     let baseline = (rect.y_top + (rect.h - p.cell_h as f64) * 0.5) as f32 + p.ascent;
+    if let Some(code) = code {
+        p.text(label_x as f32, baseline, code_text(code, &mut [0; 5]), palette::fg_muted());
+        label_x += CODE_CELLS as f64 * p.cell_w as f64;
+    }
     let fg = if selected { palette::fg() } else { palette::chrome_fg() };
     p.text(label_x as f32, baseline, name, fg);
 }
@@ -195,6 +225,16 @@ mod tests {
         assert_eq!(fill.x - row.x, chrome::px(chrome::SIDEBAR_ROW_INSET));
         assert_eq!(row.x + row.w - (fill.x + fill.w), chrome::px(chrome::SIDEBAR_ROW_INSET));
         assert_eq!((fill.y_top, fill.h), (row.y_top, row.h));
+    }
+
+    #[test]
+    fn sidebar_code_is_hash_and_four_digits_and_takes_its_room_from_the_name() {
+        assert_eq!(code_text(4145, &mut [0; 5]), "#4145");
+        assert_eq!(code_text(7, &mut [0; 5]), "#0007");
+        let row = sidebar().row_rect(0);
+        let (with, without) = (name_room(row, None, true, 7.0), name_room(row, None, false, 7.0));
+        assert_eq!(without - with, CODE_CELLS);
+        assert_eq!(name_room(Rect { w: 10.0, ..row }, None, true, 7.0), 0, "no room left for a name, none taken");
     }
 
     #[test]

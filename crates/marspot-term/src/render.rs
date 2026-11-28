@@ -365,6 +365,8 @@ pub struct SidebarEntry<'a> {
     pub label: &'a str,
     /// Drives the colour of the state dot.
     pub state: SessionState,
+    /// The pane's four-digit code, drawn as `#4145` before the label.
+    pub code: Option<u16>,
 }
 
 // ─── Box-drawing arms ─────────────────────────────────────────────────────

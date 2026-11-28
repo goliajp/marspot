@@ -200,8 +200,13 @@ fn snapshot_on(
             seq: 1 + i as u64,
         })
         .collect();
-    let sidebar: Vec<SidebarEntry> =
-        panes.iter().map(|p| SidebarEntry { label: p.title, state: p.state }).collect();
+    // the codes of the panes in the screenshot the sidebar's design was drawn from
+    const CODES: [u16; 5] = [4145, 5528, 8654, 6004, 8590];
+    let sidebar: Vec<SidebarEntry> = panes
+        .iter()
+        .enumerate()
+        .map(|(i, p)| SidebarEntry { label: p.title, state: p.state, code: Some(CODES[i % CODES.len()]) })
+        .collect();
     renderer.set_window_focused(true);
     let strips: &[SessionView] = &views;
     open(renderer, wr, &ChromeShape { layout: &layout, rows: sidebar.len(), strips: &strips });

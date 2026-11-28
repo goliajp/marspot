@@ -39,7 +39,7 @@ use crate::render::SelectionView;
 // as empty placeholders; when N > cells extras stay alive in the
 // sidebar without a main-area cell (unchanged from earlier behaviour).
 
-pub const SIDEBAR_W_LOGICAL: f64 = 200.0;
+pub const SIDEBAR_W_LOGICAL: f64 = 224.0;
 
 /// Per-cell title strip height in **logical points** — the band at
 /// the top of every 9-grid cell that shows the session label and a

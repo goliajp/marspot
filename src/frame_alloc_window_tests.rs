@@ -77,7 +77,7 @@ fn a_whole_window_frame_allocates_nothing_once_warm() {
         let sidebar: Vec<SidebarEntry> = NAMES
             .iter()
             .enumerate()
-            .map(|(i, &(label, _))| SidebarEntry { label, state: [SessionState::Active, SessionState::Idle][i % 2] })
+            .map(|(i, &(label, _))| SidebarEntry { label, state: [SessionState::Active, SessionState::Idle][i % 2], code: Some(4100 + i as u16) })
             .collect();
         let mut keep = FrameKeep::default();
         let mut l = Lists::default();

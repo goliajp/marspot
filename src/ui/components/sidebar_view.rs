@@ -32,6 +32,8 @@ const FULL: u32 = 4;
 const CAN_CLOSE: u32 = 8;
 /// `data[0]` of a row, from this bit up: its session's state.
 const STATE_SHIFT: u32 = 4;
+/// `data[1]` of a row: its low 16 bits are the pane's code.
+const HAS_CODE: u32 = 1 << 16;
 
 /// The actions: the add button's, and row `n`'s or its close button's
 /// with `arg: n`.
@@ -53,6 +55,7 @@ pub trait Rows {
     fn count(&self) -> usize;
     fn label(&self, i: usize) -> &str;
     fn state(&self, i: usize) -> SessionState;
+    fn code(&self, i: usize) -> Option<u16>;
 }
 
 impl Rows for &[SidebarEntry<'_>] {
@@ -64,6 +67,9 @@ impl Rows for &[SidebarEntry<'_>] {
     }
     fn state(&self, i: usize) -> SessionState {
         self[i].state
+    }
+    fn code(&self, i: usize) -> Option<u16> {
+        self[i].code
     }
 }
 
@@ -80,6 +86,9 @@ impl Rows for Blank {
     }
     fn state(&self, _: usize) -> SessionState {
         SessionState::Active
+    }
+    fn code(&self, _: usize) -> Option<u16> {
+        None
     }
 }
 
@@ -111,6 +120,7 @@ impl SidebarFrame<'_> {
         for i in 0..self.rows.count() {
             self.rows.label(i).hash(&mut h);
             state_bits(self.rows.state(i)).hash(&mut h);
+            self.rows.code(i).hash(&mut h);
         }
         (self.focused_idx, helpers).hash(&mut h);
         (self.quiet, self.cell_w.to_bits()).hash(&mut h);
@@ -235,11 +245,12 @@ fn describe_rows(ui: &mut Ui<'_>, f: &SidebarFrame<'_>, column: &Sidebar, bottom
             let rect = column.row_rect(i);
             let selected = if i == f.focused_idx { SELECTED } else { 0 };
             let close = l.close_session_rects.get(i);
-            let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, f.cell_w));
+            let code = f.rows.code(i);
+            let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, code.is_some(), f.cell_w));
             let state = selected | quiet | can_close | state_bits(f.rows.state(i)) << STATE_SHIFT;
             let row = ui
                 .leaf(preset::SIDEBAR_ROW, Length::Px(rect.w), Length::Px(rect.h))
-                .leaf(preset::SIDEBAR_ROW, [state, 0])
+                .leaf(preset::SIDEBAR_ROW, [state, code.map_or(0, |c| HAS_CODE | u32::from(c))])
                 .label_copy(name)
                 .pressable(row_id(i), Action::new(ROW, i as u32));
             if let Some(c) = close {
@@ -270,7 +281,8 @@ pub(crate) fn paint_helpers(p: &mut ViewPainter, rect: Rect, label: &str, data: 
 pub(crate) fn paint_row(p: &mut ViewPainter<'_>, rect: Rect, close: Option<Rect>, name: &str, data: [u32; 2], state: WidgetState) {
     let session = state_of(data[0] >> STATE_SHIFT);
     let (selected, lit) = (data[0] & SELECTED != 0, lit(data[0], state));
-    sidebar::paint_row(p, rect, name, session, selected, lit);
+    let code = (data[1] & HAS_CODE != 0).then_some(data[1] as u16);
+    sidebar::paint_row(p, rect, code, name, session, selected, lit);
     if let Some(close) = close.filter(|_| selected || lit) {
         let hot = lit && state.hovered_spot;
         sidebar::paint_close(p, close, sidebar::close_look(data[0] & CAN_CLOSE != 0, hot));
