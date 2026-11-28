@@ -282,7 +282,7 @@ mod tests {
         env.set(ENV_SHADOW_IDLE_S, "0");
         assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: SHADOW_IDLE_DEFAULT_S }, "0 is the default, as before");
         env.set(ENV_SHADOW_OF, "42");
-        env.set(ENV_SHADOW_IDLE_S, &SHADOW_IDLE_NEVER.to_string());
+        env.set(ENV_SHADOW_IDLE_S, SHADOW_IDLE_NEVER.to_string());
         assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: SHADOW_IDLE_NEVER }, "no timeout");
         env.set(ENV_SHADOW_OF, "0");
         env.set(ENV_SHADOW_IDLE_S, "2");
