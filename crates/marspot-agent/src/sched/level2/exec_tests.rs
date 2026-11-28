@@ -131,19 +131,58 @@ fn sched_exec_replay_compares_with_the_decision_recorded() {
 
 #[test]
 fn sched_exec_a_committed_switch_keeps_its_earliest_deadline() {
+    const WAIT: i64 = 600;
     let mut d = Deadlines::default();
     let w = |dead_at| Watched { dead_at, ..watched() };
+    let hold = |d: &mut Deadlines, sid, from, to, w, now| d.hold(sid, from, to, w, now, WAIT).0.dead_at;
     // a pass re-times the window later: the deadline held does not move
-    assert_eq!(d.hold(7, 3, w(4 * H), 10).dead_at, 4 * H);
+    assert_eq!(hold(&mut d, 7, 1, 3, w(4 * H), 10), 4 * H);
     d.passed();
-    assert_eq!(d.hold(7, 3, w(5 * H), 600).dead_at, 4 * H);
-    assert_eq!(d.hold(8, 3, w(5 * H), 600).dead_at, 5 * H, "another pane's is its own");
+    assert_eq!(hold(&mut d, 7, 1, 3, w(5 * H), 600), 4 * H);
+    assert_eq!(hold(&mut d, 8, 1, 3, w(5 * H), 600), 5 * H, "another pane's is its own");
     d.passed();
     // an earlier one is taken; a window not yet open is left as planned
-    assert_eq!(d.hold(7, 3, w(3 * H), 900).dead_at, 3 * H);
-    assert_eq!(d.hold(8, 3, Watched { open_at: 2000, ..w(9 * H) }, 900).dead_at, 9 * H);
+    assert_eq!(hold(&mut d, 7, 1, 3, w(3 * H), 900), 3 * H);
+    assert_eq!(hold(&mut d, 8, 1, 3, Watched { open_at: 2000, ..w(9 * H) }, 900), 9 * H);
     d.passed();
-    // a switch no pass handed over is forgotten, as is one to another account
-    assert_eq!(d.hold(8, 3, w(6 * H), 1200).dead_at, 6 * H);
-    assert_eq!(d.hold(7, 4, w(6 * H), 1200).dead_at, 6 * H);
+    // a switch no pass handed over is forgotten, as is one to another
+    // account or from another one
+    assert_eq!(hold(&mut d, 8, 1, 3, w(6 * H), 1200), 6 * H);
+    assert_eq!(hold(&mut d, 7, 1, 4, w(6 * H), 1200), 6 * H);
+    d.passed();
+    assert_eq!(hold(&mut d, 7, 2, 4, w(7 * H), 1300), 7 * H);
+}
+
+#[test]
+fn sched_exec_a_pass_without_a_plan_forgets_every_deadline() {
+    let mut d = Deadlines::default();
+    let w = |dead_at| Watched { dead_at, ..watched() };
+    assert_eq!(d.hold(7, 1, 3, w(H), 10, 600).0.dead_at, H);
+    d.passed();
+    // a pass with no standing plan hands nothing over
+    d.passed();
+    // hours later the same switch comes back with the plan's deadline,
+    // not the old one, which would notice and switch at once
+    let (got, stale) = d.hold(7, 1, 3, w(6 * H), 4 * H, 600);
+    assert_eq!((got.dead_at, stale), (6 * H, None));
+}
+
+#[test]
+fn sched_exec_a_held_deadline_long_past_restarts_from_the_plan() {
+    const WAIT: i64 = 600;
+    let mut d = Deadlines::default();
+    let w = |dead_at| Watched { dead_at, ..watched() };
+    assert_eq!(d.hold(7, 1, 3, w(H), 10, WAIT).0.dead_at, H);
+    d.passed();
+    // past, but inside the wait: still held
+    let (got, stale) = d.hold(7, 1, 3, w(3 * H), H + WAIT, WAIT);
+    assert_eq!((got.dead_at, stale), (H, None));
+    d.passed();
+    // past by more than the wait while the plan still hands it over:
+    // dropped, the plan's value starts again and is held from there
+    let (got, stale) = d.hold(7, 1, 3, w(3 * H), H + WAIT + 1, WAIT);
+    assert_eq!((got.dead_at, stale), (3 * H, Some(H)));
+    d.passed();
+    let (got, stale) = d.hold(7, 1, 3, w(4 * H), H + WAIT + 60, WAIT);
+    assert_eq!((got.dead_at, stale), (3 * H, None));
 }

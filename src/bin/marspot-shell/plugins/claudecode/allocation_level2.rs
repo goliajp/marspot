@@ -161,9 +161,10 @@ impl PanePlan {
         };
         self.ended_last = false;
         if let Some(r) = done.as_ref() {
-            self.run.watch = watches(&r.plan, &input, now, &mut self.run.deadlines);
+            self.run.watch = watches(&r.plan, &input, now, &mut self.run.deadlines, &mut log);
         } else {
             self.run.watch.clear();
+            self.run.deadlines.passed();
         }
         self.run.waits = marspot_agent::sched::level2::guard::waits(&input);
         if let Some(r) = &done {

@@ -87,8 +87,9 @@ impl PanePlan {
 
 /// The committed first switches of `plan` that the executor watches, in
 /// absolute time, with what each pane's input says of it and each
-/// committed one's deadline held.
-pub(super) fn watches(plan: &Plan, input: &Input, now: i64, deadlines: &mut Deadlines) -> Vec<Watch> {
+/// committed one's deadline held; a stale held deadline dropped is logged.
+pub(super) fn watches(plan: &Plan, input: &Input, now: i64, deadlines: &mut Deadlines, log: &mut Vec<(&'static str, String)>) -> Vec<Watch> {
+    let wait_s = i64::from(input.limits.notice_wait_min) * 60;
     let at = |h: f64| now + (h * 3600.0) as i64;
     let v = plan
         .switches
@@ -97,7 +98,11 @@ pub(super) fn watches(plan: &Plan, input: &Input, now: i64, deadlines: &mut Dead
         .filter_map(|s| {
             let p = input.panes.iter().find(|p| p.sid == s.sid && p.on == s.from)?;
             let w = Watched { open_at: at(s.t_open), dead_at: at(s.t_dead), exempt: s.exempt, clean_per_h: p.clean_per_h, long_background: p.long_background, lost_work: p.lost_work, gain: s.gain, noticed_at: None };
-            Some(Watch { sid: s.sid, from: s.from, to: s.to, w: deadlines.hold(s.sid, s.to, w, now) })
+            let (w, stale) = deadlines.hold(s.sid, s.from, s.to, w, now, wait_s);
+            if let Some(held) = stale {
+                log.push(("sched.exec", format!("sid={} from={} to={} deadline_restarted held_ago_s={} dead_in_s={}", s.sid, s.from, s.to, now - held, w.dead_at - now)));
+            }
+            Some(Watch { sid: s.sid, from: s.from, to: s.to, w })
         })
         .take(CAP)
         .collect();

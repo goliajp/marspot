@@ -111,13 +111,16 @@ impl W<'_> {
         self.refused = false;
         self.ended = done.as_ref().is_some_and(|r| !r.ended.cancelled.is_empty() || !r.ended.missed.is_empty());
         self.watch.clear();
-        let Some(r) = done else { return };
+        let Some(r) = done else {
+            self.deadlines.passed();
+            return;
+        };
         self.table = Some(Routing::of(&input, &r.plan));
         let at = |h: f64| now + (h * 3600.0) as i64;
         for s in r.plan.switches.iter().filter(|s| s.order == 0) {
             let Some(p) = panes.iter().find(|p| p.sid == s.sid && p.on == s.from) else { continue };
             let w = Watched { open_at: at(s.t_open), dead_at: at(s.t_dead), exempt: s.exempt, clean_per_h: p.clean_per_h, long_background: false, lost_work: 0.0, gain: s.gain, noticed_at: None };
-            let w = self.deadlines.hold(s.sid, s.to, w, now);
+            let (w, _) = self.deadlines.hold(s.sid, s.from, s.to, w, now, i64::from(lim.notice_wait_min) * 60);
             self.watch.push(Watch { sid: s.sid, from: s.from, to: s.to, w });
         }
         self.deadlines.passed();
