@@ -30,7 +30,7 @@ impl Codexes {
     pub(super) fn look(&mut self, table: &ProcTable, daemons: &[ProcId], now_ms: u64, oldest_pane_ms: Option<u64>) {
         let alive = self
             .kinds
-            .of(table, crate::plugins::codex::looks_like_codex)
+            .of(table, |row| crate::plugins::codex::looks_like_codex(row) && !pidtree::proc_cmdline(row.pid).is_some_and(|l| serves(&l)))
             .into_iter()
             .filter(|row| !daemons.contains(&row.id()))
             .map(|row| (row.id(), pidtree::proc_cwd(row.pid).map(|p| p.to_string_lossy().into_owned())))
@@ -41,6 +41,15 @@ impl Codexes {
     pub(super) fn alone(&self, me: ProcId, cwd: &str, since_ms: u64) -> bool {
         self.seen.alone(me, cwd, since_ms)
     }
+}
+
+/// A codex command line that runs a home's app-server or one of its
+/// helpers (`app-server --listen …`, `app-server daemon pid-update-loop`),
+/// not a TUI.  These sit in the directory of the TUI that started them,
+/// whether or not the pid files name them (0.172.0 also runs the server
+/// as a child of the TUI), and show no thread of their own.
+fn serves(cmdline: &str) -> bool {
+    cmdline.split(' ').nth(1) == Some("app-server")
 }
 
 /// The app-server and its updater of the Codex home `home`, from the
@@ -71,5 +80,15 @@ mod tests {
         assert_eq!(daemon_in(text), Some(ProcId { pid: 67903, start_us: 1_794_607_728_860_429 }));
         assert_eq!(daemon_in(r#"{"pid":1}"#), None);
         assert_eq!(daemon_in(""), None);
+    }
+
+    #[test]
+    fn an_app_server_is_not_a_codex_beside_a_pane() {
+        let bin = "/x/.codex-shared/packages/app-server-daemon/releases/0.172.0-aarch64-apple-darwin/bin/codex";
+        assert!(serves(&format!("{bin} app-server --listen unix:// --analytics-default-enabled --managed-daemon")));
+        assert!(serves(&format!("{bin} app-server daemon pid-update-loop")));
+        assert!(!serves("codex"));
+        assert!(!serves("codex resume 01a218a7-e30b-7f00-8df0-b35e1e443fe7"));
+        assert!(!serves("codex exec review"));
     }
 }
