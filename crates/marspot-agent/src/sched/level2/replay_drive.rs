@@ -12,7 +12,7 @@
 use super::super::exec::{self, Boundary, Watched, Would};
 use super::super::loop_price::{self, MEASURED, Pricing};
 use super::fx::Bound;
-use super::super::route::{Newcomer, Routing};
+use super::super::route::{Newcomer, RefusedTo, Routing};
 use super::super::trigger::Now;
 use super::super::{Account, H2, Input, Kind, Limits, Pane, pass};
 use super::{W, WEEK, Watch};
@@ -91,7 +91,8 @@ impl W<'_> {
             a.spare = *s;
         }
         let accounts: Vec<Account> = quants.iter().enumerate().map(|(j, q)| Account { q: q.clone(), spare: l1.spare[j], price: l1.price[j].unwrap_or([0.0; 2]) }).collect();
-        let day = self.out.planned.iter().filter(|x| now - x.0 < DAY_S).count();
+        // a switch that averts a refusal soon does not count against the fleet's day
+        let day = self.out.planned.iter().filter(|x| now - x.0 < DAY_S && !x.5).count();
         self.notices.retain(|t| now - t < 3600);
         let input = Input { accounts: &accounts, panes: &panes, young, window_full: KAPPA_FABLE, pi: lim.pi(l1.pi), fleet_left: lim.fleet_per_day.saturating_sub(day), notices_left: lim.notices_per_hour.saturating_sub(self.notices.len()), stale_feed: false, limits: lim };
         self.waits = super::super::guard::waits(&input);
@@ -116,8 +117,10 @@ impl W<'_> {
         for s in r.plan.switches.iter().filter(|s| s.order == 0) {
             let Some(p) = panes.iter().find(|p| p.sid == s.sid && p.on == s.from) else { continue };
             let w = Watched { open_at: at(s.t_open), dead_at: at(s.t_dead), exempt: s.exempt, clean_per_h: p.clean_per_h, long_background: false, lost_work: 0.0, gain: s.gain, noticed_at: None };
+            let w = self.deadlines.hold(s.sid, s.to, w, now);
             self.watch.push(Watch { sid: s.sid, from: s.from, to: s.to, w });
         }
+        self.deadlines.passed();
     }
 
     /// Before the first recorded boundary: a pane at rest takes its
@@ -186,8 +189,10 @@ impl W<'_> {
         let (on, class, ctx) = (p.on, p.class, p.ctx);
         let rate = if sp[0] + sp[1] > 0.0 { sp[0] + sp[1] } else { RHO0 };
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: H2 };
-        if let Some(to) = self.table.as_mut().and_then(|t| t.place(&m, Some(on))).map(|x| x.to).filter(|t| self.open(*t)) {
-            return Some(to);
+        match self.table.as_mut().map(|t| t.place_refused(&m, on, sid)) {
+            Some(RefusedTo::To(x)) if self.open(x.to) => return Some(x.to),
+            Some(RefusedTo::Wait) => return None,
+            _ => {}
         }
         let q: Vec<_> = self.accs.iter().map(|a| a.q.clone()).collect();
         let mut loads = vec![Load::default(); q.len()];

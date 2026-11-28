@@ -160,7 +160,11 @@ impl PanePlan {
             None => pass::retime(&mut self.standing, &input, now),
         };
         self.ended_last = false;
-        self.run.watch = done.as_ref().map_or_else(Vec::new, |r| watches(&r.plan, &input, now));
+        if let Some(r) = done.as_ref() {
+            self.run.watch = watches(&r.plan, &input, now, &mut self.run.deadlines);
+        } else {
+            self.run.watch.clear();
+        }
         self.run.waits = marspot_agent::sched::level2::guard::waits(&input);
         if let Some(r) = &done {
             allocation_route::rebuild(&input, &r.plan, forecast, due.is_some().then(|| allocation_route::others_now(now)), now);

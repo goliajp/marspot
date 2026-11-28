@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use marspot_agent::sched::calib::Closed;
-use marspot_agent::sched::level2::exec::Watched;
+use marspot_agent::sched::level2::exec::{Deadlines, Watched};
 use marspot_agent::sched::level2::{FableGuard, Input, Limits, Plan};
 
 use super::super::allocation_adapter::Allocation;
@@ -22,6 +22,7 @@ pub(super) struct ExecRun {
     pub exec: Exec,
     pub watch: Vec<Watch>,
     pub waits: Vec<u64>,
+    pub deadlines: Deadlines,
     limits: Limits,
     refused_now: Vec<u64>,
 }
@@ -29,7 +30,7 @@ pub(super) struct ExecRun {
 impl ExecRun {
     pub(super) fn new(state_root: &Path) -> ExecRun {
         let exec = Exec::load(state_root, super::super::rooms::unix_now());
-        ExecRun { exec, watch: Vec::new(), waits: Vec::new(), limits: Limits::default(), refused_now: Vec::new() }
+        ExecRun { exec, watch: Vec::new(), waits: Vec::new(), deadlines: Deadlines::default(), limits: Limits::default(), refused_now: Vec::new() }
     }
 
     /// The limits a pass plans under: a live executor follows a plan
@@ -85,19 +86,23 @@ impl PanePlan {
 }
 
 /// The committed first switches of `plan` that the executor watches, in
-/// absolute time, with what each pane's input says of it.
-pub(super) fn watches(plan: &Plan, input: &Input, now: i64) -> Vec<Watch> {
+/// absolute time, with what each pane's input says of it and each
+/// committed one's deadline held.
+pub(super) fn watches(plan: &Plan, input: &Input, now: i64, deadlines: &mut Deadlines) -> Vec<Watch> {
     let at = |h: f64| now + (h * 3600.0) as i64;
-    plan.switches
+    let v = plan
+        .switches
         .iter()
         .filter(|s| s.order == 0)
         .filter_map(|s| {
             let p = input.panes.iter().find(|p| p.sid == s.sid && p.on == s.from)?;
             let w = Watched { open_at: at(s.t_open), dead_at: at(s.t_dead), exempt: s.exempt, clean_per_h: p.clean_per_h, long_background: p.long_background, lost_work: p.lost_work, gain: s.gain, noticed_at: None };
-            Some(Watch { sid: s.sid, from: s.from, to: s.to, w })
+            Some(Watch { sid: s.sid, from: s.from, to: s.to, w: deadlines.hold(s.sid, s.to, w, now) })
         })
         .take(CAP)
-        .collect()
+        .collect();
+    deadlines.passed();
+    v
 }
 
 pub(super) fn offers_digest(ci: &ClassInputs) -> u64 {

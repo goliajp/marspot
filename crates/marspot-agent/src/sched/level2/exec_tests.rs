@@ -128,3 +128,22 @@ fn sched_exec_replay_compares_with_the_decision_recorded() {
     assert_eq!(replay(&record(&fresh, &near, &Limits::STEADY, s)), Some(true));
     assert_eq!(replay("decided=switch:sideways open=1"), None);
 }
+
+#[test]
+fn sched_exec_a_committed_switch_keeps_its_earliest_deadline() {
+    let mut d = Deadlines::default();
+    let w = |dead_at| Watched { dead_at, ..watched() };
+    // a pass re-times the window later: the deadline held does not move
+    assert_eq!(d.hold(7, 3, w(4 * H), 10).dead_at, 4 * H);
+    d.passed();
+    assert_eq!(d.hold(7, 3, w(5 * H), 600).dead_at, 4 * H);
+    assert_eq!(d.hold(8, 3, w(5 * H), 600).dead_at, 5 * H, "another pane's is its own");
+    d.passed();
+    // an earlier one is taken; a window not yet open is left as planned
+    assert_eq!(d.hold(7, 3, w(3 * H), 900).dead_at, 3 * H);
+    assert_eq!(d.hold(8, 3, Watched { open_at: 2000, ..w(9 * H) }, 900).dead_at, 9 * H);
+    d.passed();
+    // a switch no pass handed over is forgotten, as is one to another account
+    assert_eq!(d.hold(8, 3, w(6 * H), 1200).dead_at, 6 * H);
+    assert_eq!(d.hold(7, 4, w(6 * H), 1200).dead_at, 6 * H);
+}

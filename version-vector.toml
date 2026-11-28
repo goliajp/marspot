@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.941"  # planner and executor share one attended rule: focus or a prompt within the hour
+shell   = "0.7.942"  # the executor holds each committed switch's earliest deadline, so a deadline-timed notice goes
 core    = "0.12.816"  # the switching row's snapshot test imports in order
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

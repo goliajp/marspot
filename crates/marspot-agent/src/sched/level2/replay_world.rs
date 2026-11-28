@@ -86,6 +86,8 @@ pub(super) struct Out {
     /// held both its classes.
     pub unavoidable: f64,
     pub phi_taken_room: f64,
+    /// The reserve taken, by account and pane.
+    pub taken_by: BTreeMap<(u8, u64), f64>,
     /// Other-model use held back by strict protection's waits.
     pub waited: f64,
     pub week_lapsed: f64,
@@ -127,6 +129,7 @@ pub(super) struct W<'a> {
     pub refused: bool,
     pub table: Option<Routing>,
     pub watch: Vec<Watch>,
+    pub deadlines: super::exec::Deadlines,
     /// Notices sent, for the hourly limit.
     pub notices: Vec<i64>,
     /// Restricted use recorded so far, by hour.
@@ -146,7 +149,7 @@ pub(super) fn run(fx: &Fx, mode: Mode) -> Out {
 /// `run`, with strict protection's waits made, not only rehearsed.
 pub(super) fn run_holding(fx: &Fx, mode: Mode, hold: bool) -> Out {
     let accs = fx.start.iter().map(|&(id, r, f, renew, renew_f)| Acc { q: Quant { id, r, f, t: 0.0, tf: 0.0, open: true, stale: false }, renew, renew_f, taken: 0.0, taken_reserve: 0.0, spare: 0.0 }).collect();
-    let mut w = W { fx, mode, accs, panes: BTreeMap::new(), out: Out::default(), st: Standing::default(), tr: Triggers::default(), ended: false, refused: false, table: None, watch: Vec::new(), notices: Vec::new(), hours_r: Vec::new(), waits: Vec::new(), hold, stuck: false };
+    let mut w = W { fx, mode, accs, panes: BTreeMap::new(), out: Out::default(), st: Standing::default(), tr: Triggers::default(), ended: false, refused: false, table: None, watch: Vec::new(), deadlines: Default::default(), notices: Vec::new(), hours_r: Vec::new(), waits: Vec::new(), hold, stuck: false };
     let mut next = 0;
     for k in 0..fx.len / fx.step {
         let now = fx.t0 + k * fx.step;

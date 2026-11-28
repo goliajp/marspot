@@ -121,6 +121,43 @@ fn after_notice(w: &Watched, b: &Boundary, lim: &Limits, at: i64, wait_s: i64) -
     if !lim.notice_working || w.lost_work >= w.gain { Would::Cancel } else { Would::Switch(kind) }
 }
 
+/// Deadlines held at most.
+pub const DEADLINES_CAP: usize = 128;
+
+/// Each committed switch's deadline as the executor holds it: the
+/// earliest any pass gave it since its window opened.  Every pass works
+/// the windows out again, and a switch that only saves reserve has its
+/// deadline where its remaining gain falls under its cost, which moves
+/// on with the clock while the gain holds: a notice timed against it
+/// would never go.  A switch no pass hands over any more is forgotten.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Deadlines {
+    held: Vec<(u64, u8, i64)>,
+    next: Vec<(u64, u8, i64)>,
+}
+
+impl Deadlines {
+    /// `w` for pane `sid`'s switch to `to`, with its deadline held.
+    pub fn hold(&mut self, sid: u64, to: u8, mut w: Watched, now: i64) -> Watched {
+        if w.open_at > now {
+            return w;
+        }
+        if let Some(d) = self.held.iter().find(|h| h.0 == sid && h.1 == to).map(|h| h.2) {
+            w.dead_at = w.dead_at.min(d);
+        }
+        if self.next.len() < DEADLINES_CAP {
+            self.next.push((sid, to, w.dead_at));
+        }
+        w
+    }
+
+    /// The pass is over: what it did not hand over is forgotten.
+    pub fn passed(&mut self) {
+        std::mem::swap(&mut self.held, &mut self.next);
+        self.next.clear();
+    }
+}
+
 #[path = "exec_record.rs"]
 mod record;
 pub use record::{parse, record, replay, words};
