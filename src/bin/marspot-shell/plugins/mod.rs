@@ -47,7 +47,7 @@ pub mod helpers;
 pub mod kimi;
 pub(crate) mod cold_restore;
 #[cfg(test)]
-pub(crate) mod l3_test_support;
+pub(crate) mod l3_support_tests;
 pub(crate) mod launches;
 pub mod peerbus;
 pub mod usage;

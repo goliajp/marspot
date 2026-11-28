@@ -12,10 +12,10 @@ use super::super::CodexPlugin;
 use super::{Bound, Cold};
 use crate::observe::{Observation, Session};
 use crate::plugins::cold_restore::{Pace, PaneNow, STAGGER};
-use crate::plugins::l3_test_support::OpsHost;
+use crate::plugins::l3_support_tests::OpsHost;
 use crate::plugins::pty_op;
 
-#[path = "cold_restore_l3.rs"]
+#[path = "cold_restore_l3_tests.rs"]
 mod cold_restore_l3;
 
 fn thread(sid: u64) -> String {
@@ -62,7 +62,7 @@ fn plugin_with(rows: Vec<LastThread>) -> CodexPlugin {
 }
 
 fn host(dir: &TempDir) -> OpsHost {
-    OpsHost::new(dir.join("state"), Arc::new(crate::plugins::l3_test_support::NoPane))
+    OpsHost::new(dir.join("state"), Arc::new(crate::plugins::l3_support_tests::NoPane))
 }
 
 fn sids(h: &OpsHost) -> Vec<u64> {
