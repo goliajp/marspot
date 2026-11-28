@@ -36,7 +36,8 @@ Per-layer version numbers live in `version-vector.toml`.
 - Quitting Marspot and opening it again right away no longer leaves a
   stray icon in the Dock.
 - The +N in a pane's title and the helper rows under it count the same
-  panes.
+  panes, and with the helper rows turned off the +N updates as soon as
+  a pane's helpers change, even while the pane is idle.
 - A working agent's badge ends with a static mark instead of a spinner
   that stopped moving.
 - Output that arrives in small pieces while the Mac is busy costs less
