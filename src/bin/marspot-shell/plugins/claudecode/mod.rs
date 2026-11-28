@@ -79,6 +79,7 @@ mod alloc_order;
 mod worker_loop;
 pub(crate) mod model_guard;
 pub(in crate::plugins) mod with_helpers;
+pub(crate) mod reset_claim;
 
 use transcript::{activity_of, has_conversation, parse_session_id, tail_last_message_type};
 #[cfg(test)]
@@ -92,8 +93,7 @@ pub use statusline::statusline_ingest;
 pub(crate) use settings_hook::{cc_settings_files, sh_quote};
 pub(crate) use settings_write::write_through_symlink;
 use {idle::*, idle_rule::*, model::*};
-use statusline::*;
-use settings_hook::*;
+use {settings_hook::*, statusline::*};
 use worker::*;
 use scan_result::*;
 use profile_tag::*;

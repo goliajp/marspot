@@ -10,10 +10,8 @@ use super::ledger::{HEADER, Ledger};
 use super::*;
 
 mod again_tests;
-mod codex_tests;
 mod curl_tests;
 mod no_devops_tests;
-mod screen_tests;
 mod status_tests;
 
 const NOW: i64 = 1_795_740_000;

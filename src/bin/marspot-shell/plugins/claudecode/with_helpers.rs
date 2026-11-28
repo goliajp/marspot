@@ -68,7 +68,7 @@ impl HelperRoles {
         Self::of_with_claims(
             obs.live().map(|s| (s.entry.id, s.entry.shadow_of)),
             &crate::plugins::helpers::strip::parents(),
-            &crate::agentsvc::accounts::reset::panes::windows(),
+            &super::reset_claim::panes::windows(),
         )
     }
 

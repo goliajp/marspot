@@ -18,9 +18,14 @@ use marspot_peer::control::client::{self, CallError};
 use marspot_peer::control::{Input, Op, OpenArgs, ReadArgs, Request, Response, SendArgs, Wait};
 use marspot_peer::json::Value;
 
-use super::claude_screen::{self, SessionReset};
-use super::{Grant, Outcome, Res};
+use crate::agentsvc::accounts::reset::{Grant, Outcome, Res};
 use crate::plugins::pty_command::PtyCommand;
+use screen::SessionReset;
+
+pub(crate) mod panes;
+pub(crate) mod screen;
+#[cfg(test)]
+mod tests;
 
 /// A model the account surely has; the claim sends no message to it.
 const MODEL: &str = "sonnet";
@@ -77,7 +82,7 @@ impl Drop for Panes {
         }
         let _ = ask(Op::Close { target: self.window.clone() });
         if let Ok(sid) = self.window.parse() {
-            super::panes::unmark(sid);
+            panes::unmark(sid);
         }
     }
 }
@@ -88,12 +93,12 @@ fn open(new_window: bool, parent: Option<String>, command: Option<String>) -> Re
     v.get("id").and_then(Value::i64).map(|n| n.to_string()).ok_or_else(|| "the pane was opened with no id".into())
 }
 
-pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
+pub(crate) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
     if !marspot::agent_resets::claim_path_on("claude", &grant.kind) {
         return Outcome::of(Res::Unavailable, "marspot claims no stored Claude reset but the weekly session reset yet");
     }
     let dir = config_dir(profile);
-    let session = claude_screen::session_reset(&flags_of(&dir));
+    let session = screen::session_reset(&flags_of(&dir));
     if !session.enabled {
         return Outcome::of(Res::Unavailable, "the CLI offers no session reset on this account (its cached flags say so)");
     }
@@ -106,7 +111,7 @@ pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
         Err(e) => return Outcome::of(Res::Error, &format!("no window for the CLI: {e}")),
     };
     // marked before the CLI pane exists, so no scan sees it unmarked
-    if !panes.window.parse().is_ok_and(super::panes::mark) {
+    if !panes.window.parse().is_ok_and(panes::mark) {
         return Outcome::of(Res::Error, "the claim's window could not be kept out of account switching");
     }
     match open(false, Some(panes.window.clone()), Some(command.clone())) {
@@ -135,7 +140,7 @@ fn drive(cli: &str, session: &SessionReset, deadline: Instant) -> Outcome {
         return Outcome::of(Res::Error, &format!("could not type the command: {e}"));
     }
     let screen = read(cli, Wait::Quiet(1500), deadline);
-    match claude_screen::result_of(&screen, session) {
+    match screen::result_of(&screen, session) {
         Some((result, line)) => Outcome::of(result, &line),
         None => Outcome::of(Res::Error, "the CLI printed no line this build knows after /limit-reset"),
     }

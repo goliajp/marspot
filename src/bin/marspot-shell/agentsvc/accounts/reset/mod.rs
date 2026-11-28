@@ -15,13 +15,9 @@
 //! `/limit-reset` in a background pane under a window marspot opens for
 //! it; Codex through the app-server's consume request.
 
-mod claude;
-mod claude_screen;
-mod codex;
 pub(crate) mod idle;
 mod ledger;
 mod outcome;
-pub(crate) mod panes;
 mod status;
 mod verify;
 
@@ -220,8 +216,8 @@ fn act(c: &Claim, deadline: Instant) -> Outcome {
 
 fn claim(c: &Claim, deadline: Instant) -> Outcome {
     match c.provider {
-        Provider::Claude => claude::claim(c.profile, &c.grant, deadline),
-        Provider::Codex => codex::claim_profile(c.profile, &c.grant, &c.request_id, deadline),
+        Provider::Claude => crate::plugins::claudecode::reset_claim::claim(c.profile, &c.grant, deadline),
+        Provider::Codex => crate::plugins::codex::reset_claim::claim_profile(c.profile, &c.grant, &c.request_id, deadline),
     }
 }
 

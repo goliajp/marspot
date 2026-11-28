@@ -5,7 +5,7 @@
 
 use marspot_peer::json::{self, Value};
 
-use super::Res;
+use crate::agentsvc::accounts::reset::Res;
 
 /// What the CLI printed on an account not at its five-hour limit
 /// (Claude Code 2.1.332, 2026-11-26).
@@ -16,7 +16,7 @@ const COMMAND: &str = "/limit-reset";
 
 /// The weekly session reset as the account's cached flags describe it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct SessionReset {
+pub(crate) struct SessionReset {
     pub enabled: bool,
     /// Each with `{date}` where the CLI puts a date.
     pub success: Option<String>,
@@ -30,7 +30,7 @@ fn flag<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
 
 /// The weekly session reset of the account whose `.claude.json` is
 /// `body`; read only, never written.
-pub(super) fn session_reset(body: &str) -> SessionReset {
+pub(crate) fn session_reset(body: &str) -> SessionReset {
     let Ok(v) = json::parse(body) else { return SessionReset::default() };
     let Some(f) = flag(&v, "tengu_nifty_lemur") else { return SessionReset::default() };
     let line = |k: &str| f.str_at(k).map(str::to_string);
@@ -122,6 +122,6 @@ fn day_in(text: &str, at: i64) -> Option<i64> {
 /// When the session reset is offered again, from the line a claim
 /// printed at `at`: the date in the success or spent line, `None` when
 /// the line names none this build can read.
-pub(super) fn next_offered(line: &str, s: &SessionReset, at: i64) -> Option<i64> {
+pub(crate) fn next_offered(line: &str, s: &SessionReset, at: i64) -> Option<i64> {
     [&s.success, &s.spent].into_iter().flatten().filter_map(|t| fill(line, t)).filter(|d| !d.is_empty()).find_map(|d| day_in(d, at))
 }

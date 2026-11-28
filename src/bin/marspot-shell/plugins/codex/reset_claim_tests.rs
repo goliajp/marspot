@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use marspot_peer::json;
 
-use super::super::codex::{Credit, below_usable, claim, cli_exe, consumed, pick};
-use super::super::{Grant, Res};
+use super::{Credit, below_usable, claim, cli_exe, consumed, pick};
+use crate::agentsvc::accounts::reset::{Grant, Res};
 
-const RL_1: &str = include_str!("../../../../plugins/usage/fixtures/codex-1-rate-limits.json");
-const ANSWERS: &str = include_str!("../fixtures/codex-consume-answers.jsonl");
+const RL_1: &str = include_str!("../usage/fixtures/codex-1-rate-limits.json");
+const ANSWERS: &str = include_str!("fixtures/codex-consume-answers.jsonl");
 
 fn second_credit() -> Grant {
     Grant { kind: "codex_full".into(), grant_ref: "codex:1:g2".into(), starts_at: Some(1_793_573_597), ends_at: Some(1_796_165_597), left: Some(1) }

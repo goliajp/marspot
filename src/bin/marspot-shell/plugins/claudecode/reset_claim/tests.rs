@@ -5,10 +5,10 @@
 
 use std::time::{Duration, Instant};
 
-use super::super::claude_screen::{NOT_AVAILABLE, next_offered, result_of, session_reset};
-use super::super::{Grant, Res, claude};
+use super::screen::{NOT_AVAILABLE, next_offered, result_of, session_reset};
+use crate::agentsvc::accounts::reset::{Grant, Res};
 
-const FLAGS: &str = include_str!("../fixtures/claude-flags.json");
+const FLAGS: &str = include_str!("fixtures/claude-flags.json");
 
 /// 2026-11-27T00:00:00Z.
 const NOW: i64 = 1_795_737_600;
@@ -76,7 +76,7 @@ fn reset_screen_a_claim_of_a_stored_claude_grant_types_nothing() {
     // here would fail on the missing control socket instead
     for kind in ["full", "weekly", "fable", "codex_full"] {
         let g = Grant { kind: kind.into(), grant_ref: "claude:3:g1".into(), ..Grant::default() };
-        let o = claude::claim(3, &g, Instant::now() + Duration::from_secs(5));
+        let o = super::claim(3, &g, Instant::now() + Duration::from_secs(5));
         assert_eq!(o.result, Res::Unavailable, "{kind}: {o:?}");
         assert!(o.detail.contains("session reset"), "{o:?}");
     }

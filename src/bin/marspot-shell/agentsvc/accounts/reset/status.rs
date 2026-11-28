@@ -6,7 +6,7 @@
 use marspot::agent_resets::{AccountResets, Resets};
 use marspot_peer::json::{Value, obj};
 
-use super::claude_screen::{self, SessionReset};
+use crate::plugins::claudecode::reset_claim::screen::{self as claude_screen, SessionReset};
 use super::ledger::Row;
 
 /// A five-hour reading older than this does not say the account is at
