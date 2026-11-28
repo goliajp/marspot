@@ -28,7 +28,7 @@ mod daemon;
 mod deliver;
 mod exec_prep;
 #[cfg(test)]
-mod fake_daemon;
+pub(in crate::plugins) mod fake_daemon;
 mod gemini_bind;
 mod gemini_config;
 mod idle;

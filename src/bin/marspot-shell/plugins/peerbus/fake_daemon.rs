@@ -4,7 +4,7 @@
 //! threads, and writing down every method it was asked.
 
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -14,7 +14,7 @@ use marspot_peer::sha1::{base64, sha1};
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Default)]
-pub(super) struct State {
+pub(in crate::plugins) struct State {
     /// `thread/read`'s `thread` for each loaded thread, in order.
     pub threads: Vec<(String, Value)>,
     /// Listed as loaded, but `thread/read` fails for them.
@@ -29,7 +29,7 @@ pub(super) struct State {
     pub delay: std::time::Duration,
 }
 
-pub(super) struct Daemon {
+pub(in crate::plugins) struct Daemon {
     pub state: Arc<Mutex<State>>,
 }
 
@@ -37,7 +37,7 @@ impl Daemon {
     pub fn start(home: &Path) -> Daemon {
         let dir = home.join("app-server-control");
         std::fs::create_dir_all(&dir).unwrap();
-        let listener = UnixListener::bind(dir.join("app-server-control.sock")).unwrap();
+        let listener = marspot_term::uds_path::bind(dir.join("app-server-control.sock")).unwrap();
         let state = Arc::new(Mutex::new(State::default()));
         let s = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -114,7 +114,9 @@ fn answer(state: &Mutex<State>, method: &str, params: Option<&Value>) -> Result<
         }
         "thread/read" => s.threads.iter().find(|(i, _)| *i == id).map(|(_, t)| obj([("thread", t.clone())])).ok_or("not loaded".into()),
         "thread/resume" => Ok(obj([("approvalPolicy", Value::from("never")), ("sandbox", obj([("type", Value::from("dangerFullAccess"))]))])),
-        "thread/unsubscribe" | "thread/queue/add" | "turn/steer" => Ok(obj([])),
+        "thread/unsubscribe" | "thread/queue/add" | "turn/steer" | "thread/goal/set" | "turn/interrupt" => Ok(obj([])),
+        "thread/goal/get" => Ok(obj([("goal", Value::Null)])),
+        "thread/turns/list" => Ok(obj([("data", Value::Arr(Vec::new()))])),
         _ => Err(format!("{method}: not served here")),
     }
 }
