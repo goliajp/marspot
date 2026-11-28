@@ -23,7 +23,6 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
@@ -238,7 +237,7 @@ pub(crate) fn hold_or_exit() {
             );
             // a holder that is still booting has no socket yet, and
             // will put its own window in front when it gets there
-            if let Ok(mut stream) = UnixStream::connect(front_socket_path()) {
+            if let Ok(mut stream) = marspot_term::uds_path::connect(front_socket_path()) {
                 let _ = stream.write_all(front_request(std::process::id(), std::env::vars()).as_bytes());
             }
             // this launch is the one the system just let come forward;
@@ -261,7 +260,7 @@ pub(crate) fn serve_front(wake: impl Fn() + Send + 'static) {
     let path = front_socket_path();
     // ours to replace: we hold the lock, so whoever bound it is gone
     let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
+    let listener = match marspot_term::uds_path::bind(&path) {
         Ok(l) => l,
         Err(e) => {
             lx_warn!("shell.front.bind_failed", &format!("{e}"));

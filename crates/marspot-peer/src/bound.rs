@@ -7,7 +7,6 @@
 
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,7 +54,7 @@ impl Waiter {
         if found() {
             return true;
         }
-        if dirs.is_empty() || self.given_up().iter().any(|g| g == who) || UnixStream::connect(&self.app).is_err() {
+        if dirs.is_empty() || self.given_up().iter().any(|g| g == who) || marspot_term::uds_path::connect(&self.app).is_err() {
             return false;
         }
         let Some((watch, cancelled)) = cancel.watch().and_then(|c| Some((Watch::new(dirs, c.as_raw_fd())?, c))) else {

@@ -37,6 +37,7 @@ pub mod scrollback_search;
 pub(crate) mod segment;
 pub mod signals;
 pub mod unicode_data;
+pub mod uds_path;
 
 /// Fingerprint embedded into the binary's rodata so `install-local.sh`
 /// can extract the git sha + build timestamp via `strings BIN | grep

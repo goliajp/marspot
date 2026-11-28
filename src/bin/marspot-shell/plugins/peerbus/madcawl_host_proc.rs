@@ -33,7 +33,7 @@ pub(super) fn bind(socket: &Path) -> io::Result<UnixListener> {
     let _ = fs::remove_dir_all(&private);
     fs::DirBuilder::new().mode(0o700).create(&private)?;
     let at = private.join("s");
-    let bound = UnixListener::bind(&at).and_then(|l| {
+    let bound = marspot_term::uds_path::bind(&at).and_then(|l| {
         fs::set_permissions(&at, fs::Permissions::from_mode(0o600))?;
         fs::rename(&at, socket)?;
         Ok(l)

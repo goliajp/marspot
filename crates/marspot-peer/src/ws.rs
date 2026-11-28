@@ -52,7 +52,7 @@ fn proto(what: &str) -> io::Error {
 
 impl Ws {
     pub fn connect(path: &Path, timeout: Duration) -> io::Result<Ws> {
-        let s = UnixStream::connect(path)?;
+        let s = marspot_term::uds_path::connect(path)?;
         s.set_read_timeout(Some(timeout))?;
         s.set_write_timeout(Some(timeout))?;
         let mut nonce = [0u8; 16];

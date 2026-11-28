@@ -49,7 +49,7 @@ pub fn run(public: &Path, upstream: &Path, send: &Path) -> io::Result<()> {
 }
 
 fn bind(path: &Path) -> io::Result<UnixListener> {
-    let l = UnixListener::bind(path)?;
+    let l = marspot_term::uds_path::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(l)
 }
@@ -81,7 +81,7 @@ fn serve(listener: UnixListener, handle: impl Fn(UnixStream) + Send + Sync + Clo
 /// liveness check) is passed on as one too.
 fn pass_through(mut conn: UnixStream, upstream: &Path) {
     let _ = conn.set_read_timeout(Some(IO_TIMEOUT));
-    let Ok(mut up) = UnixStream::connect(upstream) else { return };
+    let Ok(mut up) = marspot_term::uds_path::connect(upstream) else { return };
     let _ = up.set_write_timeout(Some(IO_TIMEOUT));
     let _ = io::copy(&mut (&mut conn).take(frame::MAX_LINE as u64 * 4), &mut up);
 }
@@ -125,7 +125,7 @@ fn deliver(request: &str, dirs: &[PathBuf]) -> Result<(), String> {
 /// Hand `line` (one frame, with or without its newline) to the relay at
 /// `relay` for delivery to the socket at `to`.
 pub fn send_via(relay: &str, to: &str, line: &str) -> Result<(), String> {
-    let mut s = UnixStream::connect(relay).map_err(|e| format!("this session's relay is not running: {e}"))?;
+    let mut s = marspot_term::uds_path::connect(relay).map_err(|e| format!("this session's relay is not running: {e}"))?;
     let _ = s.set_read_timeout(Some(SEND_TIMEOUT + Duration::from_secs(5)));
     let req = obj([("to", Value::from(to)), ("line", Value::from(line.trim_end_matches('\n')))]).to_json();
     s.write_all(req.as_bytes()).and_then(|()| s.write_all(b"\n")).map_err(|e| e.to_string())?;

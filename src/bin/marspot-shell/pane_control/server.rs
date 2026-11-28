@@ -27,7 +27,7 @@ pub(super) fn serve(hub: &'static Hub) -> std::io::Result<()> {
     }
     // the previous owner is this process's predecessor: an execv, a crash
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)?;
+    let listener = marspot_term::uds_path::bind(&path)?;
     std::thread::Builder::new().name("control".into()).spawn(move || accept_loop(hub, listener))?;
     marspot::lx_info!("shell.control.listening", "pane control socket bound", path = path.display().to_string());
     Ok(())

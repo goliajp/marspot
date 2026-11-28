@@ -13,7 +13,7 @@
 //! directory's: this is a same-user channel, not an authenticated one.
 
 use std::io;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::mpsc::Sender;
 
 use marspot_term::shell_proto::{
@@ -63,7 +63,7 @@ pub fn serve(tx: Sender<CliRequest>, wake: Wake) -> io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)?;
+    let listener = marspot_term::uds_path::bind(&path)?;
     std::thread::Builder::new()
         .name("l1-cmd".into())
         .spawn(move || {
@@ -235,7 +235,7 @@ pub fn save_autorun(on: &std::collections::HashSet<String>) -> io::Result<()> {
 
 /// Client half: ask a running shell what panes it has.
 pub fn list_panes() -> io::Result<Vec<(u64, String, String)>> {
-    let mut stream = UnixStream::connect(socket_path())?;
+    let mut stream = marspot_term::uds_path::connect(socket_path())?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
     Frame::new(MsgType::CliListPanes, Vec::new()).write_to(&mut stream)?;
     match Frame::read_from(&mut stream)? {
@@ -248,7 +248,7 @@ pub fn list_panes() -> io::Result<Vec<(u64, String, String)>> {
 
 /// Client half: ask a running shell what a pane says.
 pub fn read_pane(target: &str, extra_lines: u32) -> io::Result<Result<String, String>> {
-    let mut stream = UnixStream::connect(socket_path())?;
+    let mut stream = marspot_term::uds_path::connect(socket_path())?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
     Frame::new(
         MsgType::CliReadPane,
@@ -269,7 +269,7 @@ pub fn read_pane(target: &str, extra_lines: u32) -> io::Result<Result<String, St
 /// Client half: switch the autorun policy for a pane, or ask which
 /// panes have it on (`target` empty, `on` None).
 pub fn autorun(target: &str, on: Option<bool>) -> io::Result<Result<String, String>> {
-    let mut stream = UnixStream::connect(socket_path())?;
+    let mut stream = marspot_term::uds_path::connect(socket_path())?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
     Frame::new(
         MsgType::CliAutorun,
@@ -289,7 +289,7 @@ pub fn autorun(target: &str, on: Option<bool>) -> io::Result<Result<String, Stri
 
 /// Client half: ask a running shell to type into a pane.
 pub fn send_text(target: &str, text: &str) -> io::Result<(bool, String)> {
-    let mut stream = UnixStream::connect(socket_path())?;
+    let mut stream = marspot_term::uds_path::connect(socket_path())?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
     Frame::new(
         MsgType::CliSendText,

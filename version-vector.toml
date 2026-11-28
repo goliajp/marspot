@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.891"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key
-core    = "0.12.792"  # a pane in a minimized window is still on screen for replacing, though drawn hollow
-session = "0.11.494"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key
+shell   = "0.7.892"  # marspot-term: unix sockets bind and connect at paths past the 104 bytes sockaddr_un declares
+core    = "0.12.793"  # marspot-term: unix sockets bind and connect at paths past the 104 bytes sockaddr_un declares
+session = "0.11.495"  # marspot-term: unix sockets bind and connect at paths past the 104 bytes sockaddr_un declares

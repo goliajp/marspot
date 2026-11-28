@@ -103,7 +103,7 @@ impl SessionListener {
         cleanup_stale_socket(id);
 
         let socket_path = session_socket_path(id);
-        let listener = UnixListener::bind(&socket_path)?;
+        let listener = marspot_term::uds_path::bind(&socket_path)?;
         let socket_id = crate::own_socket::SocketId::of(&socket_path);
         // Clone before moving into the accept thread: one fd for the
         // thread to accept() on, one for us to keep so execv handoff
