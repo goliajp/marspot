@@ -300,4 +300,6 @@ mod oracle_tests;
 #[cfg(test)]
 mod rows_tests;
 #[cfg(test)]
+mod scene_tests;
+#[cfg(test)]
 pub(crate) mod tests;
