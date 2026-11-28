@@ -3287,7 +3287,7 @@ fn main() {
                 }
                 CoreEvent::L3Says(sid, frame) => app.session_says(sid, &frame),
                 CoreEvent::ShellPaneControl(f) => drop(app.route_pane_control(f)),
-                CoreEvent::HelperStrip(m) => app.pane_control.strips.take(m),
+                CoreEvent::HelperStrip(m) => app.take_helper_strip(m),
                 CoreEvent::Notice(text) => app.show_notice(text),
                 CoreEvent::InstallAsk(ask) => app.install_ask(ask),
                 CoreEvent::PaneReport(sid, f) => app.report_to_shell(sid, f),

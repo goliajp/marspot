@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.867"  # marspot-term: frames carry the number of the last view ask applied
-core    = "0.12.761"  # a core attaching to a session counts its view asks on from the number the session last applied
+core    = "0.12.762"  # a record from the shell that changes a title's +N asks for the frame that draws it
 session = "0.11.485"  # a turn that parsed a kilobyte of pty output is bulk output, framed at the display interval

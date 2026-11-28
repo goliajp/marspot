@@ -83,3 +83,33 @@ fn helper_strip_the_mark_and_the_strip_are_pressed_where_drawn_at_1x() {
 fn helper_strip_the_mark_and_the_strip_are_pressed_where_drawn_at_2x() {
     pressed_where_drawn(2.0);
 }
+
+/// With the strip off from the start, the `+N` comes with the shell's
+/// record and nothing else: the record alone asks for the frame that
+/// draws it, and one that leaves the count as it was asks for none.
+#[test]
+fn helper_strip_off_a_record_that_changes_the_count_asks_for_a_frame() {
+    marspot::ui::set_chrome_scale(1.0);
+    let sb = Sandbox::new();
+    let (mut app, mut s, p) = with_plain(&sb);
+    app.windows[0].panes.push(Pane::new_vacant(s.sid + 100, 60, 16));
+    app.rebuild_layout(0);
+    turned_on(false);
+    app.strips_tick();
+    app.take_helper_strip(HelperStrip::all_told());
+    frame(&mut app, &mut s, b"$ ");
+    publish(&mut app);
+    assert_eq!(on_title(&mut app, ChromeTarget::Helpers(0)), 0, "told there are none: no +N");
+
+    let record = || HelperStrip { batch: 1, rows: vec![plain(p.sid)], ..HelperStrip::empty(s.sid) };
+    app.windows[0].needs_render = false;
+    app.take_helper_strip(record());
+    assert!(app.windows[0].needs_render, "the count changed: a frame is owed");
+    publish(&mut app);
+    assert!(on_title(&mut app, ChromeTarget::Helpers(0)) > 0, "the frame draws the +N");
+    assert!(dev_mark(&mut app).is_some(), "and the seam finds it");
+
+    app.windows[0].needs_render = false;
+    app.take_helper_strip(record());
+    assert!(!app.windows[0].needs_render, "the same count: no frame");
+}
