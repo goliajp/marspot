@@ -30,6 +30,7 @@ mod moves;
 pub mod pass;
 mod placed;
 mod propose;
+pub mod route;
 mod search;
 mod sim;
 mod tally;
