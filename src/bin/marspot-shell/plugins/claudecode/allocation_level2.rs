@@ -146,7 +146,7 @@ impl PanePlan {
         };
         self.ended_last = false;
         if let Some(r) = &done {
-            allocation_route::rebuild(&input, &r.plan, forecast, now);
+            allocation_route::rebuild(&input, &r.plan, forecast, due.is_some().then(|| allocation_route::others_now(now)), now);
         }
         self.route_shadow(view, due.is_some(), now, &mut log);
         if let Some(r) = done {

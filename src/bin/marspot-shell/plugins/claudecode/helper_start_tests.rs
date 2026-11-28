@@ -109,6 +109,11 @@ fn helpers_a_new_helper_with_fable_short_is_placed_where_there_is_room() {
     let inputs = Inputs::decode(&r.detail).expect("the inputs read back");
     assert_eq!(inputs.decide_by(&inputs.plan(), Rule::of_line(&r.detail)).map(|(to, _)| to), Some(2));
     assert!(inputs.b_f > 0.0, "the Fable panes' demand is in what it read: {inputs:?}");
+    // the shadow line read the other agents of this home, which has none,
+    // not the machine's
+    let log = crate::test_log::text();
+    let shadow: Vec<&str> = log.lines().filter(|l| l.contains("sched.route.shadow")).collect();
+    assert!(shadow.len() == 1 && shadow[0].contains("kind=helper") && shadow[0].contains(" others=-"), "{shadow:#?}");
     no_devops_lines();
 }
 

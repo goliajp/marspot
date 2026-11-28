@@ -1,4 +1,5 @@
 //! marspot-claudecode plugin — first marspot plugin.
+//!
 //! ## What it does (M2)
 //!
 //! Each tick (every 2 s), walks `~/.claude/projects/<encoded-cwd>/`

@@ -18,17 +18,26 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     // P2 renews in 10 h with 0.5 points: the first helpers go there
     let a = [acct(2, 0.005, 10.0), acct(4, 0.6, 120.0)];
     let i = input(&a);
-    rebuild(&i, &plan(&i, None), None, now);
+    rebuild(&i, &plan(&i, None), None, None, now);
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=-"));
     let placed: Vec<String> = (0..6).map(|_| place(Class::Plain, RHO0, None, None, now)).collect();
     assert!(placed[0].starts_with("table=P2 ") && placed[4].starts_with("table=P4 "), "{placed:?}");
     // the next pass sees none of them yet: their use stays taken out
-    rebuild(&i, &plan(&i, None), None, now + 2);
+    rebuild(&i, &plan(&i, None), None, None, now + 2);
     let left = line().expect("a table");
     assert!(!left.contains("P4=60.0"), "the helpers on P4 stay counted: {left}");
     // once they are past their life they are the plan's to count
-    rebuild(&i, &plan(&i, None), None, now + KEEP_S + 1);
+    rebuild(&i, &plan(&i, None), None, None, now + KEEP_S + 1);
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=-"));
-    let moved = shadow_pane("badge", 7, Class::Plain, 0.004, Some(2), Some(4), now);
+    let later = now + KEEP_S + 2;
+    let moved = shadow_pane("badge", 7, Class::Plain, 0.004, Some(2), Some(4), later);
     assert!(moved.starts_with("kind=badge sid=7 class=plain today=P4 table=P4 "), "{moved}");
+    // a clicked pane is in the plan's input already: the next table does
+    // not take its use out a second time
+    rebuild(&i, &plan(&i, None), None, None, later + 2);
+    assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=-"));
+    // the other agents read on a full search stay in the line until the next read
+    rebuild(&i, &plan(&i, None), None, Some(vec![("codex", 0.16)]), later + 4);
+    rebuild(&i, &plan(&i, None), None, None, later + 6);
+    assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=codex=16.0"));
 }

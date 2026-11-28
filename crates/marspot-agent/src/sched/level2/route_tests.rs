@@ -102,6 +102,19 @@ fn sched_route_an_open_agent_goes_where_the_most_is_left() {
 }
 
 #[test]
+fn sched_route_another_agent_must_hold_the_newcomer_for_its_lifetime() {
+    // Claude has nothing left; codex has 2 points: a quarter-hour helper
+    // fits, a pane at 0.6 points an hour that lives the day does not
+    let a = [acct(1, 0.0, 0.0, 100.0)];
+    let i = input(&a, &[]);
+    let r = Routing::of(&i, &plan(&i, None)).with_others(&[("codex", 0.02)]);
+    assert_eq!(r.agent_for(&helper(Class::Plain)), "codex");
+    assert_eq!(r.agent_for(&long(Class::Plain, 0.006)), "claude", "two points do not hold a pane that uses 14.4 over the day");
+    let big = r.with_others(&[("codex", 0.02), ("kimi", 0.2)]);
+    assert_eq!(big.agent_for(&long(Class::Plain, 0.006)), "kimi");
+}
+
+#[test]
 fn sched_route_line_lists_each_class_in_order_with_its_room() {
     let a = [acct(2, 0.2, 0.0, 10.0), acct(4, 0.6, 0.1, 120.0)];
     let i = input(&a, &[]);

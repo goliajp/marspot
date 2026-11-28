@@ -11,7 +11,7 @@
 //! a pass builds until then.
 
 use marspot_agent::sched::forecast::Forecast;
-use marspot_agent::sched::level2::route::{Newcomer, Routing};
+use marspot_agent::sched::level2::route::{Newcomer, OTHERS_CAP, Routing};
 use marspot_agent::sched::level2::{H2, Input, Plan};
 
 use crate::host::published::Published;
@@ -35,13 +35,17 @@ struct Route {
     table: Routing,
     kept: Vec<(i64, u8, Newcomer)>,
     helper_life_h: f64,
+    /// The other agents' line as last read.
+    others: Vec<(&'static str, f64)>,
     built: bool,
 }
 
 static ROUTE: Published<Route> = Published::new();
 
-/// A pass's table from its plan, with the placements still kept.
-pub(super) fn rebuild(input: &Input, plan: &Plan, forecast: Option<&Forecast>, now: i64) {
+/// A pass's table from its plan, with the placements still kept and
+/// the other agents' line: `others` when read on this pass (a full
+/// search reads their feeds), else the last one read.
+pub(super) fn rebuild(input: &Input, plan: &Plan, forecast: Option<&Forecast>, others: Option<Vec<(&'static str, f64)>>, now: i64) {
     let life = forecast.and_then(|f| f.helpers.iter().find(|h| h.agent == "claude")).map_or(HELPER_LIFE_H, |h| f64::from(h.p75_s) / 3600.0);
     let mut table = Routing::of(input, plan);
     ROUTE.update(|r| {
@@ -49,7 +53,10 @@ pub(super) fn rebuild(input: &Input, plan: &Plan, forecast: Option<&Forecast>, n
         for (_, to, m) in &r.kept {
             table.take(*to, m);
         }
-        r.table = table;
+        if let Some(o) = others {
+            r.others = o;
+        }
+        r.table = table.with_others(&r.others);
         r.helper_life_h = life;
         r.built = true;
     });
@@ -61,9 +68,12 @@ pub(super) fn line() -> Option<String> {
 }
 
 /// Where the table places a newcomer of `class` at `rate` (weeks an
-/// hour) for `life_h`, leaving `from` when it moves; the placement is
-/// kept.  The table's account and its room before and after, in points,
-/// or `-` without a table or an entry.
+/// hour) for `life_h`, leaving `from` when it moves.  The table's account
+/// and its room before and after, in points, or `-` without a table or an
+/// entry.  A new placement is kept; a pane that moves is not: it is in
+/// the plan's input already, on the account it leaves, and the next
+/// input has it on the one it went to, so its use only comes out of this
+/// table.
 fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i64) -> String {
     ROUTE.update(|r| {
         if !r.built {
@@ -72,10 +82,12 @@ fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i6
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: life_h.unwrap_or(r.helper_life_h) };
         match r.table.place(&m, from) {
             Some(p) => {
-                if r.kept.len() >= KEPT_CAP {
-                    r.kept.remove(0);
+                if from.is_none() {
+                    if r.kept.len() >= KEPT_CAP {
+                        r.kept.remove(0);
+                    }
+                    r.kept.push((now, p.to, m));
                 }
-                r.kept.push((now, p.to, m));
                 format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after)
             }
             None => "table=-".into(),
@@ -93,7 +105,7 @@ fn today(to: Option<u8>) -> String {
 
 /// The other agents with accounts here, each with what its best open,
 /// freshly read account has left of its week, weeks.  Reads their feeds.
-fn others_now(now: i64) -> Vec<(&'static str, f64)> {
+pub(super) fn others_now(now: i64) -> Vec<(&'static str, f64)> {
     use crate::plugins::handoff::{Agent, profiles};
     use crate::plugins::claudecode::quota::helper_pick::{Accounts, rooms_scene};
     let best = |a: &Accounts| rooms_scene(&a.rooms, &a.resets, None, now).accounts.iter().filter(|q| q.open && !q.stale).map(|q| q.r).fold(0.0, f64::max);
@@ -114,9 +126,14 @@ fn others_now(now: i64) -> Vec<(&'static str, f64)> {
 pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>, now: i64) {
     let others = others_now(now);
     // which agent the table would send it to, were the agent left open
-    let agent = ROUTE.get().filter(|r| r.built).map_or("-", |r| {
+    let agent = ROUTE.update(|r| {
+        r.others.clone_from(&others);
+        r.table.others = others.iter().take(OTHERS_CAP).copied().collect();
+        if !r.built {
+            return "-";
+        }
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: r.helper_life_h };
-        r.table.clone().with_others(&others).agent_for(&m)
+        r.table.agent_for(&m)
     });
     let placed = place(class, rate, None, None, now);
     let others: Vec<String> = others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
