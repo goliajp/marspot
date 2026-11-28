@@ -58,3 +58,23 @@ pub(super) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)
 }
+
+impl super::Exec {
+    /// Keeps the ladder when it changed, and logs its counters when they
+    /// changed, at most once per full pass.
+    pub(super) fn save(&mut self, full: usize, log: &mut Vec<(&'static str, String)>) {
+        let words = self.ladder.words();
+        if words != self.said.0 && full > self.said.1 {
+            log.push(("sched.gate", words.clone()));
+            self.said = (words, full);
+        }
+        let text = self.ladder.encode();
+        if text == self.saved {
+            return;
+        }
+        if let Err(e) = write_atomic(&self.path, &text) {
+            log.push(("sched.gate.save_failed", format!("{e}")));
+        }
+        self.saved = text;
+    }
+}

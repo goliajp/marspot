@@ -51,7 +51,8 @@ pub(super) struct Built {
     pub outside: Vec<u64>,
 }
 
-pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Option<&Forecast>, class: &(ClassInputs, Level1), standing: &Standing, lim: &Limits) -> Built {
+/// `focus`: the pane in focus, if any.
+pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Option<&Forecast>, class: &(ClassInputs, Level1), standing: &Standing, lim: &Limits, focus: Option<u64>) -> Built {
     let now = snap.now;
     let (ci, l1) = class;
     let accounts = ci.accounts.iter().enumerate().map(|(j, q)| Account { q: q.clone(), spare: l1.spare[j], price: l1.price[j].unwrap_or([0.0, 0.0]) }).collect();
@@ -100,6 +101,7 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             barred: 0,
             switches_left: lim.switches_left(moved(WEEK_S), moved(DAY_S)),
             disturb_left: DISTURB_PER_DAY,
+            attended: attended(a, snap, sid, focus == Some(sid), now),
         });
     }
     Built {
@@ -111,6 +113,12 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
         stale_feed: snap.feed_at.is_none_or(|f| now - f > STALE_FEED_S),
         outside,
     }
+}
+
+/// Someone is with pane `sid`, as the executor reads it too.
+fn attended(a: &Allocation, snap: &Snapshot, sid: u64, focus: bool, now: i64) -> bool {
+    let t = snap.panes.iter().find(|p| p.sid == sid).and_then(|p| p.transcript.as_deref());
+    super::allocation_more::attended(focus, t.and_then(|t| a.open_of(t, false, now).prompt_at), now)
 }
 
 /// A digest of what the plan read, in tenths of a point and minutes.

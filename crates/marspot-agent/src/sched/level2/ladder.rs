@@ -21,8 +21,8 @@
 //!   a day at `D`.  Making unattended panes wait stays a rehearsal; one
 //!   that would make an attended pane wait is recorded.
 //!
-//! Every advance is capped by the caller (`LADDER_MAX` in this build):
-//! the steps above it are kept here, tested, and not entered.  Any of
+//! Every advance is capped by the caller (`LADDER_MAX`, every step in
+//! this build; a ladder kept above a lower cap is held at it).  Any of
 //! the five rollback conditions (`exec_gate::rollback`) at `C`, `D` or
 //! `E` sends the ladder back to `B`.  A ladder that rolled back, or
 //! whose file could not be read, does not advance again until a person
@@ -33,9 +33,8 @@ use super::exec_gate::{DRY_NOTICES, DRY_RECORDS, Done, Rollback, UNATTENDED_DONE
 #[path = "ladder_text.rs"]
 mod text;
 
-/// The highest step this build enters.  The executor stays a dry run
-/// until a later build raises it.
-pub const LADDER_MAX: Step = Step::B;
+/// The highest step this build enters: all five, each rollback armed.
+pub const LADDER_MAX: Step = Step::E;
 /// Shadow placements in a row that `A` needs.
 pub const ROUTE_RECORDS: u32 = 20;
 /// `A`'s rollback counts refusals in its first day, of panes placed

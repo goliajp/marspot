@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.934"  # the lib: a notice when text pasted into a web page is cut
-core    = "0.12.814"  # a dropped copy answer from a web pane is logged once, when it arrives
+shell   = "0.7.943"  # a pass without a plan forgets held deadlines; a deadline is held per (pane, from, to) and a long-past one restarts
+core    = "0.12.816"  # the switching row's snapshot test imports in order
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

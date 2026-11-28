@@ -45,7 +45,9 @@ fn sched_level2_the_p8_scene_moves_the_opus_and_the_mixed_pane_off_p8() {
             for t in [0, 3600, (s.t_dead * 3600.0) as i64 - 60] {
                 let b = exec::Boundary { at: t, live: true, quiet_s: 600, ..exec::Boundary::default() };
                 assert_eq!(exec::decide(&w, &b, &lim), exec::Would::Wait, "steady at {t}");
-                assert_eq!(exec::decide(&w, &b, &Limits::BALANCED), exec::Would::Notify(Kind::Drain));
+                let lead = exec::NOTICE_S + i64::from(Limits::BALANCED.notice_wait_min) * 60;
+                let balanced = if t >= w.dead_at - lead { exec::Would::Notify(Kind::Drain) } else { exec::Would::Wait };
+                assert_eq!(exec::decide(&w, &b, &Limits::BALANCED), balanced, "balanced at {t}");
             }
             continue;
         }

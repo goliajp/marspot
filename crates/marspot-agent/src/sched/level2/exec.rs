@@ -4,14 +4,18 @@
 //! 1. A clean rest (nothing live, a minute of quiet): switch.
 //! 2. A short boundary (nothing live, five seconds): switch once the
 //!    chance of a clean rest before the deadline is under `SHORT_CHANCE`.
-//! 3. Otherwise a notice: a drain notice at the window's opening for a
-//!    session with long background work ("do not start the next one"),
-//!    else the five-minute notice timed so the notice and the profile's
-//!    wait for a boundary end at the deadline.  After a notice the
-//!    switch is taken at the first boundary with nothing live, or, once
-//!    the notice's five minutes and the wait are over, over background
-//!    work worth less than the switch's gain; background work worth more
-//!    cancels it and the session is told to carry on.
+//! 3. Otherwise a notice, timed so the notice's five minutes and the
+//!    profile's longest wait for a boundary end at the deadline: a drain
+//!    notice ("do not start the next one") for a session with long
+//!    background work, else the five-minute notice.  After either the
+//!    switch is taken at the first boundary with nothing live.  Over
+//!    background work a five-minute notice switches at the first
+//!    boundary once its five minutes are over, and a drain notice once
+//!    the wait is over too, if the work is worth less than the switch's
+//!    gain; work worth more cancels it and the session is told to carry
+//!    on.  A profile that does not notice working panes never switches
+//!    over background work: it cancels once the wait is over, inside the
+//!    half hour a notice must be answered in.
 //!
 //! Never inside a turn, never while the user is at the pane.  A profile
 //! that does not notice working panes notices only for a switch that
@@ -91,14 +95,7 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     }
     let wait_s = i64::from(lim.notice_wait_min) * 60;
     if let Some(at) = w.noticed_at {
-        let kind = if w.long_background { Kind::Drain } else { Kind::Notice };
-        if !b.live {
-            return Would::Switch(kind);
-        }
-        if b.at < at + NOTICE_S + wait_s {
-            return Would::Wait;
-        }
-        return if w.lost_work >= w.gain { Would::Cancel } else { Would::Switch(kind) };
+        return after_notice(w, b, lim, at, wait_s);
     }
     if !b.live && b.quiet_s >= CLEAN_S {
         return Would::Switch(Kind::Clean);
@@ -106,13 +103,68 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     if !b.live && b.quiet_s >= SHORT_S && clean_chance(w.clean_per_h, w.dead_at - b.at) < SHORT_CHANCE {
         return Would::Switch(Kind::Short);
     }
-    if !lim.notice_working && !w.exempt {
+    if !lim.notice_working && !w.exempt || b.at < w.dead_at - NOTICE_S - wait_s {
         return Would::Wait;
     }
-    if w.long_background {
-        return Would::Notify(Kind::Drain);
+    Would::Notify(if w.long_background { Kind::Drain } else { Kind::Notice })
+}
+
+fn after_notice(w: &Watched, b: &Boundary, lim: &Limits, at: i64, wait_s: i64) -> Would {
+    let kind = if w.long_background { Kind::Drain } else { Kind::Notice };
+    if !b.live {
+        return Would::Switch(kind);
     }
-    if b.at >= w.dead_at - NOTICE_S - wait_s { Would::Notify(Kind::Notice) } else { Would::Wait }
+    let over = at + NOTICE_S + if kind == Kind::Drain || !lim.notice_working { wait_s } else { 0 };
+    if b.at < over {
+        return Would::Wait;
+    }
+    if !lim.notice_working || w.lost_work >= w.gain { Would::Cancel } else { Would::Switch(kind) }
+}
+
+/// Deadlines held at most.
+pub const DEADLINES_CAP: usize = 128;
+
+/// Each committed switch's deadline as the executor holds it: the
+/// earliest any pass gave it since its window opened.  Every pass works
+/// the windows out again, and a switch that only saves reserve has its
+/// deadline where its remaining gain falls under its cost, which moves
+/// on with the clock while the gain holds: a notice timed against it
+/// would never go.  A switch no pass hands over any more is forgotten,
+/// and so is everything when a pass hands over no plan at all.  A held
+/// deadline past by more than the profile's wait while the plan still
+/// hands the switch over is stale: the plan's value starts again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Deadlines {
+    held: Vec<(u64, u8, u8, i64)>,
+    next: Vec<(u64, u8, u8, i64)>,
+}
+
+impl Deadlines {
+    /// `w` for pane `sid`'s switch from `from` to `to`, with its deadline
+    /// held, and the held deadline dropped as stale if one was.
+    pub fn hold(&mut self, sid: u64, from: u8, to: u8, mut w: Watched, now: i64, wait_s: i64) -> (Watched, Option<i64>) {
+        if w.open_at > now {
+            return (w, None);
+        }
+        let mut stale = None;
+        if let Some(d) = self.held.iter().find(|h| h.0 == sid && h.1 == from && h.2 == to).map(|h| h.3) {
+            if d < now - wait_s && d < w.dead_at {
+                stale = Some(d);
+            } else {
+                w.dead_at = w.dead_at.min(d);
+            }
+        }
+        if self.next.len() < DEADLINES_CAP {
+            self.next.push((sid, from, to, w.dead_at));
+        }
+        (w, stale)
+    }
+
+    /// The pass is over: what it did not hand over is forgotten.
+    pub fn passed(&mut self) {
+        std::mem::swap(&mut self.held, &mut self.next);
+        self.next.clear();
+    }
 }
 
 #[path = "exec_record.rs"]

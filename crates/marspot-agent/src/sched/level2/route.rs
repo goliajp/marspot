@@ -18,6 +18,10 @@
 //! long-lived newcomer only goes where the room lasts it the profile's `lasts_h` at
 //! its high band, or to the renewal when that comes first.
 //!
+//! Under protection a refused pane nobody is at does not move onto an
+//! account an attended pane is on: it waits, and the quota stays for the
+//! person (the plan's own simulation of refusals does the same).
+//!
 //! The other agents have a line each with what their best account has
 //! left; a request that leaves the agent open goes where the most is
 //! left for its use.
@@ -31,6 +35,8 @@ pub const SHORT_H: f64 = 0.5;
 pub const ACCOUNTS_CAP: usize = 32;
 /// Other agents' lines at most.
 pub const OTHERS_CAP: usize = 4;
+/// Unattended panes a table knows at most.
+pub const UNATTENDED_CAP: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Room {
@@ -41,6 +47,8 @@ struct Room {
     plain: f64,
     /// The account's own: only the other models can use part of its week.
     plain_only: bool,
+    /// An attended pane is on it.
+    attended: bool,
     /// Hours until the week and the restricted window renew.
     t: f64,
     tf: f64,
@@ -109,6 +117,10 @@ pub struct Routing {
     /// The profile protects what only Fable can use, and Fable is short:
     /// another model's newcomer goes only where it has room of its own.
     protect: bool,
+    /// The profile keeps an attended pane's account from a refused pane
+    /// nobody is at, and the panes the plan knows nobody is at.
+    keep_attended: bool,
+    unattended: Vec<u64>,
 }
 
 /// Where a placement went, and its entry's room before and after, weeks.
@@ -119,6 +131,16 @@ pub struct Placed {
     pub after: f64,
     /// The account had week beyond its Fable-usable quota.
     pub plain_only: bool,
+}
+
+/// Where a refused pane goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RefusedTo {
+    To(Placed),
+    /// No entry holds it.
+    Nowhere,
+    /// It is kept off the accounts attended panes are on, and no other holds it.
+    Wait,
 }
 
 impl Routing {
@@ -160,6 +182,7 @@ impl Routing {
                     window: a.q.phi() - use_[j][0],
                     plain: a.spare - use_[j][1],
                     plain_only: a.q.n() > EPS,
+                    attended: input.panes.iter().any(|p| p.attended && p.on == a.q.id),
                     t: a.q.t,
                     tf: a.q.tf,
                     load: load[j],
@@ -167,7 +190,9 @@ impl Routing {
             })
             .collect();
         let protect = input.limits.fable != super::FableGuard::Price && input.pi > 0.0;
-        Routing { rooms, others: Vec::new(), lasts_h: input.limits.lasts_h, protect }
+        let keep_attended = input.limits.fable != super::FableGuard::Price;
+        let unattended = input.panes.iter().filter(|p| !p.attended).map(|p| p.sid).take(UNATTENDED_CAP).collect();
+        Routing { rooms, others: Vec::new(), lasts_h: input.limits.lasts_h, protect, keep_attended, unattended }
     }
 
     /// The other agents' lines, at most `OTHERS_CAP`.
@@ -194,11 +219,33 @@ impl Routing {
         v.iter().map(|r| r.id).collect()
     }
 
+    /// An account with room for `class` whose week is all Fable-usable:
+    /// one a plain newcomer could wrongly be placed on.
+    pub fn fable_only_room(&self, class: Class) -> bool {
+        self.rooms.iter().any(|r| !r.plain_only && r.left(class) > EPS)
+    }
+
     /// Where `m` goes, `None` when no entry holds it; the room it takes
     /// is taken out of the table.  A pane that moves names the account
     /// it leaves in `except`.
     pub fn place(&mut self, m: &Newcomer, except: Option<u8>) -> Option<Placed> {
-        let to = self.order(m.class).into_iter().filter(|id| Some(*id) != except).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS))?;
+        self.place_where(m, except, |_| true)
+    }
+
+    /// Where refused pane `sid` leaving `from` goes: as `place`, except
+    /// that under protection a pane the plan knows nobody is at skips
+    /// every account an attended pane is on, and waits when that leaves
+    /// nowhere.
+    pub fn place_refused(&mut self, m: &Newcomer, from: u8, sid: u64) -> RefusedTo {
+        if !(self.keep_attended && self.unattended.contains(&sid)) {
+            return self.place(m, Some(from)).map_or(RefusedTo::Nowhere, RefusedTo::To);
+        }
+        let held: Vec<u8> = self.rooms.iter().filter(|r| r.attended).map(|r| r.id).collect();
+        self.place_where(m, Some(from), |id| !held.contains(&id)).map_or(RefusedTo::Wait, RefusedTo::To)
+    }
+
+    fn place_where(&mut self, m: &Newcomer, except: Option<u8>, ok: impl Fn(u8) -> bool) -> Option<Placed> {
+        let to = self.order(m.class).into_iter().filter(|id| Some(*id) != except && ok(*id)).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS))?;
         self.take(to, m)
     }
 

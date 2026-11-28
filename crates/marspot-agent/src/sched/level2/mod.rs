@@ -146,6 +146,9 @@ pub struct Pane {
     /// actions today.
     pub switches_left: u8,
     pub disturb_left: u8,
+    /// It has focus or someone wrote to it within the hour: in a gap it
+    /// keeps its quota first, and strict protection never makes it wait.
+    pub attended: bool,
 }
 
 /// Everything one plan reads.
@@ -282,6 +285,7 @@ impl Sched {
 }
 
 #[cfg(test)] mod cases_tests;
+#[cfg(test)] mod gap_tests;
 #[cfg(test)] mod loop_digest_tests;
 #[cfg(test)] mod loop_plan;
 #[cfg(test)] mod loop_price;
@@ -290,6 +294,7 @@ impl Sched {
 #[cfg(test)] mod loop_tests;
 #[cfg(test)] mod loop_world;
 #[cfg(test)] mod oracle_tests;
+#[cfg(test)] mod replay_world;
 #[cfg(test)] mod rows_tests;
 #[cfg(test)] mod scene_tests;
 #[cfg(test)] pub(crate) mod tests;

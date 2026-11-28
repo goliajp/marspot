@@ -53,6 +53,7 @@ pub(super) fn worker_main(
             marspot::lx_info!("sched.level1", &line);
         }
         if let Some(view) = allocation.view.take() {
+            pane_plan.focus = focus;
             for (tag, line) in pane_plan.scan(&mut allocation, &snap, &view, forecast.last(), class_plan.last()) {
                 marspot::lx_info!(tag, &line);
             }

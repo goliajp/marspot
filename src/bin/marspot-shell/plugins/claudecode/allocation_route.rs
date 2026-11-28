@@ -13,9 +13,13 @@
 //! counts in the plan only at fleet level, so each placement is kept
 //! for its expected life (at most `KEEP_S`) and taken out of every table
 //! a pass builds until then.
+//!
+//! Each full pass also places one probe newcomer of each class without
+//! keeping it (`probe`); a plain probe is noted for the ladder like a
+//! real placement when it could have gone wrong on a table not tried yet.
 
 use marspot_agent::sched::forecast::Forecast;
-use marspot_agent::sched::level2::route::{Newcomer, OTHERS_CAP, Routing};
+use marspot_agent::sched::level2::route::{Newcomer, OTHERS_CAP, Placed, RefusedTo, Routing};
 use marspot_agent::sched::level2::{H2, Input, Plan};
 
 use crate::host::published::Published;
@@ -50,6 +54,8 @@ struct Route {
     noted: Vec<bool>,
     /// Live placements of the last hour: when, and the account.
     live_placed: Vec<(i64, u8)>,
+    /// The table's line when a probe was last noted.
+    probed: String,
 }
 
 static ROUTE: Published<Route> = Published::new();
@@ -85,14 +91,23 @@ pub(super) fn line() -> Option<String> {
 /// entry.  A new placement is kept; a pane that moves is not: it is in
 /// the plan's input already, on the account it leaves, and the next
 /// input has it on the one it went to, so its use only comes out of this
-/// table.
-fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i64) -> (String, Option<u8>) {
+/// table.  A refused pane (`refused`) is placed by the table's rule for
+/// refusals, and may be told to wait (`wait=1`).
+fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, refused: Option<u64>, now: i64) -> (String, Pick) {
     ROUTE.update(|r| {
         if !r.built {
-            return ("table=-".into(), None);
+            return ("table=-".into(), Pick::None);
         }
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: life_h.unwrap_or(r.helper_life_h) };
-        match r.table.place(&m, from) {
+        let placed: Option<Placed> = match (refused, from) {
+            (Some(sid), Some(f)) => match r.table.place_refused(&m, f, sid) {
+                RefusedTo::To(p) => Some(p),
+                RefusedTo::Nowhere => None,
+                RefusedTo::Wait => return ("table=- wait=1".into(), Pick::Wait),
+            },
+            _ => r.table.place(&m, from),
+        };
+        match placed {
             Some(p) => {
                 if from.is_none() {
                     if r.kept.len() >= KEPT_CAP {
@@ -103,10 +118,59 @@ fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i6
                 if r.noted.len() < NOTED_CAP {
                     r.noted.push(class == Class::Plain && !p.plain_only);
                 }
-                (format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after), Some(p.to))
+                (format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after), Pick::To(p.to))
             }
-            None => ("table=-".into(), None),
+            None => ("table=-".into(), Pick::None),
         }
+    })
+}
+
+/// What the table says of a placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::plugins) enum Pick {
+    None,
+    To(u8),
+    /// A refused pane nobody is at waits rather than take an attended
+    /// pane's account.
+    Wait,
+}
+
+impl Pick {
+    fn to(self) -> Option<u8> {
+        if let Pick::To(t) = self { Some(t) } else { None }
+    }
+}
+
+/// One probe newcomer of each class placed through the table as a
+/// helper would be, at the default rate and the helper life; the table
+/// and its kept placements are left as they were.  Run once per full
+/// plan pass, so the ladder's count does not wait on the person starting
+/// work.  Only a plain probe can go wrong (a Fable newcomer may use any
+/// account), and it is noted only when the table has an account whose
+/// week is all Fable-usable for it to wrongly pick: under protection the
+/// order leaves such accounts out for the plain class, and the probe
+/// checks that it does.  The same table is noted once, so a quiet fleet
+/// does not count one decision twenty times.  The lines for
+/// `sched.route.shadow`.
+pub(super) fn probe() -> Vec<String> {
+    ROUTE.update(|r| {
+        if !r.built {
+            return Vec::new();
+        }
+        let line = r.table.line();
+        let mut lines = Vec::new();
+        for class in [Class::Plain, Class::Restricted] {
+            let m = Newcomer { class, rate: RHO0, high: RHO0 * high_of(class), life_h: r.helper_life_h };
+            let counts = class == Class::Plain && r.table.fable_only_room(class) && r.probed != line;
+            let p = r.table.clone().place(&m, None);
+            if counts && r.noted.len() < NOTED_CAP {
+                r.noted.push(p.is_some_and(|p| !p.plain_only));
+                r.probed.clone_from(&line);
+            }
+            let placed = p.map_or("table=-".into(), |p| format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after));
+            lines.push(format!("kind=probe class={} {placed} counted={}", class_word(class), u8::from(counts)));
+        }
+        lines
     })
 }
 
@@ -133,10 +197,10 @@ pub(super) fn live_placed(now: i64) -> Vec<(i64, u8)> {
     })
 }
 
-/// `to`, the table's placement, when the table is live.  The caller
-/// still filters it, so it is not kept here; see `used`.
-fn live_pick(to: Option<u8>) -> Option<u8> {
-    to.filter(|_| live())
+/// The table's pick, when the table is live.  The caller still filters
+/// it, so it is not kept here; see `used`.
+fn live_pick(p: Pick) -> Pick {
+    if live() { p } else { Pick::None }
 }
 
 /// A live placement on `to` the caller acted on: kept for the ladder's
@@ -192,21 +256,22 @@ pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>,
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: r.helper_life_h };
         r.table.agent_for(&m).unwrap_or("claude")
     });
-    let (placed, picked) = place(class, rate, None, None, now);
+    let (placed, picked) = place(class, rate, None, None, None, now);
     let others: Vec<String> = others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
     let line = format!("kind=helper class={} today={} {placed} agent={agent} others={}", class_word(class), today(to), if others.is_empty() { "-".into() } else { others.join(",") });
     marspot::lx_info!("sched.route.shadow", &line);
-    live_pick(picked)
+    live_pick(picked).to()
 }
 
 /// A pane that appeared on `on`, or a pane a badge click or a refusal
-/// moves off `from` to `to`: the line, and the table's account when the
-/// table is live and the pane moves.
-pub(super) fn shadow_pane(kind: &str, sid: u64, class: Class, rate: f64, from: Option<u8>, to: Option<u8>, now: i64) -> (String, Option<u8>) {
+/// (`kind` "refused") moves off `from` to `to`: the line, and the table's
+/// pick when the table is live and the pane moves.
+pub(super) fn shadow_pane(kind: &str, sid: u64, class: Class, rate: f64, from: Option<u8>, to: Option<u8>, now: i64) -> (String, Pick) {
     let rate = if rate > 0.0 { rate } else { RHO0 };
-    let (placed, picked) = place(class, rate, Some(H2), from, now);
+    let refused = (kind == "refused").then_some(sid);
+    let (placed, picked) = place(class, rate, Some(H2), from, refused, now);
     let line = format!("kind={kind} sid={sid} class={} today={} {placed}", class_word(class), today(to));
-    (line, if from.is_some() { live_pick(picked) } else { None })
+    (line, if from.is_some() { live_pick(picked) } else { Pick::None })
 }
 
 #[cfg(test)]

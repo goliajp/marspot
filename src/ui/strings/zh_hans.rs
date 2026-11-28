@@ -36,7 +36,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostCircledDigitsWide => "宽度与中日韩文字一致，但换行位置可能提前一列",
         Msg::CostClaudeCodeReportsModel => "在 Claude Code 的设置中添加状态行；原有的状态行继续生效，关闭此项后恢复原状",
         Msg::CostClaudeCodeGuardModel => "发送 /model 前再确认一次；没有确认过的改动会被改回去",
-        Msg::CostClaudeCodeSchedProfile => "试运行中，检查通过前只记录不切换；越积极作废的 Fable 越少，每次切换要重读整段对话",
+        Msg::CostClaudeCodeSchedProfile => "按检查分步上线；越积极作废的 Fable 越少，每次切换要重读整段对话",
         Msg::CostWheelSpeed => "越快越省滑动次数，但也越容易滚过头",
 
         Msg::MenuCopy => "拷贝",

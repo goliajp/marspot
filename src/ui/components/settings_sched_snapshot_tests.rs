@@ -6,8 +6,10 @@ use super::controls;
 use super::density_kit::at_scale;
 use super::panel_snapshot_tests::snapshot;
 use super::settings_modal;
+use super::settings_rows::{Control, Row};
 use super::settings_view::SettingsRender;
 use crate::settings::{SchedProfile, Settings};
+use crate::ui::strings::{Msg, table};
 
 /// How far down the panel the picture starts, before the scale.
 const SCROLL: f64 = 760.0;
@@ -47,4 +49,24 @@ fn panel_snapshot_settings_sched_en_2x() {
 crate::snapshot_kit::snapshots_in_other_languages! {
     panel_snapshot_settings_sched_ja, panel_snapshot_settings_sched_zh = panel_snapshot_settings_sched;
     panel_snapshot_settings_sched_ja_2x, panel_snapshot_settings_sched_zh_2x = panel_snapshot_settings_sched_2x;
+}
+
+/// A settings file with no `sched.profile` line lights balanced, and the
+/// row's three choices read 稳妥 / 平衡 / 充分利用; no language calls the
+/// planner a trial or a dry run any more.
+#[test]
+fn settings_sched_row_defaults_to_balanced_and_names_the_three_profiles() {
+    let s = crate::settings::parse("");
+    assert_eq!(s.sched.profile, SchedProfile::Balanced);
+    let Control::Segmented { options, chosen } = Row::SchedProfile.control(&s) else { panic!("the profile row is a segmented control") };
+    let zh = table(marspot_term::language::LangId::ZhHans);
+    let words: Vec<&str> = options.iter().map(|m| (zh.text)(*m)).collect();
+    assert_eq!(words, ["稳妥", "平衡", "充分利用"]);
+    assert_eq!(chosen, 1);
+    for id in [marspot_term::language::LangId::En, marspot_term::language::LangId::Ja, marspot_term::language::LangId::ZhHans] {
+        let cost = (table(id).text)(Msg::CostClaudeCodeSchedProfile).to_lowercase();
+        for word in ["试运行", "試行", "trial", "dry run", "dry-run"] {
+            assert!(!cost.contains(word), "{id:?}: {cost}");
+        }
+    }
 }

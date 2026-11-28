@@ -1,9 +1,14 @@
 //! Refusals inside a run: who is refused at a moment and where each
 //! refused pane goes.
 
-use super::super::STALL_REFUSAL_H;
+use super::super::{FableGuard, STALL_REFUSAL_H};
 use super::{Ctx, Sim, Totals};
 use crate::quota::EPS;
+
+/// Under protection a refusal of an attended pane, which stalls the
+/// person at it mid-turn, is charged this much more, weeks (two points,
+/// what the profiles' design priced every refusal at).
+const ATTENDED_REFUSAL: f64 = 0.02;
 
 impl Sim {
     /// Marks the accounts that stopped serving at `at`, and gives the
@@ -45,7 +50,8 @@ impl Sim {
             let p = &c.input.panes[k];
             let Some(j) = self.at.on[k] else { continue };
             t.refusals += 1;
-            t.refused += p.rewrite + c.input.limits.refusal_extra;
+            let attended = p.attended && c.input.limits.fable != FableGuard::Price;
+            t.refused += p.rewrite + c.input.limits.refusal_extra + if attended { ATTENDED_REFUSAL } else { 0.0 };
             t.eff += STALL_REFUSAL_H;
             if self.refused.len() < 256 {
                 self.refused.push((k, at));
@@ -84,9 +90,14 @@ impl Sim {
         }
     }
 
-    /// Where pane `k` refused on `from` goes, among `open` that take its class.
+    /// Where pane `k` refused on `from` goes, among `open` that take its
+    /// class.  Under protection an unattended pane does not go where an
+    /// attended one is: it waits instead, and the quota stays for the
+    /// person.
     fn fallback(&self, c: &Ctx, k: usize, from: usize, band: usize, open: &[usize]) -> Option<usize> {
         let p = &c.input.panes[k];
+        let keep = !p.attended && c.input.limits.fable != FableGuard::Price;
+        let held = |j: usize| keep && self.at.panes[j].iter().any(|&o| c.input.panes[o].attended);
         let s = if band == 0 { p.speed } else { p.high };
         let lasts = |j: usize| {
             let [a, b] = self.load[j];
@@ -98,7 +109,7 @@ impl Sim {
         };
         // the longest lasting, the lowest index among equals
         let mut best: Option<(usize, f64)> = None;
-        for &j in open.iter().filter(|&&j| j != from) {
+        for &j in open.iter().filter(|&&j| j != from && !held(j)) {
             let h = lasts(j);
             if best.is_none_or(|b| h.total_cmp(&b.1).is_gt()) {
                 best = Some((j, h));

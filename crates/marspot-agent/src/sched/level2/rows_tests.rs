@@ -56,6 +56,7 @@ fn p(sid: u64, on: u8, restricted: bool, a: f64, b: f64, tokens: Option<u64>) ->
         barred: 0,
         switches_left: 6,
         disturb_left: 4,
+        attended: false,
     }
 }
 

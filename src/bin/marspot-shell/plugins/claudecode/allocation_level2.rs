@@ -74,6 +74,8 @@ pub(super) struct PanePlan {
     /// Plan passes run, full searches among them.
     pub passes: usize,
     pub full: usize,
+    /// The pane in focus as of this scan: attended.
+    pub focus: Option<u64>,
 }
 
 impl PanePlan {
@@ -97,6 +99,7 @@ impl PanePlan {
             run: ExecRun::new(state_root),
             passes: 0,
             full: 0,
+            focus: None,
         }
     }
 
@@ -134,7 +137,7 @@ impl PanePlan {
         let refused = self.note_refusals(snap);
         let limits = self.run.limits(limits::current());
         self.standing.inertia = Some(limits.inertia);
-        let mut b = build(a, snap, view, forecast, class, &self.standing, &limits);
+        let mut b = build(a, snap, view, forecast, class, &self.standing, &limits, self.focus);
         self.calibrate(&mut b, now, &mut log);
         let input = Input { accounts: &b.accounts, panes: &b.panes, young: b.young, window_full: KAPPA_FABLE, pi: b.pi, fleet_left: b.fleet_left, notices_left: limits.notices_per_hour, stale_feed: b.stale_feed, limits };
         let quants: Vec<_> = b.accounts.iter().map(|x| x.q.clone()).collect();
@@ -157,12 +160,20 @@ impl PanePlan {
             None => pass::retime(&mut self.standing, &input, now),
         };
         self.ended_last = false;
-        self.run.watch = done.as_ref().map_or_else(Vec::new, |r| watches(&r.plan, &input, now));
+        if let Some(r) = done.as_ref() {
+            self.run.watch = watches(&r.plan, &input, now, &mut self.run.deadlines, &mut log);
+        } else {
+            self.run.watch.clear();
+            self.run.deadlines.passed();
+        }
         self.run.waits = marspot_agent::sched::level2::guard::waits(&input);
         if let Some(r) = &done {
             allocation_route::rebuild(&input, &r.plan, forecast, due.is_some().then(|| allocation_route::others_now(now)), now);
         }
         self.route_shadow(view, due.is_some(), now, &mut log);
+        if due.is_some() {
+            log.extend(allocation_route::probe().into_iter().map(|l| ("sched.route.shadow", l)));
+        }
         if let Some(r) = done {
             self.foreseen = r.plan.refusals.iter().map(|x| x.0).chain(r.plan.switches.iter().map(|s| s.sid)).collect();
             for (sid, why) in &r.ended.cancelled {

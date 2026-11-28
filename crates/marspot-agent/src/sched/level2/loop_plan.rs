@@ -261,6 +261,7 @@ fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, (
                 barred: 0,
                 switches_left: lim.switches_left(p.planned.iter().filter(|t| now - **t < WEEK).count(), p.planned.iter().filter(|t| now - **t < 86_400).count()),
                 disturb_left: 4,
+                attended: false,
             }
         })
         .collect();
