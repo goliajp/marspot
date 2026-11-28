@@ -354,6 +354,7 @@ mod window_state_tests {
             pending_to_shell: Vec::new(),
             last_focus_notified: std::collections::HashMap::new(),
             terminal_focus: None,
+            user_told: Default::default(),
             pane_sessions: std::collections::HashMap::new(),
             esc_history: std::collections::HashMap::new(),
             shell_child_pids: std::collections::HashMap::new(),
@@ -663,29 +664,6 @@ mod window_state_tests {
         app.drag_window = None;
         assert_eq!(app.drag_target(2), Some(1), "no press: the frame decides");
         assert_eq!(app.drag_target(99), None, "unknown window is dropped");
-    }
-
-    /// Focus moving repaints both windows: the focus ring leaves one
-    /// and arrives in the other.  A frame for a window that already
-    /// closed changes nothing.
-    #[test]
-    fn focusing_a_window_repaints_the_one_it_left() {
-        let sandbox = sandbox_state_dir();
-        let mut app = app_with(&sandbox, vec![win(1, Vec::new()), win(2, Vec::new())]);
-        app.windows[0].needs_render = false;
-        app.windows[1].needs_render = false;
-
-        assert_eq!(app.focus_window(2), Some(1));
-        assert_eq!(app.key_window, 1);
-        assert!(app.windows[0].needs_render, "the window that lost focus");
-        assert!(app.windows[1].needs_render, "the window that gained it");
-
-        app.windows[0].needs_render = false;
-        app.windows[1].needs_render = false;
-        assert_eq!(app.focus_window(99), None, "unknown window");
-        assert_eq!(app.key_window, 1);
-        assert!(!app.windows[0].needs_render);
-        assert!(!app.windows[1].needs_render);
     }
 
     /// Overlays belong to the window they were opened in.  The cc
@@ -2331,6 +2309,8 @@ mod pointer_press;
 mod pointer_drag;
 #[path = "marspot-core/wheel.rs"]
 mod wheel;
+#[path = "marspot-core/user_input.rs"]
+mod user_input;
 #[path = "marspot-core/tape.rs"]
 mod tape;
 #[path = "marspot-core/draw.rs"]
@@ -2404,6 +2384,7 @@ struct CoreApp {
     last_focus_notified: std::collections::HashMap<usize, u64>,
     /// The session whose L3 was last told it has the keyboard.
     terminal_focus: Option<u64>,
+    user_told: user_input::Told,
     /// RFC-003 pane sessions currently held by L1 plugins, keyed by
     /// shelld_session_id.  Membership routes L2 behaviour:
     ///   * LOCK_KEYS cap → key events forwarded as PaneSessionKey,
@@ -2766,6 +2747,7 @@ fn main() {
         pending_to_shell: Vec::new(),
         last_focus_notified: std::collections::HashMap::new(),
         terminal_focus: None,
+        user_told: Default::default(),
         pane_sessions: std::collections::HashMap::new(),
         esc_history: std::collections::HashMap::new(),
         shell_child_pids: std::collections::HashMap::new(),

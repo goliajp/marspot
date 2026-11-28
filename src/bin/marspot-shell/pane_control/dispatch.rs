@@ -187,6 +187,7 @@ pub(super) fn audit(conn: &Conn, ctx: &Ctx, op: &'static str, sid: u64, content:
     let reached = matches!(result, "written" | "ended" | "timeout") || result.starts_with("exit ");
     if matches!(op, "pane.send" | "pane.run") && reached {
         super::helpers_port::input_seen(sid);
+        conn.hub.input_sent(sid);
     }
     conn.hub.audit.record(Rec {
         at_ms: super::audit_log::now_ms(),

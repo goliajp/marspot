@@ -109,8 +109,13 @@ pub(super) fn claim(profile: u8, grant: &Grant, deadline: Instant) -> Outcome {
     if !panes.window.parse().is_ok_and(super::panes::mark) {
         return Outcome::of(Res::Error, "the claim's window could not be kept out of account switching");
     }
-    match open(false, Some(panes.window.clone()), Some(command)) {
-        Ok(cli) => panes.cli = Some(cli),
+    match open(false, Some(panes.window.clone()), Some(command.clone())) {
+        Ok(cli) => {
+            if let Some(l) = cli.parse().ok().and_then(|sid| crate::plugins::launches::Launch::of_line("reset", sid, &command)) {
+                crate::plugins::launches::announce(&l);
+            }
+            panes.cli = Some(cli)
+        }
         Err(e) => return Outcome::of(Res::Error, &format!("no pane for the CLI: {e}")),
     }
     let cli = panes.cli.clone().unwrap_or_default();

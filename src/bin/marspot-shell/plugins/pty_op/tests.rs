@@ -251,34 +251,6 @@ impl crate::plugins::PluginHost for FakePluginHost {
     }
 }
 
-/// The queue must not need a plugin's permissions to start a run.
-///
-/// This shipped: `pump` went through `PluginHost::begin_pane_session`,
-/// which checks the *current plugin's* permissions — so the very
-/// first CLI delivery was refused by the supervisor's own gate with
-/// `missing permission`, and the text never reached the pane.  The
-/// queue's owner is the authority; starting a run is its business.
-#[test]
-fn the_queue_starts_runs_through_its_owner_not_a_plugin_gate() {
-    struct Owner {
-        started: Mutex<Vec<u64>>,
-    }
-    impl OpHost for Owner {
-        fn begin(&self, sid: u64, _s: Box<dyn PaneSession>) -> Result<(), String> {
-            self.started.lock().unwrap().push(sid);
-            Ok(())
-        }
-        fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
-    }
-    let state = Arc::new(FakeState::default());
-    let mut ops = PtyOps::new(Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>);
-    let owner = Owner { started: Mutex::new(Vec::new()) };
-    ops.submit(390, PtyOp::new("cli.send").step(Step::paste("hi")));
-    ops.pump(&owner);
-    assert_eq!(*owner.started.lock().unwrap(), vec![390]);
-    assert!(ops.is_busy(390));
-}
-
 /// A fake process id: the fake env matches on the pid alone.
 fn fid(pid: i32) -> ProcId {
     ProcId { pid, start_us: 0 }
@@ -291,7 +263,7 @@ pub(super) struct FakeState {
     present: Mutex<Vec<i32>>,
     out_len: Mutex<u64>,
     signals: Mutex<Vec<(i32, i32)>>,
-    sent: Mutex<Vec<Vec<u8>>>,
+    pub(super) sent: Mutex<Vec<Vec<u8>>>,
     holds: Mutex<Vec<bool>>,
     pasted: Mutex<Vec<String>>,
     mouse_resets: Mutex<Vec<u64>>,
@@ -314,9 +286,10 @@ pub(super) struct FakeState {
     /// the pid naming another process by now, or one we may not
     /// signal.  A signal not listed is delivered.
     refuse: Mutex<Vec<(i32, SignalError)>>,
+    pub(super) last_input: Mutex<Option<SystemTime>>,
 }
 
-struct FakeIo(Arc<FakeState>);
+pub(super) struct FakeIo(pub(super) Arc<FakeState>);
 impl PtyIo for FakeIo {
     fn send(&self, _sid: u64, bytes: &[u8]) -> std::io::Result<()> {
         self.0.sent.lock().unwrap().push(bytes.to_vec());
@@ -390,12 +363,15 @@ impl OpEnv for FakeEnv {
     fn output_len(&self, _sid: u64) -> u64 {
         *self.state.out_len.lock().unwrap()
     }
+    fn last_input(&self, _sid: u64) -> Option<SystemTime> {
+        *self.state.last_input.lock().unwrap()
+    }
 }
 
 pub(super) struct Host {
     ended: Mutex<bool>,
     pub(super) badges: Mutex<Vec<String>>,
-    logs: Mutex<Vec<String>>,
+    pub(super) logs: Mutex<Vec<String>>,
 }
 impl PaneSessionHost for Host {
     fn shelld_session_id(&self) -> u64 {

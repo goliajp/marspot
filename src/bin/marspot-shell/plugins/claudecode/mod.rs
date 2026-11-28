@@ -51,6 +51,8 @@ mod api_error;
 mod reclaim;
 mod looks;
 mod dormant;
+mod cold_record;
+mod cold_restore;
 mod cycle;
 mod cycle_op;
 mod plugin;
@@ -252,6 +254,8 @@ pub struct ClaudecodePlugin {
     scan_inflight: bool,
     /// What the ticks need while no pane runs claude; see `due`.
     quiet: due::Quiet,
+    /// What each pane last ran, for putting claude back; see `cold_restore`.
+    cold: cold_restore::Cold,
 }
 
 impl ClaudecodePlugin {
@@ -290,6 +294,7 @@ impl ClaudecodePlugin {
             scan_res_rx: None,
             scan_inflight: false,
             quiet: Default::default(),
+            cold: Default::default(),
         }
     }
 
@@ -398,6 +403,7 @@ mod tests {
     mod cycle_clicks;
     mod fable_refused;
     mod boundary_holds;
+    mod cold_restores;
     mod support;
     use support::*;
 

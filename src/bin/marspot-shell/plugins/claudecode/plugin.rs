@@ -27,6 +27,7 @@ impl Plugin for ClaudecodePlugin {
         // Anything an earlier process left dormant still has its
         // scrollback and its uuid; the next scan re-arms the wake path.
         self.load_dormant(host);
+        self.load_last_bound(host);
         self.load_heads_up(host);
         self.load_refused(host);
         self.load_fable_need(host);
@@ -205,6 +206,7 @@ impl Plugin for ClaudecodePlugin {
             // shell and the session is only recoverable by hand.
             self.rearm_dormant(host, &result);
             t_rearm = t0.elapsed().as_micros();
+            self.cold_tick(host, &result);
             self.quiet.scanned(result.sessions_seen.iter().copied());
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;

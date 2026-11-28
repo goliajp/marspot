@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use marspot::shell_proto::MsgType;
 use marspot_peer::control::Reject;
@@ -47,6 +47,7 @@ pub(crate) mod run_trailer;
 mod server;
 mod shadow_gate;
 mod shadow_tree;
+mod typed_in;
 mod wait;
 
 pub(crate) use mainloop::MainSide;
@@ -90,8 +91,13 @@ pub(crate) struct Hub {
     caps: AtomicU32,
     /// When the current core said hello, ms after `epoch`; 0 before.
     hello_ms: AtomicU64,
+    /// The pane keys go to; 0 for none.
     focus: AtomicU64,
+    /// The current core says which pane keys go to (`KeyboardPane`); a
+    /// core that does not is followed by its `PaneFocused`.
+    keyboard_known: AtomicBool,
     last_key_ms: AtomicU64,
+    typed: typed_in::TypedIn,
     conns: AtomicUsize,
     links: links::Links,
     limits: Mutex<limits::Limits>,
@@ -137,7 +143,9 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         caps: AtomicU32::new(0),
         hello_ms: AtomicU64::new(0),
         focus: AtomicU64::new(0),
+        keyboard_known: AtomicBool::new(false),
         last_key_ms: AtomicU64::new(0),
+        typed: typed_in::TypedIn::default(),
         conns: AtomicUsize::new(0),
         links: links::Links::new(),
         limits: Mutex::new(limits::Limits::default()),
@@ -198,12 +206,49 @@ impl Hub {
         self.last_key_ms.store(self.now_ms().max(1), Ordering::Relaxed);
     }
 
+    /// One window's focused pane changed.  It tells nothing when only
+    /// the key window changes, so it is followed only while the core
+    /// says nothing of the keyboard.
     pub(crate) fn focused(&self, sid: u64) {
+        if !self.keyboard_known.load(Ordering::Relaxed) {
+            self.keys_go_to(sid);
+        }
+    }
+
+    /// The core says keys now go to `sid`, or to no pane.
+    fn keyboard(&self, sid: Option<u64>) {
+        self.keyboard_known.store(true, Ordering::Relaxed);
+        self.keys_go_to(sid.unwrap_or(0));
+    }
+
+    fn keys_go_to(&self, sid: u64) {
+        self.typed.focused(sid, self.key_at(), SystemTime::now());
         self.focus.store(sid, Ordering::Relaxed);
     }
 
+    /// The wall-clock time of the last key, if any.
+    fn key_at(&self) -> Option<SystemTime> {
+        let last = self.last_key_ms.load(Ordering::Relaxed);
+        (last > 0).then(|| SystemTime::now() - Duration::from_millis(self.now_ms().saturating_sub(last)))
+    }
+
+    /// When pane `sid` last had input that this process saw.
+    pub(crate) fn last_input(&self, sid: u64) -> Option<SystemTime> {
+        self.typed.last_input(sid, self.key_at())
+    }
+
+    /// Something was written into pane `sid` through this socket, or the
+    /// core says the user put something into it other than by a key.
+    fn input_sent(&self, sid: u64) {
+        self.typed.sent(sid, SystemTime::now());
+    }
+
     /// A new core said hello: until it says what it does, it does nothing.
+    /// Nor does it say where keys go until it does: every core says so
+    /// as soon as the app is active.
     fn core_hello(&self) {
+        self.keyboard_known.store(false, Ordering::Relaxed);
+        self.keys_go_to(0);
         self.caps.store(0, Ordering::Release);
         self.hello_ms.store(self.now_ms().max(1), Ordering::Release);
     }
@@ -284,6 +329,20 @@ impl Hub {
                 self.caps.store(caps, Ordering::Release);
                 marspot::lx_event!("PANE_CONTROL_CAPS_SEEN", "the core said what it does with pane control", caps = caps);
                 self.queue(MainCmd::Resync);
+            }
+            return true;
+        }
+        if msg == MsgType::KeyboardPane {
+            // here, in the core's order, so a new core's hello cannot
+            // land after the keyboard frame it precedes
+            if let Ok(sid) = marspot::shell_proto::decode_keyboard_pane(payload) {
+                self.keyboard(sid);
+            }
+            return true;
+        }
+        if msg == MsgType::PaneUserInput {
+            if let Ok(sid) = marspot::shell_proto::decode_pane_user_input(payload) {
+                self.input_sent(sid);
             }
             return true;
         }

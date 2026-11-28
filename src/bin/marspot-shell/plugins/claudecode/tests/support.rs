@@ -183,7 +183,7 @@ impl FakeHost {
             status: std::sync::Mutex::new(HashMap::new()),
             begun: std::sync::Mutex::new(Vec::new()),
             sessions: std::sync::Mutex::new(Vec::new()),
-            ops: std::sync::Mutex::new(pty_op::PtyOps::new(io)),
+            ops: std::sync::Mutex::new(pty_op::PtyOps::new(io).with_after_typed(crate::plugins::launches::after_typed())),
             submitted: std::sync::Mutex::new(Vec::new()),
             sent: std::sync::Mutex::new(Vec::new()),
             pane_badges: std::sync::Mutex::new(Vec::new()),

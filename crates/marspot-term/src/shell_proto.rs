@@ -638,6 +638,10 @@ pub enum MsgType {
     InstallAsk = 150,
     /// L1 → L2: a window was minimized or restored; see `window_frames`.
     WindowMinimized = 151,
+    /// L2 → L1: the pane keys go to changed; see `pane_focus`.
+    KeyboardPane = 152,
+    /// L2 → L1: the user put input into a pane other than by a key; see `pane_focus`.
+    PaneUserInput = 153,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -751,6 +755,8 @@ impl MsgType {
             149 => MsgType::ProgramInput,
             150 => MsgType::InstallAsk,
             151 => MsgType::WindowMinimized,
+            152 => MsgType::KeyboardPane,
+            153 => MsgType::PaneUserInput,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -783,6 +789,8 @@ mod surface_attach;
 pub use surface_attach::*;
 mod window_frames;
 pub use window_frames::*;
+mod pane_focus;
+pub use pane_focus::*;
 mod pointer;
 pub use pointer::{PointerInput, PointerKind, decode_pane_pointer_input, encode_pane_pointer_input};
 
@@ -1531,33 +1539,6 @@ pub fn decode_cli_text(payload: &[u8]) -> io::Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&payload[4..4 + n]).into_owned())
-}
-
-/// PaneFocused payload: `session_id u64 LE`.
-pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
-    session_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_pane_focused(payload: &[u8]) -> io::Result<u64> {
-    decode_pane_badge_clicked(payload)
-}
-
-/// PaneBadgeClicked payload: `session_id u64 LE`.  Carries which pane
-/// (identified by its shelld session_id) the user clicked the badge
-/// on; the badge text itself is L1 plugin state, so L2 only needs to
-/// say "here, your turn".
-pub fn encode_pane_badge_clicked(session_id: u64) -> Vec<u8> {
-    session_id.to_le_bytes().to_vec()
-}
-
-pub fn decode_pane_badge_clicked(payload: &[u8]) -> io::Result<u64> {
-    if payload.len() != 8 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "pane_badge_clicked payload != 8 bytes",
-        ));
-    }
-    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
 }
 
 /// One row of a pane-badge context menu on the wire.  `tag` is the

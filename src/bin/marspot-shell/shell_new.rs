@@ -149,7 +149,8 @@ impl ShellApp {
                 std::sync::Arc::new(plugins::host::HostPtyIo::new(inject_input_tx_for_ops))
                     as std::sync::Arc<dyn plugins::pty_op::PtyIo>,
             )
-            .with_receipts(Some(std::sync::Arc::clone(&receipts))),
+            .with_receipts(Some(std::sync::Arc::clone(&receipts)))
+            .with_after_typed(plugins::launches::after_typed()),
             inject_input_rx,
             active_pane_sessions: std::collections::HashMap::new(),
         }

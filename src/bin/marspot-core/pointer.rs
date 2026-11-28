@@ -44,6 +44,7 @@ impl CoreApp {
                 if let Some(pane) = self.shown_pane_mut(wi, idx) {
                     pane.session_mut().l3_inject_mouse_motion(button, c1, r1);
                 }
+                self.user_wrote_into(wi, idx);
             }
             return;
         }
