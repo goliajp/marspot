@@ -38,7 +38,7 @@ fn text(m: Msg) -> &'static str {
             "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"
         }
         Msg::CostClaudeCodeGuardModel => "/modelは送信前に確認します。確認されていない変更は元に戻します",
-        Msg::CostClaudeCodeSchedProfile => "試行中：確認が通るまで記録のみ。積極的なほどFable枠の失効が減り、切り替えで会話を読み直します",
+        Msg::CostClaudeCodeSchedProfile => "確認しながら段階的に有効化。積極的なほどFable枠の失効が減り、切り替えで会話を読み直します",
         Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります",
 
         Msg::MenuCopy => "コピー",

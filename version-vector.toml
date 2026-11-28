@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.937"  # under protection an attended pane keeps its quota first in a gap; strict never makes it wait
-core    = "0.12.814"  # a dropped copy answer from a web pane is logged once, when it arrives
+core    = "0.12.815"  # the switching row no longer says the planner is in trial: it goes live in checked steps
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

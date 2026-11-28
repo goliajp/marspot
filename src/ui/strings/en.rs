@@ -45,7 +45,7 @@ fn text(m: Msg) -> &'static str {
             "/model asks again before it is sent; a change nobody confirmed is put back"
         }
         Msg::CostClaudeCodeSchedProfile => {
-            "in trial: switches are recorded until checks pass; freer wastes less Fable, a switch rereads the chat"
+            "goes live in checked steps; freer wastes less Fable, a switch rereads the chat"
         }
         Msg::CostWheelSpeed => "faster gets there in fewer flicks and overshoots in one",
 
