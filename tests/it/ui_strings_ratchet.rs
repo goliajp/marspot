@@ -101,7 +101,7 @@ fn without_test_files(mut files: Vec<(String, String)>) -> Vec<(String, String)>
                 cfg_test = true;
             } else if let Some(p) = line.strip_prefix("#[path = \"").and_then(|r| r.strip_suffix("\"]")) {
                 path = Some(dir.join(p));
-            } else if let Some(m) = line.strip_prefix("mod ").or_else(|| line.strip_prefix("pub(crate) mod "))
+            } else if let Some(m) = line.strip_prefix("mod ").or_else(|| visible_mod(line))
                 && let Some(m) = m.strip_suffix(';')
                 && cfg_test
             {
@@ -115,6 +115,12 @@ fn without_test_files(mut files: Vec<(String, String)>) -> Vec<(String, String)>
     }
     files.retain(|(name, _)| !tests.contains(name));
     files
+}
+
+/// The module name after `pub(…) mod `, whatever the visibility says.
+fn visible_mod(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("pub(")?;
+    rest.split_once(") mod ").map(|(_, m)| m)
 }
 
 /// `line` up to a trailing comment, if it has one outside a string.
