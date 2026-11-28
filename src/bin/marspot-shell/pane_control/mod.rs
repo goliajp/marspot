@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use marspot::shell_proto::MsgType;
 use marspot_peer::control::Reject;
@@ -47,6 +47,7 @@ pub(crate) mod run_trailer;
 mod server;
 mod shadow_gate;
 mod shadow_tree;
+mod typed_in;
 mod wait;
 
 pub(crate) use mainloop::MainSide;
@@ -92,6 +93,7 @@ pub(crate) struct Hub {
     hello_ms: AtomicU64,
     focus: AtomicU64,
     last_key_ms: AtomicU64,
+    typed: typed_in::TypedIn,
     conns: AtomicUsize,
     links: links::Links,
     limits: Mutex<limits::Limits>,
@@ -138,6 +140,7 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         hello_ms: AtomicU64::new(0),
         focus: AtomicU64::new(0),
         last_key_ms: AtomicU64::new(0),
+        typed: typed_in::TypedIn::default(),
         conns: AtomicUsize::new(0),
         links: links::Links::new(),
         limits: Mutex::new(limits::Limits::default()),
@@ -199,7 +202,24 @@ impl Hub {
     }
 
     pub(crate) fn focused(&self, sid: u64) {
+        self.typed.focused(sid, self.key_at(), SystemTime::now());
         self.focus.store(sid, Ordering::Relaxed);
+    }
+
+    /// The wall-clock time of the last key, if any.
+    fn key_at(&self) -> Option<SystemTime> {
+        let last = self.last_key_ms.load(Ordering::Relaxed);
+        (last > 0).then(|| SystemTime::now() - Duration::from_millis(self.now_ms().saturating_sub(last)))
+    }
+
+    /// When pane `sid` last had input that this process saw.
+    pub(crate) fn last_input(&self, sid: u64) -> Option<SystemTime> {
+        self.typed.last_input(sid, self.key_at())
+    }
+
+    /// Something was written into pane `sid` through this socket.
+    fn input_sent(&self, sid: u64) {
+        self.typed.sent(sid, SystemTime::now());
     }
 
     /// A new core said hello: until it says what it does, it does nothing.

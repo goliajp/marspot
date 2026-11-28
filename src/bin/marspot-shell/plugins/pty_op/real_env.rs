@@ -90,6 +90,10 @@ impl OpEnv for RealEnv {
     fn pane_unsent(&self, sid: u64) -> Option<String> {
         marspot::pane_read::composer(sid).ok()?
     }
+
+    fn last_input(&self, sid: u64) -> Option<SystemTime> {
+        crate::pane_control::hub()?.last_input(sid)
+    }
 }
 
 #[cfg(test)]

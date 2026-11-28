@@ -39,6 +39,7 @@ fn hub_at(dir: &std::path::Path) -> (Hub, std::sync::mpsc::Receiver<MainCmd>) {
         hello_ms: AtomicU64::new(0),
         focus: AtomicU64::new(0),
         last_key_ms: AtomicU64::new(0),
+        typed: typed_in::TypedIn::default(),
         conns: AtomicUsize::new(0),
         links: links::Links::new(),
         limits: Mutex::new(Limits::default()),
