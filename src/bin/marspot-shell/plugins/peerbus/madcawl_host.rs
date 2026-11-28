@@ -43,6 +43,10 @@ pub(super) struct Config {
     pub idle_secs: u32,
     /// A host that exits sooner than this counts against the brake.
     pub quick: Duration,
+    /// Pages in content processes of their own (`--isolate`); only the
+    /// sandbox web pane asks for it, since an installed host serves
+    /// every agent's MCP session and an older one refuses the flag.
+    pub isolate: bool,
 }
 
 impl Config {
@@ -59,6 +63,7 @@ impl Config {
             home,
             idle_secs: 300,
             quick: Duration::from_secs(10),
+            isolate: false,
         })
     }
 }
@@ -80,12 +85,20 @@ impl Host {
     /// Bind or close the socket after what is installed now; run by
     /// the peerbus worker at start and on every config pass.
     pub(super) fn reconcile(&mut self) {
+        let Some(mut cfg) = Config::of_env() else { return };
         // the sandbox shares the developer's HOME, and the agents there
-        // are registered with the installed app's socket, not this one
+        // are registered with the installed app's socket, not this one:
+        // it runs a host only for the web pane its dev seam opens, from
+        // the program that seam names
         if std::env::var_os("MARSPOT_DEV_SANDBOX").is_some() {
-            return;
+            let (Some(_), Some(program)) = (marspot::web_pane::dev_url(), marspot::web_pane::dev_host_program()) else {
+                return;
+            };
+            cfg.shell = program;
+            cfg.isolate = true;
+            let present = cfg.shell.is_file();
+            return self.apply(cfg, present);
         }
-        let Some(cfg) = Config::of_env() else { return };
         let present = mcp_servers::madcawl_installed(&cfg.home);
         self.apply(cfg, present);
     }

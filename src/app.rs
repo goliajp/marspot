@@ -57,6 +57,7 @@ use objc2_foundation::{
     NSString, NSUInteger, NSURL,
 };
 
+use crate::app_scale::backing;
 use crate::app_keys::{nsevent_modifiers, nsevent_to_mars_key, selector_named_key};
 
 mod caret_probe;
@@ -232,7 +233,7 @@ impl MarspotAppCtx {
 
     /// Backing scale factor of the window's current screen.
     pub fn scale(&self) -> f64 {
-        self.nswindow.backingScaleFactor()
+        backing(&self.nswindow)
     }
 
     /// Right edge of the macOS traffic-light cluster, in **physical
@@ -647,7 +648,7 @@ define_class!(
             // into bottom y_phys, sending sidebar entry "1" to row 7).
             let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
-            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
             // Modifier flags carry on the NSEvent — read them here so
@@ -665,7 +666,7 @@ define_class!(
             // Ctrl-Left-Click into this path on macOS by default.
             let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
-            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
             let mods = nsevent_modifiers(event);
@@ -679,7 +680,7 @@ define_class!(
             // and mouseUp:, so the app can rely on order.
             let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
-            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
             // RFC-006 — resolve the hovered window per drag tick so
@@ -696,7 +697,7 @@ define_class!(
         fn mouse_up(&self, event: &NSEvent) {
             let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
-            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
             // Which marspot window is the pointer over RIGHT NOW?
@@ -725,7 +726,7 @@ define_class!(
         fn mouse_moved(&self, event: &NSEvent) {
             // Only while the window is key.  Coords match mouse_down.
             let loc_view = self.convertPoint_fromView(event.locationInWindow(), None);
-            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
             let (x, y) = (loc_view.x * scale, loc_view.y * scale);
             dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseMove { x, y });
         }
@@ -793,8 +794,7 @@ define_class!(
                 // as mouse_down, so the receiver can pane-hit-test it.
                 let loc_window = { info.draggingLocation() };
                 let loc_view = self.convertPoint_fromView(loc_window, None);
-                let scale =
-                    self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+                let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
                 dispatch_event_for(self.ivars().window_id.get(), EventKind::FileDrop {
                     x: loc_view.x * scale,
                     y: loc_view.y * scale,
@@ -814,8 +814,7 @@ define_class!(
             
             let (dx, dy) = if precise {
                 // In points; convert to backing pixels.
-                let scale =
-                    self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+                let scale = self.window().map(|w| backing(&w)).unwrap_or(1.0);
                 ({ event.scrollingDeltaX() } * scale, { event.scrollingDeltaY() } * scale)
             } else {
                 // Lines; pass through, caller scales.
@@ -912,7 +911,7 @@ define_class!(
                 Some(w) => w,
                 None => return zero,
             };
-            let scale = window.backingScaleFactor();
+            let scale = backing(&window);
             let bounds = self_view.bounds();
             // Backing px → view points (top-left, y-down).
             let pt_x = phys.origin.x / scale;
@@ -1541,7 +1540,7 @@ fn marspot_pointer_in_window() -> (u32, f64, f64) {
         };
         let win_pt = c.nswindow.convertPointFromScreen(point);
         let view_pt = c.inner.convertPoint_fromView(win_pt, None);
-        let scale = c.nswindow.backingScaleFactor();
+        let scale = backing(&c.nswindow);
         (c.window_id, view_pt.x * scale, view_pt.y * scale)
     })
 }
