@@ -16,6 +16,7 @@ use marspot_peer::registry::Agent;
 
 use super::alloc::{AccountIn, CodexAlloc, PaneIn, Snapshot, events_dir};
 use super::alloc_rollout::rollout_of_thread;
+use super::credits::{accounts as accounts_of, feed_balances, spent_week, Acct};
 use super::rollout::RolloutIndex;
 use crate::plugins::claudecode::heads_up;
 use crate::plugins::claudecode::quota::Room;
@@ -76,15 +77,17 @@ enum Core {
 pub(super) struct AllocPass {
     core: Core,
     feed: Option<(i64, Option<i64>, Vec<AccountIn>)>,
+    /// The feed's credits balances, as `credits::feed_balances` reads them.
+    balances: Option<(i64, Vec<(u8, f64)>)>,
     threads: HashMap<String, (i64, Option<PathBuf>)>,
 }
 
 impl AllocPass {
-    pub(super) fn run(&mut self, host: &dyn PluginHost, seen: &[Seen], obs: &crate::observe::Observation) {
+    /// One pass; what the credits rule reads of each account, once the
+    /// allocation is ready.
+    pub(super) fn run(&mut self, host: &dyn PluginHost, seen: &[Seen], obs: &crate::observe::Observation) -> Option<(i64, Vec<Acct>)> {
         let now = crate::plugins::claudecode::rooms::unix_now();
-        if self.core(now).is_none() {
-            return;
-        }
+        self.core(now)?;
         let views = crate::plugins::peerbus::threads();
         let roles = HelperRoles::of_observation(obs);
         let mut panes = Vec::new();
@@ -107,8 +110,17 @@ impl AllocPass {
             });
         }
         let (feed_at, accounts) = self.feed(now);
-        let Some(alloc) = self.core(now) else { return };
-        let (log, tell) = alloc.observe(&Snapshot { now, feed_at, accounts, panes });
+        let balances = self.balances.clone();
+        let alloc = self.core(now)?;
+        let snap = Snapshot { now, feed_at, accounts, panes };
+        let (log, tell) = alloc.observe(&snap);
+        if let Some((at, list)) = balances {
+            for (n, b) in list {
+                let spent = snap.accounts.iter().find(|a| a.profile == n).and_then(|a| spent_week(a, now));
+                alloc.credit_seen.saw(n, at, b, spent);
+            }
+        }
+        let credit = (now, accounts_of(&snap, &alloc.limits, &alloc.credit_seen));
         for (tag, line) in log {
             host.log(LogLevel::Info, tag, &line);
         }
@@ -119,6 +131,7 @@ impl AllocPass {
             let body = body(t.profile, t.hours);
             heads_up::send_to(t.sid, t.profile, body, Arc::new(AtomicBool::new(false)), "codex.quota.heads_up", move || inbox_of(pid));
         }
+        Some(credit)
     }
 
     /// The allocation, or None while the kept events are still being read.
@@ -175,7 +188,10 @@ impl AllocPass {
             return (*feed_at, accounts.clone());
         }
         let numbers: Vec<u8> = super::profile_dirs().into_iter().map(|(n, _)| n).collect();
-        let read = codex_accounts(&numbers, marspot::cc_usage::read_codex(), now);
+        use marspot::cc_usage as usage;
+        let body = usage::authoritative_body(&usage::codex_feed_path(), &usage::own_codex_feed_path(), now);
+        self.balances = body.as_deref().and_then(feed_balances);
+        let read = codex_accounts(&numbers, body.as_deref().and_then(usage::parse_codex), now);
         let resets = marspot::agent_resets::read(now);
         let feed_at = (read.feed_at > 0).then_some(read.feed_at);
         let accounts: Vec<AccountIn> = read

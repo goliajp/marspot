@@ -120,6 +120,9 @@ pub(super) struct CodexAlloc {
     pub(super) sched: crate::agentsvc::sched::Shadow,
     /// Each account's paid balance as the rollouts read it.
     pub(super) wallets: super::alloc_wallet::Wallets,
+    /// Each account's credits balance as the stop-paying rule reads it,
+    /// from its panes' rollouts and the feed.
+    pub(super) credit_seen: super::credits::Wallets,
 }
 
 pub(super) type Log = Vec<(&'static str, String)>;
@@ -162,6 +165,7 @@ impl CodexAlloc {
             refusals: HashMap::new(),
             decided: None,
             sched: Default::default(),
+            credit_seen: Default::default(),
         }
     }
 
@@ -272,6 +276,10 @@ impl CodexAlloc {
                         && self.limits.get(&p.profile).is_none_or(|(was, _, _)| at > *was)
                     {
                         self.limits.insert(p.profile, (at, used, renews));
+                    }
+                    if let Some(balance) = balance {
+                        let spent = self.limits.get(&p.profile).filter(|(_, used, renews)| *used >= super::credits::SPENT && *renews > at).map(|l| l.2);
+                        self.credit_seen.saw(p.profile, at, balance, spent);
                     }
                     self.wallets.seen(super::alloc_wallet::Seen { at, sid: p.sid, profile: p.profile, class: class_word(class), week, balance, cap, tokens });
                 }
