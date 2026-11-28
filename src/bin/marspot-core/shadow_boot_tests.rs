@@ -1,7 +1,9 @@
 //! Which panes a core starting up keeps in no window, against real
 //! `marspot-session` processes.
 
-use super::super::shadows::tests::sandbox;
+use super::super::shadows::tests::{app_with_parent, drive, open_shadow, sandbox, wait_for};
+use crate::pane_control::Route;
+use marspot::shell_proto::decode_pane_spawned;
 use super::super::spawn::{ShadowEnv, spawn_l3_shadow_with_cwd};
 use super::*;
 use marspot::shell_proto::SHADOW_IDLE_DEFAULT_S;
@@ -64,4 +66,58 @@ fn shadow_boot_without_a_record_children_go_to_the_shadows() {
     let (window, shadows) = boot(psid, &tx);
     assert_eq!(window, [psid, top].into());
     assert_eq!(shadows, [shown, hidden].into());
+}
+
+fn recorded() -> HashSet<u64> {
+    hidden_record().expect("the core keeps a record")
+}
+
+/// A pane in no window is in the record while it lives and leaves it
+/// when its shell ends.
+#[test]
+fn shadow_boot_record_loses_a_pane_when_it_ends() {
+    let sb = sandbox();
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    let sid = open_shadow(&mut app, &rx, 7, psid);
+    let other = open_shadow(&mut app, &rx, 8, psid);
+    assert_eq!(recorded(), [sid, other].into());
+    app.inject_input(sid, b"q\r");
+    wait_for("the ended pane left the record", || {
+        drive(&mut app, &rx);
+        app.pump_all();
+        !recorded().contains(&sid)
+    });
+    assert_eq!(recorded(), [other].into(), "the live one stays");
+}
+
+/// The record lists only panes the core holds, and a spawn past the
+/// session cap leaves none behind: at the cap it holds every pane in no
+/// window and no more.
+#[test]
+fn shadow_boot_record_stays_within_the_session_cap() {
+    const CAP: usize = 4;
+    let mut sb = sandbox();
+    sb.set("MARSPOT_SESSION_CAP", &CAP.to_string());
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    let lines = || std::fs::read_to_string(record_path()).unwrap().lines().count();
+    let hidden: HashSet<u64> = (0..CAP as u32 - 1).map(|r| open_shadow(&mut app, &rx, 10 + r, psid)).collect();
+    assert_eq!(recorded(), hidden, "the parent and three panes in no window fill the cap");
+    assert_eq!(lines(), CAP - 1);
+    assert_eq!(app.dev_open_shadow(20, psid), Route::Forwarded, "the spawn is tried");
+    let mut answer = None;
+    wait_for("the spawn past the cap was answered", || {
+        drive(&mut app, &rx);
+        assert!(lines() <= CAP, "the record never lists more than the cap");
+        answer = app
+            .pane_control
+            .reports
+            .frames()
+            .filter(|f| f.msg_type == MsgType::PaneSpawned)
+            .map(|f| decode_pane_spawned(&f.payload).unwrap())
+            .find(|s| s.req_id == 20);
+        answer.is_some()
+    });
+    assert!(!answer.unwrap().ok, "refused at the cap");
+    assert_eq!(recorded(), hidden, "the refused pane left no line");
+    assert_eq!(lines(), CAP - 1);
 }

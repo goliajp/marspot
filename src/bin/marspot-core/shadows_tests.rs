@@ -84,6 +84,29 @@ pub(crate) fn app_with_parent(sb: &Sandbox) -> (CoreApp, Receiver<CoreEvent>, u6
 /// its session reads pane control.
 pub(crate) fn open_shadow(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64) -> u64 {
     assert_eq!(app.dev_open_shadow(req_id, parent), Route::Forwarded);
+    shadow_opened(app, rx, req_id)
+}
+
+/// As [`open_shadow`], with an idle timeout of `idle_s`.
+pub(crate) fn open_shadow_idle(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32, parent: u64, idle_s: u32) -> u64 {
+    let m = marspot::shell_proto::PaneSpawn {
+        req_id,
+        shadow: true,
+        no_focus: true,
+        helper: false,
+        new_window: false,
+        parent_sid: parent,
+        idle_s,
+        cols: 0,
+        rows: 0,
+        cwd: String::new(),
+    };
+    let f = frame(MsgType::PaneSpawn, marspot::shell_proto::encode_pane_spawn(&m).unwrap());
+    assert_eq!(app.route_pane_control(f), Route::Forwarded);
+    shadow_opened(app, rx, req_id)
+}
+
+fn shadow_opened(app: &mut CoreApp, rx: &Receiver<CoreEvent>, req_id: u32) -> u64 {
     let mut spawned = None;
     wait_for("the shadow pane's spawn was answered", || {
         drive(app, rx);
