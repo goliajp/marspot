@@ -67,7 +67,10 @@ fn shadow_levels_an_image_swap_flattens_a_third_level() {
     let (mut a, ra) = parent(&mut sandbox, 31);
     let (mut b, rb) = parent(&mut sandbox, 32);
     let (mut c, rc) = pane(&mut sandbox, 33, SLEEP, Some((sid(32), 0)));
-    // b becomes a child as an image before the rule could have made it
+    // b becomes a child as an image before the rule could have made it;
+    // stopped, so nothing of its own writes its entry back meanwhile
+    // SAFETY: a process this test started
+    assert_eq!(unsafe { libc::kill(b.pid() as i32, libc::SIGSTOP) }, 0);
     let mut entry = read_session_entry(sid(32)).unwrap();
     entry.shadow_of = sid(31);
     rewrite_session_entry(&entry).unwrap();
@@ -78,6 +81,8 @@ fn shadow_levels_an_image_swap_flattens_a_third_level() {
     kill(&a);
     exits_within(&mut c, 2.0).expect("it follows its new parent");
     let _ = a.child.wait();
+    // SAFETY: as above
+    unsafe { libc::kill(b.pid() as i32, libc::SIGCONT) };
     b.kill();
     std::thread::sleep(Duration::from_millis(50));
     for r in [ra, rb, rc] {
