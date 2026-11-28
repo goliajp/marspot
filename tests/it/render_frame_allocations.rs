@@ -48,9 +48,11 @@ const CEILING: usize = 14;
 fn render_inner_body() -> String {
     let mut body = fn_body("src/bin/marspot-core/draw.rs", "fn render_inner(");
     assert!(body.lines().count() > 50, "render_inner came out {} lines long", body.lines().count());
-    for head in ["fn pane_labels(", "fn publish_overlays("] {
+    body.push('\n');
+    body.push_str(&fn_body("src/bin/marspot-core/draw.rs", "fn publish_overlays("));
+    for head in ["pub(super) fn pane_labels(", "pub(super) fn sidebar_labels("] {
         body.push('\n');
-        body.push_str(&fn_body("src/bin/marspot-core/draw.rs", head));
+        body.push_str(&fn_body("src/bin/marspot-core/draw_labels.rs", head));
     }
     body.push('\n');
     body.push_str(&fn_body("src/bin/marspot-core/helper_strip/mod.rs", "pub(super) fn place_strips("));
