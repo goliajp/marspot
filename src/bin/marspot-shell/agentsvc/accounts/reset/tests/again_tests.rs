@@ -122,7 +122,7 @@ fn reset_a_claude_kind_without_a_claim_path_is_refused_before_the_account_is_hel
     let l = ledger(&dir);
     let held = Ledger::hold(&l, &claim(Provider::Claude, 17, "rf-other")).expect("free");
     let mut c = claim(Provider::Claude, 17, "rf-1");
-    c.grant.kind = "full".into();
+    c.grant.kind = "claude_full".into();
     let t = Instant::now();
     let o = run(&l, c, |_| panic!("not checked: there is nothing to claim it with"));
     assert_eq!(o.result, Res::Unavailable, "not busy and not a wait for the account: {o:?}");

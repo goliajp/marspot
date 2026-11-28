@@ -23,8 +23,9 @@ pub struct ResetLine {
 
 /// Whether marspot can claim a grant of `kind` on an `agent` account:
 /// every Codex credit; of Claude's, only the weekly session reset,
-/// typed as `/limit-reset`.  A stored Claude grant would be chosen from
-/// a list the CLI has never been seen to show, so none is claimed.
+/// typed as `/limit-reset`.  A stored Claude grant (`claude_full`,
+/// `claude_fable`) would be chosen from a list the CLI has never been
+/// seen to show, so none is claimed.
 pub fn claim_path_on(agent: &str, kind: &str) -> bool {
     match agent {
         "codex" => true,
@@ -114,6 +115,7 @@ pub fn armed_text(g: &Grant, renews: Option<i64>, when: impl Fn(i64) -> String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_resets::{CLAUDE_FABLE, CLAUDE_FULL};
 
     fn grant(kind: &str, left: u32, ends: i64) -> Grant {
         Grant { kind: kind.into(), restores: vec!["seven_day".into()], left: Some(left), total: Some(1), ends_at: Some(ends), ..Grant::default() }
@@ -122,7 +124,7 @@ mod tests {
     #[test]
     fn a_line_claims_the_first_ending_usable_grant_of_its_kind() {
         let mut r = Resets::none(0, "app_server");
-        r.grants = vec![grant("codex_full", 1, 300), grant("fable", 1, 50), grant("codex_full", 1, 200), grant("codex_full", 0, 100)];
+        r.grants = vec![grant("codex_full", 1, 300), grant("claude_fable", 1, 50), grant("codex_full", 1, 200), grant("codex_full", 0, 100)];
         assert_eq!(claimable(&r, 0).map(|(i, _)| i), Some(2), "line 0 is codex_full: the one ending at 200, not the spent one");
         assert_eq!(claimable(&r, 1).map(|(i, _)| i), Some(1));
         assert_eq!(claimable(&r, 2), None);
@@ -133,7 +135,7 @@ mod tests {
     #[test]
     fn of_claude_grants_only_the_session_reset_has_a_claim_path() {
         assert!(claim_path_on("codex", "codex_full") && claim_path_on("claude", "session"));
-        for kind in ["full", "weekly", "fable"] {
+        for kind in [CLAUDE_FULL, CLAUDE_FABLE] {
             assert!(!claim_path_on("claude", kind), "{kind}");
         }
         assert!(!claim_path_on("kimi", "session"));

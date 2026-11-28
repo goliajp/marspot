@@ -1,6 +1,6 @@
 use super::*;
 use super::super::allocation_inputs::Snapshot;
-use marspot_agent::sched::reset::Supply;
+use marspot_agent::sched::reset::{Supply, WeekCut};
 
 const NOW: i64 = 1_795_600_000;
 
@@ -26,7 +26,7 @@ fn view(accounts: &[AccountIn], b_f: f64, b_n: f64) -> View {
 }
 
 fn window_reset() -> Supply {
-    Supply { week: false, window: true, gives_back_week: true, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None }
+    Supply { week: false, window: true, gives_back_week: true, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None }
 }
 
 #[test]

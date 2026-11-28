@@ -1,26 +1,47 @@
 //! An account's stored resets, as last read, turned into the supply
-//! with a deadline the allocation counts on.
+//! with a deadline the allocation counts on.  A claim the planner plans
+//! is supply from its claim time on; using it still waits for the
+//! user's confirmation on the accounts panel while `sched.reset` is off.
 
-use marspot::agent_resets::{AccountResets, Grant};
-use marspot_agent::sched::reset::Supply;
+use marspot::agent_resets::{AccountResets, CLAUDE_FABLE, CLAUDE_FULL, Grant};
+use marspot_agent::sched::reset::{Supply, WeekCut};
+
+/// What a `claude_fable` reset takes off the week's usage.  Half of it
+/// is all that is known; whether that is half of what was used or a
+/// fixed half week is not verified yet, so this is read as the former.
+pub(crate) const FABLE_WEEK_CUT: WeekCut = WeekCut::ShareOfUsed(0.5);
 
 fn hours(at: i64, now: i64) -> f64 {
     (at - now) as f64 / 3600.0
+}
+
+/// What a grant brings back, `(week, window, gives_back_week, week_cut)`:
+/// Claude's two stored resets by their kind, any other by what it says
+/// it restores.
+fn brings_back(g: &Grant) -> (bool, bool, bool, WeekCut) {
+    match g.kind.as_str() {
+        CLAUDE_FULL => (true, true, false, WeekCut::Nothing),
+        CLAUDE_FABLE => (false, true, false, FABLE_WEEK_CUT),
+        _ => {
+            let window = g.gives_back_weekly || g.restores.iter().any(|w| w == "seven_day_overage_included");
+            (g.restores.iter().any(|w| w == "seven_day"), window, g.gives_back_weekly, WeekCut::Nothing)
+        }
+    }
 }
 
 /// What one grant brings back; none for one with nothing left or one
 /// that brings back neither the week nor the restricted window.
 fn of_grant(g: &Grant, usable_below_left: Option<f64>, now: i64) -> Option<Supply> {
     let left = g.left.unwrap_or(1);
-    let window = g.gives_back_weekly || g.restores.iter().any(|w| w == "seven_day_overage_included");
-    let week = g.restores.iter().any(|w| w == "seven_day");
+    let (week, window, gives_back_week, week_cut) = brings_back(g);
     if left == 0 || !(week || window) {
         return None;
     }
     Some(Supply {
         week,
         window,
-        gives_back_week: g.gives_back_weekly,
+        gives_back_week,
+        week_cut,
         moves_week: g.moves_weekly_reset,
         // not said is read as needing the limit, the stricter of the two
         requires_limit: g.use_requires_limit.unwrap_or(true),
@@ -62,17 +83,29 @@ mod tests {
             ends_at: Some(NOW + 7_200),
             ..Grant::default()
         };
-        let fable = Grant { kind: "fable".into(), restores: vec!["seven_day_overage_included".into()], gives_back_weekly: true, left: None, ends_at: None, starts_at: Some(NOW + 3_600), ..Grant::default() };
+        let fable = Grant { kind: "window".into(), restores: vec!["seven_day_overage_included".into()], gives_back_weekly: true, left: None, ends_at: None, starts_at: Some(NOW + 3_600), ..Grant::default() };
         let session = Grant { kind: "session".into(), restores: vec!["five_hour".into()], left: Some(2), ..Grant::default() };
         let used = Grant { left: Some(0), ..week.clone() };
         let ended = Grant { ends_at: Some(NOW), ..week.clone() };
         let all = account(vec![week, fable, session, used, ended]);
         let got = of_account(&all, "a", 1, None, NOW);
         assert_eq!(got.len(), 2, "the session reset brings back no week; the used and ended ones nothing");
-        assert_eq!(got[0], Supply { week: true, window: false, gives_back_week: false, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(2.0), left: 1, usable_below_left: None });
-        assert_eq!(got[1], Supply { week: false, window: true, gives_back_week: true, moves_week: false, requires_limit: true, starts_h: 1.0, ends_h: None, left: 1, usable_below_left: None });
+        assert_eq!(got[0], Supply { week: true, window: false, gives_back_week: false, week_cut: WeekCut::Nothing, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(2.0), left: 1, usable_below_left: None });
+        assert_eq!(got[1], Supply { week: false, window: true, gives_back_week: true, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 1.0, ends_h: None, left: 1, usable_below_left: None });
         assert!(of_account(&all, "a", 2, None, NOW).is_empty());
         assert!(of_account(&all, "b", 1, None, NOW).is_empty());
+    }
+
+    #[test]
+    fn claudes_two_stored_resets_bring_back_by_their_kind() {
+        let full = Grant { kind: CLAUDE_FULL.into(), left: Some(1), ends_at: Some(NOW + 7_200), ..Grant::default() };
+        let fable = Grant { kind: CLAUDE_FABLE.into(), restores: vec!["seven_day".into()], gives_back_weekly: true, left: Some(2), ..Grant::default() };
+        let got = of_account(&account(vec![full, fable]), "a", 1, None, NOW);
+        assert_eq!((got[0].week, got[0].window, got[0].gives_back_week, got[0].week_cut), (true, true, false, WeekCut::Nothing));
+        assert_eq!(got[0].ends_h, Some(2.0));
+        assert_eq!((got[1].week, got[1].window, got[1].gives_back_week, got[1].week_cut), (false, true, false, FABLE_WEEK_CUT), "the kind wins over what it says");
+        assert_eq!(got[1].left, 2);
+        assert_eq!(FABLE_WEEK_CUT.of(0.6), 0.3);
     }
 
     #[test]

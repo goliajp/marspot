@@ -12,7 +12,7 @@
 //! on, nothing more.
 
 use crate::quota::{EPS, Load, Quant};
-pub use crate::types::reset::{AGREE_WITHIN_S, Agreement, Count, Supply, agree};
+pub use crate::types::reset::{AGREE_WITHIN_S, Agreement, Count, Supply, WeekCut, agree};
 
 const WEEK_H: f64 = 168.0;
 
@@ -29,6 +29,7 @@ struct Unit {
     moves_week: bool,
     usable_below_left: Option<f64>,
     gives_back_week: bool,
+    week_cut: WeekCut,
     /// Brings back the week and the restricted window at one use.
     both: bool,
 }
@@ -83,6 +84,7 @@ fn units(supply: &[Supply], pick: impl Fn(&Supply) -> bool) -> Vec<Unit> {
                 moves_week: s.moves_week,
                 usable_below_left: s.usable_below_left,
                 gives_back_week: s.gives_back_week,
+                week_cut: s.week_cut,
                 both: s.week && s.window,
             };
             std::iter::repeat_n(u, s.left as usize)
@@ -100,6 +102,9 @@ fn units(supply: &[Supply], pick: impl Fn(&Supply) -> bool) -> Vec<Unit> {
 /// A reset that brings back both the week and the window is used once:
 /// when the week runs out if it is worth something there, and the window
 /// is refilled at that same moment; otherwise when the window runs out.
+/// One that brings back the window alone takes its `week_cut` off what
+/// the week has used by then, counting the week's own resets used and
+/// the cuts of earlier window resets before it.
 pub fn with_supply(q: &Quant, load: &Load, window_full: f64, supply: &[Supply]) -> Quant {
     let mut out = q.clone();
     if supply.is_empty() {
@@ -126,13 +131,53 @@ pub fn with_supply(q: &Quant, load: &Load, window_full: f64, supply: &[Supply]) 
     }
     window_units.sort_by(|a, b| a.ends_h.total_cmp(&b.ends_h));
     window_units.truncate(MAX_UNITS);
+    let refills: Vec<f64> = week.iter().flatten().map(|w| w.at).collect();
+    let mut cuts: Vec<(f64, f64)> = Vec::with_capacity(window_units.len());
     for u in claims(q.f, window_full, load.restricted, q.tf, &window_units).iter().flatten() {
         out.f += u.gain;
         if u.unit.gives_back_week {
             out.r += u.gain;
         }
+        if !u.unit.both {
+            let week_left = week_left_at(q.r, load.total(), &refills, &cuts, u.at);
+            let cut = u.unit.week_cut.of(1.0 - week_left);
+            out.r += cut;
+            cuts.push((u.at, cut));
+        }
     }
     out
+}
+
+/// What the week has left at `t`: `left` now, used at `rate`, filled
+/// again by each of the week's own resets used at `refills` and raised by
+/// each earlier cut `(at, amount)`.  Uses come in time order in both lists.
+fn week_left_at(left: f64, rate: f64, refills: &[f64], cuts: &[(f64, f64)], t: f64) -> f64 {
+    let (mut h, mut left) = (0.0, left.max(0.0));
+    let (mut i, mut j) = (0, 0);
+    loop {
+        let refill = refills.get(i).copied().filter(|&at| at <= t);
+        let cut = cuts.get(j).copied().filter(|&(at, _)| at <= t);
+        // a refill and a cut at one moment: the refill first, the cut then has nothing to raise
+        let (at, amount) = match (refill, cut) {
+            (Some(r), Some((c, _))) if r <= c => (r, None),
+            (Some(r), None) => (r, None),
+            (_, Some((c, a))) => (c, Some(a)),
+            (None, None) => break,
+        };
+        left = (left - rate * (at - h)).max(0.0);
+        h = at;
+        match amount {
+            None => {
+                left = 1.0;
+                i += 1;
+            }
+            Some(a) => {
+                left = (left + a).min(1.0);
+                j += 1;
+            }
+        }
+    }
+    (left - rate * (t - h)).max(0.0)
 }
 
 /// An account is idle when every pane on it waits for its user; one
