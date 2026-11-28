@@ -7,7 +7,12 @@
 //! was written.  Lines of five fields predate the last two and were
 //! marspot's own.  marspot writes its own first sighting once per
 //! account, the moment local collection began; a scan of the shared
-//! rollouts adds the earliest reading there that shows a balance, once.
+//! rollouts adds the earliest reading there that shows a balance, once,
+//! and only from a scan that settled the account: a scan stopped by its
+//! deadline may not have read the earliest days yet.  Where a settled
+//! scan found nothing, `credit_scan_progress` keeps the day it reached.
+//! Two logins with one account id (workspaces of one team) cannot be
+//! told apart in the rollouts, and neither is scanned.
 //!
 //! The lot of an account is its line seen first; ties go to the rollout
 //! before devops before marspot, then to the line written first, so the
@@ -27,6 +32,7 @@ use marspot_agent::types::wallet::Lot;
 
 use super::alloc::Log;
 use super::credit_scan::{self, Found, Want};
+use super::credit_scan_progress::ScanProgress;
 use crate::plugins::claudecode::allocation_events::DAY;
 
 /// 2026-11-13 00:00 in Japan: grants seen before it last twelve months.
@@ -81,7 +87,7 @@ fn plus_a_year(at: i64) -> i64 {
 }
 
 /// Year, month, day of a day count from 1970-01-01.
-fn civil(z: i64) -> (i64, i64, i64) {
+pub(super) fn civil(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -128,6 +134,7 @@ pub(super) struct LotLog {
     homes: PathBuf,
     lines: Vec<LotLine>,
     scan: Option<JoinHandle<credit_scan::Scanned>>,
+    progress: ScanProgress,
     /// Accounts scanned for, or found unscannable, by this process.
     scanned: HashSet<u8>,
 }
@@ -135,7 +142,8 @@ pub(super) struct LotLog {
 impl LotLog {
     pub(super) fn new(path: PathBuf, homes: PathBuf) -> LotLog {
         let lines = fs::read_to_string(&path).unwrap_or_default().lines().filter_map(parse).take(LINES_KEPT).collect();
-        LotLog { path, homes, lines, scan: None, scanned: HashSet::new() }
+        let progress = ScanProgress::load(path.with_file_name("credit_scan.tsv"));
+        LotLog { path, homes, lines, scan: None, progress, scanned: HashSet::new() }
     }
 
     pub(super) fn lot(&self, profile: u8) -> Option<Lot> {
@@ -173,21 +181,32 @@ impl LotLog {
         if self.scan.is_some() {
             return;
         }
+        let fresh: Vec<u8> = seen.into_iter().filter(|p| !self.has(*p, ROLLOUT) && self.scanned.insert(*p)).collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let ids = accounts(&self.homes);
         let mut wants: Vec<(PathBuf, Want)> = Vec::new();
-        for profile in seen {
-            if self.has(profile, ROLLOUT) || !self.scanned.insert(profile) {
+        for profile in fresh {
+            let Some((_, account)) = ids.iter().find(|(p, _)| *p == profile) else {
+                log.push(("codex.wallet.lot_scan", format!("P{profile} no account id in its login; its rollouts cannot be told apart")));
+                continue;
+            };
+            let twins: Vec<u8> = ids.iter().filter(|(p, a)| a == account && *p != profile).map(|(p, _)| *p).collect();
+            if !twins.is_empty() {
+                log.push(("codex.wallet.lot_scan", format!("ambiguous P{profile} shares its account id with {twins:?}; not scanned")));
                 continue;
             }
-            let home = home(&self.homes, profile);
-            match credit_scan::account_of(&home) {
-                Some(account) => wants.push((home.join("sessions"), Want { profile, account })),
-                None => log.push(("codex.wallet.lot_scan", format!("P{profile} no account id in its login; its rollouts cannot be told apart"))),
-            }
+            let from = self.progress.from(account).unwrap_or(i64::MIN);
+            wants.push((home(&self.homes, profile).join("sessions"), Want { profile, account: account.clone(), from }));
         }
         if wants.is_empty() {
             return;
         }
-        let spawned = std::thread::Builder::new().name("codex-credit-scan".into()).spawn(move || credit_scan::scan_all(wants));
+        let spawned = std::thread::Builder::new().name("codex-credit-scan".into()).spawn(move || {
+            let background = credit_scan::background_thread();
+            credit_scan::Scanned { background, ..credit_scan::scan_all(wants) }
+        });
         match spawned {
             Ok(h) => self.scan = Some(h),
             Err(e) => log.push(("codex.wallet.lot_scan", format!("not started: {e}"))),
@@ -195,12 +214,23 @@ impl LotLog {
     }
 
     fn took(&mut self, done: credit_scan::Scanned, now: i64, log: &mut Log) {
-        let line = format!("profiles={:?} complete={} files={} bytes={} secs={}", done.asked, done.complete, done.files, done.bytes, done.secs);
+        let profiles: Vec<u8> = done.wants.iter().map(|w| w.profile).collect();
+        let (complete, files, bytes, secs, bg) = (done.complete, done.files, done.bytes, done.secs, done.background);
+        let line = format!("profiles={profiles:?} complete={complete} files={files} bytes={bytes} secs={secs} background={bg}");
         log.push(("codex.wallet.lot_scan", line));
-        for (profile, Found { at, balance }) in done.found {
-            if !self.has(profile, ROLLOUT) {
-                self.write(LotLine { first_seen: at, profile, amount: balance, seen_by: ROLLOUT.into(), recorded_at: now }, log);
+        let mut moved = false;
+        for w in &done.wants {
+            let Some(opened) = done.settled.get(&w.profile) else { continue };
+            match done.found.get(&w.profile) {
+                Some(&Found { at, balance }) if !self.has(w.profile, ROLLOUT) => {
+                    self.write(LotLine { first_seen: at, profile: w.profile, amount: balance, seen_by: ROLLOUT.into(), recorded_at: now }, log);
+                }
+                Some(_) => {}
+                None => moved |= opened.is_some_and(|day| self.progress.advance(&w.account, day)),
             }
+        }
+        if moved && let Err(e) = self.progress.save() {
+            log.push(("codex.wallet.lot_scan_failed", e.to_string()));
         }
     }
 
@@ -214,6 +244,24 @@ impl LotLog {
 /// `.codex` for 0.
 fn home(homes: &Path, profile: u8) -> PathBuf {
     if profile == 0 { homes.join(".codex") } else { homes.join(format!(".codex-profile-{profile}")) }
+}
+
+/// The account id of every login under `homes`, by profile.
+fn accounts(homes: &Path) -> Vec<(u8, String)> {
+    let mut out = Vec::new();
+    for e in fs::read_dir(homes).into_iter().flatten().flatten() {
+        let name = e.file_name();
+        let profile = match name.to_str() {
+            Some(".codex") => Some(0),
+            Some(n) => n.strip_prefix(".codex-profile-").and_then(|n| n.parse::<u8>().ok()),
+            None => None,
+        };
+        if let Some(account) = profile.and_then(|p| credit_scan::account_of(&home(homes, p)).map(|a| (p, a))) {
+            out.push(account);
+        }
+    }
+    out.sort();
+    out
 }
 
 fn append(path: &Path, line: &str) -> std::io::Result<()> {

@@ -12,8 +12,11 @@
 //!
 //! Days are read oldest first and the walk stops once every account has
 //! a reading older than the day being opened; files of other makers are
-//! read no further than their first line.  The whole scan gives up at a
-//! deadline and says it did not finish.
+//! read no further than their first line.  An account's search can
+//! start at a later day (what an earlier finished scan read without
+//! finding a balance is not read again).  The whole scan gives up at a
+//! deadline and says it did not finish; the accounts of a directory read
+//! to its end, or to the stop above, are settled.
 
 use std::collections::HashMap;
 use std::fs;
@@ -52,14 +55,21 @@ pub(super) struct Found {
 pub(super) struct Want {
     pub profile: u8,
     pub account: String,
+    /// The start of the first day to read; `i64::MIN` for all.
+    pub from: i64,
 }
 
 /// What one scan found, and what it cost.
 #[derive(Debug, Default)]
 pub(super) struct Scanned {
-    pub asked: Vec<u8>,
+    pub wants: Vec<Want>,
     pub found: HashMap<u8, Found>,
+    /// The accounts whose directory was read to the end or to the stop,
+    /// each with the start of the newest day opened, if any was.
+    pub settled: HashMap<u8, Option<i64>>,
     pub complete: bool,
+    /// Whether the scan ran at background priority.
+    pub background: bool,
     pub files: u64,
     pub bytes: u64,
     pub secs: u64,
@@ -78,7 +88,7 @@ pub(super) fn account_of(home: &Path) -> Option<String> {
 /// Each `(sessions directory, account)` scanned, one directory at a time.
 pub(super) fn scan_all(wants: Vec<(PathBuf, Want)>) -> Scanned {
     let start = Instant::now();
-    let mut out = Scanned { asked: wants.iter().map(|(_, w)| w.profile).collect(), complete: true, ..Scanned::default() };
+    let mut out = Scanned { wants: wants.iter().map(|(_, w)| w.clone()).collect(), complete: true, ..Scanned::default() };
     let mut by_dir: Vec<(PathBuf, Vec<Want>)> = Vec::new();
     for (dir, w) in wants {
         let dir = fs::canonicalize(&dir).unwrap_or(dir);
@@ -92,6 +102,14 @@ pub(super) fn scan_all(wants: Vec<(PathBuf, Want)>) -> Scanned {
     }
     out.secs = start.elapsed().as_secs();
     out
+}
+
+/// Put the calling thread at background priority: its CPU time and its
+/// disk reads yield to everything else.  Whether it took.
+pub(super) fn background_thread() -> bool {
+    // SAFETY: with PRIO_DARWIN_THREAD and who 0 the call changes only
+    // the calling thread
+    unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) == 0 }
 }
 
 /// The day directories under `sessions`, oldest first, each with the
@@ -119,13 +137,16 @@ fn days(sessions: &Path) -> Vec<(i64, PathBuf)> {
 /// stopped it.
 fn scan(sessions: &Path, wants: &[Want], deadline: Instant, out: &mut Scanned) -> bool {
     let mut buf = Vec::new();
-    for (start, day) in days(sessions) {
+    let first = wants.iter().map(|w| w.from).min().unwrap_or(i64::MIN);
+    let mut opened = None;
+    for (start, day) in days(sessions).into_iter().filter(|(start, _)| *start >= first) {
         // a day's directory holds sessions made that local day: none of
         // its readings is older than the day before in UTC
         let newest = wants.iter().map(|w| out.found.get(&w.profile).map(|f| f.at)).collect::<Option<Vec<_>>>();
         if newest.and_then(|v| v.into_iter().max()).is_some_and(|at| start - DAY > at) {
             break;
         }
+        opened = Some(start);
         let mut files: Vec<PathBuf> = fs::read_dir(&day).into_iter().flatten().flatten().map(|e| e.path()).collect();
         files.retain(|p| p.extension().is_some_and(|x| x == "jsonl"));
         files.sort();
@@ -133,16 +154,19 @@ fn scan(sessions: &Path, wants: &[Want], deadline: Instant, out: &mut Scanned) -
             if Instant::now() > deadline {
                 return false;
             }
-            if !file(&f, wants, deadline, &mut buf, out) {
+            if !file(&f, wants, start, deadline, &mut buf, out) {
                 return false;
             }
         }
+    }
+    for w in wants {
+        out.settled.insert(w.profile, opened);
     }
     true
 }
 
 /// One rollout; false only when the deadline passed inside it.
-fn file(path: &Path, wants: &[Want], deadline: Instant, buf: &mut Vec<u8>, out: &mut Scanned) -> bool {
+fn file(path: &Path, wants: &[Want], day: i64, deadline: Instant, buf: &mut Vec<u8>, out: &mut Scanned) -> bool {
     let Ok(f) = fs::File::open(path) else { return true };
     out.files += 1;
     let mut r = BufReader::with_capacity(256 * 1024, f);
@@ -158,7 +182,7 @@ fn file(path: &Path, wants: &[Want], deadline: Instant, buf: &mut Vec<u8>, out: 
     if !next(buf, out) {
         return true;
     }
-    let Some(profile) = maker(buf).and_then(|m| wants.iter().find(|w| w.account.as_bytes() == m)).map(|w| w.profile) else { return true };
+    let Some(profile) = maker(buf).and_then(|m| wants.iter().find(|w| w.from <= day && w.account.as_bytes() == m)).map(|w| w.profile) else { return true };
     let mut week: Option<i64> = None;
     let mut lines = 0u32;
     while next(buf, out) {

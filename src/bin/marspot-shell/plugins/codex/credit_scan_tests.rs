@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::plugins::codex::credit_lots::days_of;
 use marspot_term::test_env::TempDir;
 
 const GRANT: &str = include_str!("fixtures/codex-credits-grant.jsonl");
@@ -25,7 +26,7 @@ fn put(sessions: &Path, day: &str, name: &str, text: &str) -> PathBuf {
 }
 
 fn want(profile: u8, account: &str) -> Want {
-    Want { profile, account: account.to_string() }
+    Want { profile, account: account.to_string(), from: i64::MIN }
 }
 
 fn run(sessions: &Path, wants: &[Want]) -> Scanned {
@@ -111,4 +112,29 @@ fn a_scan_of_two_homes_sharing_one_directory_reads_it_once() {
     }
     let out = scan_all(vec![(t.join("h1/sessions"), want(1, "acct-test-1")), (t.join("h2/sessions"), want(2, "acct-test-2"))]);
     assert!(out.complete && out.found.len() == 2 && out.files == 2, "{out:?}");
+}
+
+#[test]
+fn an_account_searched_from_a_later_day_leaves_the_older_days_unread() {
+    let t = TempDir::new("codex-scan-from");
+    put(&t.join("s"), "20260927", "a", GRANT);
+    let later = made_by("acct-test-1").replace("2026-09-30T11:0", "2026-10-02T11:0");
+    put(&t.join("s"), "20261002", "later", &later);
+    let oct_1 = days_of(2026, 10, 1) * DAY;
+    let out = run(&t.join("s"), &[Want { from: oct_1, ..want(1, "acct-test-1") }]);
+    assert_eq!(out.files, 1, "{out:?}");
+    assert_eq!(out.found.get(&1).map(|f| f.at), Some(GRANTED_AT + 2 * DAY));
+    assert_eq!(out.settled.get(&1), Some(&Some(oct_1 + DAY)), "the newest day opened");
+}
+
+#[test]
+fn a_scan_stopped_by_its_deadline_settles_nothing() {
+    let t = TempDir::new("codex-scan-deadline");
+    put(&t.join("s"), "20260927", "a", GRANT);
+    let mut out = Scanned::default();
+    assert!(!scan(&t.join("s"), &[want(1, "acct-test-1")], Instant::now() - Duration::from_secs(1), &mut out));
+    assert!(out.settled.is_empty(), "{out:?}");
+    // an empty directory read to its end settles its accounts with no day opened
+    let out = run(&t.join("none"), &[want(1, "acct-test-1")]);
+    assert_eq!(out.settled.get(&1), Some(&None));
 }

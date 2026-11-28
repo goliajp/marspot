@@ -22,6 +22,7 @@ mod alloc_rollout;
 mod alloc_wallet;
 mod credit_lots;
 mod credit_scan;
+mod credit_scan_progress;
 #[cfg(test)]
 mod alloc_wallet_tests;
 #[cfg(test)]

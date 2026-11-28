@@ -82,3 +82,74 @@ fn marspots_own_sighting_is_written_once_and_kept_beside_an_earlier_one() {
     let again = LotLog::new(path, t.join("home"));
     assert_eq!(again.lot(2), lots.lot(2), "a restart reads the same lot back");
 }
+
+fn login(homes: &std::path::Path, profile: u8, account: &str) {
+    let home = if profile == 0 { homes.join(".codex") } else { homes.join(format!(".codex-profile-{profile}")) };
+    fs::create_dir_all(home.join("sessions")).unwrap();
+    fs::write(home.join("auth.json"), format!(r#"{{"tokens":{{"account_id":"{account}"}}}}"#)).unwrap();
+}
+
+fn wait(lots: &LotLog) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while lots.scanning() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_finished_scan_that_found_nothing_is_not_read_again_from_the_start() {
+    let t = TempDir::new("codex-lots-progress");
+    let homes = t.join("home");
+    login(&homes, 1, "acct-test-1");
+    let day = homes.join(".codex-profile-1/sessions/2026/10/01");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(day.join("rollout-a.jsonl"), "{\"type\":\"session_meta\",\"payload\":{\"creator_account_id\":\"acct-test-1\"}}\n").unwrap();
+    let mut log = Vec::new();
+    let mut lots = LotLog::new(t.join("credit_lots.tsv"), homes.clone());
+    lots.scan([1], 10, &mut log);
+    wait(&lots);
+    lots.scan([1], 20, &mut log);
+    assert_eq!(fs::read_to_string(t.join("credit_scan.tsv")).unwrap(), "acct-test-1\t20261001\t1\n");
+    assert!(log.iter().any(|(_, l)| l.contains("complete=true files=1 ") && l.contains("background=true")), "{log:?}");
+    // a restart reads that day again and the newer ones, not the older
+    let old = homes.join(".codex-profile-1/sessions/2026/09/20");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("rollout-old.jsonl"), "{}\n").unwrap();
+    let mut log = Vec::new();
+    let mut again = LotLog::new(t.join("credit_lots.tsv"), homes);
+    again.scan([1], 30, &mut log);
+    wait(&again);
+    again.scan([1], 40, &mut log);
+    assert!(log.iter().any(|(_, l)| l.contains("complete=true files=1 ")), "{log:?}");
+}
+
+#[test]
+fn two_logins_of_one_account_are_neither_scanned() {
+    let t = TempDir::new("codex-lots-twins");
+    let homes = t.join("home");
+    login(&homes, 1, "acct-team");
+    login(&homes, 3, "acct-team");
+    let mut log = Vec::new();
+    let mut lots = LotLog::new(t.join("credit_lots.tsv"), homes);
+    lots.scan([1, 3], 10, &mut log);
+    assert!(!lots.scanning());
+    let lines: Vec<&String> = log.iter().filter(|(tag, _)| *tag == "codex.wallet.lot_scan").map(|(_, l)| l).collect();
+    assert_eq!(lines.len(), 2, "{log:?}");
+    assert!(lines.iter().all(|l| l.starts_with("ambiguous ") && !l.contains("acct-team")), "{log:?}");
+}
+
+#[test]
+fn a_reading_from_a_scan_that_did_not_settle_its_account_is_not_written() {
+    let t = TempDir::new("codex-lots-unsettled");
+    let mut log = Vec::new();
+    let mut lots = LotLog::new(t.join("credit_lots.tsv"), t.join("home"));
+    let w = |profile: u8| Want { profile, account: format!("acct-{profile}"), from: i64::MIN };
+    let mut done = credit_scan::Scanned { wants: vec![w(1), w(2)], ..Default::default() };
+    done.found.insert(1, Found { at: SEPT_30, balance: 62_500.0 });
+    done.found.insert(2, Found { at: SEPT_30, balance: 62_500.0 });
+    done.settled.insert(2, Some(SEPT_30));
+    lots.took(done, 50, &mut log);
+    assert_eq!(lots.lot(1), None, "its earliest days may not have been read");
+    assert_eq!(lots.lot(2).and_then(|l| l.seen_by).as_deref(), Some(ROLLOUT));
+    assert!(!t.join("credit_scan.tsv").exists(), "nothing found unsettled is kept");
+}
