@@ -123,14 +123,21 @@ impl CoreApp {
         h.finish()
     }
 
-    /// Whether `sid` is in a cell of some window not minimized, or
-    /// viewed in one.
+    /// Whether `sid` is in a cell of some window, or viewed in one.
     pub(crate) fn on_screen(&self, sid: u64) -> bool {
+        self.windows.iter().any(|w| Self::in_cells(w, sid))
+    }
+
+    /// As [`Self::on_screen`], counting only windows not minimized: what
+    /// the sidebar's solid dot means.
+    pub(crate) fn on_visible_screen(&self, sid: u64) -> bool {
         let shown = |w: &&WindowState| !self.pane_control.shadows.minimized.contains(&w.window_id);
-        self.windows.iter().filter(shown).any(|w| {
-            let cells = w.layout.cells.len();
-            w.panes.iter().take(cells).any(|p| p.shelld_session_id() == Some(sid) || p.peeked() == Some(sid))
-        })
+        self.windows.iter().filter(shown).any(|w| Self::in_cells(w, sid))
+    }
+
+    fn in_cells(w: &WindowState, sid: u64) -> bool {
+        let cells = w.layout.cells.len();
+        w.panes.iter().take(cells).any(|p| p.shelld_session_id() == Some(sid) || p.peeked() == Some(sid))
     }
 
     /// Window `wi`'s rows, worked out again if what they are made of
@@ -144,7 +151,7 @@ impl CoreApp {
         let here: Vec<Option<u64>> = win!(self, wi).panes.iter().map(Pane::shelld_session_id).collect();
         let all: Vec<u64> = self.windows.iter().flat_map(|w| w.panes.iter()).chain(&self.shadows).filter_map(Pane::shelld_session_id).collect();
         let parents = &self.pane_control.shadows.family.parents;
-        let rows = build(&here, &all, |s| parents.get(&s).copied(), |s| self.on_screen(s));
+        let rows = build(&here, &all, |s| parents.get(&s).copied(), |s| self.on_visible_screen(s));
         let ids: Vec<u32> = self.windows.iter().map(|w| w.window_id).collect();
         let trees = &mut self.pane_control.shadows.trees.0;
         trees.retain(|t| t.0 != id && ids.contains(&t.0));
