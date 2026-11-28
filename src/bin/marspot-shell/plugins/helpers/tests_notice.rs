@@ -139,20 +139,25 @@ fn helpers_a_notice_to_a_gone_parent_is_given_up_at_once() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// What runs in pane 1 as `script`, looked at once `ready` says its
-/// processes are there, and the shell to end.
+/// Pane 1 as it is now, its shell being `shell`.
+fn look(shell: i32) -> Observation {
+    let entry = crate::observe::tests::entry(1, 1, shell);
+    Observation::from_parts(std::time::Instant::now(), marspot::pidtree::ProcTable::take(), vec![(entry, true)], |r| {
+        marspot::pidtree::proc_argv(r.pid).map(std::sync::Arc::<[String]>::from)
+    })
+}
+
+/// What runs in pane 1 as `script`, the shell to end, and the first
+/// observation `ready` accepted (the last one taken when none did).
+/// The very observation that was accepted is returned: a second look
+/// would be a second sample of a tree that is still forking.
 fn pane_running(script: &[u8], ready: impl Fn(&Observation) -> bool) -> (std::process::Child, Observation, bool) {
     let (sh, mut m) = shell_on_a_pty();
     let shell = sh.id() as i32;
     m.write_all(script).unwrap();
-    let look = || {
-        let entry = crate::observe::tests::entry(1, 1, shell);
-        Observation::from_parts(std::time::Instant::now(), marspot::pidtree::ProcTable::take(), vec![(entry, true)], |r| {
-            marspot::pidtree::proc_argv(r.pid).map(std::sync::Arc::<[String]>::from)
-        })
-    };
-    let seen = wait_for(|| ready(&look()));
-    (sh, look(), seen)
+    let mut last = None;
+    let seen = wait_for(|| ready(last.insert(look(shell))));
+    (sh, last.unwrap_or_else(|| look(shell)), seen)
 }
 
 fn end(mut sh: std::process::Child, obs: &Observation) {
@@ -199,6 +204,32 @@ fn helpers_a_notice_goes_to_the_outer_of_two_nested_sessions() {
     let entries = vec![record(inner, "/tmp/inner.sock"), record(outer, "/tmp/outer.sock")];
     assert_eq!(super::inbox_of::in_pane(&entries, &obs, 1).as_deref(), Some("/tmp/outer.sock"));
     assert_eq!(super::inbox_of::in_pane(&entries[..1], &obs, 1).as_deref(), Some("/tmp/inner.sock"), "alone, the inner one is the top");
+}
+
+/// The outer claude's fork held before it execs the inner shell: two
+/// claudes, the second right under the first, and no nesting yet.
+#[test]
+fn helpers_a_fork_of_a_claude_that_has_not_execed_is_no_nesting() {
+    let fifo = std::env::temp_dir().join(format!("mh-held-fork-{}", std::process::id()));
+    let _ = std::fs::remove_file(&fifo);
+    assert!(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo).status().unwrap().success());
+    let script = format!(
+        "(exec -a claude /bin/bash -c '(read x < {}; exec /bin/bash -c \"(exec -a claude /bin/sleep 30) & wait\") & wait')\n",
+        fifo.display()
+    );
+    let held = |o: &Observation| matches!(named(o, "claude")[..], [(a, _), (_, pb)] if pb == a);
+    let (sh, obs, seen) = pane_running(script.as_bytes(), held);
+    let shell = sh.id() as i32;
+    let nested_while_held = nested(&obs);
+    std::fs::write(&fifo, "go\n").unwrap();
+    let mut after = None;
+    let released = wait_for(|| nested(after.insert(look(shell))).is_some());
+    let after = after.unwrap_or_else(|| look(shell));
+    end(sh, &after);
+    let _ = std::fs::remove_file(&fifo);
+    assert!(seen, "the held fork never read as a second claude");
+    assert_eq!(nested_while_held, None, "a held fork is not an inner shell");
+    assert!(released, "the nesting never showed up after the exec");
 }
 
 /// Two registered sessions side by side under the shell: neither is the
