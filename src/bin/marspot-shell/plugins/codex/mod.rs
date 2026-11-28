@@ -35,6 +35,7 @@ mod hand_off;
 mod installer;
 pub(in crate::plugins) mod last_model;
 mod refresh;
+pub(crate) mod reset_claim;
 mod rollout;
 mod switch;
 mod update;
@@ -48,8 +49,7 @@ mod switch_tests;
 mod first_frame_tests;
 pub(crate) use update::{install as install_cli, installed_cli, path_with_local_bin, tail};
 
-use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata,
-            PLUGIN_API_VERSION};
+use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, PLUGIN_API_VERSION};
 use crate::plugins::{handoff, pidtree};
 use marspot::ui::strings::{self, Arg};
 
@@ -57,8 +57,7 @@ use badge::badge_text;
 use pane::{home_from, profile_from, PaneCodex};
 use rollout::{codex_home, read_model_and_effort, RolloutIndex};
 
-pub(crate) use pane::{argv_thread_id, home_of, profile_dirs};
-pub(crate) use rollout::newest_rollout_for_cwd;
+pub(crate) use {pane::{argv_thread_id, home_of, profile_dirs}, rollout::newest_rollout_for_cwd};
 
 /// Is this descendant the `codex` CLI?
 ///

@@ -9,7 +9,7 @@
 //! credit without an end of its own is said to end then.
 
 use marspot::agent_resets::{AccountResets, Grant, Resets};
-use marspot_agent::sched::reset::{Agreement, Count, agree};
+use marspot_agent::types::reset::{Agreement, Count, agree};
 use marspot_peer::json::{self, Value};
 
 use super::codex::Replies;

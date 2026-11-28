@@ -101,7 +101,7 @@ impl ScanResult {
     /// waits until every pane on its account does.
     pub(super) fn publish_resting(&self) {
         let resting = |sid: &u64| matches!(self.new_activity.get(sid), Some(CcActivity::AwaitingUser));
-        crate::agentsvc::reset::idle::publish("claude", self.ordinary().map(|(sid, m)| (m.profile_num, resting(sid))));
+        crate::agentsvc::accounts::reset::idle::publish("claude", self.ordinary().map(|(sid, m)| (m.profile_num, resting(sid))));
     }
 }
 

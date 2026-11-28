@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.926"  # test-only session-process helpers sit in _tests files the source scans skip
-core    = "0.12.808"  # web pane: writes to madcawl never block, the GPU linear-texture alignment is checked, the dev seam URL is read once
+shell   = "0.7.930"  # the host hands the active core the questions services registered; the event loop names no service
+core    = "0.12.809"  # the accounts panel reads the reset feed with marspot-json directly, not through marspot-peer
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

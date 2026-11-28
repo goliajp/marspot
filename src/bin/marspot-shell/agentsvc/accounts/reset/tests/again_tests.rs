@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::super::codex;
+use crate::plugins::codex::reset_claim as codex;
 use super::super::ledger::{AGAIN_FOR_S, Ledger};
 use super::*;
 

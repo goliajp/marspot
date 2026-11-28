@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use marspot_peer::json::{self, Value, obj};
 
-use super::{Grant, Outcome, Res};
+use crate::agentsvc::accounts::reset::{Grant, Outcome, Res};
 use crate::plugins::usage::codex::Replies;
 
 /// A limit with this much of it left or more cannot be brought back.
@@ -50,14 +50,14 @@ fn home(profile: u8) -> PathBuf {
 /// through the `current` link once, so the binary started is the
 /// release that was checked.
 pub(super) fn cli_exe(home: &Path) -> Option<PathBuf> {
-    crate::plugins::codex::installed_cli(home)?;
+    super::installed_cli(home)?;
     let current = home.join("packages/standalone/current");
     let target = std::fs::read_link(&current).ok()?;
     let release = if target.is_absolute() { target } else { current.parent()?.join(target) };
     Some(release.join("bin/codex"))
 }
 
-pub(super) fn claim_profile(profile: u8, grant: &Grant, request_id: &str, deadline: Instant) -> Outcome {
+pub(crate) fn claim_profile(profile: u8, grant: &Grant, request_id: &str, deadline: Instant) -> Outcome {
     let home = home(profile);
     let Some(bin) = cli_exe(&home) else {
         return Outcome::of(Res::Unavailable, "no codex CLI is installed in that account's home");
@@ -112,7 +112,7 @@ impl Drop for Server {
 }
 
 /// `who` is `codex:<profile>`, the name the readings give the account.
-pub(super) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_id: &str, deadline: Instant) -> Outcome {
+pub(crate) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_id: &str, deadline: Instant) -> Outcome {
     let Some(mut server) = Server::start(bin, home) else { return Outcome::untried(Res::Error, "the codex app-server could not be started") };
     let read = request("rl", "account/rateLimits/read", obj([]));
     let Some(limits) = server.ask(&read, "rl", deadline) else { return Outcome::untried(Res::Error, "the app-server did not answer the limits request") };
@@ -133,7 +133,7 @@ pub(super) fn claim(bin: &Path, home: &Path, who: &str, grant: &Grant, request_i
     let mut o = consumed(&answer);
     let after = server.ask(&request("rl2", "account/rateLimits/read", obj([])), "rl2", deadline);
     let replies = Replies { account: None, limits: after };
-    if let Some(r) = crate::plugins::usage::codex_resets::of_replies(&replies, super::unix_now()) {
+    if let Some(r) = crate::plugins::usage::codex_resets::of_replies(&replies, crate::agentsvc::accounts::reset::unix_now()) {
         o.left_after = Some(r.left_total());
         o.observed_after = Some(r.to_value(who));
     }
@@ -200,3 +200,7 @@ pub(super) fn consumed(answer: &Value) -> Outcome {
     };
     Outcome::of(result, outcome)
 }
+
+#[cfg(test)]
+#[path = "reset_claim_tests.rs"]
+mod tests;

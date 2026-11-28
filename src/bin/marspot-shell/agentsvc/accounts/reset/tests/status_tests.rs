@@ -3,7 +3,7 @@
 use marspot::agent_resets::{AccountResets, Grant as Stored, Resets};
 use marspot_peer::json::Value;
 
-use super::super::claude_screen::{SessionReset, session_reset};
+use crate::plugins::claudecode::reset_claim::screen::{SessionReset, session_reset};
 use super::super::ledger::Row;
 use super::super::outcome::{Outcome, Res};
 use super::super::status::{Session, build};
@@ -26,7 +26,7 @@ fn said(mut r: Row, line: &str) -> Row {
 
 /// The account's real flags (Claude Code 2.1.332, P3), switched on or off.
 fn flags(enabled: bool) -> SessionReset {
-    SessionReset { enabled, ..session_reset(include_str!("../fixtures/claude-flags.json")) }
+    SessionReset { enabled, ..session_reset(include_str!("../../../../plugins/claudecode/reset_claim/fixtures/claude-flags.json")) }
 }
 
 fn session(profile: u8, enabled: bool, at_limit: Option<bool>) -> Session {
