@@ -202,7 +202,7 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeCodexStateUnknown => "⚠ セッション状態不明のため切り替えなし",
         Msg::BadgeCodexSwitching => "⚠ 切り替え中",
         Msg::BadgeCodexNotTracked => "⚠ セッション未追跡のため切り替えなし",
-        Msg::BadgeCodexTerminalBusy => "⚠ codex作業中のため切り替えなし",
+        Msg::BadgeCodexThreadUnknown => "⚠ 会話のIDが不明のため切り替えなし（新しい会話も始めません）",
         Msg::BadgeCodexWaitingRelease => "旧アカウントの解放待ち",
         Msg::BadgeCodexStillLoaded => "⚠ 旧アカウントがセッションを保持中のため切り替えなし",
 

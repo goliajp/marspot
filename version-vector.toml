@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.957"  # a codex pane whose title has named its thread for hours is bound beside other codexes; app-servers are not counted beside it
-core    = "0.12.820"  # the lib says what each kind of stored reset brings back
+shell   = "0.7.958"  # a codex switch with no thread known is refused and said beside the badge, never handed to a new conversation
+core    = "0.12.821"  # the codex thread-unknown refusal text, en ja zh
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

@@ -9,16 +9,15 @@
 # What the handoff said about it was "命令形状正确, 端到端未证".
 #
 # codex itself is not in the chain, and neither is its app-server
-# daemon: with no daemon to name the pane's thread, the switch has only
-# the terminal to go by.  It holds a pick while the terminal is still
-# drawing, and once the pane has been quiet it hands the conversation
-# off to a codex started under the other profile's `CODEX_HOME`.  The
-# stand-in writes a rollout in the shape codex does, so the handoff has
-# a conversation to carry, and the test reads back what the new codex
-# was typed and the document it names.  The
-# resume-by-id path needs the daemon and is pinned by unit tests
-# against a stand-in daemon; driving the real CLI would sign into the
-# user's accounts and end their sessions.
+# daemon: with no daemon, nothing names the pane's thread.  A switch
+# with no thread id to resume by is refused, said beside the badge, and
+# the running codex is left alone: a new conversation started in its
+# place (what an earlier version did) is not the same session.  The
+# pick is made twice, once while the terminal has just drawn and once
+# after the pane has been quiet, since quiet was what used to let the
+# hand-off through.  The resume-by-id path needs the daemon and is
+# pinned by unit tests against a stand-in daemon; driving the real CLI
+# would sign into the user's accounts and end their sessions.
 #
 # Sandbox-only: MARSPOT_STATE_DIR *and* HOME are redirected, so the
 # profile directories this reads are its own and the user's real
@@ -288,97 +287,32 @@ pick() {
   echo "$PICK" > "$MENU_FILE.tmp" && mv "$MENU_FILE.tmp" "$MENU_FILE"
   wait_for 'DEV_BADGE_MENU' 20 "$base" || fail "the seam never fired"
 }
-HELD="switch\.held.*pane $SID: BadgeCodexTerminalBusy"
-HANDED="switch\.no_thread.*pane $SID: thread not known, handing off to P2"
+REFUSED="switch\.thread_unknown.*pane $SID: thread not known; not switching to P2"
+
+refused_and_left_alone() { # what the pick was made on
+  local base; base="$(mark)"
+  pick
+  wait_for "$REFUSED" 10 "$base" || fail "a pick with no thread known was not refused ($1)"
+  after "$base" | grep -qE "switch\.held.*pane $SID: BadgeCodexThreadUnknown" \
+    || fail "the refusal was not put beside the badge ($1)"
+  sleep 3
+  (( $(starts) == BEFORE )) || fail "a refused pick still started a codex ($1)"
+  kill -0 "$LIVE_PID" 2>/dev/null || fail "a refused pick still ended the running codex ($1)"
+  after "$base" | grep -qE "handoff\.(start|switch)" && fail "a refused pick still handed the pane off ($1)"
+  [[ -e "$MARSPOT_STATE_DIR/handoff/$SID.md" ]] && fail "a refused pick still wrote a handoff document ($1)"
+  ok "the pick was refused and the running codex left alone ($1)"
+}
 
 echo "==> picking profile 2 while the terminal has just drawn"
-# The pane drew the echoed command line and the stand-in's input box
-# moments ago, and no daemon says whether a turn is running: the pick
-# is held, not acted on.
 QUIET_BASE="$(mark)"
-base="$(mark)"
-pick
-wait_for "$HELD" 10 "$base" \
-  || fail "a pick on a terminal that just drew was not held as busy"
-sleep 1
-(( $(starts) == BEFORE )) || fail "a held pick still started a codex"
-kill -0 "$LIVE_PID" 2>/dev/null || fail "a held pick still ended the running codex"
-ok "the pick was held: the terminal had just drawn"
+refused_and_left_alone "terminal just drew"
 
 echo "==> waiting for the pane to read quiet"
-# The pane state machine calls a silent foreground job quiet after
-# 30 s without output, and the switch wants it quiet 3 s more.  Nothing
-# logs the second part, so the switch itself is asked: a pick that is
-# still held is picked again, and the first one handed off ends the
-# wait.  Bounded well past the 3 s, so a threshold that grew would fail.
 wait_for "pane_state\.changed.*$(sid_is "$SID").*to=busy:fg_job" 45 "$QUIET_BASE" \
   || fail "the pane never settled into a quiet foreground job"
-SETTLED_AT=$SECONDS
+sleep 4
 
-echo "==> picking profile 2 from the badge menu"
-HANDOFF_BASE=""
-held=0
-while (( SECONDS - SETTLED_AT < 15 )); do
-  base="$(mark)"
-  pick
-  for (( i = 0; i < 25; i++ )); do
-    if after "$base" | grep -qE "$HANDED"; then HANDOFF_BASE=$base; break 2; fi
-    if after "$base" | grep -qE "$HELD"; then held=$(( held + 1 )); break; fi
-    sleep 0.2
-  done
-  (( i < 25 )) || fail "a pick on a quiet pane was neither held nor handed off"
-  sleep 0.5
-done
-[[ -n "$HANDOFF_BASE" ]] \
-  || fail "the pick on a quiet pane was not handed off within 15 s ($held picks held)"
-ok "the pick on a quiet pane was handed off ($held picks held while the 3 s ran)"
+echo "==> picking profile 2 on the quiet pane"
+refused_and_left_alone "pane quiet"
 
-# What the switch must do: end the running one, and start codex under
-# the other profile's CODEX_HOME.
-for (( i = 0; i < 200; i++ )); do
-  (( $(starts) > BEFORE )) && break
-  sleep 0.2
-done
-(( $(starts) > BEFORE )) || fail "no codex was started after the pick"
-kill -0 "$LIVE_PID" 2>/dev/null && fail "the codex that was running is still running"
-ok "the codex that was running was ended"
-
-SECOND="$(grep '^start ' "$CODEX_LOG" | tail -1)"
-NEW_PID="$(sed -n 's/.*pid=\([0-9]*\).*/\1/p' <<<"$SECOND")"
-grep -q "CODEX_HOME=$HOME/.codex-profile-2" <<<"$SECOND" \
-  || fail "the new codex did not get profile 2's home: $SECOND"
-ok "it came back under profile 2's CODEX_HOME"
-# profile 2 has never held this pane's conversation, so there is
-# nothing there to resume: the conversation travels as a handoff
-grep -q 'argv=$' <<<"$SECOND" \
-  || fail "with no session on profile 2, the new codex should start fresh: $SECOND"
-ok "with no session on profile 2, it started fresh"
-
-echo "==> waiting for the handoff to be typed at the new codex"
-wait_for "handoff\.switch\.paste.*$(sid_is "$SID")" 60 "$HANDOFF_BASE" \
-  || fail "the handoff never pasted anything into pane $SID"
-for (( i = 0; i < 50; i++ )); do
-  grep -q "^input pid=$NEW_PID: " "$CODEX_LOG" && break
-  sleep 0.2
-done
-# a second paste or a stray newline would land after the first line:
-# give it a moment before counting
-sleep 1
-TYPED="$(grep "^input pid=$NEW_PID: " "$CODEX_LOG")"
-[[ -n "$TYPED" ]] || fail "the new codex (pid $NEW_PID) was typed nothing"
-[[ "$(wc -l <<<"$TYPED" | tr -d ' ')" == 1 ]] || fail "the new codex was typed more than one line: $TYPED"
-grep -qF '[marspot handoff] I just switched this pane from codex to you' <<<"$TYPED" \
-  || fail "what the new codex was typed is not the handoff message: $TYPED"
-ok "the new codex was typed the handoff message"
-grep -q "^input pid=$LIVE_PID: " "$CODEX_LOG" \
-  && fail "the codex that was leaving was typed at: $(grep "^input pid=$LIVE_PID: " "$CODEX_LOG")"
-
-DOC="$MARSPOT_STATE_DIR/handoff/$SID.md"
-grep -qF " is in $DOC. Read it" <<<"$TYPED" \
-  || fail "the message does not name pane $SID's handoff document $DOC: $TYPED"
-[[ -f "$DOC" ]] || fail "the document the message names does not exist: $DOC"
-grep -qF "carry-me-$LIVE_PID" "$DOC" && grep -qF "carried-reply-$LIVE_PID" "$DOC" \
-  || fail "the document does not carry the leaving codex's turn: $(head -c 600 "$DOC")"
-ok "the document it names carries the turn from the leaving codex's rollout"
-
-echo "PASS — a badge-menu pick moves a live codex pane to another profile, conversation and all"
+echo "PASS — a badge-menu pick with no thread known is refused, and the pane keeps its codex and its conversation"

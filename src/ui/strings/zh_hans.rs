@@ -191,7 +191,7 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeCodexStateUnknown => "⚠ 查不到会话状态，没换账户",
         Msg::BadgeCodexSwitching => "⚠ 正在换账户",
         Msg::BadgeCodexNotTracked => "⚠ 还没认出这个会话，没换账户",
-        Msg::BadgeCodexTerminalBusy => "⚠ codex 正在干活，没换账户",
+        Msg::BadgeCodexThreadUnknown => "⚠ 不知道这个会话的 id，没换账户，也没有开新会话",
         Msg::BadgeCodexWaitingRelease => "等旧账户放下会话",
         Msg::BadgeCodexStillLoaded => "⚠ 旧账户没放下会话，没换账户",
 
