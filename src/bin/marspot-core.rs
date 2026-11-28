@@ -1576,7 +1576,7 @@ enum CoreEvent {
     /// is the one under the cursor, which on macOS receives the wheel
     /// whether or not it is key — scrolling an unfocused window must
     /// scroll THAT window.
-    Scroll(f64, bool, u32),
+    Scroll(f64, f64, bool, u32),
     /// Finder file drop forwarded by L1: `(x, y)` drop point in
     /// physical px + resolved filesystem paths.  L2 hit-tests the
     /// pane and inserts shell-quoted paths via the Paste path.
@@ -2940,7 +2940,7 @@ fn main() {
                 })
                 .min()
                 .or_else(|| app.idle_wait());
-            let recv_timeout = if app.any_prediction_pending() || app.dev_panels.is_some() {
+            let recv_timeout = if app.any_prediction_pending() || app.dev_ticking() {
                 Some(recv_timeout.map_or(Duration::from_millis(10), |t| t.min(Duration::from_millis(10))))
             } else {
                 recv_timeout
@@ -3076,9 +3076,9 @@ fn main() {
                         app.mouse_moved(wi, x, y)
                     }
                 }
-                CoreEvent::Scroll(dy, precise, win) => {
+                CoreEvent::Scroll(dx, dy, precise, win) => {
                     if let Some(wi) = app.window_index(win) {
-                        app.scroll(wi, dy, precise)
+                        app.scroll_xy(wi, dx, dy, precise)
                     }
                 }
                 CoreEvent::FileDrop(x, y, paths, win) => {

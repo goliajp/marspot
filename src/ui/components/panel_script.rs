@@ -154,7 +154,7 @@ fn parse_step(text: &str) -> Result<Step, String> {
     })
 }
 
-fn parse_chord(text: &str) -> Option<Step> {
+pub fn parse_chord(text: &str) -> Option<Step> {
     let mut mods = NO_MODIFIERS;
     let mut rest = text;
     // A lone `-` after the modifiers is the key itself.

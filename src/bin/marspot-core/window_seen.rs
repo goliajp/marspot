@@ -38,6 +38,7 @@ impl CoreApp {
             list.push(window_id);
         }
         self.windows.iter_mut().for_each(|w| w.needs_render = true);
+        (0..self.windows.len()).for_each(|wi| self.web_follow_layout(wi));
         lx_event!("WINDOW_MINIMIZED_SEEN", "the shell said a window was minimized or restored",
             window_id = window_id, minimized = minimized as u32);
     }

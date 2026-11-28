@@ -24,6 +24,8 @@ pub(crate) enum ShellInbox {
     /// Caret rect plus the window it belongs to — the shell parks the
     /// IME candidate panel against that window.
     CaretRect(Option<(f64, f64, f64, f64)>, u32),
+    /// The pointer's shape over a web pane; one pointer for every window
+    PointerShape(marspot::shell_proto::PointerShape),
     /// Whether a window's keys are a helper strip's.
     StripKeys(marspot::shell_proto::StripKeys),
     /// Core rendered a fresh frame into the IOSurface — present it.  Carries
@@ -92,6 +94,9 @@ pub(crate) fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>
                     MsgType::CaretRect => decode_caret_rect(&frame.payload)
                         .ok()
                         .map(|(rect, win)| ShellInbox::CaretRect(rect, win)),
+                    MsgType::PointerShape => marspot::shell_proto::decode_pointer_shape(&frame.payload)
+                        .ok()
+                        .map(|(shape, _)| ShellInbox::PointerShape(shape)),
                     // Empty-payload wake: a fresh frame is in the IOSurface.
                     // Mapping it to Some(..) is what makes `proxy.wake()`
                     // fire below → user_event → present.

@@ -4,6 +4,9 @@ use super::*;
 
 impl CoreApp {
     pub(super) fn copy_selection_to_clipboard(&mut self, wi: usize) -> bool {
+        if self.web_copy(wi) {
+            return true;
+        }
         let Some(sel) = win!(self, wi).selection else { return false };
         let idx = sel.session_idx;
         // L3 owns the real grid + scrollback; L2's mirror is a window-only

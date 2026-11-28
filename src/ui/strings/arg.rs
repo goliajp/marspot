@@ -67,6 +67,12 @@ pub enum Arg<'a> {
     InstallAsk { cli: &'a str, place: &'a str, megabytes: u32 },
     /// A web pane opening its page.
     WebOpening(&'a str),
+    /// A menu row: show this page in the pane's place
+    WebPageRow(&'a str),
+    /// A menu row: open this page in a new pane
+    WebOpenRow(&'a str),
+    /// A notice: text pasted into a web page was cut to this many MB
+    WebPasteCut(usize),
     /// A web pane whose other side speaks no version this build does:
     /// which side, its range when it said one, and ours.
     WebVersion { side: &'a str, theirs: Option<(u32, u32)>, ours: (u32, u32) },

@@ -113,7 +113,7 @@ impl CoreApp {
                 DevInput::Down(x, y, mods) => CoreEvent::MouseDown(x, y, mods, id),
                 DevInput::Drag(x, y) => CoreEvent::MouseDrag(x, y, id, id, x, y),
                 DevInput::Up(x, y) => CoreEvent::MouseUp(id, id, x, y),
-                DevInput::Scroll(dy) => CoreEvent::Scroll(dy, true, id),
+                DevInput::Scroll(dy) => CoreEvent::Scroll(0.0, dy, true, id),
                 DevInput::Key(event, mods) => CoreEvent::Key(event, mods, id),
             });
         }

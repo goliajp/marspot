@@ -36,7 +36,7 @@ fn surface(epoch: u64) -> Surface {
 }
 
 fn commit(epoch: u64, seq: u64, buffer: u32) -> Commit {
-    Commit { epoch, seq, buffer, dirty: PxRect { x: 0, y: 0, w: 100, h: 50 }, doc_width: 100, doc_height: 50 }
+    Commit { epoch, seq, buffer, dirty: PxRect { x: 0, y: 0, w: 100, h: 50 }, doc_width: 100, doc_height: 50, scroll_x: 0, scroll_y: 0 }
 }
 
 fn marked(seq: u64) -> impl Fn(usize) -> u64 {
@@ -46,11 +46,11 @@ fn marked(seq: u64) -> impl Fn(usize) -> u64 {
 #[test]
 fn commits_are_shown_and_their_buffers_go_back_once_a_newer_one_was_drawn() {
     let mut c = Commits::new(surface(5));
-    assert_eq!(c.take(&commit(5, 1, 0).frame(), marked(1)), Verdict::Show { buffer: 0, seq: 1 });
+    assert_eq!(c.take(&commit(5, 1, 0).frame(), marked(1)), Verdict::Show { buffer: 0, seq: 1, scrolled: (0, 0) });
     let mut out = Vec::new();
     c.release(1, &mut out);
     assert!(out.is_empty(), "the buffer shown is kept");
-    assert_eq!(c.take(&commit(5, 2, 1).frame(), marked(2)), Verdict::Show { buffer: 1, seq: 2 });
+    assert_eq!(c.take(&commit(5, 2, 1).frame(), marked(2)), Verdict::Show { buffer: 1, seq: 2, scrolled: (0, 0) });
     c.release(1, &mut out);
     assert!(out.is_empty(), "commit 1 may still be on screen until a frame of 2 finished");
     c.release(2, &mut out);
@@ -63,7 +63,7 @@ fn commits_are_shown_and_their_buffers_go_back_once_a_newer_one_was_drawn() {
 #[test]
 fn every_out_of_range_commit_is_refused_and_three_in_a_row_close_the_channel() {
     let mut c = Commits::new(surface(5));
-    assert_eq!(c.take(&commit(5, 4, 0).frame(), marked(4)), Verdict::Show { buffer: 0, seq: 4 });
+    assert_eq!(c.take(&commit(5, 4, 0).frame(), marked(4)), Verdict::Show { buffer: 0, seq: 4, scrolled: (0, 0) });
     let refused = |v: Verdict| match v {
         Verdict::Refused { why, close } => (why, close),
         other => panic!("taken: {other:?}"),
@@ -85,7 +85,7 @@ fn every_out_of_range_commit_is_refused_and_three_in_a_row_close_the_channel() {
     let mut c = Commits::new(surface(5));
     c.take(&commit(5, 1, 3).frame(), marked(1));
     c.take(&commit(5, 1, 3).frame(), marked(1));
-    assert_eq!(c.take(&commit(5, 1, 0).frame(), marked(1)), Verdict::Show { buffer: 0, seq: 1 });
+    assert_eq!(c.take(&commit(5, 1, 0).frame(), marked(1)), Verdict::Show { buffer: 0, seq: 1, scrolled: (0, 0) });
     assert_eq!(refused(c.take(&commit(5, 1, 1).frame(), marked(1))), ("sequence not after the last", false));
 }
 
@@ -108,7 +108,7 @@ fn an_earlier_surfaces_commit_and_unknown_kinds_are_passed_over() {
     for seq in 1..=3 {
         assert_eq!(c.take(&commit(4, seq, 0).frame(), marked(seq)), Verdict::Pass);
     }
-    assert_eq!(c.take(&commit(5, 1, 0).frame(), marked(1)), Verdict::Show { buffer: 0, seq: 1 });
+    assert_eq!(c.take(&commit(5, 1, 0).frame(), marked(1)), Verdict::Show { buffer: 0, seq: 1, scrolled: (0, 0) });
 }
 
 #[test]

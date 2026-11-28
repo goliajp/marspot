@@ -10,7 +10,7 @@ impl CoreApp {
         if self.close_ask_hover(wi, x_phys, y_phys) {
             return;
         }
-        if self.pointer_left(wi, x_phys, y_phys) {
+        if self.pointer_left(wi, x_phys, y_phys) || self.web_hover(wi, x_phys, y_phys) {
             return;
         }
         // Motion, for a program that asked to hear about it.
@@ -95,7 +95,9 @@ impl CoreApp {
             return;
         }
 
-        if self.link_press(wi, x_phys, y_phys) || self.vacant_press(wi, cell_pos_hit) {
+        if self.web_press(wi, x_phys, y_phys, modifiers)
+            || self.web_link_press(wi, x_phys, y_phys, modifiers)
+            || self.link_press(wi, x_phys, y_phys) || self.vacant_press(wi, cell_pos_hit) {
             return;
         }
 

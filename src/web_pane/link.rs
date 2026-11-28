@@ -21,6 +21,7 @@ use madcawl_wire::host::{self, PaneOpen, PaneOpened};
 use madcawl_wire::{os, Frame, FrameError, Hello, MAX_FRAME};
 
 use super::frames::{hello_answer, Commits, Verdict};
+use super::link_input::Sending;
 use super::gpu::{self, Device, Texture};
 use super::{Note, Shared};
 
@@ -36,21 +37,23 @@ pub struct Open {
 }
 
 /// Why the thread stopped.
-enum End {
+pub(super) enum End {
     /// The pane closed its end of the wake pipe
     Closed,
     Failed(Note),
 }
 
-fn failed(what: &str, e: impl std::fmt::Display) -> End {
+pub(super) fn failed(what: &str, e: impl std::fmt::Display) -> End {
     End::Failed(Note::Failed(format!("{what}: {e}")))
 }
 
 /// Frames on a socket, with the descriptors that come with them.
-struct Link {
-    s: UnixStream,
+pub(super) struct Link {
+    pub(super) s: UnixStream,
     buf: Vec<u8>,
     fds: Vec<OwnedFd>,
+    /// The bytes of the frame being sent, kept for the next
+    out: Vec<u8>,
 }
 
 impl Link {
@@ -59,15 +62,15 @@ impl Link {
     /// only after `poll` says there is something.
     fn new(s: UnixStream) -> Result<Link, End> {
         s.set_nonblocking(true).map_err(|e| failed("the socket", e))?;
-        Ok(Link { s, buf: Vec::new(), fds: Vec::new() })
+        Ok(Link { s, buf: Vec::new(), fds: Vec::new(), out: Vec::new() })
     }
 
     /// A frame that does not fit in the socket's buffer now ends the
     /// link: the other side has stopped reading.
-    fn send(&self, f: &Frame, fds: &[BorrowedFd]) -> Result<(), End> {
-        let mut out = Vec::new();
-        f.encode(&mut out);
-        os::send(&self.s, &out, fds).map_err(|e| match e.kind() {
+    pub(super) fn send(&mut self, f: &Frame, fds: &[BorrowedFd]) -> Result<(), End> {
+        self.out.clear();
+        f.encode(&mut self.out);
+        os::send(&self.s, &self.out, fds).map_err(|e| match e.kind() {
             io::ErrorKind::WouldBlock => failed("writing", "the other side stopped reading"),
             _ => failed("writing", e),
         })
@@ -176,46 +179,50 @@ fn serve(o: &Open, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), 
     let dh = Hello { range: display::RANGE, role: None, version: None };
     ch.send(&dh.frame(display::kind::HELLO), &[])?;
     let answer = ch.next(wake)?;
-    hello_answer(&answer, display::kind::HELLO, display::RANGE)
+    let version = hello_answer(&answer, display::kind::HELLO, display::RANGE)
         .map_err(|u| End::Failed(Note::Unspoken("content process", display::RANGE, u)))?;
-    let (textures, commits) = attach(&ch, o, device)?;
-    show(o.session, &mut host_link, &mut ch, &textures, commits, shared, wake)
+    let live = attach(&mut ch, o.px, o.scale, 1, device)?;
+    let sending = Sending::new(o.session, version);
+    show(&mut host_link, &mut ch, live, sending, device, shared, wake)
 }
 
-/// Make the surface's two buffers, a texture over each, and send them.
-fn attach(ch: &Link, o: &Open, device: &Device) -> Result<(Vec<Texture>, Commits), End> {
+/// A surface the content process draws into, and a texture over each
+/// of its buffers.
+pub(super) struct Live {
+    pub(super) textures: Vec<Texture>,
+    pub(super) commits: Commits,
+}
+
+/// Make a surface's two buffers of `px` device pixels, a texture over
+/// each, and send them.
+pub(super) fn attach(ch: &mut Link, px: (u32, u32), scale: u32, epoch: u64, device: &Device) -> Result<Live, End> {
     let (mut fds, mut textures, mut buffers) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..display::MAX_BUFFERS {
-        let (fd, m, b) = gpu::make_buffer(o.px.0, o.px.1).map_err(|e| failed("no shared memory", e))?;
+        let (fd, m, b) = gpu::make_buffer(px.0, px.1).map_err(|e| failed("no shared memory", e))?;
         textures.push(gpu::wrap(device, m, &b).map_err(|e| failed("no texture", e))?);
         fds.push(fd);
         buffers.push(b);
     }
-    let surface = Surface { epoch: 1, scale: o.scale, buffers };
+    let surface = Surface { epoch, scale, buffers };
     let borrowed: Vec<_> = fds.iter().map(|f| f.as_fd()).collect();
     ch.send(&surface.frame(), &borrowed)?;
-    Ok((textures, Commits::new(surface)))
+    Ok(Live { textures, commits: Commits::new(surface) })
 }
 
 /// Show commits until the pane closes or a side goes away.
-fn show(
-    session: u64,
-    host_link: &mut Link,
-    ch: &mut Link,
-    textures: &[Texture],
-    mut commits: Commits,
-    shared: &Shared,
-    wake: RawFd,
-) -> Result<(), End> {
+fn show(host_link: &mut Link, ch: &mut Link, mut live: Live, mut sending: Sending, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), End> {
+    let session = sending.session;
     let mut releases = Vec::new();
     loop {
         while let Some(f) = ch.ready()? {
+            let Live { textures, commits } = &mut live;
             match commits.take(&f, |i| textures[i].generation()) {
-                Verdict::Show { buffer, seq } => {
+                Verdict::Show { buffer, seq, scrolled } => {
                     let b = commits.surface().buffers[buffer as usize];
-                    shared.show(seq, textures[buffer as usize].clone(), (b.width, b.height));
+                    shared.show(seq, textures[buffer as usize].clone(), (b.width, b.height), scrolled);
+                    sending.shown();
                 }
-                Verdict::Pass => {}
+                Verdict::Pass => sending.page_said(&f, shared)?,
                 Verdict::Refused { why, close } => {
                     crate::lx_warn!("web_pane.commit_refused", why, session = session);
                     if close {
@@ -227,7 +234,8 @@ fn show(
         let [from_ch, from_host, woken] = wait([ch.s.as_raw_fd(), host_link.s.as_raw_fd(), wake])?;
         if woken {
             drain(wake)?;
-            commits.release(shared.drawn(), &mut releases);
+            sending.send(ch, &mut live, device, shared)?;
+            live.commits.release(shared.drawn(), &mut releases);
             for seq in releases.drain(..) {
                 ch.send(&display::released(seq), &[])?;
             }

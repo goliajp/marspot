@@ -277,6 +277,9 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         ),
         Arg::ModelNowIs(to) => write!(out, "Claude Code's default model for every account is now {to}"),
         Arg::WebOpening(url) => write!(out, "opening {url}…"),
+        Arg::WebPageRow(url) => write!(out, "Web page {url}"),
+        Arg::WebOpenRow(url) => write!(out, "Open web page {url}"),
+        Arg::WebPasteCut(mb) => write!(out, "Only the first {mb} MB of the clipboard went into the page"),
         Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
             write!(out, "madcawl {side} speaks versions {a}–{b}; marspot speaks {c}–{d}")
         }

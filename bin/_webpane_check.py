@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """_webpane_check.py: what bin/test-webpane.sh reads.  Standard library only.
 
-    diff SURFACE.png SHOT.png X Y W H OUT.png
+    diff SURFACE.png SHOT.png X Y W H OUT.png [OX OY]
         Compares the W by H pixels at X,Y of SURFACE (the window's buffer)
-        with the top left W by H of SHOT (the page drawn by the engine
-        alone), RGB only; writes the region of SURFACE to OUT.  Prints
-        `differ=N total=N max_delta=N colors=N`.
+        with the W by H at OX,OY (default the top left) of SHOT (the page
+        drawn by the engine alone), RGB only; writes the region of SURFACE
+        to OUT.  Prints `differ=N total=N max_delta=N colors=N`.
+
+    wait-drawn LOG SESSION AFTER SECS [SCROLL_X SCROLL_Y]
+        Waits up to SECS for a WEB_PANE_DRAWN line of web pane SESSION
+        past line AFTER of LOG (scrolled to SCROLL_X,SCROLL_Y when given);
+        prints its line number and the line.  Exits 1 when none came.
+
+    scroll-stats LOG OUT.json
+        The latencies the core logged for scrolls drawn (web_pane.scroll):
+        prints and writes their count, median, p99 and largest, in us.
 
     usage NAME=PID...
         Prints `NAME cpu_ns wakeups` per process from proc_pid_rusage, one
@@ -21,7 +30,7 @@ import sys
 import zlib
 
 
-def read_png(path):
+def read_png(path, rows=None):
     data = open(path, "rb").read()
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         sys.exit(f"{path}: not a PNG")
@@ -42,7 +51,7 @@ def read_png(path):
     stride = w * bpp
     out = bytearray(h * stride)
     prev = bytearray(stride)
-    for y in range(h):
+    for y in range(h if rows is None else min(h, rows)):
         f = raw[y * (stride + 1)]
         line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
         for i in range(stride if f else 0):
@@ -74,17 +83,17 @@ def write_png(path, w, h, rgb):
     open(path, "wb").write(png)
 
 
-def diff(surface, shot, x, y, w, h, out):
+def diff(surface, shot, x, y, w, h, out, ox=0, oy=0):
     sw, sh, sb, s = read_png(surface)
-    pw, ph, pb, p = read_png(shot)
+    pw, ph, pb, p = read_png(shot, oy + h)
     if x + w > sw or y + h > sh:
         sys.exit(f"the region {w}x{h}+{x}+{y} is not inside the surface {sw}x{sh}")
-    w, h = min(w, pw), min(h, ph)
+    w, h = min(w, pw - ox), min(h, ph - oy)
     differ, worst, colors, crop = 0, 0, set(), bytearray()
     for r in range(h):
         for c in range(w):
             i = ((y + r) * sw + x + c) * sb
-            j = (r * pw + c) * pb
+            j = ((oy + r) * pw + ox + c) * pb
             a, b = s[i:i + 3], p[j:j + 3]
             crop += a
             colors.add(bytes(a))
@@ -142,7 +151,48 @@ def thread(pid, prefix):
     print(f"threads={count} cpu_ns={total}")
 
 
+def wait_drawn(log, session, after, secs, scroll=None):
+    import time
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        try:
+            lines = open(log, errors="replace").read().splitlines()
+        except FileNotFoundError:
+            lines = []
+        for n, line in enumerate(lines[after:], after + 1):
+            if "\tWEB_PANE_DRAWN\t" not in line or f"session={session}" not in line.split():
+                continue
+            if scroll and not all(f"scroll_{k}={v}" in line.split() for k, v in zip("xy", scroll)):
+                continue
+            print(n, line)
+            return
+        time.sleep(0.2)
+    sys.exit(1)
+
+
+def scroll_stats(log, out):
+    import json
+    import re
+    us = sorted(int(m.group(1)) for line in open(log, errors="replace")
+                if "web_pane.scroll" in line for m in [re.search(r"latency_us=(\d+)", line)] if m)
+    if not us:
+        sys.exit("no scroll was logged as drawn")
+    pick = lambda q: us[min(len(us) - 1, int(q * len(us)))]
+    r = {"count": len(us), "p50_us": pick(0.5), "p99_us": pick(0.99), "max_us": us[-1]}
+    open(out, "w").write(json.dumps(r) + "\n")
+    print(" ".join(f"{k}={v}" for k, v in r.items()))
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["wait-drawn"] and len(sys.argv) in (6, 8):
+        wait_drawn(sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5]), sys.argv[6:8] or None)
+        sys.exit(0)
+    if sys.argv[1:2] == ["scroll-stats"] and len(sys.argv) == 4:
+        scroll_stats(sys.argv[2], sys.argv[3])
+        sys.exit(0)
+    if sys.argv[1:2] == ["diff"] and len(sys.argv) == 11:
+        diff(sys.argv[2], sys.argv[3], *map(int, sys.argv[4:8]), sys.argv[8], *map(int, sys.argv[9:11]))
+        sys.exit(0)
     if sys.argv[1:2] == ["thread"] and len(sys.argv) == 4:
         thread(int(sys.argv[2]), sys.argv[3])
         sys.exit(0)

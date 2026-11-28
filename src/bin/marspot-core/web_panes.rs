@@ -11,13 +11,20 @@ use objc2::Message;
 
 use super::*;
 
+#[path = "web_dev.rs"]
+mod web_dev;
+#[path = "web_entry.rs"]
+mod web_entry;
+#[path = "web_input.rs"]
+mod web_input;
+
 /// The dev seam opens its pane once per process.
 static DEV_OPENED: AtomicBool = AtomicBool::new(false);
 
 /// Where the page of pane `i` goes: where a terminal's text would, below
 /// the title strip and inside the padding the pane's outline is drawn
 /// over, at whole device pixels.
-fn page_rect(layout: &Layout, i: usize) -> Option<(f64, f64, f64, f64)> {
+pub(super) fn page_rect(layout: &Layout, i: usize) -> Option<(f64, f64, f64, f64)> {
     let c = layout.cells.get(i)?;
     let pad = layout.padding;
     let (x, y) = ((c.x + pad).ceil(), (c.y_top + layout.cell_title_h + pad).ceil());
@@ -30,24 +37,31 @@ impl CoreApp {
     /// window is laid out, open one web pane in it on that page.  For
     /// the sandbox only (see `web_pane::dev_url`).
     pub(super) fn dev_drive_web_pane(&mut self) {
-        if DEV_OPENED.load(Ordering::Relaxed) || self.windows.is_empty() {
-            return;
-        }
         let Some(url) = marspot::web_pane::dev_url() else { return };
+        if DEV_OPENED.load(Ordering::Relaxed) || self.windows.is_empty() {
+            return self.dev_web_script_play();
+        }
         let laid_out = !win!(self, 0).panes.is_empty() && !win!(self, 0).layout.cells.is_empty();
         if !laid_out || win!(self, 0).surfaces.is_none() {
             return;
         }
         DEV_OPENED.store(true, Ordering::Relaxed);
         self.open_web_pane(0, url.to_owned());
+        self.dev_web_script_start();
     }
 
     /// Add a web pane for `url` to window `wi`, focused, and open it at
-    /// the size the layout gives it.
-    pub(super) fn open_web_pane(&mut self, wi: usize, url: String) {
+    /// the size the layout gives it; whether a pane was added.
+    pub(super) fn open_web_pane(&mut self, wi: usize, url: String) -> bool {
+        if self.window_full(wi) {
+            return false;
+        }
         let id = match allocate_next_session_id() {
             Ok(id) => id,
-            Err(e) => return lx_warn!("web_pane.no_id", &e.to_string()),
+            Err(e) => {
+                lx_warn!("web_pane.no_id", &e.to_string());
+                return false;
+            }
         };
         let tx = self.event_tx.clone();
         let notify = Box::new(move || {
@@ -64,7 +78,8 @@ impl CoreApp {
         self.rebuild_layout(wi);
         let idx = win!(self, wi).panes.len() - 1;
         let Some((_, _, pw, ph)) = page_rect(&win!(self, wi).layout, idx) else {
-            return lx_warn!("web_pane.no_cell", "the layout gave the web pane no cell", session = id);
+            lx_warn!("web_pane.no_cell", "the layout gave the web pane no cell", session = id);
+            return true;
         };
         let scale = (marspot::layout::density() * 100.0).round() as u32;
         let socket = marspot_term::paths::state_root().join(marspot::web_pane::HOST_SOCKET);
@@ -74,6 +89,7 @@ impl CoreApp {
             web.open(socket, Opening { url, px: (pw, ph), scale }, device);
         }
         win!(self, wi).needs_render = true;
+        true
     }
 
     /// The connection thread of web pane `id` published something.
@@ -89,6 +105,7 @@ impl CoreApp {
                 }
             }
         }
+        self.web_said(id);
     }
 
     /// The pictures of window `wi`'s web panes, into the frame about to
@@ -127,7 +144,9 @@ impl CoreApp {
                 y = y,
                 width = f64::from(iw).min(pw),
                 height = f64::from(ih).min(ph),
-                scale = marspot::layout::density()
+                scale = marspot::layout::density(),
+                scroll_x = web.scrolled().0,
+                scroll_y = web.scrolled().1
             );
         }
     }
