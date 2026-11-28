@@ -117,7 +117,8 @@ impl CoreApp {
         // for the duration of the frame and put it back at the end.
         let mut wr = std::mem::take(&mut win!(self, wi).render);
 
-        let resolved_labels = self.pane_labels(wi);
+        let names = self.pane_names();
+        let resolved_labels = self.pane_labels(wi, &names);
         let titles: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 let mut s = resolved_labels.get(i).cloned().unwrap_or_default();
@@ -135,7 +136,7 @@ impl CoreApp {
                 s
             })
             .collect();
-        let sidebar_texts = self.sidebar_texts(wi, &resolved_labels);
+        let sidebar_texts = self.sidebar_texts(wi, &resolved_labels, &names);
 
         // the titles say how many helpers only where no strip lists them
         self.place_strips(wi);
