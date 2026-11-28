@@ -2,7 +2,8 @@
 //! model and the first line of its task.  Derived from the table once
 //! per change of it.
 //!
-//! A helper's title covers its plugin's only while it is a shadow.  The
+//! A helper's title covers its plugin's only while it is in no window,
+//! whose child it is or not.  The
 //! host tells the shell a plugin's title once, not on every scan, so
 //! what each plugin last said is kept here to go back to.
 
@@ -30,7 +31,7 @@ pub(crate) fn declare(decls: &mut PaneDecls<String>, said: impl Iterator<Item = 
     take_said(decls, plugins, said);
     let Some(titles) = titles().filter(|t| !t.is_empty()) else { return };
     let obs = crate::observe::shared().latest();
-    declare_in(decls, plugins, &titles, |sid| obs.session(sid).is_some_and(|s| s.entry.shadow_of != 0));
+    declare_in(decls, plugins, &titles, |sid| obs.session(sid).is_some() && !crate::pane_control::in_window(sid));
 }
 
 /// What pane `sid`'s plugin last titled it.
