@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.960"  # a codex credit lot is dated from its first balance in the shared rollouts and lasts twelve months when seen before 2026-11-13
+shell   = "0.7.961"  # the state map lists the codex credit scan progress file
 core    = "0.12.821"  # the codex thread-unknown refusal text, en ja zh
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
