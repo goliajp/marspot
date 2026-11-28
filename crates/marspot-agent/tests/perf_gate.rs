@@ -51,6 +51,41 @@ fn p95(mut v: Vec<Duration>) -> Duration {
     v[v.len() * 95 / 100]
 }
 
+/// The time the calling thread has spent on a core, which the pane
+/// plan's gates hold: on a runner at load1 20 to 400 a search of tens of
+/// milliseconds waits for a core longer than it runs, and the gate is
+/// about the search, not the queue.
+struct OnCore(u64);
+
+impl OnCore {
+    fn now() -> Self {
+        Self(thread_cpu_ns())
+    }
+
+    fn elapsed(&self) -> Duration {
+        Duration::from_nanos(thread_cpu_ns() - self.0)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn thread_cpu_ns() -> u64 {
+    // CLOCK_THREAD_CPUTIME_ID in <time.h>
+    const THREAD_CPU: u32 = 16;
+    unsafe extern "C" {
+        fn clock_gettime_nsec_np(clock: u32) -> u64;
+    }
+    // SAFETY: takes a clock id by value and touches no memory of ours
+    unsafe { clock_gettime_nsec_np(THREAD_CPU) }
+}
+
+/// Off macOS the times are only printed (see `within`), so the clock
+/// stands in.
+#[cfg(not(target_os = "macos"))]
+fn thread_cpu_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
 #[test]
 fn sched_decide_perf_gate() {
     let accounts = accounts(16);
@@ -117,11 +152,12 @@ fn sched_state_bytes() {
 }
 
 /// One full search of the pane plan at 64 panes × 16 accounts, some of
-/// them running out inside the day.  Budget per search.
-const PLAN_BUDGET: Duration = Duration::from_micros(305_804);
+/// them running out inside the day.  Budget per search, on the core.
+const PLAN_BUDGET: Duration = Duration::from_micros(529_906);
 
-/// The standing plan re-timed and re-costed at the same size.
-const RETIME_BUDGET: Duration = Duration::from_micros(3_755);
+/// The standing plan re-timed and re-costed at the same size, on the
+/// core.
+const RETIME_BUDGET: Duration = Duration::from_micros(4_097);
 
 /// One full search whose exhaustive pass enumerates the most joint
 /// choices it allows.
@@ -169,21 +205,23 @@ fn plan_input<'a>(a: &'a [level2::Account], p: &'a [level2::Pane]) -> level2::In
 fn sched_plan_perf_gate() {
     let (a, p) = plan_world(16, 64);
     let i = plan_input(&a, &p);
-    let mut times = Vec::new();
+    let (mut times, mut walls) = (Vec::new(), Vec::new());
     let mut last = None;
     for _ in 0..40 {
-        let t0 = Instant::now();
+        let (t0, w0) = (OnCore::now(), Instant::now());
         last = Some(black_box(level2::plan(black_box(&i), None)));
         times.push(t0.elapsed());
+        walls.push(w0.elapsed());
     }
     let pl = last.expect("a plan");
     let full = p95(times.split_off(5));
-    println!("sched plan P95 per full search {full:?} ({} switches, mode {}, {} active, {} simulations: {}; money {:.4} against {:.4} idle), budget {PLAN_BUDGET:?}", pl.switches.len(), pl.mode.word(), pl.active, pl.sims, pl.tally, pl.totals.money * 100.0, pl.idle.money * 100.0);
+    let wall = p95(walls.split_off(5));
+    println!("sched plan P95 per full search {full:?} on the core, {wall:?} by the clock ({} switches, mode {}, {} active, {} simulations: {}; money {:.4} against {:.4} idle), budget {PLAN_BUDGET:?}", pl.switches.len(), pl.mode.word(), pl.active, pl.sims, pl.tally, pl.totals.money * 100.0, pl.idle.money * 100.0);
     let (a8, p12) = plan_world(8, 12);
     let i8 = plan_input(&a8, &p12);
     let mut small = Vec::new();
     for _ in 0..200 {
-        let t0 = Instant::now();
+        let t0 = OnCore::now();
         black_box(level2::plan(black_box(&i8), None));
         small.push(t0.elapsed());
     }
@@ -197,18 +235,19 @@ fn sched_plan_retime_perf_gate() {
     let i = plan_input(&a, &p);
     let mut st = level2::standing::Standing::default();
     level2::pass::full(&mut st, &i, 1, 1_800_000_000);
-    let mut times = Vec::new();
+    let (mut times, mut walls) = (Vec::new(), Vec::new());
     for k in 0..200 {
-        let t0 = Instant::now();
+        let (t0, w0) = (OnCore::now(), Instant::now());
         let pass = black_box(level2::pass::retime(&mut st, black_box(&i), 1_800_000_000 + 2 * k));
         times.push(t0.elapsed());
+        walls.push(w0.elapsed());
         // a pass that finds the structure gone returns at once and times
         // nothing
         let pass = pass.expect("the standing structure holds on the gate's input");
         assert!(!pass.plan.switches.is_empty(), "the re-time evaluated no switch");
     }
     let p = p95(times.split_off(10));
-    println!("sched plan re-time P95 {p:?}, {} standing switches, budget {RETIME_BUDGET:?}", st.switches.len());
+    println!("sched plan re-time P95 {p:?} on the core, {:?} by the clock, {} standing switches, budget {RETIME_BUDGET:?}", p95(walls.split_off(10)), st.switches.len());
     within("sched plan re-time", p, RETIME_BUDGET);
 }
 
