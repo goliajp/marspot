@@ -5,6 +5,11 @@ use super::*;
 impl CoreApp {
     pub(super) fn mouse_moved(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
         self.strips.pointer_at(win!(self, wi).window_id, x_phys, y_phys);
+        // the question's buttons are over the pane: the program under
+        // them hears nothing of the pointer there
+        if self.close_ask_hover(wi, x_phys, y_phys) {
+            return;
+        }
         if self.pointer_left(wi, x_phys, y_phys) {
             return;
         }

@@ -106,8 +106,9 @@ impl CoreApp {
     }
 
     /// Open the badge context menu from a `PaneBadgeMenu` reply.  The
-    /// anchor is the echoed right-click position; empty items = the
-    /// owning plugin has nothing to offer, show nothing.
+    /// anchor is the echoed right-click position.  The core's own rows
+    /// (the pane's helpers, the way back from viewing one) are offered
+    /// whether or not the plugin had rows; with neither nothing shows.
     pub(super) fn open_pane_badge_menu(
         &mut self, wi: usize,
         sid: u64,
@@ -115,18 +116,20 @@ impl CoreApp {
         anchor_y: f64,
         items: Vec<marspot::shell_proto::PaneBadgeMenuItem>,
     ) {
-        if items.is_empty() {
-            // The plugin that owns the badge had nothing to offer.
-            // Silent until now, which made a dead right-click
-            // indistinguishable from a missed hit-test.
-            lx_warn!(
-                "core.badge_menu_empty",
-                &format!("shelld_session={sid} replied with no items")
-            );
-            return;
-        }
         let helpers = self.pane_control.shadows.family.count(sid);
         let viewing = self.find_window_pane_by_sid(sid).is_some_and(|(wi, i)| win!(self, wi).panes[i].peek.is_some());
+        if items.is_empty() {
+            // logged: a dead right-click looks the same as a missed hit-test
+            lx_warn!(
+                "core.badge_menu_empty",
+                &format!("shelld_session={sid} replied with no items"),
+                helpers = helpers,
+                viewing = viewing as u32
+            );
+            if helpers == 0 && !viewing {
+                return;
+            }
+        }
         let items = menus::badge_menu(items, helpers, viewing).into();
         win!(self, wi).context_menu = Some(ContextMenuState {
             items,

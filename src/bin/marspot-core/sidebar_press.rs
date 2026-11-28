@@ -47,10 +47,10 @@ impl CoreApp {
     /// row, when it has no cell for it.  A window holding as many panes
     /// as it can says so over the pane in use instead.
     pub(crate) fn show_here(&mut self, wi: usize, sid: u64) {
+        let Some(i) = self.shadow_index(sid) else { return };
         if self.window_full(wi) {
             return;
         }
-        let Some(i) = self.shadow_index(sid) else { return };
         let mut pane = self.take_shadow(i);
         unwatched::set(sid, false);
         // a shadow's frames were not read while it was one

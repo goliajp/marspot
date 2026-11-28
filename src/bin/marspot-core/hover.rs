@@ -64,8 +64,9 @@ impl CoreApp {
     /// Forget everything the pointer was on in a window: its chrome,
     /// its open panel, its context menu, in that order.
     pub(super) fn clear_hover(&mut self, wi: usize) -> [bool; 3] {
+        let ask = self.notices.unhover();
         let w = &mut win!(self, wi);
-        let chrome = w.render.chrome_pointer_leave();
+        let chrome = w.render.chrome_pointer_leave() | ask;
         let mut panel = w.settings_surface.borrow_mut().kept.surface.pointer_leave();
         panel |= w.layout_surface.borrow_mut().kept.surface.pointer_leave();
         panel |= w.shortcuts_surface.borrow_mut().kept.surface.pointer_leave();

@@ -67,6 +67,8 @@ pub fn wrap(text: &str, cols: u16) -> Vec<String> {
 
 pub struct PaneNoticeParams<'a> {
     pub text: &'a str,
+    /// The button the pointer is on: 0 goes ahead, 1 does not.
+    pub hover: Option<u8>,
     pub inner_x: f32,
     pub inner_y: f32,
     pub grid_cols: u16,
@@ -151,7 +153,7 @@ pub fn paint_pane_notice(p: &mut ViewPainter, params: PaneNoticeParams<'_>) {
         }
         for (i, (r, label)) in l.buttons.iter().flatten().enumerate() {
             let kind = if i == 0 { ButtonKind::Primary } else { ButtonKind::Secondary };
-            controls::paint_button(p, *r, label, kind, false, false);
+            controls::paint_button(p, *r, label, kind, params.hover == Some(i as u8), false);
         }
     });
 }
@@ -174,7 +176,7 @@ mod tests {
     #[test]
     fn a_question_has_its_buttons_under_its_text_inside_the_card() {
         let text = ask_text("Closing this pane also ends these child panes:\n#8590 madpdf", "Close All", "Cancel");
-        let params = PaneNoticeParams { text: &text, inner_x: 100.0, inner_y: 50.0, grid_cols: 80, grid_rows: 24 };
+        let params = PaneNoticeParams { text: &text, hover: None, inner_x: 100.0, inner_y: 50.0, grid_cols: 80, grid_rows: 24 };
         let l = layout(&params, (8.0, 16.0)).expect("room for it");
         assert_eq!(l.lines, ["Closing this pane also ends these child panes:", "#8590 madpdf"], "the labels are no text");
         let [(go, go_label), (stay, stay_label)] = l.buttons.expect("two buttons");

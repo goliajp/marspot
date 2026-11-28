@@ -24,8 +24,8 @@ use crate::ui::theme::spec::{self, card, content, space};
 ///
 /// The data path has no cap of its own — `Layout::build` takes any
 /// shape — so this is only the panel's range.  `SESSION_COUNT_HARD_CAP`
-/// is kept at `GRID_MAX²` so the panel can never offer a shape the app
-/// would refuse to fill.  A grid is slots, not sessions: a 9×9 window
+/// is worked out as `GRID_MAX²`, so the panel can never offer a shape
+/// the app would refuse to fill.  A grid is slots, not sessions: a 9×9 window
 /// with three panes has three processes and 78 empty seats.
 pub const GRID_MIN: usize = 1;
 pub const GRID_MAX: usize = 9;

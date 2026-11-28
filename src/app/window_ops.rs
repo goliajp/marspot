@@ -1,5 +1,5 @@
 //! Applying the window opens, closes and raises queued while an event
-//! handler held the app's state.
+//! handler held the app's state, and asking AppKit to quit.
 
 use super::*;
 
@@ -125,5 +125,30 @@ pub(super) fn drain_pending_windows() {
                 }
             }
         }
+    }
+}
+
+/// Ask AppKit to quit, exactly as the dock's Quit item and Cmd-Q do.
+///
+/// A test cannot click a dock menu, and the thing worth testing is the
+/// whole route — `terminate:` → `applicationShouldTerminate:` → the
+/// app's `quit_requested` — not just the handler at the end of it.
+pub fn request_terminate() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    // Next run-loop turn, not now.  `terminate:` calls
+    // `applicationShouldTerminate:` synchronously, which dispatches an
+    // event, which borrows the app state — and a caller inside an
+    // event callback is already holding that borrow.  Calling it
+    // straight took the app down with `RefCell already borrowed`
+    // (2026-09-28).  A real quit arrives from the event loop with
+    // nothing borrowed, and this makes every caller look the same.
+    unsafe {
+        let _: () = objc2::msg_send![
+            &*app,
+            performSelector: objc2::sel!(terminate:),
+            withObject: std::ptr::null::<objc2::runtime::AnyObject>(),
+            afterDelay: 0.0f64,
+        ];
     }
 }

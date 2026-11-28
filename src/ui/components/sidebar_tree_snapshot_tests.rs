@@ -2,7 +2,8 @@
 //! indented under their parent with a tree line, a hollow dot for a
 //! pane in no window, a parent of another window as a grey row above
 //! its child shown here, and a long name cut with its code whole.
-//! Baselines `bench/ui/snapshots/chrome_sidebar_tree{,.2x}.png`.
+//! Baselines `bench/ui/snapshots/chrome_sidebar_tree{,.2x}.png`, and
+//! `chrome_sidebar_minimized{,.2x}.png` beside them.
 
 use super::super::density_kit;
 use super::{pane, snapshot, ROWS};
@@ -41,4 +42,27 @@ pub(super) fn chrome_snapshot_sidebar_tree() {
 #[test]
 fn chrome_snapshot_sidebar_tree_2x() {
     density_kit::at_scale(2.0, chrome_snapshot_sidebar_tree);
+}
+
+/// Another window is minimized: the parent it shows, a grey row here,
+/// and the child it shows are drawn hollow, the panes of this window
+/// solid.  Baselines `chrome_sidebar_minimized{,.2x}.png`.
+#[test]
+pub(super) fn chrome_snapshot_sidebar_minimized() {
+    use SessionState::{Active, Idle};
+    use SidebarTree::{LastChild, Parent, Top};
+    let rows = vec![
+        row("lab", Idle, 2210, Parent, true),
+        SidebarEntry { selected: true, ..row("smix", Active, 4145, LastChild, false) },
+        row("devops", Idle, 5528, Top, false),
+        row("madpdf", Active, 8590, LastChild, true),
+    ];
+    let panes = [pane("smix", "", Active), pane("devops", "", Idle)];
+    ROWS.with(|r| *r.borrow_mut() = Some(rows));
+    snapshot("chrome_sidebar_minimized", (1200, 640), (2, 1), &panes, 0, |_, _, _| {});
+}
+
+#[test]
+fn chrome_snapshot_sidebar_minimized_2x() {
+    density_kit::at_scale(2.0, chrome_snapshot_sidebar_minimized);
 }

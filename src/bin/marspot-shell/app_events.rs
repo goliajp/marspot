@@ -308,8 +308,12 @@ impl MarspotApp for ShellApp {
         self.save_window_state_if_changed(ctx);
     }
 
-    fn focused(&mut self, _ctx: &MarspotAppCtx, focused: bool) {
+    fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
         self.send(MsgType::Focus, encode_focus(focused));
+        if focused {
+            // keys and the core's raise follow the key window
+            self.send(MsgType::WindowFocus, marspot::shell_proto::encode_window_focus(Self::event_window(ctx)));
+        }
         self.proxy.wake(); // a pass now: what is queued below is driven by the clock
         let returning = focused && !self.app_focused;
         self.app_focused = focused;
@@ -331,6 +335,15 @@ impl MarspotApp for ShellApp {
             && std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_none() {
                 self.apply_pending_update();
             }
+    }
+
+    fn minimized(&mut self, ctx: &MarspotAppCtx, minimized: bool) {
+        let id = Self::event_window(ctx);
+        if let Some(i) = self.window_index(id) {
+            self.windows[i].minimized = minimized;
+        }
+        self.send(MsgType::WindowMinimized, marspot::shell_proto::encode_window_minimized(id, minimized));
+        lx_event!("WINDOW_MINIMIZED", "a window was minimized or restored", window_id = id, minimized = minimized as u32);
     }
 
     fn ime_preedit_changed(&mut self, ctx: &MarspotAppCtx, text: &str) {

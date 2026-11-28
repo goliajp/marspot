@@ -172,6 +172,7 @@ pub enum Msg {
     CloseChildrenAsk,
     CloseChildrenConfirm,
     CloseChildrenCancel,
+    CloseAskNowhere,
     // The menu on a link in a pane
     LinkCopyUuid,
     LinkOpenUrl,

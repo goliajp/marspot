@@ -130,3 +130,15 @@ fn sidebar_hidden_pane_is_refused_a_window_at_the_pane_cap_and_told_why() {
     assert_eq!(win!(app, 0).panes.len(), n);
     assert_eq!(app.notices.shell_text(), Some(strings::text(Arg::WindowFull(n)).as_str()), "says why");
 }
+
+#[test]
+fn sidebar_pane_that_is_not_hidden_is_not_told_the_window_is_full() {
+    let sb = Sandbox::new();
+    let n = SESSION_COUNT_HARD_CAP;
+    let mut app = crowded(&sb, n as u64, (9, 9));
+    // 1 is a pane of the window itself, 5000 is no pane at all
+    app.show_here(0, 1);
+    app.show_here(0, 5000);
+    assert_eq!(app.notices.shell_text(), None, "nothing to refuse, so nothing said");
+    assert_eq!(win!(app, 0).panes.len(), n);
+}

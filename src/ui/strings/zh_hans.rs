@@ -117,6 +117,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CloseChildrenAsk => "关闭这个窗格会同时结束下面这些子窗格：",
         Msg::CloseChildrenConfirm => "全部关闭",
         Msg::CloseChildrenCancel => "取消",
+        Msg::CloseAskNowhere => "这个窗格有子窗格，关闭前要先确认，但这个窗口里没有能显示确认的窗格。请在显示着窗格的窗口里关闭它",
 
         Msg::LinkCopyUuid => "拷贝 UUID",
         Msg::LinkOpenUrl => "打开 URL",

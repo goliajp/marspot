@@ -636,6 +636,8 @@ pub enum MsgType {
     ProgramInput = 149,
     /// L1 → L2: ask before an agent CLI's first install; see `install_ask`.
     InstallAsk = 150,
+    /// L1 → L2: a window was minimized or restored; see `window_frames`.
+    WindowMinimized = 151,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -748,6 +750,7 @@ impl MsgType {
             148 => MsgType::ResetPanelAct,
             149 => MsgType::ProgramInput,
             150 => MsgType::InstallAsk,
+            151 => MsgType::WindowMinimized,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1020,26 +1023,6 @@ pub fn decode_surface_attach_window(
         trailing_window_id(payload, 32),
         frame_index,
         lights_right,
-    ))
-}
-
-/// `(window_id, lights_right_phys)` — see [`MsgType::WindowChrome`].
-pub fn encode_window_chrome(window_id: u32, lights_right_phys: f64) -> Vec<u8> {
-    let mut v = window_id.to_le_bytes().to_vec();
-    v.extend_from_slice(&lights_right_phys.to_le_bytes());
-    v
-}
-
-pub fn decode_window_chrome(payload: &[u8]) -> io::Result<(u32, f64)> {
-    if payload.len() < 12 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "WINDOW_CHROME payload < 12 bytes",
-        ));
-    }
-    Ok((
-        u32::from_le_bytes(payload[0..4].try_into().unwrap()),
-        f64::from_le_bytes(payload[4..12].try_into().unwrap()),
     ))
 }
 

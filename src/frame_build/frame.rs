@@ -363,9 +363,10 @@ fn paint_overlays(
                 let mut painter = overlay_painter!();
                 paint_search_overlay(&mut painter, SearchOverlayParams { overlay, inner_x, inner_y, grid_cols, grid_rows });
             }
-            if let Some(text) = view.notice {
+            if let Some(n) = view.notice {
                 let mut painter = overlay_painter!();
-                paint_pane_notice(&mut painter, PaneNoticeParams { text, inner_x, inner_y, grid_cols, grid_rows });
+                let params = PaneNoticeParams { text: n.text, hover: n.hover, inner_x, inner_y, grid_cols, grid_rows };
+                paint_pane_notice(&mut painter, params);
             }
         }
     }

@@ -125,6 +125,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CloseChildrenAsk => "Closing this pane also ends these child panes:",
         Msg::CloseChildrenConfirm => "Close All",
         Msg::CloseChildrenCancel => "Cancel",
+        Msg::CloseAskNowhere => "This pane has child panes, so closing it asks first, but no pane in this window can show the question. Close it from a window that shows a pane",
 
         Msg::LinkCopyUuid => "Copy UUID",
         Msg::LinkOpenUrl => "Open URL",

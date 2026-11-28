@@ -61,6 +61,7 @@ use crate::app_keys::{nsevent_modifiers, nsevent_to_mars_key, selector_named_key
 
 mod caret_probe;
 mod window_ops;
+pub use window_ops::request_terminate;
 use window_ops::drain_pending_windows;
 pub mod dock;
 pub(crate) mod key_script;
@@ -142,6 +143,9 @@ pub trait MarspotApp: 'static {
     fn moved(&mut self, _ctx: &MarspotAppCtx) {}
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool);
+
+    /// The window was minimized to the Dock, or came back.  Default no-op.
+    fn minimized(&mut self, _ctx: &MarspotAppCtx, _minimized: bool) {}
 
     /// A window this app asked for has been created.  `ctx` is that
     /// window's own context — which is what makes it the right place
@@ -1122,33 +1126,18 @@ define_class!(
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Focused(false));
         }
+
+        #[unsafe(method(windowDidMiniaturize:))]
+        fn window_did_miniaturize(&self, _notification: &NSNotification) {
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Minimized(true));
+        }
+
+        #[unsafe(method(windowDidDeminiaturize:))]
+        fn window_did_deminiaturize(&self, _notification: &NSNotification) {
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Minimized(false));
+        }
     }
 );
-
-/// Ask AppKit to quit, exactly as the dock's Quit item and Cmd-Q do.
-///
-/// A test cannot click a dock menu, and the thing worth testing is the
-/// whole route — `terminate:` → `applicationShouldTerminate:` → the
-/// app's `quit_requested` — not just the handler at the end of it.
-pub fn request_terminate() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    // Next run-loop turn, not now.  `terminate:` calls
-    // `applicationShouldTerminate:` synchronously, which dispatches an
-    // event, which borrows the app state — and a caller inside an
-    // event callback is already holding that borrow.  Calling it
-    // straight took the app down with `RefCell already borrowed`
-    // (2026-09-28).  A real quit arrives from the event loop with
-    // nothing borrowed, and this makes every caller look the same.
-    unsafe {
-        let _: () = objc2::msg_send![
-            &*app,
-            performSelector: objc2::sel!(terminate:),
-            withObject: std::ptr::null::<objc2::runtime::AnyObject>(),
-            afterDelay: 0.0f64,
-        ];
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Event dispatch
@@ -1178,6 +1167,8 @@ pub enum EventKind {
     Resized,
     Moved,
     Focused(bool),
+    /// Minimized to the Dock, or back from it.
+    Minimized(bool),
     CloseRequested,
     /// Cmd-Q / Quit menu / dock Quit — the app, not this window.
     QuitRequested,
@@ -1302,6 +1293,7 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             }
             EventKind::Moved => app.moved(ctx),
             EventKind::Focused(f) => app.focused(ctx, f),
+            EventKind::Minimized(m) => app.minimized(ctx, m),
             EventKind::CloseRequested => app.close_requested(ctx),
             EventKind::QuitRequested => app.quit_requested(ctx),
             EventKind::WindowOpened => app.window_opened(ctx),

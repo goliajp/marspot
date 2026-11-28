@@ -185,7 +185,7 @@ pub struct SessionView<'a> {
     pub strip: Option<StripView<'a>>,
     /// A sentence to show over the top of the pane until it is taken
     /// away; see `MsgType::Notice`.
-    pub notice: Option<&'a str>,
+    pub notice: Option<NoticeView<'a>>,
     /// F1+13 — content-freshness tag the renderer uses to short-
     /// circuit per-pane instance rebuilds.  Caller (`Pane::as_view`)
     /// supplies a monotonic-ish counter that bumps whenever the
@@ -196,14 +196,10 @@ pub struct SessionView<'a> {
 }
 
 mod view_parts;
-pub use view_parts::{ActiveHighlight, HighlightSpan, HistoryView, SearchHitView, SearchOverlayView, SidebarEntry, SidebarTree, StripView};
-
-#[derive(Copy, Clone, Debug)]
-pub struct SelectionView {
-    pub anchor: (u16, u16),
-    pub focus: (u16, u16),
-    pub blockwise: bool,
-}
+pub use view_parts::{
+    ActiveHighlight, HighlightSpan, HistoryView, NoticeView, SearchHitView, SearchOverlayView, SelectionView, SidebarEntry,
+    SidebarTree, StripView,
+};
 
 /// Serialise the text under a selection on `grid` to a clipboard string.
 ///

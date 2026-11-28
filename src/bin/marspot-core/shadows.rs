@@ -40,6 +40,8 @@ pub(super) struct Shadows {
     pub(super) family: super::helper_panel::Family,
     /// Each window's sidebar rows.
     pub(super) trees: super::draw::sidebar_tree::Trees,
+    /// Windows minimized to the Dock, by id (`window_seen`).
+    pub(super) minimized: Vec<u32>,
     /// The panes the open menu lists to belong to, and the hidden ones
     /// it lists to show, by their place in it.
     pub(super) menu_panes: Vec<u64>,

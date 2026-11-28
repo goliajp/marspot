@@ -54,6 +54,9 @@ pub(super) fn decode_frame(t: MsgType, payload: &[u8]) -> Option<CoreEvent> {
         MsgType::WindowFocus => decode_window_focus(payload)
             .ok()
             .map(CoreEvent::WindowFocus),
+        MsgType::WindowMinimized => marspot::shell_proto::decode_window_minimized(payload)
+            .ok()
+            .map(|(win, m)| CoreEvent::WindowMinimized(win, m)),
         MsgType::Focus => decode_focus(payload).ok().map(CoreEvent::Focus),
         MsgType::Resize => decode_resize(payload)
             .ok()
