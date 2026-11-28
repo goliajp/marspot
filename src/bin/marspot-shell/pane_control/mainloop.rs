@@ -10,6 +10,7 @@ use marspot_peer::control::{ErrorCode, Reject};
 
 use super::{MainCmd, PaneView, Reply, hub};
 use crate::ShellApp;
+use crate::plugins::{PaneSession, PaneSessionHost};
 
 type Snapshot = HashMap<u64, (marspot::pane_state::PaneStatus, std::time::Duration, bool)>;
 
@@ -21,6 +22,24 @@ impl MainSide {
     pub(crate) fn start(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> MainSide {
         MainSide { rx: super::start(wake) }
     }
+}
+
+/// How long after a wake an agent should try its input again: the
+/// resume takes about two seconds, and the agent then loads.
+const WAKE_RETRY_MS: u64 = 3_000;
+
+/// Input for a pane whose agent sleeps (`parked`): the input wakes it,
+/// as the user coming back to it would, and waits until it is up.
+pub(crate) fn wake_for_input(s: &mut dyn PaneSession, host: &dyn PaneSessionHost) -> Option<Reject> {
+    if !s.parked() {
+        return None;
+    }
+    s.on_focus(host);
+    let woken = !s.parked();
+    marspot::lx_event!("PANE_CONTROL_WAKE", "input for a sleeping pane wakes it", session = host.shelld_session_id(),
+        woken = woken as u32);
+    let r = Reject::new(ErrorCode::PaneDormant, "the pane's agent was put to sleep idle; it is waking for this request");
+    Some(r.retry_after(WAKE_RETRY_MS))
 }
 
 fn refuse(reply: Option<(u32, std::sync::mpsc::Sender<Reply>)>, r: Reject) {
@@ -55,9 +74,9 @@ impl ShellApp {
     }
 
     /// Why a script on `sid` keeps input out, if one does.
-    fn ops_hold(&self, sid: u64) -> Option<Reject> {
-        if self.active_pane_sessions.get(&sid).is_some_and(|a| a.session.parked()) {
-            return Some(Reject::new(ErrorCode::PaneDormant, "the pane's agent was put to sleep idle and waits for the user to come back"));
+    fn ops_hold(&mut self, sid: u64) -> Option<Reject> {
+        if let Some(r) = self.with_pane_session(sid, wake_for_input).flatten() {
+            return Some(r);
         }
         self.pty_ops
             .running(sid)

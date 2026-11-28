@@ -33,7 +33,7 @@ pub(crate) mod helpers_port;
 mod links;
 mod matched;
 mod limits;
-mod mainloop;
+pub(crate) mod mainloop;
 pub(crate) mod names;
 mod ops_input;
 mod ops_pane;
