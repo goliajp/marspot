@@ -33,7 +33,7 @@ pub(crate) enum RowPane {
 pub(crate) struct Row {
     pub(crate) pane: RowPane,
     pub(crate) tree: SidebarTree,
-    /// In no cell of a window.
+    /// In no cell of a window, or only in a minimized one.
     pub(crate) hollow: bool,
 }
 
@@ -102,6 +102,7 @@ impl CoreApp {
     fn sidebar_key(&self, wi: usize) -> u64 {
         let mut h = FxHasher::default();
         wi.hash(&mut h);
+        self.pane_control.shadows.minimized.hash(&mut h);
         for w in &self.windows {
             (w.window_id, w.layout.cells.len(), w.panes.len()).hash(&mut h);
             for p in &w.panes {
@@ -122,9 +123,11 @@ impl CoreApp {
         h.finish()
     }
 
-    /// Whether `sid` is in a cell of some window, or viewed in one.
+    /// Whether `sid` is in a cell of some window not minimized, or
+    /// viewed in one.
     pub(crate) fn on_screen(&self, sid: u64) -> bool {
-        self.windows.iter().any(|w| {
+        let shown = |w: &&WindowState| !self.pane_control.shadows.minimized.contains(&w.window_id);
+        self.windows.iter().filter(shown).any(|w| {
             let cells = w.layout.cells.len();
             w.panes.iter().take(cells).any(|p| p.shelld_session_id() == Some(sid) || p.peeked() == Some(sid))
         })

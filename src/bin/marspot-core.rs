@@ -1617,6 +1617,7 @@ enum CoreEvent {
     WindowClosed(u32),
     /// RFC-005 — which window is key now.
     WindowFocus(u32),
+    WindowMinimized(u32, bool),
     /// PROTO_VERSION=1 single-surface resize.  Kept for tolerance; the
     /// PROTO_VERSION=2 path uses `SurfaceAttach` (dual-buffer).
     Resize(u32, f64, f64, f64),
@@ -2218,6 +2219,8 @@ mod frames;
 use frames::WindowSurfaces;
 #[path = "marspot-core/hover.rs"]
 mod hover;
+#[path = "marspot-core/window_seen.rs"]
+mod window_seen;
 #[path = "marspot-core/link_menu.rs"]
 mod link_menu;
 use link_menu::{link_menu_items_for, LinkContext};
@@ -3178,22 +3181,8 @@ fn main() {
                     }
                     queue_attach(pending_attach, win, (fr, bk, w, h, sc));
                 }
-                CoreEvent::Focus(focused) => {
-                    // Application-level, not window-level: the whole
-                    // app gained or lost focus, so every window's
-                    // chrome changes and every window owes a frame.
-                    app.renderer.set_window_focused(focused);
-                    // No mouseMoved deliveries while the app isn't
-                    // active — drop any latched hover so the
-                    // affordance doesn't linger when the user
-                    // alt-tabs away mid-hover.
-                    for wi in 0..app.windows.len() {
-                        if !focused {
-                            app.clear_hover(wi);
-                        }
-                        app.windows[wi].needs_render = true;
-                    }
-                }
+                CoreEvent::Focus(focused) => app.app_focus(focused),
+                CoreEvent::WindowMinimized(win, m) => app.window_minimized(win, m),
                 CoreEvent::Closed => *closed = true,
                 CoreEvent::Resize(_new_id, _new_w, _new_h, _new_scale) => {
                     // Legacy PROTO_VERSION=1 path — kept as a tolerance

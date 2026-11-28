@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.891"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key
-core    = "0.12.787"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key
+core    = "0.12.788"  # a pane shown only in a minimized window is drawn hollow in the sidebar until the window comes back
 session = "0.11.494"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key

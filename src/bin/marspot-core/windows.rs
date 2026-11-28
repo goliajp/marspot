@@ -365,6 +365,7 @@ impl CoreApp {
         }
         (0..win!(self, i).panes.len()).for_each(|idx| _ = self.unview(i, idx));
         let gone = self.windows.remove(i);
+        self.pane_control.shadows.minimized.retain(|id| *id != window_id);
         for at in [&mut self.mouse_report_press, &mut self.mouse_report_last_cell] {
             *at = at.filter(|a| a.0 != i).map(|(w, p, c, r)| (w - (w > i) as usize, p, c, r));
         }
