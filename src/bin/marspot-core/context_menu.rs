@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "menus.rs"]
+mod menus;
+
 impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
 
@@ -117,12 +120,8 @@ impl CoreApp {
             return;
         }
         let helpers = self.pane_control.shadows.family.count(sid);
-        use marspot::ui::components::MenuItem;
-        let of_helpers = (helpers > 0)
-            .then(|| MenuItem::entry(&strings::text(Arg::HelpersOf(helpers)), helper_panel::MENU_TAG));
         let viewing = self.find_window_pane_by_sid(sid).is_some_and(|(wi, i)| win!(self, wi).panes[i].peek.is_some());
-        let back = viewing.then(|| MenuItem::entry(t(Msg::HelperViewBack), helper_panel::BACK_TAG));
-        let items = items.into_iter().map(|it| MenuItem::entry(&it.label, it.tag)).chain(of_helpers).chain(back).collect();
+        let items = menus::badge_menu(items, helpers, viewing).into();
         win!(self, wi).context_menu = Some(ContextMenuState {
             items,
             anchor_x: marspot::ui::Units::from_px(anchor_x),
@@ -150,53 +149,11 @@ impl CoreApp {
         &self, wi: usize,
         region: ContextRegion,
     ) -> Vec<marspot::ui::components::MenuItem> {
-        use marspot::ui::components::MenuItem;
-        use marspot::commands::{hint, Command};
+        let moves = || menus::move_items(self.windows.len(), wi, win!(self, wi).panes.len());
         match region {
-            ContextRegion::Pane(_) => {
-                // Never disabled: closing a window's last pane closes
-                // the window, and the last window's last pane quits.
-                let close = MenuItem::entry(
-                    t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag(),
-                );
-                let copy = MenuItem::entry(
-                    t(Msg::MenuCopy), ContextMenuAction::CopySelection.tag(),
-                ).with_shortcut(&hint(Command::Copy));
-                let mut items = vec![
-                    if win!(self, wi).selection.is_some() { copy } else { copy.disabled() },
-                    MenuItem::entry(t(Msg::MenuPaste), ContextMenuAction::Paste.tag())
-                        .with_shortcut(&hint(Command::Paste)),
-                    MenuItem::divider(),
-                    MenuItem::entry(t(Msg::MenuClearScrollback),
-                        ContextMenuAction::ClearScrollback.tag()),
-                    MenuItem::divider(),
-                    MenuItem::entry(t(Msg::MenuNewPane),
-                        ContextMenuAction::SplitNewPane.tag()),
-                    close,
-                ];
-                items.push(MenuItem::divider());
-                self.push_move_to_window_items(wi, &mut items);
-                items
-            }
-            ContextRegion::SidebarSlot(_) => {
-                let close = MenuItem::entry(
-                    t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag(),
-                );
-                let mut items = vec![
-                    MenuItem::divider(),
-                    close,
-                ];
-                items.push(MenuItem::divider());
-                self.push_move_to_window_items(wi, &mut items);
-                items
-            }
-            ContextRegion::TitleStrip => vec![
-                MenuItem::entry(t(Msg::MenuToggleSidebar),
-                    ContextMenuAction::ToggleSidebar.tag())
-                    .with_shortcut(&hint(Command::ToggleSidebar)),
-                MenuItem::entry(t(Msg::MenuOpenLayout),
-                    ContextMenuAction::OpenLayout.tag()),
-            ],
+            ContextRegion::Pane(_) => menus::pane_menu(win!(self, wi).selection.is_some(), moves()),
+            ContextRegion::SidebarSlot(_) => menus::sidebar_menu(moves()),
+            ContextRegion::TitleStrip => menus::title_menu(),
             // Badge menus never come through here — their items
             // arrive from L1 via PaneBadgeMenu and open through
             // `open_pane_badge_menu`.
@@ -212,34 +169,6 @@ impl CoreApp {
         link: &LinkContext,
     ) -> Vec<marspot::ui::components::MenuItem> {
         link_menu_items_for(link)
-    }
-
-    /// RFC-005 step 5 — the cross-window entries of a pane's context
-    /// menu: one "Move to Window N" per OTHER window, plus "Move to
-    /// New Window".  Window numbers are 1-based creation order, the
-    /// same order the sidebar of each window implies.
-    pub(super) fn push_move_to_window_items(
-        &self,
-        wi: usize,
-        items: &mut Vec<marspot::ui::components::MenuItem>,
-    ) {
-        use marspot::ui::components::MenuItem;
-        for (ti, w) in self.windows.iter().enumerate() {
-            if ti == wi {
-                continue;
-            }
-            items.push(MenuItem::entry(
-                &strings::text(Arg::MoveToWindow(ti + 1)),
-                MOVE_TO_WINDOW_TAG_BASE + ti as u32,
-            ));
-            let _ = w;
-        }
-        // Moving the only pane of the only window to a "new" window
-        // would just rebuild the same state with a window flash.
-        let pointless =
-            self.windows.len() == 1 && win!(self, wi).panes.len() <= 1;
-        let mi = MenuItem::entry(t(Msg::MenuMoveToNewWindow), MOVE_TO_NEW_WINDOW_TAG);
-        items.push(if pointless { mi.disabled() } else { mi });
     }
 
     pub(super) fn dispatch_context_action(

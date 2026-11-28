@@ -149,7 +149,7 @@ pub(super) fn link_menu_items_for(
             ContextMenuAction::RevealLink.tag(),
         ));
     }
-    items
+    marspot::ui::components::grouped([items])
 }
 
 /// Hand `arg` off to macOS `open(1)` so the system routes it to the
