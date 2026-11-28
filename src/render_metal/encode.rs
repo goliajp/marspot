@@ -9,8 +9,10 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLDevice, MTLLoadAction, MTLPrimitiveType,
     MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineState, MTLResourceOptions,
-    MTLSamplerState, MTLScissorRect, MTLStoreAction, MTLTexture,
+    MTLSamplerState, MTLStoreAction, MTLTexture,
 };
+
+use super::pass_parts::scissor_for;
 
 use super::{clear_color, CellInstance, GlyphInstance, UiRectInstance};
 use crate::frame_build::pane_cache::PaneInstanceCache;
@@ -211,6 +213,7 @@ pub(super) struct Drawing<'a> {
     pub(super) atlas_texture: &'a ProtocolObject<dyn MTLTexture>,
     pub(super) color_atlas_texture: &'a ProtocolObject<dyn MTLTexture>,
     pub(super) device: &'a ProtocolObject<dyn MTLDevice>,
+    pub(super) images: &'a [super::pass_parts::WebImage],
 }
 
 /// Encode the whole frame against `target` in one pass, for the
@@ -343,7 +346,10 @@ pub(super) fn encode_passes(
                 Kind::Image => continue,
             };
             match kind {
-                Kind::Rect if built.pane_rects == Some(li) => draw_panes(0, pipeline, texture),
+                Kind::Rect if built.pane_rects == Some(li) => {
+                    draw_panes(0, pipeline, texture);
+                    super::pass_parts::draw_images(&enc, d);
+                }
                 Kind::Glyph if built.pane_glyphs == Some(li) => draw_panes(1, pipeline, texture),
                 Kind::ColorGlyph if built.pane_glyphs == Some(li) => draw_panes(2, pipeline, texture),
                 _ => {}
@@ -358,16 +364,6 @@ pub(super) fn encode_passes(
         }
     }
     enc.endEncoding();
-}
-
-/// A layer's clip as Metal's scissor, held inside the target: Metal
-/// rejects a scissor that reaches past the attachment.
-fn scissor_for(clip: golia_ui_core::units::RectPx, tw: usize, th: usize) -> MTLScissorRect {
-    let x0 = (clip.x.max(0.0).floor() as usize).min(tw);
-    let y0 = (clip.y.max(0.0).floor() as usize).min(th);
-    let x1 = ((clip.x + clip.w).max(0.0).ceil() as usize).min(tw);
-    let y1 = ((clip.y + clip.h).max(0.0).ceil() as usize).min(th);
-    MTLScissorRect { x: x0, y: y0, width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) }
 }
 
 #[cfg(test)]

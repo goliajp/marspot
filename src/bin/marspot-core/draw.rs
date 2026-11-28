@@ -154,6 +154,7 @@ impl CoreApp {
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate().take(cell_count) {
             fading |= p.aim_scrim(i == focused, now);
         }
+        self.collect_web_images(wi, cell_count);
         let views: Vec<SessionView> = win!(self, wi)
             .panes
             .iter()

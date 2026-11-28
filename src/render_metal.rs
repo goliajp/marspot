@@ -75,15 +75,6 @@ pub use golia_ui_core::scene::RectInstance as CellInstance;
 pub use golia_ui_core::scene::GlyphInstance;
 
 
-/// F1+11 — one UI rect's draw data, layout-compatible with `UiRect`
-/// in `src/shaders/cells.metal`.  A real pixel-mode rounded rectangle
-/// with anti-aliased corners, optional border stroke, and optional
-/// soft drop shadow — all computed in one fragment shader.
-///
-/// `origin` + `size` describe the FILL rect in physical pixels (NOT
-/// inflated by shadow).  `corner_radius` is also in pixels.  Set
-/// `shadow_blur = 0` to skip the shadow path entirely (the SDF still
-/// runs but contributes nothing).
 /// The rounded-rect instance the GPU reads, which is the published
 /// one.
 ///
@@ -237,6 +228,8 @@ pub struct MetalRenderer {
     /// when the frame completes.  One block for the renderer's life,
     /// so a frame allocates nothing for it.
     frame_done: Option<FrameDone>,
+    /// The web pane pictures of the next frame and where each goes.
+    pub web_images: Vec<pass_parts::WebImage>,
 }
 
 type FrameDone = block2::RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffer>>)>;
@@ -301,6 +294,7 @@ impl MetalRenderer {
             process_panel: None, cc_usage: None, settings_panel: None, shortcuts_panel: None, helpers_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None,
             last_render_split: RenderSplit::default(),
             frame_done: None,
+            web_images: Vec::new(),
         })
     }
 
@@ -440,6 +434,7 @@ mod pane_cache_tests;
 mod encode;
 pub mod pipelines;
 mod menu_pass;
+pub mod pass_parts;
 pub use menu_pass::MenuBuffers;
 #[cfg(test)]
 mod sheet;

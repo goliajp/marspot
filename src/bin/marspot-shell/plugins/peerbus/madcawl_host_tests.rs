@@ -69,6 +69,7 @@ impl Rig {
             home: self.home.path().to_path_buf(),
             idle_secs: 1,
             quick: Duration::ZERO,
+            isolate: false,
         }
     }
 
@@ -146,6 +147,16 @@ fn madcawl_host_starts_on_first_connect_and_again_after_idle_exit() {
     let second = call(&cfg.socket);
     assert_ne!(second, first);
     assert_eq!(rig.pids(), vec![first, second]);
+}
+
+#[test]
+fn madcawl_host_passes_isolate_only_when_asked() {
+    let rig = Rig::new();
+    let cfg = Config { isolate: true, ..rig.cfg() };
+    let _h = started(&cfg);
+    call(&cfg.socket);
+    let argv = std::fs::read_to_string(rig.home.join("argv")).unwrap();
+    assert!(argv.ends_with(" --isolate\n"), "{argv}");
 }
 
 #[test]

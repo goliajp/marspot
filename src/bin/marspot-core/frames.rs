@@ -211,6 +211,7 @@ pub(super) fn announce_settled(app: &mut CoreApp, control_writer: &FrameWriter, 
             let idx = s.writing_idx;
             (s.announce(), idx)
         };
+        app.web_frames_finished(wi, surface_id);
         // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
         // a busy display (60 Hz cap) without flooding when the
         // user runs `MARSPOT_LOG_CORE=debug` to investigate latency

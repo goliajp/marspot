@@ -24,7 +24,6 @@ pub(super) const PEER: &str = "marspot";
 pub(super) const MADCAWL: &str = "madcawl";
 const MADCAWL_BIN: &str = ".local/bin/madcawl-mcp";
 pub(super) const MADCAWL_SHELL_BIN: &str = ".local/bin/madcawl-shell";
-const MADCAWL_SOCKET: &str = "madcawl.sock";
 /// Why an entry under a server's name was left as the user wrote it.
 pub(super) const NOT_OURS: &str = "an entry pointed at another program; left as it is";
 
@@ -65,7 +64,7 @@ pub(super) fn madcawl_installed(home: &Path) -> bool {
 
 /// The socket the madcawl host listens on, which the shell binds.
 pub(super) fn madcawl_socket() -> PathBuf {
-    marspot_term::paths::state_root().join(MADCAWL_SOCKET)
+    marspot_term::paths::state_root().join(marspot::web_pane::HOST_SOCKET)
 }
 
 /// The table with the peer helper at `peer_bin`, `madcawl-mcp` looked

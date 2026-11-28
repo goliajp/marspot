@@ -65,6 +65,10 @@ pub(super) fn spawn(cfg: &Config, lfd: RawFd) -> io::Result<i32> {
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
+    if cfg.isolate {
+        // a web pane's page opens only in a content process of its own
+        cmd.arg("--isolate");
+    }
     let limit = marspot_term::inherited_fds::close_limit();
     // SAFETY: dup2 and fcntl only, both async-signal-safe; the listener
     // is close-on-exec in the shell and becomes fd 3 without the flag

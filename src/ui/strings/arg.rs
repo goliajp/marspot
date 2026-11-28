@@ -65,4 +65,11 @@ pub enum Arg<'a> {
     ModelNowIs(&'a str),
     /// Over the focused pane: may this agent CLI be installed, there, taking that much.
     InstallAsk { cli: &'a str, place: &'a str, megabytes: u32 },
+    /// A web pane opening its page.
+    WebOpening(&'a str),
+    /// A web pane whose other side speaks no version this build does:
+    /// which side, its range when it said one, and ours.
+    WebVersion { side: &'a str, theirs: Option<(u32, u32)>, ours: (u32, u32) },
+    /// A web pane that could not show its page, and why.
+    WebFailed(&'a str),
 }

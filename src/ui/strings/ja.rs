@@ -262,6 +262,14 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
             write!(out, "全アカウント共通のClaude Codeのデフォルトモデルが確認なしで{to}に変更されたため、{back}に戻しました")
         }
         Arg::ModelNowIs(to) => write!(out, "全アカウント共通のClaude Codeのデフォルトモデルは{to}になりました"),
+        Arg::WebOpening(url) => write!(out, "{url} を開いています…"),
+        Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
+            write!(out, "madcawl の {side} はバージョン {a}–{b}、marspot は {c}–{d} に対応しています")
+        }
+        Arg::WebVersion { side, theirs: None, ours: (c, d) } => {
+            write!(out, "madcawl の {side} は marspot が対応するバージョン {c}–{d} より古いです")
+        }
+        Arg::WebFailed(why) => write!(out, "ページを表示できません：{why}"),
         Arg::InstallAsk { cli, place, megabytes } => write!(
             out,
             "{cli}を{place}にインストールしますか？配布元からダウンロードし、約{megabytes} MBを使います。\
