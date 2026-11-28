@@ -27,7 +27,7 @@ const DRAWS: &[&str] = &[
 ];
 
 /// The controls and frames a tree's nodes are painted by.
-const PRESETS: &[&str] = &["controls.rs", "panel_chrome.rs", "context_menu_view.rs"];
+const PRESETS: &[&str] = &["controls.rs", "panel_chrome.rs", "context_menu_paint.rs"];
 
 /// Content that is a drawing: the usage panel's timeline.
 const DRAWINGS: &[&str] = &["cc_usage_paint.rs"];

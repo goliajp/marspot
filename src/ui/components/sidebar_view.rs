@@ -19,43 +19,10 @@ use crate::ui::SESSION_COUNT_HARD_CAP;
 use golia_ui_core::{Action, Length, Ui, WidgetId, WidgetState};
 use marspot_term::layout::Rect;
 use marspot_term::render::SidebarTree;
-use marspot_term::session::SessionState;
 
-/// `data[0]` of a row: it is the pane in use.
-const SELECTED: u32 = 1;
-/// `data[0]` of anything: the pointer is not to light it, because a
-/// panel or a menu lies over the window.
-const QUIET: u32 = 2;
-/// `data[0]` of the add button: no more panes can be added.
-const FULL: u32 = 4;
-/// `data[0]` of a row: its pane is not the last, so it can be closed.
-const CAN_CLOSE: u32 = 8;
-/// `data[0]` of a row, from this bit up: its session's state.
-const STATE_SHIFT: u32 = 4;
-/// `data[1]` of a row: its low 16 bits are the pane's code.
-const HAS_CODE: u32 = 1 << 16;
-/// `data[1]` of a row: its pane is in no window.
-const HOLLOW: u32 = 1 << 17;
-/// `data[1]` of a row, from this bit up: where it sits in the tree.
-const TREE_SHIFT: u32 = 18;
-
-fn tree_bits(t: SidebarTree) -> u32 {
-    match t {
-        SidebarTree::Top => 0,
-        SidebarTree::Child => 1,
-        SidebarTree::LastChild => 2,
-        SidebarTree::Parent => 3,
-    }
-}
-
-fn tree_of(bits: u32) -> SidebarTree {
-    match bits & 3 {
-        0 => SidebarTree::Top,
-        1 => SidebarTree::Child,
-        2 => SidebarTree::LastChild,
-        _ => SidebarTree::Parent,
-    }
-}
+#[path = "sidebar_bits.rs"]
+mod bits;
+use bits::*;
 
 /// The actions: the add button's, and row `n`'s or its close button's
 /// with `arg: n`.
@@ -147,26 +114,6 @@ impl HitShape {
         self.measures = Some(f.hit_shape());
         self.closes.clear();
         self.closes.extend_from_slice(&f.layout.close_session_rects);
-    }
-}
-
-fn rect_bits(r: &Rect) -> [u64; 4] {
-    [r.x.to_bits(), r.y_top.to_bits(), r.w.to_bits(), r.h.to_bits()]
-}
-
-fn state_bits(s: SessionState) -> u32 {
-    match s {
-        SessionState::Active => 0,
-        SessionState::Idle => 1,
-        SessionState::Exited => 2,
-    }
-}
-
-fn state_of(bits: u32) -> SessionState {
-    match bits {
-        0 => SessionState::Active,
-        1 => SessionState::Idle,
-        _ => SessionState::Exited,
     }
 }
 
