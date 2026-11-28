@@ -305,6 +305,8 @@ MENU=(
   'Settings' 'ClosePanel'
   # focus: the second pane, round the end, back, the first
   'FocusPane(1)' 'NextPane' 'PrevPane' 'FocusPane(0)'
+  # the panes' shells leave no prompt marks: a jump moves nothing
+  'PrevPrompt' 'NextPrompt'
   'Paste' 'Copy' 'ToggleSidebar' 'ToggleSidebar'
   'NewPane' 'wait:6000' 'FocusPane(2)'
   # there is no fourth pane or later
@@ -361,6 +363,9 @@ grep $'\tMENU_COMMAND\t' "$APPLOG" | grep -Eqv $'\tdelivered=1(\t|$)' && fail "a
 echo "==> chosen with a key window: $(grep $'\tDEV_MENU_STEP\t' "$APPLOG" | grep -c $'\tkey_window=1') of $(grep -c $'\tDEV_MENU_STEP\t' "$APPLOG") (without one the key-window lookup is not exercised: a script's choice goes to the first window)"
 (( $(printf '%s\n' "$chosen" | sort -u | wc -l) == commands )) \
   || fail "chose $(printf '%s\n' "$chosen" | sort -u | wc -l | tr -d ' ') different commands; the menu bar has $commands"
+jumps="$(grep $'\tL3_PROMPT_JUMP\t' "$APPLOG" | grep -oE $'\t(back|found)=[0-9]+' | tr -d '\t' | paste -sd' ' -)"
+[[ "$jumps" == "back=1 found=0 back=0 found=0" ]] \
+  || fail "the prompt jumps reached the focused pane's session as [$jumps] -- want one back and one forward, neither finding a prompt"
 
 menu_events="$(command_events)"
 echo "==> command events from the menu, in order:"

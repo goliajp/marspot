@@ -9,7 +9,7 @@ use crate::boot_assembly_tests::Sandbox;
 use marspot::shell_proto::{HelperStrip, StripAgent, StripRow, StripState};
 
 /// What the shell says of a pane opened by `pane.open` that runs claude.
-fn plain(sid: u64) -> StripRow {
+pub(super) fn plain(sid: u64) -> StripRow {
     StripRow {
         agent: StripAgent::Claude,
         plain: true,
@@ -26,7 +26,7 @@ fn plain(sid: u64) -> StripRow {
 
 /// Let the view of `p` asked for in pane 0's place begin: `p` takes
 /// the size it was asked for, as a session does.
-fn sized_to_view(app: &mut CoreApp, p: &mut Session) {
+pub(super) fn sized_to_view(app: &mut CoreApp, p: &mut Session) {
     let c = app.windows[0].layout.cells[0];
     assert_eq!(p.resizes(&app.shadows[0]), [(c.cols, c.rows)], "sized to be viewed, as a helper is");
     p.shows(c.cols, c.rows, b"$ ");
@@ -36,7 +36,7 @@ fn sized_to_view(app: &mut CoreApp, p: &mut Session) {
 
 /// A window whose pane has one plain shadow pane, of the size
 /// `pane.open` gives, and no helpers.
-fn with_plain(sb: &Sandbox) -> (CoreApp, Session, Session) {
+pub(super) fn with_plain(sb: &Sandbox) -> (CoreApp, Session, Session) {
     let (mut app, s) = app(sb);
     let (pane, p) = Session::of(120, 40);
     app.pane_control.shadows.family.adopted(p.sid, s.sid);

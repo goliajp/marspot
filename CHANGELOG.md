@@ -4,6 +4,45 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.19.0
+
+- The settings panel chooses the terminal font family and size. The
+  change reaches every open window at once, without a restart. Only
+  monospaced faces already installed on the Mac are offered.
+- Cmd-Up and Cmd-Down jump to the previous and next command prompt in
+  a pane's history, for shells that mark their prompts (OSC 133). The
+  prompt you land on is highlighted for a moment.
+- Scrolling back through a pane while its program keeps printing no
+  longer makes the view jump on the next scroll step.
+- Before Marspot installs an agent CLI (Claude Code, Codex, Gemini or
+  Kimi) for the first time, it asks above the focused pane; answer with
+  Ctrl-Option-Y or Ctrl-Option-N. The settings panel keeps each answer,
+  and a no also stops Marspot's own updates of that CLI (Claude Code
+  and Kimi still update themselves).
+- Marspot no longer changes the default model of every Claude Code
+  account. Each Claude Code session it starts or restarts is given its
+  model explicitly, `/model` typed into a Claude Code prompt is sent
+  only after you confirm it with y, and a program cannot send `/model`
+  into a Claude Code prompt.
+- The accounts panel lists the usage resets Marspot can read (Codex
+  reset credits today), and a reset is claimed from there with two
+  presses.
+- Usage readings, account balancing and account switches rely only on
+  what Marspot collects itself; no outside service is needed.
+- A pane can open in a window of its own (`marspot-peer pane open
+  --new-window`, or `new_window` in the PaneOpen tool).
+- `marspot-peer send --from NAME` lets a program outside any agent
+  session message a pane, which sees it as from `external:NAME`.
+- Quitting Marspot and opening it again right away no longer leaves a
+  stray icon in the Dock.
+- The +N in a pane's title and the helper rows under it count the same
+  panes, and with the helper rows turned off the +N updates as soon as
+  a pane's helpers change, even while the pane is idle.
+- A working agent's badge ends with a static mark instead of a spinner
+  that stopped moving.
+- Output that arrives in small pieces while the Mac is busy costs less
+  to draw.
+
 ## 0.18.0
 
 - The helper rows under a Claude Code pane take only the rows they

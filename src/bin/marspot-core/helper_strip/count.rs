@@ -16,6 +16,24 @@ impl CoreApp {
         let host = self.strips.hosts.get(&sid);
         record.rows.iter().filter(|r| !r.gone && host.is_none_or(|h| h.shows(r.sid))).count() as u32
     }
+
+    /// Take what the shell said of a pane's helpers.  The title's `+N`
+    /// is drawn from it, so a window whose count changed wants a frame:
+    /// with the strip turned off nothing else would draw one.
+    pub(in super::super) fn take_helper_strip(&mut self, m: marspot::shell_proto::HelperStrip) {
+        let (root, all_told) = (m.root_sid, m.is_all_told());
+        let before = self.shadows_counted(root);
+        self.pane_control.strips.take(m);
+        if all_told {
+            for w in &mut self.windows {
+                w.needs_render = true;
+            }
+        } else if self.shadows_counted(root) != before
+            && let Some((wi, _)) = self.find_window_pane_by_sid(root)
+        {
+            win!(self, wi).needs_render = true;
+        }
+    }
 }
 
 /// Every pane the title of `root` counts is a row the strip reaches by
@@ -35,3 +53,7 @@ pub(super) fn assert_counted_as_reached(app: &CoreApp, root: u64) {
 #[cfg(test)]
 #[path = "plain_tests.rs"]
 mod plain_tests;
+
+#[cfg(test)]
+#[path = "mark_tests.rs"]
+mod mark_tests;
