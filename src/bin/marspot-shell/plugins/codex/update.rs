@@ -63,10 +63,6 @@ fn daemon_selected(home: &Path) -> Option<Release> {
     selected(&home.join("packages"), "app-server-daemon")
 }
 
-/// The command codex itself prints when `codex update` cannot tell how
-/// it was installed, which is the case on a machine whose packages
-/// directory is shared between profiles.
-const INSTALLER: &str = "https://chatgpt.com/codex/install.sh";
 /// How often the two packages are compared: two link reads.
 const CHECK_EVERY: Duration = Duration::from_secs(60);
 /// After a failed install, how long before the same release is tried
@@ -186,18 +182,8 @@ impl Follower {
 pub(crate) fn install(home: &Path) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("marspot-codex-install-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let script = dir.join("install.sh");
     let r = (|| {
-        let fetched = Command::new("/usr/bin/curl")
-            .args(["-fsSL", "--max-time", "120", "-o"])
-            .arg(&script)
-            .arg(INSTALLER)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("curl: {e}"))?;
-        if !fetched.status.success() {
-            return Err(format!("curl {INSTALLER}: {} {}", fetched.status, tail(&fetched.stderr)));
-        }
+        let script = super::installer::script(&dir)?;
         let ran = Command::new("/bin/sh")
             .arg(&script)
             .env("CODEX_NON_INTERACTIVE", "1")
