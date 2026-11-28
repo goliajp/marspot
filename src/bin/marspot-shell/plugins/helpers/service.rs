@@ -75,7 +75,11 @@ impl Service {
         flags.extend(launch::tool_flags(a.agent, mode, &account.home));
         let script = launch::run_script(a.agent, account, a.model.as_deref(), &flags, resume, &task_file)?;
         std::fs::write(&task_file, launch::task_text(parent, cwd, a.budget_minutes, &result, &a.task, launch::by_result(caller, a.agent, mode))).map_err(internal)?;
-        std::fs::write(dir.join("run.sh"), script).map_err(internal)
+        std::fs::write(dir.join("run.sh"), &script).map_err(internal)?;
+        if let Some(l) = script.lines().nth(1).and_then(|line| crate::plugins::launches::Launch::of_line("helper", sid, line)) {
+            crate::plugins::launches::announce(&l);
+        }
+        Ok(())
     }
 
     /// Run the script in the pane.

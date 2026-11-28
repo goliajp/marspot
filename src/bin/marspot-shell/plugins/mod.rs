@@ -51,6 +51,7 @@ pub mod codex;
 pub mod gemini;
 pub mod helpers;
 pub mod kimi;
+pub(crate) mod launches;
 pub mod peerbus;
 pub mod usage;
 pub mod handoff;
@@ -66,9 +67,8 @@ pub(crate) mod zombie;
 #[cfg(test)]
 mod agent_front_tests;
 pub use ticks::TickDue;
-// F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2 (marspot-core)
-// can use the same libproc walker for the process-tree panel.  Re-export under
-// the old path keeps L1 plugin code unchanged (`crate::plugins::pidtree::…`).
+// pidtree lives in the marspot lib so L2 shares the libproc walker; re-exported
+// under the old path so L1 plugin code keeps `crate::plugins::pidtree::…`
 pub use marspot::pidtree;
 
 /// Packed `MAJOR:MINOR` u32.  v0.1.0 ⇒ `0x0001_0001` (MAJOR=1, MINOR=1).

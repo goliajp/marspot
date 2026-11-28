@@ -98,6 +98,8 @@ pub struct CodexPlugin {
     focused: Option<u64>,
     switches: switch::Switches,
     alloc: alloc_wire::AllocPass,
+    /// The codex processes seen in front of panes, for `launch.observed`.
+    seen: crate::plugins::launches::Seen,
 }
 
 impl CodexPlugin {
@@ -113,6 +115,7 @@ impl CodexPlugin {
             focused: None,
             switches: Default::default(),
             alloc: Default::default(),
+            seen: Default::default(),
         }
     }
 }
@@ -255,7 +258,9 @@ impl Plugin for CodexPlugin {
         if let Some(home) = codex_home() {
             self.follower.tick(&home);
         }
+        let live = |sid: u64| obs.sessions.iter().any(|s| s.entry.id == sid);
         if self.last_badge.is_empty() && !obs.live().any(|s| pane_codex(s).is_some()) {
+            self.seen.end_pass(live);
             self.refresh_stale(host, &[]);
             return;
         }
@@ -311,6 +316,8 @@ impl Plugin for CodexPlugin {
                 alloc_seen.push(alloc_wire::Seen::new(sid, p, &pane_home, cwd.clone(), &self.rollouts, model.clone(), profile));
             }
             if let Some(id) = codex_id {
+                let account = crate::plugins::launches::account_of_home(codex.and_then(|p| self.env.value(&p.row, "CODEX_HOME")).as_deref());
+                self.seen.saw(sid, "codex", id, &account);
                 self.panes.insert(
                     sid,
                     PaneCodex {
@@ -325,6 +332,7 @@ impl Plugin for CodexPlugin {
             }
             declare::declare(host, &mut self.last_badge, sid, has_codex, &text);
         }
+        self.seen.end_pass(live);
         self.refresh_stale(host, &codex_panes);
         self.alloc.run(host, &alloc_seen, &obs);
         super::helpers::used::look_at_codex();
