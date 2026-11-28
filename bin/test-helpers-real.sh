@@ -48,6 +48,8 @@ while (($#)); do
   esac
 done
 ((MEMORY_ONLY)) && CONTAINER=0
+source "$(cd "$(dirname "$0")" && pwd)/_real-agent-guard.sh"
+refuse_real_agent_on_runner "real agent CLIs with real accounts"
 
 if [[ -n "${MARSPOT_STATE_DIR:-}" ]]; then
   echo "MARSPOT_STATE_DIR is set: this script is for the installed app" >&2

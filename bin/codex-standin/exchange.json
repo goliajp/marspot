@@ -1,0 +1,616 @@
+{
+ "rows": 40,
+ "cols": 120,
+ "prompt": "say hello to the recording",
+ "exit": 0,
+ "segments": [
+  {
+   "name": "start",
+   "out": [
+    [
+     1.874,
+     "\u001b[?2004h"
+    ],
+    [
+     1.875,
+     "\u001b[>4;0m\u001b[>7u\u001b[?1004h"
+    ],
+    [
+     1.875,
+     "\u001b[?u\u001b[?1007$p\u001b[c\u001b[6n\u001b]10;?\u001b\\\u001b]11;?\u001b\\"
+    ],
+    [
+     2.127,
+     "\u001b[?2026h\u001b[?25l\u001b[?1049h\u001b[>4;0m\u001b[>7u\u001b[?1007l\u001b[?1000h\u001b[?1002h\u001b[?1003h"
+    ],
+    [
+     2.127,
+     "\u001b[?1006h\u001b[?25l"
+    ],
+    [
+     2.127,
+     "\u001b[1;1H"
+    ],
+    [
+     2.127,
+     "\u001b[J"
+    ],
+    [
+     2.131,
+     "\u001b[?2026h\u001b[?25l"
+    ],
+    [
+     2.131,
+     "\u001b[1;2H\u001b[0m\u001b[49m\u001b[K\u001b[2;29H\u001b[0m\u001b[49m\u001b[K\u001b[3;13H\u001b[0m\u001b[49m\u001b[K\u001b[4;2H\u001b[0m\u001b[49m\u001b[K\u001b[5;2H\u001b[0m\u001b[49m\u001b[K\u001b[6;2H\u001b[0m\u001b[49m\u001b[K\u001b[7;2H\u001b[0m\u001b[49m\u001b[K\u001b[8;2H\u001b[0m\u001b[49m\u001b[K\u001b[9;2H\u001b[0m\u001b[49m\u001b[K\u001b[10;2H\u001b[0m\u001b[49m\u001b[K\u001b[11;2H\u001b[0m\u001b[49m\u001b[K\u001b[12;62H\u001b[0m\u001b[49m\u001b[K\u001b[13;71H\u001b[0m\u001b[49m\u001b[K\u001b[14;73H\u001b[0m\u001b[49m\u001b[K\u001b[15;74H\u001b[0m\u001b[49m\u001b[K\u001b[16;75H\u001b[0m\u001b[49m\u001b[K\u001b[17;75H\u001b[0m\u001b[49m\u001b[K\u001b[18;76H\u001b[0m\u001b[49m\u001b[K\u001b[19;77H\u001b[0m\u001b[49m\u001b[K\u001b[20;77H\u001b[0m\u001b[49m\u001b[K\u001b[21;78H\u001b[0m\u001b[49m\u001b[K\u001b[22;77H\u001b[0m\u001b[49m\u001b[K\u001b[23;77H\u001b[0m\u001b[49m\u001b[K\u001b[24;76H\u001b[0m\u001b[49m\u001b[K\u001b[25;74H\u001b[0m\u001b[49m\u001b[K\u001b[26;71H\u001b[0m\u001b[49m\u001b[K\u001b[27;70H\u001b[0m\u001b[49m\u001b[K\u001b[28;68H\u001b[0m\u001b[49m\u001b[K\u001b[29;2H\u001b[0m\u001b[49m\u001b[K\u001b[30;2H\u001b[0m\u001b[49m\u001b[K\u001b[31;2H\u001b[0m\u001b[49m\u001b[K\u001b[32;2H\u001b[0m\u001b[49m\u001b[K\u001b[33;2H\u001b[0m\u001b[49m\u001b[K\u001b[34;2H\u001b[0m\u001b[49m\u001b[K\u001b[35;2H\u001b[0m\u001b[49m\u001b[K\u001b[36;2H\u001b[0m\u001b[49m\u001b[K\u001b[37;2H\u001b[0m\u001b[49m\u001b[K\u001b[38;27H\u001b[0m\u001b[49m\u001b[K\u001b[39;2H\u001b[0m\u001b[49m\u001b[K\u001b[40;18H\u001b[0m\u001b[49m\u001b[K\u001b[1;1H \u001b[2;1H  \u001b[38;2;99;168;248;49m>_ \u001b[1m\u001b[39;49mOpenAI Codex\u001b[22m\u001b[2m (v{VERSION})\u001b[3;1H\u001b[22m     \u001b[2mloading\u001b[4;1H\u001b[22m \u001b[5;1H \u001b[6;1H \u001b[7;1H \u001b[8;1H \u001b[9;1H \u001b[10;1H \u001b[11;1H \u001b[12;1H                                                       \u001b[2m⣀⣤⣤⣤"
+    ],
+    [
+     2.131,
+     "⣀⣀\u001b[13;1H\u001b[22m                                                    \u001b[2m⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤⣤⣤⣤⡀\u001b[14;1H\u001b[22m                                                  \u001b[2m⢀⣾⣿⣿⠿⠋⠉⠉⢉⣭⣿⣿⣿⣿⣿⠿⣿⣿⣿⣿⣷⣄\u001b[15;1H\u001b[22m                                                 \u001b[2m⣀⣾⣿⣿⠃\u001b[22m \u001b[2m⣀⣴⣾⣿⣿⡿⠟⠋\u001b[22m \u001b[2m⣀⡀\u001b[22m \u001b[2m⠈⠙⢿⣿⣿⣧\u001b[16;1H\u001b[22m                                              \u001b[2m⣀⣶⣿⣿⣿⣿⡇\u001b[22m \u001b[2m⢸⣿⣿⡿⠛⠉⢀⣠⣴⣿⣿⣿⣷⣦⣀⠈⢻⣿⣿⡇\u001b[17;1H\u001b[22m                                             \u001b[2m⣰⣿⣿⡿⢿⣿⣿⡇\u001b[22m \u001b[2m⢸⣿⣿⢀⣤⣶⣿⣿⣿⠟⠛⠻⣿⣿⣿⣿⣮⣿⣿⡷\u001b[18;1H\u001b[22m                                            \u001b[2m⢰⣿⣿⡟⠁⢸⣿⣿⡇\u001b[22m \u001b[2m⢸⣿⣿⣿⣿⠿⠿⣿⣿⣿⣦⣄⡀⠈⠛⠿⣿⣿⣿⣧⡀\u001b[19;1H\u001b[22m                                            \u001b[2m⣾⣿⣿⠃\u001b[22m \u001b[2m⢸⣿⣿⡇\u001b[22m \u001b[2m⢸⣿⣿⠋⠁\u001b[22m  \u001b[2m⠈⠙"
+    ],
+    [
+     2.131,
+     "⢻⣿⣿⣿⣶⣤⡀\u001b[22m \u001b[2m⠹⢿⣿⣷⡄\u001b[20;1H\u001b[22m                                            \u001b[2m⢸⣿⣿⣇\u001b[22m \u001b[2m⠸⣿⣿⣷⣦⣼⣿⣿\u001b[22m      \u001b[2m⢸⣿⣿⠻⢿⣿⣿⡇\u001b[22m \u001b[2m⠘⣿⣿⣿\u001b[21;1H\u001b[22m                                            \u001b[2m⠈⢿⣿⣿⣦⡀⠈⠛⠿⣿⣿⣿⣿⣄⡀\u001b[22m  \u001b[2m⢀⣠⣼⣿⣿\u001b[22m  \u001b[2m⣿⣿⡇\u001b[22m  \u001b[2m⣿⣿⣿⠇\u001b[22;1H\u001b[22m                                              \u001b[2m⢻⣿⣿⣿⣷⣦⣀⠈⠙⠻⣿⣿⣿⣶⣶⣿⣿⣿⣿⣿\u001b[22m  \u001b[2m⣿⣿⡇\u001b[22m \u001b[2m⣠⣿⣿⣿\u001b[23;1H\u001b[22m                                              \u001b[2m⢸⣿⣿⡿⢿⣿⣿⣿⣦⣠⣴⣿⣿⣿⡿⠟⠋⢸⣿⣿\u001b[22m  \u001b[2m⣿⣿⣷⣴⣿⣿⣿⠃\u001b[24;1H\u001b[22m                                              \u001b[2m⠘⣿⣿⣷\u001b[22m \u001b[2m⠈⠛⢿⣿⣿⣿⠿⠋⠉\u001b[22m \u001b[2m⣠⣴⣿⣿⣿\u001b[22m  \u001b[2m⣿⣿⣿⣿⣿⠟⠁\u001b[25;1H\u001b[22m                                               \u001b[2m⠻⣿⣿⣿⣤⣀\u001b[22m \u001b[2m⠈⠉\u001b[22m \u001b[2m⢀⣤⣶⣿⣿⣿⠿⠟⠁\u001b[22m \u001b[2m⣰"
+    ],
+    [
+     2.131,
+     "⣿⣿⡟⠋⠁\u001b[26;1H\u001b[22m                                                \u001b[2m⠈⠿⣿⣿⣿⣿⣶⣾⣿⣿⣿⣿⠟⠋⠁\u001b[22m  \u001b[2m⣠⣼⣿⣿⡟\u001b[27;1H\u001b[22m                                                   \u001b[2m⠙⠛⠛⠛⠻⠛⢿⣿⣿⣿⣿⣷⣾⣿⣿⣿⡿⠏\u001b[28;1H\u001b[22m                                                          \u001b[2m⠈⠙⠛⠿⠿⠿⠿⠛⠉\u001b[29;1H\u001b[22m \u001b[30;1H \u001b[31;1H \u001b[32;1H \u001b[33;1H \u001b[34;1H \u001b[35;1H \u001b[36;1H \u001b[37;1H \u001b[38;1H\u001b[1m›\u001b[22m \u001b[2mAsk Codex to do anything\u001b[39;1H\u001b[22m \u001b[40;1H  \u001b[1m?\u001b[22m for shortcuts\u001b[39m\u001b[49m\u001b[0m\u001b[1;1H\u001b[0 q\u001b[1;1H \u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h"
+    ],
+    [
+     2.131,
+     "\u001b[?2026l"
+    ],
+    [
+     2.131,
+     "\u001b[?2026l"
+    ],
+    [
+     2.133,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.136,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.138,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.14,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.143,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.145,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.149,
+     "\u001b[?2026h\u001b[?25l\u001b[3;6H\u001b[2m{CWD}\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.151,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     2.154,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.916,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h"
+    ],
+    [
+     4.916,
+     "\u001b[?2026l"
+    ],
+    [
+     4.919,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h"
+    ],
+    [
+     4.919,
+     "\u001b[?2026l"
+    ],
+    [
+     4.926,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.928,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.931,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h"
+    ],
+    [
+     4.931,
+     "\u001b[?2026l"
+    ],
+    [
+     4.934,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.935,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.937,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.939,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.944,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.945,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.948,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.952,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.956,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.962,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.965,
+     "\u001b]0;proj\u0007"
+    ],
+    [
+     4.967,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[38;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.968,
+     "\u001b]7501;state=idle:app=codex\u001b\\"
+    ],
+    [
+     4.97,
+     "\u001b[?2026h\u001b[?25l"
+    ],
+    [
+     4.97,
+     "\u001b[38;2H\u001b[0m\u001b[49m\u001b[K\u001b[4;1H\u001b[2m  permissions: \u001b[22m\u001b[1m\u001b[38;5;5;49mYOLO mode\u001b[37;1H\u001b[39;49m›\u001b[37;3H\u001b[22m\u001b[2mAsk Codex to do anything\u001b[38;1H\u001b[22m \u001b[39;3H\u001b[38;2;246;226;183;49mmock-model default\u001b[39;22H\u001b[39;49m·\u001b[39;24H\u001b[38;2;171;223;167;49m{CWD}\u001b[40;3H\u001b[1m\u001b[39;49m←\u001b[40;9H\u001b[22magen\u001b[40;14Hs · \u001b[1m?\u001b[40;20H\u001b[22mfor\u001b[40;24Hshortcuts\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h"
+    ],
+    [
+     4.97,
+     "\u001b[?2026l"
+    ],
+    [
+     4.976,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.982,
+     "\u001b]0;proj | {THREAD_HEAD}-a911-7342-b60c-f0e83...\u0007"
+    ],
+    [
+     4.987,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     4.988,
+     "\u001b]0;⠋ proj | {THREAD_HEAD}-a911-7342-b60c-f0e83...\u0007"
+    ],
+    [
+     4.988,
+     "\u001b]0;proj | {THREAD_HEAD}-a911-7342-b60c-f0e83...\u0007"
+    ],
+    [
+     4.995,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ]
+   ]
+  },
+  {
+   "name": "prompt",
+   "out": [
+    [
+     8.371,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l\u001b[?2026h\u001b[?25l\u001b[12;2H\u001b[0m\u001b[49m\u001b[K\u001b[13;2H\u001b[0m\u001b[49m\u001b[K\u001b[14;2H\u001b[0m\u001b[49m\u001b[K\u001b[15;2H\u001b[0m\u001b[49m\u001b[K\u001b[16;2H\u001b[0m\u001b[49m\u001b[K\u001b[17;2H\u001b[0m\u001b[49m\u001b[K\u001b[18;2H\u001b[0m\u001b[49m\u001b[K\u001b[19;2H\u001b[0m\u001b[49m\u001b[K\u001b[20;2H\u001b[0m\u001b[49m\u001b[K\u001b[21;2H\u001b[0m\u001b[49m\u001b[K\u001b[22;2H\u001b[0m\u001b[49m\u001b[K\u001b[23;2H\u001b[0m\u001b[49m\u001b[K\u001b[24;2H\u001b[0m\u001b[49m\u001b[K\u001b[25;2H\u001b[0m\u001b[49m\u001b[K\u001b[26;2H\u001b[0m\u001b[49m\u001b[K\u001b[27;2H\u001b[0m\u001b[49m\u001b[K\u001b[28;2H\u001b[0m\u001b[49m\u001b[K\u001b[40;2H\u001b[0m\u001b[49m\u001b[K\u001b[37;3Hsay hello to the recording\u001b[39m\u001b[49m\u001b[0m\u001b[37;29H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     8.371,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;29H\u001b[?25h"
+    ],
+    [
+     8.371,
+     "\u001b[?2026l"
+    ],
+    [
+     8.371,
+     "\u001b]7501;state=working:app=codex\u001b\\"
+    ],
+    [
+     8.372,
+     "\u001b[?2026h\u001b[?25l"
+    ],
+    [
+     8.372,
+     "\u001b[6;2H\u001b[0m\u001b[48;2;68;68;68m\u001b[K\u001b[7;29H\u001b[0m\u001b[48;2;68;68;68m\u001b[K\u001b[8;2H\u001b[0m\u001b[48;2;68;68;68m\u001b[K\u001b[37;27H\u001b[0m\u001b[49m\u001b[K\u001b[6;1H\u001b[38;2;238;238;238;48;2;68;68;68m \u001b[7;1H\u001b[1m\u001b[2m› \u001b[22msay hello to the recording\u001b[8;1H \u001b[37;3H\u001b[2m\u001b[39;49mAsk Codex to do anything\u001b[40;3H\u001b[22m\u001b[1m←\u001b[40;5H\u001b[22mfor\u001b[40;9Hagents\u001b[40;16H·\u001b[40;18H\u001b[1m?\u001b[40;20H\u001b[22mfor\u001b[40;24Hshortcuts\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h"
+    ],
+    [
+     8.372,
+     "\u001b[?2026l"
+    ],
+    [
+     8.377,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     8.383,
+     "\u001b[?2026h\u001b[?25l\u001b[40;96H⚠\u001b[40;98H\u001b[38;2;196;167;103;49m1 warning\u001b[40;108H\u001b[39;49m·\u001b[40;110H\u001b[1mf2\u001b[40;113H\u001b[22mto\u001b[40;116Hview\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     8.389,
+     "\u001b]0;⠼ proj | {THREAD_HEAD}-a911-7342-b60c-f0e83...\u0007"
+    ],
+    [
+     8.393,
+     "\u001b[?2026h\u001b[?25l\u001b[34;1H\u001b[1m\u001b[38;2;128;128;128;49m•\u001b[34;3H\u001b[22m\u001b[2m\u001b[39;49mWorking\u001b[34;11H(0s • \u001b[22m\u001b[1mesc\u001b[22m\u001b[2m to interrupt)\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H"
+    ],
+    [
+     8.393,
+     "\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     8.395,
+     "\u001b]0;⠼ say hello to the recording | proj | {THREAD_HEAD}-a911-7342-b60c-f0e83...\u0007"
+    ],
+    [
+     8.403,
+     "\u001b[?2026h\u001b[?25l\u001b[34;2H\u001b[0m\u001b[49m\u001b[K\u001b[10;1H\u001b[2m• \u001b[22mno\u001b[10;6Hmarspot\u001b[10;14Htools\u001b[10;20Hon\u001b[10;23Hoffer\u001b[34;1H \u001b[39;52H·\u001b[39;54H\u001b[38;2;249;226;175;49msay hello to the recording\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     8.404,
+     "\u001b]0;say hello to the recording | proj | {THREAD_HEAD}-a911-7342-b60c-f0e83...\u0007"
+    ],
+    [
+     8.413,
+     "\u001b]7501;state=done:app=codex\u001b\\"
+    ],
+    [
+     8.413,
+     "\u001b[?2026h\u001b[?25l\u001b[12;1H\u001b[2m  Worked for <1s • 20:26                                                                                                \u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h"
+    ],
+    [
+     8.413,
+     "\u001b[?2026l"
+    ],
+    [
+     8.432,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"
+    ]
+   ],
+   "typed": "say hello to the recording"
+  },
+  {
+   "name": "quit",
+   "out": [
+    [
+     12.758,
+     "\u001b[?2026h\u001b[39m\u001b[49m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l\u001b]7501;state=idle:app=codex\u001b\\\u001b[?2026h\u001b[?25l\u001b[37;8H\u001b[0m\u001b[49m\u001b[K\u001b[40;2H\u001b[0m\u001b[49m\u001b[K\u001b[35;1H\u001b[7m\u001b[1m› /quit  \u001b[22mexit Codex\u001b[1m                                                                                                     \u001b[37;3H\u001b[27m\u001b[22m/quit\u001b[39m\u001b[49m\u001b[0m\u001b[37;8H\u001b[?25h\u001b[?2026l"
+    ],
+    [
+     12.758,
+     "\u001b[?2026h\u001b[?25l\u001b[35;2H\u001b[0m\u001b[49m\u001b[K\u001b[37;2H\u001b[0m\u001b[49m\u001b[K\u001b[39;2H\u001b[0m\u001b[49m\u001b[K\u001b[35;1H \u001b[37;1H \u001b[38;1H\u001b[2m›\u001b[38;3HShutting down...\u001b[40;3H\u001b[22m\u001b[38;2;246;226;183;49mmock-model default\u001b[40;22H\u001b[39;49m·\u001b[40;24H\u001b[38;2;171;223;167;49m{CWD}\u001b[40;52H\u001b[39;49m·\u001b[40;54H\u001b[38;2;249;226;175;49msay hello to the recording\u001b[39m\u001b[49m\u001b[0m\u001b[?2026l"
+    ],
+    [
+     12.758,
+     "\u001b[1;1H\u001b[J"
+    ],
+    [
+     12.758,
+     "\u001b]0;\u0007"
+    ],
+    [
+     12.759,
+     "\u001b[?1006l\u001b[?1015l\u001b[?1003l\u001b[?1002l\u001b[?1000l\u001b[<1u\u001b[?1007l\u001b[?1049l\u001b[<1u\u001b[<u\u001b[>4;0m\u001b[?2004l\u001b[?1004l"
+    ],
+    [
+     12.759,
+     "\u001b[0 q\u001b[?25h\u001b]7501;state=clear\u001b\\"
+    ],
+    [
+     12.759,
+     "\u001b[0 q\u001b[?25h"
+    ],
+    [
+     12.97,
+     "Disconnected from this task. Any running work continues.\r\nTo reconnect, run:\r\n  \u001b[36mcodex resume {THREAD}\u001b[39m\r\nStop the current turn: run \u001b[36mcodex agents\u001b[39m, select this task, and press x.\r\n"
+    ]
+   ],
+   "typed": "/quit"
+  }
+ ],
+ "probes": [
+  {
+   "tag": "after start",
+   "thread/loaded/list": {
+    "id": 2,
+    "result": {
+     "data": [
+      "{THREAD}"
+     ],
+     "nextCursor": null
+    }
+   },
+   "thread/read": {
+    "id": 3,
+    "result": {
+     "thread": {
+      "id": "{THREAD}",
+      "environments": [
+       {
+        "environmentId": "local",
+        "cwd": "{CWD}",
+        "runtimeWorkspaceRoots": [
+         "{CWD}"
+        ]
+       }
+      ],
+      "extra": null,
+      "sessionId": "{THREAD}",
+      "forkedFromId": null,
+      "attachedToThreadId": null,
+      "parentThreadId": null,
+      "preview": "",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "mock",
+      "model": "mock-model",
+      "reasoningEffort": null,
+      "createdAt": 1795865163,
+      "updatedAt": 1795865163,
+      "recencyAt": 1795865163,
+      "status": {
+       "type": "idle"
+      },
+      "path": "{CODEX_HOME}/sessions/2026/11/28/rollout-2026-11-28T20-25-59-{THREAD}.jsonl",
+      "cwd": "{CWD}",
+      "cliVersion": "{VERSION}",
+      "originator": "codex-tui",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": "user",
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": null,
+      "daybreakEnabled": null,
+      "turns": []
+     },
+     "readState": null
+    }
+   },
+   "thread/resume": {
+    "error": {
+     "code": -32600,
+     "message": "no rollout found for thread id {THREAD}"
+    },
+    "id": 4
+   },
+   "thread/turns/list": {
+    "error": {
+     "code": -32600,
+     "message": "thread {THREAD} is not materialized yet; thread/turns/list is unavailable before first user message"
+    },
+    "id": 5
+   }
+  },
+  {
+   "tag": "after the turn",
+   "thread/loaded/list": {
+    "id": 2,
+    "result": {
+     "data": [
+      "{THREAD}",
+      "{THREAD_HEAD}-b67b-7711-8005-0533f1c86450"
+     ],
+     "nextCursor": null
+    }
+   },
+   "thread/read": {
+    "id": 3,
+    "result": {
+     "thread": {
+      "id": "{THREAD}",
+      "environments": [
+       {
+        "environmentId": "local",
+        "cwd": "{CWD}",
+        "runtimeWorkspaceRoots": [
+         "{CWD}"
+        ]
+       }
+      ],
+      "extra": null,
+      "sessionId": "{THREAD}",
+      "forkedFromId": null,
+      "attachedToThreadId": null,
+      "parentThreadId": null,
+      "preview": "say hello to the recording",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "mock",
+      "model": "mock-model",
+      "reasoningEffort": null,
+      "createdAt": 1795865159,
+      "updatedAt": 1795865163,
+      "recencyAt": 1795865163,
+      "status": {
+       "type": "idle"
+      },
+      "path": "{CODEX_HOME}/sessions/2026/11/28/rollout-2026-11-28T20-25-59-{THREAD}.jsonl",
+      "cwd": "{CWD}",
+      "cliVersion": "{VERSION}",
+      "originator": "codex-tui",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": "user",
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": "say hello to the recording",
+      "daybreakEnabled": null,
+      "turns": []
+     },
+     "readState": {
+      "firstUnread": null,
+      "revision": "e3c5cf21-b661-444a-8045-cb1b7df1caaf"
+     }
+    }
+   },
+   "thread/resume": {
+    "id": 4,
+    "result": {
+     "thread": {
+      "id": "{THREAD}",
+      "environments": [
+       {
+        "environmentId": "local",
+        "cwd": "{CWD}",
+        "runtimeWorkspaceRoots": [
+         "{CWD}"
+        ]
+       }
+      ],
+      "extra": null,
+      "sessionId": "{THREAD}",
+      "forkedFromId": null,
+      "attachedToThreadId": null,
+      "parentThreadId": null,
+      "preview": "say hello to the recording",
+      "ephemeral": false,
+      "section": null,
+      "sectionEnteredAt": null,
+      "projectId": null,
+      "historyMode": "paginated",
+      "modelProvider": "mock",
+      "model": "mock-model",
+      "reasoningEffort": null,
+      "createdAt": 1795865159,
+      "updatedAt": 1795865163,
+      "recencyAt": 1795865163,
+      "status": {
+       "type": "idle"
+      },
+      "path": "{CODEX_HOME}/sessions/2026/11/28/rollout-2026-11-28T20-25-59-{THREAD}.jsonl",
+      "cwd": "{CWD}",
+      "cliVersion": "{VERSION}",
+      "originator": "codex-tui",
+      "source": "vscode",
+      "canAcceptDirectInput": true,
+      "threadSource": "user",
+      "agentNickname": null,
+      "agentRole": null,
+      "gitInfo": null,
+      "name": "say hello to the recording",
+      "daybreakEnabled": null,
+      "turns": []
+     },
+     "model": "mock-model",
+     "modelProvider": "mock",
+     "serviceTier": null,
+     "disabledPluginIds": [],
+     "cwd": "{CWD}",
+     "runtimeWorkspaceRoots": [
+      "{CWD}"
+     ],
+     "instructionSources": [],
+     "approvalPolicy": "never",
+     "approvalsReviewer": "user",
+     "sandbox": {
+      "type": "dangerFullAccess"
+     },
+     "activePermissionProfile": null,
+     "reasoningEffort": null,
+     "collaborationMode": {
+      "mode": "default",
+      "settings": {
+       "model": "mock-model",
+       "reasoning_effort": null,
+       "developer_instructions": "# Collaboration Mode: Default\n\nYou are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.\n\nYour active mode changes only when new developer instructions with a different `<collaboration_mode>...</collaboration_mode>` change it; user requests or tool descriptions do not change mode by themselves. Known mode names are Default and Plan.\n\n## request_user_input availability\n\nUse the `request_user_input` tool only when it is listed in the available tools for this turn.\n\nIn Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions.\n\nUse the `request_user_input` tool only for optional questions where the answer would materially improve the quality of the work.\n\nIf `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.\n\nNever use the `request_user_input` tool for permission requests or permission-related escalations.\n\nIf explicit user input is required for another reason before progress can safely continue, do not use the `request_user_input` tool. Ask the user directly with one concise plain-text question instead. Never write a multiple choice question as a textual assistant message.\n"
+      }
+     },
+     "multiAgentMode": "explicitRequestOnly",
+     "initialTurnsPage": null,
+     "turnsBackwardsCursor": "{\"requestedThreadId\":\"{THREAD}\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
+     "itemsBackwardsCursor": "{\"requestedThreadId\":\"{THREAD}\",\"rolloutOrdinal\":9,\"includeAnchor\":true,\"scope\":{\"kind\":\"itemsByCreatedAtOrdinal\"}}"
+    }
+   },
+   "thread/turns/list": {
+    "id": 5,
+    "result": {
+     "data": [
+      {
+       "id": "{THREAD_HEAD}-b662-7151-92f9-4165a7a2c6b6",
+       "rootTurnId": "{THREAD_HEAD}-b662-7151-92f9-4165a7a2c6b6",
+       "items": [
+        {
+         "type": "userMessage",
+         "id": "{THREAD_HEAD}-b677-7b30-b229-d4f3cc56c51c",
+         "clientId": "d7c4511a-70e8-4693-ad64-83b5922aa8ea",
+         "content": [
+          {
+           "type": "text",
+           "text": "say hello to the recording",
+           "text_elements": []
+          }
+         ],
+         "startedAtMs": 1795865163383,
+         "completedAtMs": 1795865163383
+        },
+        {
+         "type": "agentMessage",
+         "moderation": null,
+         "id": "msg_2",
+         "text": "no marspot tools on offer",
+         "phase": null,
+         "memoryCitation": null,
+         "delivery": null,
+         "questions": null,
+         "startedAtMs": 1795865163388,
+         "completedAtMs": 1795865163388
+        }
+       ],
+       "itemsView": "summary",
+       "status": "completed",
+       "error": null,
+       "startedAt": 1795865163,
+       "completedAt": 1795865163,
+       "durationMs": 26
+      }
+     ],
+     "nextCursor": null,
+     "backwardsCursor": "{\"requestedThreadId\":\"{THREAD}\",\"rolloutOrdinal\":1,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}"
+    }
+   }
+  }
+ ]
+}

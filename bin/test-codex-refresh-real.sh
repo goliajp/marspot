@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 #
-# The refresh with a real codex: two released CLIs side by side in the
-# packaged layout, the real app-server, a turn run against a model
-# stand-in, and peerbus binding the pane to its thread from what the
-# daemon reports.  The pane started on the older release ends up on the
-# installed one, on the same thread, with the conversation still on it.
+# The refresh against a codex that does what a real one does: two
+# releases side by side in the packaged layout, a shared app-server
+# holding the threads, a turn run against a model stand-in, and peerbus
+# binding the pane to its thread from what the app-server reports.  The
+# pane started on the older release ends up on the installed one, on
+# the same thread, with the conversation still on it.
 #
-# test-codex-refresh.sh pins marspot's half with a stand-in; this one is
-# for the half that belongs to codex: that a thread survives its TUI
-# being stopped, that `codex resume <id>` from a newer CLI reattaches
-# it, and that the daemon's idle status is what peerbus publishes.
+# test-codex-refresh.sh pins marspot's half with a stand-in that has no
+# app-server; this one has the codex side too: a thread outlives its TUI
+# being stopped, `codex resume <id>` from the newer release reattaches
+# it, and the app-server's idle status is what peerbus publishes.  The
+# codex is the stand-in in bin/codex-standin (real agent CLIs never run
+# on a runner): it draws the screen recorded from codex 0.171.0 and
+# speaks the app-server protocol as far as marspot uses it.
 #
 # No account and no model: codex talks to `_peerbus_mock_model.py`.
 # Sandbox-only: MARSPOT_STATE_DIR and HOME are redirected.  Opens
@@ -18,12 +22,11 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+source "$ROOT/bin/_codex-standin.sh"
 
 OLD=0.163.0
-OLD_SHA256=b0344fc2e41f15e0071147e5869008047b8ff4bf2c4a8897975d3bae3f103b34
 NEW=0.164.0
-NEW_SHA256=dd99e9092270691a67bdde7be04ac283dea9da8e86cbde356c2cc851a79205fa
-TARGET=aarch64-apple-darwin
+TARGET=$CODEX_STANDIN_TARGET
 
 # short: codex puts unix sockets under $HOME/.codex, and a socket path
 # has to fit in 104 bytes
@@ -87,24 +90,6 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" || ! -x "$SESSION_BIN" || ! -x "$PEE
     && cargo build --release -p marspot-peer 2>&1 | tail -3 )
 fi
 
-# ── two codex releases, pinned ────────────────────────────────────
-fetch() { # version, sha256 → the unpacked package directory
-  local v=$1 sha=$2 dir="$HOME/.cache/marspot-e2e/codex-$1" got
-  if [[ ! -x "$dir/bin/codex" ]]; then
-    rm -rf "$dir"; mkdir -p "$dir"
-    curl -fsSL -o "$dir/codex.tar.gz" \
-      "https://github.com/openai/codex/releases/download/rust-v$v/codex-package-$TARGET.tar.gz" \
-      || { echo "download of codex $v failed" >&2; return 1; }
-    got="$(shasum -a 256 "$dir/codex.tar.gz" | cut -d' ' -f1)"
-    [[ "$got" == "$sha" ]] || { echo "codex $v archive digest $got, expected $sha" >&2; return 1; }
-    tar -xzf "$dir/codex.tar.gz" -C "$dir" && rm "$dir/codex.tar.gz"
-  fi
-  echo "$dir"
-}
-echo "==> codex $OLD and $NEW"
-OLD_PKG="$(fetch "$OLD" "$OLD_SHA256")" || exit 1
-NEW_PKG="$(fetch "$NEW" "$NEW_SHA256")" || exit 1
-
 # ── this test's own HOME, with both installed, the newer selected ─
 rm -rf "$SB"; mkdir -p "$SB/bin" "$SB/proj1" "$SB/proj2"
 cp "$PEER_BIN" "$SB/bin/marspot-peer"
@@ -115,9 +100,9 @@ for (( i = 0; i < 50; i++ )); do [[ -s "$SB/port" ]] && break; sleep 0.1; done
 
 export HOME="$SB/home"
 PKG="$HOME/.codex/packages/standalone"
-mkdir -p "$PKG/releases"
-cp -Rc "$OLD_PKG" "$PKG/releases/$OLD-$TARGET"
-cp -Rc "$NEW_PKG" "$PKG/releases/$NEW-$TARGET"
+echo "==> codex stand-ins $OLD and $NEW"
+codex_standin_release "$PKG" "$OLD" || exit 1
+codex_standin_release "$PKG" "$NEW" || exit 1
 ln -sfn "$PKG/releases/$NEW-$TARGET" "$PKG/current"
 cat > "$HOME/.codex/config.toml" <<EOF
 model = "mock-model"
@@ -248,4 +233,4 @@ grep -qE "refresh.held.*pane $OTHER:.*held: user_here" "$APPLOG" \
   || fail "pane $OTHER was not held back as the pane with the cursor"
 ok "pane $OTHER, which has the cursor, still runs $OLD"
 
-echo "PASS — a real codex pane on $OLD is moved to the installed $NEW on the same thread"
+echo "PASS — a codex pane on $OLD is moved to the installed $NEW on the same thread"
