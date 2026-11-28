@@ -394,6 +394,8 @@ pub(super) fn reclaim_op(
     let held = pty_op::Job::new();
     let mut op = pty_op::PtyOp::new("cc.reclaim")
             .hold_screen(true)
+            // what input refused while claude loads is told to wait for
+            .wake_bound(WAKE_WATCHDOG)
             // Same rule as the switch: the person's half-written
             // sentence travels, marspot's own words do not.
             .step(

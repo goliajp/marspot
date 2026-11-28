@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.888"  # input that cannot wake a pane says so, and a pane loading after a wake says when to try again
+shell   = "0.7.889"  # an idle wake bounds its loading by the wake watchdog for retry answers
 core    = "0.12.772"  # pane labels and sidebar rows move out of draw.rs and sidebar_view.rs
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX
