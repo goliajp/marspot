@@ -117,6 +117,8 @@ pub struct Placed {
     pub to: u8,
     pub before: f64,
     pub after: f64,
+    /// The account had week beyond its Fable-usable quota.
+    pub plain_only: bool,
 }
 
 impl Routing {
@@ -212,7 +214,7 @@ impl Routing {
             Class::Plain => r.plain -= u,
         }
         r.load += m.rate;
-        Some(Placed { to, before, after: r.left(m.class) })
+        Some(Placed { to, before, after: r.left(m.class), plain_only: r.plain_only })
     }
 
     /// The other agent a request that leaves it open goes to, or `None`

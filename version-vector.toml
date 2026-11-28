@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.910"  # an unmeasured switch costs exactly what it was charged before, by context
+shell   = "0.7.911"  # the planner's go-live ladder, from shadow to every pane, as a pure state machine
 core    = "0.12.800"  # the core tells the shell of a file drop or a mouse or wheel report into a pane, once a second per pane at most
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

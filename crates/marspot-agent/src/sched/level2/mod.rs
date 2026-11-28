@@ -28,6 +28,7 @@ mod finish;
 mod fit;
 mod grid;
 mod guard;
+pub mod ladder;
 pub mod limits;
 pub mod line;
 mod moves;

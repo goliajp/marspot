@@ -54,3 +54,13 @@ fn sched_exec_after_a_notice_switches_at_a_free_boundary_or_cancels_over_dear_wo
     assert_eq!(decide(&Watched { lost_work: 0.02, ..n }, &busy(over), &b), Would::Cancel);
     assert_eq!(Would::Switch(Kind::Drain).word(), "switch kind=drain");
 }
+
+#[test]
+fn sched_exec_a_record_replays_to_the_same_decision() {
+    let w = Watched { lost_work: 0.1 + 0.2, gain: 1.0 / 3.0, noticed_at: Some(77), ..watched() };
+    let b = Boundary { live: true, ..at(4 * H) };
+    let (w2, b2) = parse(&words(&w, &b)).unwrap();
+    assert_eq!((w2, b2), (w, b));
+    assert_eq!(decide(&w2, &b2, &Limits::FULL), decide(&w, &b, &Limits::FULL));
+    assert_eq!(parse("open=1"), None);
+}

@@ -115,6 +115,49 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     if b.at >= w.dead_at - NOTICE_S - wait_s { Would::Notify(Kind::Notice) } else { Would::Wait }
 }
 
+/// What a dry-run record keeps of the switch and the boundary, so the
+/// decision can be made again from the record alone.  Floats are written
+/// in their shortest form that reads back to the same bits.
+pub fn words(w: &Watched, b: &Boundary) -> String {
+    format!(
+        "open={} dead={} exempt={} clean={} long={} lost={} gain={} noticed={} at={} turn={} live={} user={} quiet={}",
+        w.open_at,
+        w.dead_at,
+        u8::from(w.exempt),
+        w.clean_per_h,
+        u8::from(w.long_background),
+        w.lost_work,
+        w.gain,
+        w.noticed_at.map_or("-".to_string(), |t| t.to_string()),
+        b.at,
+        u8::from(b.turn_running),
+        u8::from(b.live),
+        u8::from(b.user),
+        b.quiet_s,
+    )
+}
+
+/// `words` read back.
+pub fn parse(detail: &str) -> Option<(Watched, Boundary)> {
+    let get = |k: &str| detail.split(' ').find_map(|x| x.strip_prefix(k)?.strip_prefix('='));
+    let flag = |k: &str| get(k).map(|v| v == "1");
+    let w = Watched {
+        open_at: get("open")?.parse().ok()?,
+        dead_at: get("dead")?.parse().ok()?,
+        exempt: flag("exempt")?,
+        clean_per_h: get("clean")?.parse().ok()?,
+        long_background: flag("long")?,
+        lost_work: get("lost")?.parse().ok()?,
+        gain: get("gain")?.parse().ok()?,
+        noticed_at: match get("noticed")? {
+            "-" => None,
+            v => Some(v.parse().ok()?),
+        },
+    };
+    let b = Boundary { at: get("at")?.parse().ok()?, turn_running: flag("turn")?, live: flag("live")?, user: flag("user")?, quiet_s: get("quiet")?.parse().ok()? };
+    Some((w, b))
+}
+
 #[cfg(test)]
 #[path = "exec_tests.rs"]
 mod tests;
