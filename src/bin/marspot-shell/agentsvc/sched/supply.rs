@@ -3,37 +3,20 @@
 //! is supply from its claim time on; using it still waits for the
 //! user's confirmation on the accounts panel while `sched.reset` is off.
 
-use marspot::agent_resets::{AccountResets, CLAUDE_FABLE, CLAUDE_FULL, Grant};
+use marspot::agent_resets::{AccountResets, Grant, brings_back};
 use marspot_agent::sched::reset::{Supply, WeekCut};
-
-/// What a `claude_fable` reset takes off the week's usage.  Half of it
-/// is all that is known; whether that is half of what was used or a
-/// fixed half week is not verified yet, so this is read as the former.
-pub(crate) const FABLE_WEEK_CUT: WeekCut = WeekCut::ShareOfUsed(0.5);
 
 fn hours(at: i64, now: i64) -> f64 {
     (at - now) as f64 / 3600.0
-}
-
-/// What a grant brings back, `(week, window, gives_back_week, week_cut)`:
-/// Claude's two stored resets by their kind, any other by what it says
-/// it restores.
-fn brings_back(g: &Grant) -> (bool, bool, bool, WeekCut) {
-    match g.kind.as_str() {
-        CLAUDE_FULL => (true, true, false, WeekCut::Nothing),
-        CLAUDE_FABLE => (false, true, false, FABLE_WEEK_CUT),
-        _ => {
-            let window = g.gives_back_weekly || g.restores.iter().any(|w| w == "seven_day_overage_included");
-            (g.restores.iter().any(|w| w == "seven_day"), window, g.gives_back_weekly, WeekCut::Nothing)
-        }
-    }
 }
 
 /// What one grant brings back; none for one with nothing left or one
 /// that brings back neither the week nor the restricted window.
 fn of_grant(g: &Grant, usable_below_left: Option<f64>, now: i64) -> Option<Supply> {
     let left = g.left.unwrap_or(1);
-    let (week, window, gives_back_week, week_cut) = brings_back(g);
+    let b = brings_back(g);
+    let (week, window, gives_back_week) = (b.week, b.window, b.gives_back_week);
+    let week_cut = b.week_share.map_or(WeekCut::Nothing, WeekCut::ShareOfUsed);
     if left == 0 || !(week || window) {
         return None;
     }
@@ -63,7 +46,7 @@ pub(crate) fn of_account(all: &[AccountResets], agent: &str, profile: u8, usable
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marspot::agent_resets::Resets;
+    use marspot::agent_resets::{CLAUDE_FABLE, CLAUDE_FULL, Resets};
 
     const NOW: i64 = 1_800_000_000;
 
@@ -103,9 +86,9 @@ mod tests {
         let got = of_account(&account(vec![full, fable]), "a", 1, None, NOW);
         assert_eq!((got[0].week, got[0].window, got[0].gives_back_week, got[0].week_cut), (true, true, false, WeekCut::Nothing));
         assert_eq!(got[0].ends_h, Some(2.0));
-        assert_eq!((got[1].week, got[1].window, got[1].gives_back_week, got[1].week_cut), (false, true, false, FABLE_WEEK_CUT), "the kind wins over what it says");
+        assert_eq!((got[1].week, got[1].window, got[1].gives_back_week, got[1].week_cut), (false, true, false, WeekCut::ShareOfUsed(marspot::agent_resets::FABLE_WEEK_SHARE)), "the kind wins over what it says");
         assert_eq!(got[1].left, 2);
-        assert_eq!(FABLE_WEEK_CUT.of(0.6), 0.3);
+        assert_eq!(WeekCut::ShareOfUsed(marspot::agent_resets::FABLE_WEEK_SHARE).of(0.6), 0.3);
     }
 
     #[test]

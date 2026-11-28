@@ -20,7 +20,7 @@ mod kinds;
 mod lines;
 pub use claim::{ARMED_FOR_S, Armed, ResetButtons, ResetLine, armed_text, claim_path_on, claimable};
 pub use claimed::{Claimed, claimed_text, claims_dir, last_claims};
-pub use kinds::{CLAUDE_FABLE, CLAUDE_FULL, kind_of};
+pub use kinds::{Brings, CLAUDE_FABLE, CLAUDE_FULL, FABLE_WEEK_SHARE, brings_back, kind_of};
 pub use lines::{MAX_LINES, line_count, lines};
 
 /// How a reading of an account's resets ended.
