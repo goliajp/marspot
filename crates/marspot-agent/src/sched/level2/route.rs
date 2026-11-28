@@ -209,16 +209,17 @@ impl Routing {
         Some(Placed { to, before, after: r.left(m.class) })
     }
 
-    /// The agent a request that leaves it open goes to: `claude` while
-    /// its first entry that holds `m` has the most left, else the other
-    /// agent with the most among those whose best account holds `m` for
-    /// its lifetime.  Another agent's renewal is not read, so its room
-    /// must hold `m`'s whole use (and, for a long-lived one, six hours at
-    /// its high band).
-    pub fn agent_for(&self, m: &Newcomer) -> &'static str {
-        let claude = self.order(m.class).into_iter().filter_map(|id| self.rooms.iter().find(|r| r.id == id)).find(|r| r.left(m.class) >= m.needs(r.renews(m.class)) - EPS).map_or(0.0, |r| r.left(m.class));
+    /// The other agent a request that leaves it open goes to, or `None`
+    /// for the agent this table plans, which keeps it while its first
+    /// entry that holds `m` has the most left.  Otherwise the other agent
+    /// with the most among those whose best account holds `m` for its
+    /// lifetime.  Another agent's renewal is not read, so its room must
+    /// hold `m`'s whole use (and, for a long-lived one, six hours at its
+    /// high band).
+    pub fn agent_for(&self, m: &Newcomer) -> Option<&'static str> {
+        let own = self.order(m.class).into_iter().filter_map(|id| self.rooms.iter().find(|r| r.id == id)).find(|r| r.left(m.class) >= m.needs(r.renews(m.class)) - EPS).map_or(0.0, |r| r.left(m.class));
         let need = m.needs(f64::INFINITY);
-        self.others.iter().filter(|o| o.1 >= need - EPS && o.1 > claude + EPS).max_by(|a, b| a.1.total_cmp(&b.1)).map_or("claude", |o| o.0)
+        self.others.iter().filter(|o| o.1 >= need - EPS && o.1 > own + EPS).max_by(|a, b| a.1.total_cmp(&b.1)).map(|o| o.0)
     }
 
     /// One line, in points: each class's entries in order with their room,

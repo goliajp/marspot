@@ -133,7 +133,7 @@ pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>,
             return "-";
         }
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: r.helper_life_h };
-        r.table.agent_for(&m)
+        r.table.agent_for(&m).unwrap_or("claude")
     });
     let placed = place(class, rate, None, None, now);
     let others: Vec<String> = others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
