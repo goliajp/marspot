@@ -54,7 +54,9 @@ pub struct Limits {
     pub per_day: u8,
     /// Planned switches of the fleet in a day.
     pub fleet_per_day: usize,
-    /// Planned switches a pane may hold inside the pane horizon.
+    /// Planned switches a pane may hold inside the pane horizon.  A
+    /// schedule holds at most `HOPS` (two), so every value from two up
+    /// plans alike; under two no pane is given a second switch.
     pub hops: usize,
     /// Notices of the fleet in an hour; of one session, the gap between
     /// two and the most in a day.
@@ -179,7 +181,7 @@ impl Limits {
             "per_week" => self.per_week = count(0.0, 255.0).map_or(self.per_week, |v| v as u8),
             "per_day" => self.per_day = count(0.0, 255.0).map_or(self.per_day, |v| v as u8),
             "fleet_per_day" => self.fleet_per_day = count(0.0, 1000.0).map_or(self.fleet_per_day, |v| v as usize),
-            // a plan holds at most two switches per pane whatever the profile
+            // read up to six as the profiles are written; a schedule holds two
             "hops" => self.hops = count(0.0, 6.0).map_or(self.hops, |v| v as usize),
             "notices_per_hour" => self.notices_per_hour = count(0.0, 100.0).map_or(self.notices_per_hour, |v| v as usize),
             "notice_gap_h" => self.notice_gap_h = hours.unwrap_or(self.notice_gap_h),

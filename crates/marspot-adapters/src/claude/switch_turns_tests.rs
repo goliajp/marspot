@@ -47,9 +47,9 @@ fn switch_cost_fit_is_a_share_of_the_context() {
     for _ in 0..switch_cost::FIT_MIN - 1 {
         f.add(&s);
     }
-    assert_eq!(f.shares(), switch_cost::DEFAULT);
+    assert_eq!(f.measured(), None);
     f.add(&s);
-    let sh = f.shares();
+    let sh = f.measured().unwrap();
     assert!((sh.rewrite - 210_002.0 / 212_005.0).abs() < 1e-12);
     assert_eq!(sh.one_hour, 1.0);
     assert!((sh.regen - 1_800.0 / 212_005.0).abs() < 1e-12);

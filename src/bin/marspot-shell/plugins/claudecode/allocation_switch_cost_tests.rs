@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use marspot_agent::sched::switch_cost::{self, Shares};
+use marspot_agent::sched::switch_cost;
+
+use super::super::super::allocation_prices::{Tokens, weeks};
 
 use super::super::super::allocation_usage::Readers;
 use super::*;
@@ -49,15 +51,19 @@ fn allocation_switch_cost_measures_a_switch_from_the_transcript() {
 #[test]
 fn allocation_switch_cost_prices_the_context() {
     let near = |x: f64, y: f64| assert!((x - y).abs() < 1e-12, "{x} vs {y}");
-    // unmeasured: the context written once to the five-minute cache instead
-    // of read from it, at the class's price
-    let d = switch_cost::DEFAULT;
-    near(switch_weeks(d, Class::Plain, Some(1_000_000)), (5.0 - 0.2) / 30.5 / 100.0);
-    near(switch_weeks(d, Class::Restricted, Some(1_000_000)), (10.0 - 0.2) / 11.2 / 100.0);
-    // a long session costs more to move, in proportion
-    near(switch_weeks(d, Class::Plain, Some(800_000)), 4.0 * switch_weeks(d, Class::Plain, Some(200_000)));
-    // the one-hour cache and thinking said again add to it
-    let measured = Shares { rewrite: 1.0, one_hour: 1.0, regen: 0.01 };
-    near(switch_weeks(measured, Class::Plain, Some(1_000_000)), (8.0 - 0.2 + 0.01 * 20.0) / 30.5 / 100.0);
-    assert!(switch_weeks(d, Class::Plain, None) > 0.0);
+    // unmeasured: the charge of a switch before anything was measured, by context
+    let mut fit = Fit::default();
+    near(switch_weeks(&fit, Class::Restricted, None), crate::plugins::allocation::waste::SWITCH_RESTRICTED);
+    near(switch_weeks(&fit, Class::Plain, Some(920_000)), 2.0 * crate::plugins::allocation::waste::SWITCH_PLAIN);
+    // measured: the agent's switch prices are the control plane's table
+    let s = Sample { at: 0, ctx: 1_000_000, rewrite: 1_000_000, rewrite_1h: 1_000_000, regen: 10_000, hit_after: 0, hit_base: 990 };
+    for _ in 0..switch_cost::FIT_MIN {
+        fit.add(&s);
+    }
+    let after = Tokens { cache_1h: 1_000_000, output: 10_000, ..Tokens::default() };
+    let normal = Tokens { cache_read: 1_000_000, ..Tokens::default() };
+    for (class, model) in [(Class::Plain, "claude-opus-5-5"), (Class::Restricted, "claude-fable-5-2")] {
+        near(switch_weeks(&fit, class, Some(1_000_000)), weeks(model, &after) - weeks(model, &normal));
+    }
+    assert!(switch_weeks(&fit, Class::Plain, Some(800_000)) > switch_weeks(&fit, Class::Plain, Some(200_000)));
 }

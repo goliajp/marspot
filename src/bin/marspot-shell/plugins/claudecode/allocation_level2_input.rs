@@ -91,7 +91,7 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             restricted: cls == Class::Restricted,
             speed,
             high: [speed[0] * band[0], speed[1] * band[1]],
-            rewrite: switch_weeks(a.switch.fit.shares(), cls, tokens),
+            rewrite: switch_weeks(&a.switch.fit, cls, tokens),
             lost_work: speed[1] * f64::from(fp.background_s.unwrap_or(0)) / 3600.0,
             clean_per_h: fp.clean_per_h,
             long_background: fp.background_s.is_some_and(|s| s >= LONG_BACKGROUND_S),
