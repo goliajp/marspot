@@ -162,7 +162,7 @@ source = "git+https://github.com/goliajp/madcawl?rev=69e2425c48ad79528f5ad7204ad
 
 [[package]]
 name = "marspot"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "block2",
  "core-foundation",
