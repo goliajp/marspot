@@ -173,11 +173,13 @@ pub enum StepKind {
     /// away: its spinner animates several times a second (about 1 KB
     /// per second, measured) and the pane never goes still. With it,
     /// "still" means no more than a spinner's trickle over `still`
-    /// ([`TRICKLE_BYTES_PER_SEC`]), and it counts only while an input
+    /// ([`quiet::TRICKLE_BYTES_PER_SEC`]), and it counts only while an input
     /// box is on screen, whatever the byte floor: a new conversation's
     /// first screen is a few hundred bytes. The trickle bound keeps a
     /// resume still repainting from counting; the box, a loading spinner.
-    AwaitQuiet { still: Duration, min_bytes: u64, or_composer: bool },
+    ///
+    /// `or_drawn_late`: see [`Step::or_drawn_late`].
+    AwaitQuiet { still: Duration, min_bytes: u64, or_composer: bool, or_drawn_late: bool },
     /// Wait for work running on another thread, and fail the run with
     /// its error if it fails.
     ///
@@ -512,7 +514,7 @@ impl Step {
     }
     pub fn await_quiet(still: Duration) -> Self {
         Self {
-            kind: StepKind::AwaitQuiet { still, min_bytes: 0, or_composer: false },
+            kind: StepKind::AwaitQuiet { still, min_bytes: 0, or_composer: false, or_drawn_late: false },
             timeout: Some(Duration::from_secs(30)),
             proceed_on_timeout: false,
             at_shell: None,
@@ -561,6 +563,10 @@ pub enum OpOutcome {
     Done,
     /// A step outlived its deadline.
     TimedOut { step: usize, label: &'static str },
+    /// A first-frame wait ran out on a program that had drawn and was
+    /// still drawing. Not a failure: the rest of the run went on, minus
+    /// the steps that type into the pane, named in `skipped`.
+    DrawnLate { step: usize, label: &'static str, skipped: Vec<&'static str> },
     /// The user pressed Esc, or the host ended the session.
     Cancelled(&'static str),
     /// An effect failed (the PTY is gone, the core is down).
@@ -568,8 +574,9 @@ pub enum OpOutcome {
 }
 
 impl OpOutcome {
+    /// The run did what it was for: every step ran, or it was drawn late.
     pub fn is_done(&self) -> bool {
-        matches!(self, Self::Done)
+        matches!(self, Self::Done | Self::DrawnLate { .. })
     }
 }
 
@@ -751,33 +758,6 @@ fn delivered_not_typed(t: &str) -> bool {
         .is_some_and(|(from, _)| !from.is_empty() && !from.contains(char::is_whitespace))
 }
 
-/// How often an `or_composer` wait samples the output counter, and at
-/// most how often it looks at the pane's frame.
-const SAMPLE_EVERY: Duration = Duration::from_millis(500);
-
-/// Output an agent's spinner may produce and still count as still.
-/// Measured on a working claude: 1.1-1.9 KB per 1.5 s, with one 5 KB
-/// burst; a resumed conversation repainting is tens of KB at a time.
-const TRICKLE_BYTES_PER_SEC: u64 = 4 * 1024;
-
-/// Samples an `or_composer` wait keeps: enough to span its window.
-const SAMPLES_KEPT: usize = 8;
-
-/// Is an agent's input box drawn on this screen?
-///
-/// Claude Code rules the box off above its prompt line, which is what
-/// tells it from the messages already sent: those carry the same glyph
-/// but no rule.  Kimi's prompt is a plain `>` under a box's top edge.
-fn composer_on_screen(screen: &str) -> bool {
-    let bare = |l: &str| l.trim().trim_matches(['│', '┃', '|']).trim().to_string();
-    let lines: Vec<String> = screen.lines().map(bare).collect();
-    lines.windows(2).any(|w| {
-        !w[0].is_empty()
-            && w[0].chars().all(|c| matches!(c, '─' | '━' | '╭' | '╮'))
-            && (w[1].starts_with(['\u{276f}', '\u{203a}']) || (w[0].starts_with('╭') && w[1].starts_with('>')))
-    })
-}
-
 fn is_composer_line(l: &str) -> bool {
     let t = l.trim_start();
     COMPOSER_PROMPTS.iter().any(|p| t.starts_with(*p))
@@ -893,6 +873,12 @@ pub struct OpRunner {
     /// What the last readiness probe saw, kept so a step that gives up
     /// can say what it was looking at rather than only that it waited.
     ready_saw: Option<(u64, u32)>,
+    /// The first-frame wait that ran out drawn, and the typing steps
+    /// left out since; see [`Step::or_drawn_late`].
+    late: Option<(usize, &'static str)>,
+    skipped: Vec<&'static str>,
+    /// What the step that ended the run saw, said on the outcome line.
+    why: Option<String>,
     /// Cleanup is idempotent, and this is what makes it so.
     cleaned: bool,
     /// Whether the first tick has run.  An explicit flag rather than
@@ -926,6 +912,9 @@ impl OpRunner {
             samples: std::collections::VecDeque::new(),
             finished: None,
             ready_saw: None,
+            late: None,
+            skipped: Vec::new(),
+            why: None,
             cleaned: false,
             started: false,
             badge_at: SystemTime::UNIX_EPOCH,
@@ -955,10 +944,17 @@ impl OpRunner {
         if self.finished.is_some() {
             return;
         }
+        let outcome = match (outcome, self.late) {
+            (OpOutcome::Done, Some((step, label))) => {
+                OpOutcome::DrawnLate { step, label, skipped: std::mem::take(&mut self.skipped) }
+            }
+            (o, _) => o,
+        };
+        let why = self.why.take().map(|w| format!("; {w}")).unwrap_or_default();
         host.log(
             if outcome.is_done() { LogLevel::Info } else { LogLevel::Warn },
             &format!("{}.outcome", self.op.name),
-            &format!("pane {} {outcome:?}", host.shelld_session_id()),
+            &format!("pane {} {outcome:?}{why}", host.shelld_session_id()),
         );
         self.finished = Some(outcome);
     }
@@ -977,31 +973,6 @@ impl OpRunner {
                     &format!("{e}"),
                 );
             }
-    }
-
-    /// Take a sample if one is due, and say whether one was taken.
-    fn sample(&mut self, len: u64) -> bool {
-        let now = self.env.now();
-        let due = self.samples.back().is_none_or(|(t, _)| {
-            now.duration_since(*t).unwrap_or_default() >= SAMPLE_EVERY
-        });
-        if due {
-            if self.samples.len() == SAMPLES_KEPT {
-                self.samples.pop_front();
-            }
-            self.samples.push_back((now, len));
-        }
-        due
-    }
-
-    /// Output over the last `window`, once the samples reach that far.
-    fn grown_over(&self, window: Duration, len: u64) -> Option<u64> {
-        let now = self.env.now();
-        self.samples
-            .iter()
-            .rev()
-            .find(|(t, _)| now.duration_since(*t).unwrap_or_default() >= window)
-            .map(|(_, l)| len.saturating_sub(*l))
     }
 
     fn enter_step(&mut self, host: &dyn PaneSessionHost) {
@@ -1045,6 +1016,9 @@ impl OpRunner {
         let Some(step) = self.op.steps.get(self.at).cloned() else {
             return true;
         };
+        if self.skip_when_late(host, &step) {
+            return true;
+        }
         match step.kind {
             StepKind::Settle => elapsed >= step.timeout.unwrap_or_default(),
             StepKind::Terminate { target, signal, escalate, sent } => {
@@ -1507,66 +1481,8 @@ impl OpRunner {
                 }
                 false
             }
-            StepKind::AwaitQuiet { still, min_bytes, or_composer } => {
-                let len = self.env.output_len(sid);
-                if len != self.seen_len {
-                    self.seen_len = len;
-                    self.still_since = self.env.now();
-                    self.drew = true;
-                }
-                let quiet = self
-                    .env
-                    .now()
-                    .duration_since(self.still_since)
-                    .unwrap_or_default();
-                // Counted from the line that started the program, not
-                // from this step: a program quick enough to paint and
-                // go quiet before the step opened has drawn nothing by
-                // this step's own reckoning, and the floor is then
-                // unreachable. The quiet itself is still measured from
-                // the last byte, which is the thing it is about.
-                let from = self.sent_len.unwrap_or(self.entered_len).min(self.entered_len);
-                let drawn = self.seen_len.saturating_sub(from);
-                // `drew` is this step having seen the stream move. A
-                // program that was already finished moves it no more,
-                // so what counts is that the line produced bytes at
-                // all -- and the floor above is what says how many.
-                let painted = self.drew || drawn > 0;
-                let done = painted && drawn >= min_bytes && quiet >= still;
-                if !done && or_composer && painted && self.sample(len) {
-                    let allowance = TRICKLE_BYTES_PER_SEC * still.as_millis() as u64 / 1000;
-                    let trickle = self.grown_over(still, len).filter(|&g| g <= allowance);
-                    if let Some(grew) = trickle
-                        && self.env.pane_screen(sid).is_some_and(|s| composer_on_screen(&s))
-                    {
-                        host.log(
-                            LogLevel::Info,
-                            &format!("{}.composer", self.op.name),
-                            &format!(
-                                "sid={sid} step={} drew={drawn}B floor={min_bytes}B, \
-                                 {grew}B in the last {}ms with the input box up",
-                                step.label,
-                                still.as_millis()
-                            ),
-                        );
-                        return true;
-                    }
-                }
-                if done {
-                    // What the floor is worth is a number nobody had:
-                    // how much a resuming CLI actually paints before it
-                    // stops.  Logged so the floor can be set from this
-                    // machine's traces instead of from a guess.
-                    host.log(
-                        LogLevel::Info,
-                        &format!("{}.quiet", self.op.name),
-                        &format!(
-                            "sid={sid} step={} drew={drawn}B floor={min_bytes}B",
-                            step.label
-                        ),
-                    );
-                }
-                done
+            StepKind::AwaitQuiet { still, min_bytes, or_composer, .. } => {
+                self.await_quiet(host, step.label, still, min_bytes, or_composer)
             }
         }
     }
@@ -1745,6 +1661,9 @@ impl PaneSession for OpRunner {
             self.advance(host);
             return;
         }
+        if self.quiet_ran_out(host, elapsed) {
+            return;
+        }
         if let Some(step) = self.op.steps.get(self.at)
             && let Some(limit) = step.timeout
                 && elapsed >= limit {
@@ -1832,6 +1751,9 @@ impl PaneSession for OpRunner {
 pub mod front;
 mod job;
 pub use job::Job;
+mod quiet;
+#[cfg(test)]
+use quiet::composer_on_screen;
 mod real_env;
 mod typing;
 pub use typing::{Origin, PtyIo, Typed};

@@ -233,6 +233,10 @@ pub fn switch_op(sid: u64, leaving: Leaving, to: Agent, to_profile: u8, to_home:
                     .after_bytes(2048)
                     .or_composer()
                     .timeout(Duration::from_secs(30))
+                    // past the floor and still drawing, the agent is up: the
+                    // ledger is still committed, the handover and their line
+                    // are not typed into a program mid-redraw
+                    .or_drawn_late()
                     .named("first_frame"),
             )
             // Then make sure what drew is the agent, before typing at it.
