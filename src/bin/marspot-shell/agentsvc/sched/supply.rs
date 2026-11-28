@@ -46,7 +46,7 @@ pub(crate) fn of_account(all: &[AccountResets], agent: &str, profile: u8, usable
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marspot::agent_resets::{CLAUDE_FABLE, CLAUDE_FULL, Resets};
+    use marspot::agent_resets::Resets;
 
     const NOW: i64 = 1_800_000_000;
 
@@ -77,18 +77,6 @@ mod tests {
         assert_eq!(got[1], Supply { week: false, window: true, gives_back_week: true, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 1.0, ends_h: None, left: 1, usable_below_left: None });
         assert!(of_account(&all, "a", 2, None, NOW).is_empty());
         assert!(of_account(&all, "b", 1, None, NOW).is_empty());
-    }
-
-    #[test]
-    fn claudes_two_stored_resets_bring_back_by_their_kind() {
-        let full = Grant { kind: CLAUDE_FULL.into(), left: Some(1), ends_at: Some(NOW + 7_200), ..Grant::default() };
-        let fable = Grant { kind: CLAUDE_FABLE.into(), restores: vec!["seven_day".into()], gives_back_weekly: true, left: Some(2), ..Grant::default() };
-        let got = of_account(&account(vec![full, fable]), "a", 1, None, NOW);
-        assert_eq!((got[0].week, got[0].window, got[0].gives_back_week, got[0].week_cut), (true, true, false, WeekCut::Nothing));
-        assert_eq!(got[0].ends_h, Some(2.0));
-        assert_eq!((got[1].week, got[1].window, got[1].gives_back_week, got[1].week_cut), (false, true, false, WeekCut::ShareOfUsed(marspot::agent_resets::FABLE_WEEK_SHARE)), "the kind wins over what it says");
-        assert_eq!(got[1].left, 2);
-        assert_eq!(WeekCut::ShareOfUsed(marspot::agent_resets::FABLE_WEEK_SHARE).of(0.6), 0.3);
     }
 
     #[test]

@@ -87,7 +87,7 @@ fn a_fable_reset_refills_the_window_and_gives_its_use_back_to_the_week() {
 }
 
 #[test]
-fn a_claude_fable_reset_refills_the_window_and_takes_its_cut_off_the_weeks_usage() {
+fn a_window_reset_with_a_week_cut_refills_the_window_and_takes_its_cut_off_the_weeks_usage() {
     // the window is spent at 5 h, when the week has used 0.65
     let q = Quant { id: 2, r: 0.4, f: 0.05, t: 100.0, tf: 100.0, open: true, stale: false };
     let fable = Supply { week: false, window: true, gives_back_week: false, week_cut: WeekCut::ShareOfUsed(0.5), moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: Some(40.0), left: 1, usable_below_left: None };
@@ -101,7 +101,7 @@ fn a_claude_fable_reset_refills_the_window_and_takes_its_cut_off_the_weeks_usage
 }
 
 #[test]
-fn a_claude_fable_cut_counts_the_week_already_given_back_before_it() {
+fn a_week_cut_counts_the_week_already_given_back_before_it() {
     let load = Load { restricted: 0.01, plain: 0.005 };
     let fable = Supply { week: false, window: true, gives_back_week: false, week_cut: WeekCut::ShareOfUsed(0.5), moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None };
     // the full reset refills both at 13.3 h, when the week runs out; the

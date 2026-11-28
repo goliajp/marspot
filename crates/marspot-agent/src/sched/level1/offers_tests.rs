@@ -72,22 +72,22 @@ fn sched_level1_the_gap_of_the_claim_time_is_reported() {
     assert!(gap >= 0.0 && p.claims.len() == 1);
 }
 
-/// Claude's two stored resets, usable any time before they end in 40 h:
-/// one brings back the week and the window, the other the window and
-/// half of what the week used.
-fn claude_full() -> Supply {
+/// Two stored resets, usable any time before they end in 40 h: one
+/// brings back the week and the window, the other the window and half
+/// of what the week used.
+fn both_back() -> Supply {
     Supply { week: true, window: true, gives_back_week: false, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: false, starts_h: 0.0, ends_h: Some(40.0), left: 1, usable_below_left: None }
 }
 
-fn claude_fable() -> Supply {
-    Supply { week: false, window: true, week_cut: WeekCut::ShareOfUsed(0.5), ..claude_full() }
+fn window_back() -> Supply {
+    Supply { week: false, window: true, week_cut: WeekCut::ShareOfUsed(0.5), ..both_back() }
 }
 
 #[test]
 fn sched_level1_where_the_window_binds_the_window_reset_is_claimed_and_the_full_one_kept() {
     // the window is spent in 2 h, the week has plenty
     let a = [q(3, 0.9, 0.02, 60.0)];
-    let offers = [Offer { account: 3, supply: claude_full() }, Offer { account: 3, supply: claude_fable() }];
+    let offers = [Offer { account: 3, supply: both_back() }, Offer { account: 3, supply: window_back() }];
     let p = plan(&World { offers: &offers, ..world(&a, [0.01, 0.0], 0.01) });
     assert_eq!(p.claims.len(), 1, "{:?}", p.claims);
     assert_eq!(p.claims[0].offer, 1, "the fable reset serves as much: {:?}", p.claims);
@@ -97,7 +97,7 @@ fn sched_level1_where_the_window_binds_the_window_reset_is_claimed_and_the_full_
 fn sched_level1_where_the_week_binds_the_full_reset_is_claimed() {
     // plain demand only; the week is spent in 5 h
     let a = [q(3, 0.05, 0.05, 100.0)];
-    let offers = [Offer { account: 3, supply: claude_fable() }, Offer { account: 3, supply: claude_full() }];
+    let offers = [Offer { account: 3, supply: window_back() }, Offer { account: 3, supply: both_back() }];
     let p = plan(&World { offers: &offers, ..world(&a, [0.0, 0.01], 0.0) });
     assert_eq!(p.claims.len(), 1, "{:?}", p.claims);
     assert_eq!(p.claims[0].offer, 1, "half the week is less than a whole one: {:?}", p.claims);
@@ -111,9 +111,9 @@ fn sched_level1_one_full_reset_is_claimed_over_two_window_resets_that_serve_as_m
     // each window reset adds only the 0.2 the week has free: one falls
     // short, two serve everything, as does the full reset alone
     let a = [q(3, 0.26, 0.06, 160.0)];
-    let first = Supply { ends_h: Some(20.0), ..claude_fable() };
-    let late = Supply { ends_h: Some(80.0), ..claude_fable() };
-    let full = Supply { ends_h: Some(20.0), ..claude_full() };
+    let first = Supply { ends_h: Some(20.0), ..window_back() };
+    let late = Supply { ends_h: Some(80.0), ..window_back() };
+    let full = Supply { ends_h: Some(20.0), ..both_back() };
     let offers = [Offer { account: 3, supply: first }, Offer { account: 3, supply: late }, Offer { account: 3, supply: full }];
     let w = World { offers: &offers, ..world(&a, [0.0025, 0.0], 0.0025) };
     let p = plan(&w);
