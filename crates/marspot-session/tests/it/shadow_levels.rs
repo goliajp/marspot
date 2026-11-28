@@ -4,15 +4,19 @@
 //! idle timeout keeps no deadline; both hold across an image swap, and
 //! a three-level chain left from before the rule is flattened by it.
 
+use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
 use marspot_term::session_registry::{read_session_entry, rewrite_session_entry};
 use marspot_term::shell_proto::{DoneCode, SHADOW_IDLE_NEVER};
 
+use crate::pane_link::wait;
 use crate::self_execv::{Sandbox, count_in_log};
 use crate::shadow_session::{exits_within, kill, pane, parent, set_shadow_idle, shadow_of, sid, swap};
 
 const SLEEP: &str = "stty -echo; printf READY; exec sleep 600";
+/// Longest a session is held stopped, past any swap's time.
+const STOPPED_AT_MOST_S: u32 = 30;
 
 #[test]
 fn shadow_levels_a_third_level_is_refused_either_way() {
@@ -68,7 +72,20 @@ fn shadow_levels_an_image_swap_flattens_a_third_level() {
     let (mut b, rb) = parent(&mut sandbox, 32);
     let (mut c, rc) = pane(&mut sandbox, 33, SLEEP, Some((sid(32), 0)));
     // b becomes a child as an image before the rule could have made it;
-    // stopped, so nothing of its own writes its entry back meanwhile
+    // stopped, so nothing of its own writes its entry back meanwhile.
+    // The stop has a deadline of its own: a test killed while b is
+    // stopped leaves a session that goes on and ends as any other
+    // a group of its own and no stdio, so its sleep holds nothing of the
+    // test's and goes with it
+    let resume = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("sleep {STOPPED_AT_MOST_S}; kill -CONT {}", b.pid()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .expect("the resume deadline");
     // SAFETY: a process this test started
     assert_eq!(unsafe { libc::kill(b.pid() as i32, libc::SIGSTOP) }, 0);
     let mut entry = read_session_entry(sid(32)).unwrap();
@@ -76,13 +93,19 @@ fn shadow_levels_an_image_swap_flattens_a_third_level() {
     rewrite_session_entry(&entry).unwrap();
     let before = count_in_log(&state, "L3_SHADOW_FLATTENED");
     let _link = swap(&c, &state, 33);
-    assert_eq!(shadow_of(33), sid(31), "under the pane at the top after the swap");
+    // the new image writes its entry once its listener is adopted, which
+    // a reattach can beat
+    wait(5.0, "under the pane at the top after the swap", || shadow_of(33) == sid(31));
     assert_eq!(count_in_log(&state, "L3_SHADOW_FLATTENED"), before + 1, "said once");
     kill(&a);
     exits_within(&mut c, 2.0).expect("it follows its new parent");
     let _ = a.child.wait();
     // SAFETY: as above
     unsafe { libc::kill(b.pid() as i32, libc::SIGCONT) };
+    let mut resume = resume;
+    // SAFETY: the group this test started, the shell and its sleep
+    unsafe { libc::kill(-(resume.id() as i32), libc::SIGKILL) };
+    let _ = resume.wait();
     b.kill();
     std::thread::sleep(Duration::from_millis(50));
     for r in [ra, rb, rc] {
