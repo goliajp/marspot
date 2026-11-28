@@ -294,6 +294,7 @@ impl Sched {
 #[cfg(test)] mod loop_tests;
 #[cfg(test)] mod loop_world;
 #[cfg(test)] mod oracle_tests;
+#[cfg(test)] mod replay_world;
 #[cfg(test)] mod rows_tests;
 #[cfg(test)] mod scene_tests;
 #[cfg(test)] pub(crate) mod tests;
