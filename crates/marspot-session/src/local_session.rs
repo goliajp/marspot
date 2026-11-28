@@ -509,15 +509,17 @@ impl LocalSession {
     ///
     /// The reader stops between two reads and everything it queued is
     /// parsed into the terminal the snapshot is taken from, held output
-    /// included -- the next image starts unheld.  Input queued for the
-    /// PTY, replies included, is given time to reach it.  What the PTY
-    /// has not given up yet stays there for the next image.
+    /// included -- the next image starts unheld -- and written to the
+    /// bytelog, whose length the next image counts its position from.
+    /// Input queued for the PTY, replies included, is given time to
+    /// reach it; what the PTY has not given up stays for the next image.
     pub fn quiesce_for_handoff(&mut self) {
         if let Some(r) = self.reader.take() {
             r.stop();
         }
         self.hold_grid(false);
         self.pump();
+        self.bytelog.iter_mut().for_each(ByteLog::flush);
         let deadline = Instant::now() + HANDOFF_INPUT_WAIT;
         while self.writer.backlog() > 0 && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
@@ -544,9 +546,7 @@ impl LocalSession {
     ///     subsequent `execv` kills the thread and discards the heap,
     ///     so no real leak (the OS reclaims everything).
     ///
-    /// Caller should `pump()` once right before this so any bytes the
-    /// reader has already queued are folded into the Terminal that
-    /// gets serialized; otherwise those bytes are lost in the swap.
+    /// [`Self::quiesce_for_handoff`] has run: nothing queued is lost.
     pub fn extract_for_handoff(self) -> (RawFd, i32, Terminal, u16, u16) {
         let master_fd = self.pty.raw_master();
         let child_pid = self.child_pid;
