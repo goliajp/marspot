@@ -17,7 +17,7 @@
 //! today's rule would move it to (its standing would-move), so a plan
 //! line reads next to the `would_move` facts of the same panes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use marspot_agent::quota::Quant;
@@ -33,6 +33,7 @@ use super::allocation_adapter::Allocation;
 use super::allocation_inputs::Snapshot;
 use super::allocation_level1::Inputs as ClassInputs;
 use super::allocation_level2_input::{Built, build, digest};
+use super::allocation_route;
 use super::allocation_view::View;
 use crate::plugins::allocation::{Class, KAPPA_FABLE};
 
@@ -57,6 +58,10 @@ pub(super) struct PanePlan {
     status_path: PathBuf,
     status_said: String,
     ended_last: bool,
+    /// Panes seen by the routing table's shadow, and whether a scan has run.
+    seen: HashSet<u64>,
+    seen_once: bool,
+    route_said: String,
     /// Plan passes run, full searches among them.
     pub passes: usize,
     pub full: usize,
@@ -77,6 +82,9 @@ impl PanePlan {
             status_path: state_root.join("sched").join("status.json"),
             status_said: String::new(),
             ended_last: false,
+            seen: HashSet::new(),
+            seen_once: false,
+            route_said: String::new(),
             passes: 0,
             full: 0,
         }
@@ -137,6 +145,10 @@ impl PanePlan {
             None => pass::retime(&mut self.standing, &input, now),
         };
         self.ended_last = false;
+        if let Some(r) = &done {
+            allocation_route::rebuild(&input, &r.plan, forecast, now);
+        }
+        self.route_shadow(view, due.is_some(), now, &mut log);
         if let Some(r) = done {
             self.foreseen = r.plan.refusals.iter().map(|x| x.0).chain(r.plan.switches.iter().map(|s| s.sid)).collect();
             for (sid, why) in &r.ended.cancelled {
@@ -184,6 +196,22 @@ impl PanePlan {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Each pane that appeared since the last scan placed by the routing
+    /// table in shadow, and the table logged when a full search changed it.
+    fn route_shadow(&mut self, view: &View, full: bool, now: i64, log: &mut Vec<(&'static str, String)>) {
+        for row in view.panes.iter().filter(|r| !r.4) {
+            if self.seen.insert(row.0) && self.seen_once {
+                log.push(("sched.route.shadow", allocation_route::shadow_pane("pane", row.0, row.2, row.3, None, Some(row.1), now)));
+            }
+        }
+        self.seen.retain(|sid| view.panes.iter().any(|r| r.0 == *sid));
+        self.seen_once = true;
+        if let Some(line) = allocation_route::line().filter(|l| full && *l != self.route_said) {
+            log.push(("sched.route", line.clone()));
+            self.route_said = line;
         }
     }
 

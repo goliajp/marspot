@@ -1,5 +1,4 @@
 //! marspot-claudecode plugin — first marspot plugin.
-//!
 //! ## What it does (M2)
 //!
 //! Each tick (every 2 s), walks `~/.claude/projects/<encoded-cwd>/`
@@ -70,6 +69,7 @@ mod allocation_prices;
 mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;
+pub(in crate::plugins) mod allocation_route;
 mod alloc_moves;
 mod worker_loop;
 pub(crate) mod model_guard;
