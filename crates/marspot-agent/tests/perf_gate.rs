@@ -215,9 +215,10 @@ const PLAN_RELEASE_BUDGET: Duration = Duration::from_millis(30);
 
 /// What the shell does on a 2-second tick with no full search due: the
 /// triggers asked, the standing plan re-timed (its windows against the
-/// clock), at the same size in a release build.  Three times the largest
+/// clock), the routing table rebuilt from it and copied as publishing
+/// it copies it, at the same size in a release build.  Three times the largest
 /// P95 measured on mini2, kept well under a millisecond.
-const TICK_RELEASE_BUDGET: Duration = Duration::from_micros(167);
+const TICK_RELEASE_BUDGET: Duration = Duration::from_micros(216);
 
 /// A release budget is held only in a release build.
 fn within_release(what: &str, p: Duration, budget: Duration) {
@@ -264,6 +265,9 @@ fn sched_plan_tick_perf_gate() {
         let t = Instant::now();
         assert!(black_box(tr.due(&now(at))).is_none(), "a tick asked for a full search");
         let pass = black_box(level2::pass::retime(&mut st, black_box(&i), at)).expect("the standing structure holds");
+        // the routing table every pass rebuilds, and the copy publishing it makes
+        let table = black_box(level2::route::Routing::of(&i, &pass.plan));
+        black_box(table.clone());
         times.push(t.elapsed());
         assert!(!pass.plan.switches.is_empty(), "the tick evaluated no switch");
     }
