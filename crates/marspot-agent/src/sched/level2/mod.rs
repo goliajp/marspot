@@ -287,6 +287,8 @@ mod loop_digest_tests;
 #[cfg(test)]
 mod loop_plan;
 #[cfg(test)]
+mod loop_price;
+#[cfg(test)]
 mod loop_profile_tests;
 #[cfg(test)]
 mod loop_tests;

@@ -22,8 +22,7 @@ use super::standing::Standing;
 use super::trigger::{Now, Triggers};
 use super::tests::KAPPA;
 use super::*;
-use crate::quota::{Class, Quant};
-use crate::quota::waste::switch_cost;
+use crate::quota::Quant;
 use crate::sched::level1::{self, World};
 
 /// What the policies read of the accounts: each one's week and
@@ -155,6 +154,7 @@ pub(super) struct Driver {
     planned_once: bool,
     calib: crate::sched::calib::Calib,
     pub lim: super::Limits,
+    pub pricing: super::loop_price::Pricing,
 }
 
 impl Driver {
@@ -172,7 +172,7 @@ impl Driver {
             Policy::Planner { bias, shell: false, .. } if refused || now % 3600 == 0 || !self.planned_once => {
                 let lim = self.lim;
                 self.st.inertia = Some(lim.inertia);
-                with_input(read, panes, now, [bias, bias], f, lim, |i, _| {
+                with_input(read, panes, now, [bias, bias], f, (lim, self.pricing), |i, _| {
                     pass::full(&mut self.st, i, now as u64, now);
                 });
                 self.planned_once = true;
@@ -183,7 +183,7 @@ impl Driver {
 
     fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: f64, refused: bool) {
         self.st.inertia = Some(self.lim.inertia);
-        with_input(read, panes, now, bias, f, self.lim, |i, outside| {
+        with_input(read, panes, now, bias, f, (self.lim, self.pricing), |i, outside| {
             let quants: Vec<_> = i.accounts.iter().map(|x| x.q.clone()).collect();
             let high: Vec<f64> = i.accounts.iter().map(|x| i.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
             let counted: Vec<u64> = i.panes.iter().map(|p| p.sid).collect();
@@ -224,7 +224,7 @@ fn handed(panes: &[P], now: i64, bias: [f64; 2]) -> Vec<[f64; 2]> {
 }
 
 #[allow(clippy::too_many_arguments)] // the shell's inputs, one by one
-fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, lim: super::Limits, f: impl FnOnce(&Input, &[u64])) {
+fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, (lim, pricing): (super::Limits, super::loop_price::Pricing), f: impl FnOnce(&Input, &[u64])) {
     let q = read.quants();
     let mut outside = Vec::new();
     for (k, p) in panes.iter().enumerate() {
@@ -252,7 +252,7 @@ fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, l
                 restricted: p.restricted,
                 speed: sp[k],
                 high: [sp[k][0] * 2.5, sp[k][1] * 1.5],
-                rewrite: switch_cost(if p.restricted { Class::Restricted } else { Class::Plain }, Some(400_000)),
+                rewrite: super::loop_price::cost(pricing, if p.restricted { crate::quota::Class::Restricted } else { crate::quota::Class::Plain }, p.ctx),
                 lost_work: 0.0,
                 clean_per_h: RESTS[k],
                 long_background: false,
