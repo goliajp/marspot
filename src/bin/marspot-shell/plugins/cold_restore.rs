@@ -7,7 +7,7 @@
 //! what it last ran there and under which shell; a pane whose shell is
 //! new, idle, young and untouched gets that agent resumed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -131,6 +131,9 @@ struct PaceState {
     last_start: Option<Instant>,
     started: u32,
     capped_said: bool,
+    /// Panes a restore was started for, by any agent's plugin: once
+    /// each.  One per pane with a row, and rows are capped.
+    claimed: HashSet<u64>,
 }
 
 /// The pace restores start at: one every `STAGGER`, `CAP` in all.  One
@@ -173,6 +176,16 @@ impl Pace {
         Ok(())
     }
 
+    /// Take pane `sid` for a restore; false when one was already
+    /// started for it, by this agent's plugin or another's.
+    pub(crate) fn claim(&self, sid: u64) -> bool {
+        self.0.lock().unwrap().claimed.insert(sid)
+    }
+
+    pub(crate) fn claimed(&self, sid: u64) -> bool {
+        self.0.lock().unwrap().claimed.contains(&sid)
+    }
+
     pub(crate) fn note_start(&self) {
         let mut p = self.0.lock().unwrap();
         p.started += 1;
@@ -204,5 +217,15 @@ mod tests {
         other.set_last_start(None);
         assert_eq!(pace.may_start(), Err(Held::Capped { first: true }));
         assert_eq!(other.may_start(), Err(Held::Capped { first: false }));
+    }
+
+    #[test]
+    fn a_pane_is_claimed_once_across_agents() {
+        let pace = Pace::own();
+        let other = pace.clone();
+        assert!(pace.claim(7));
+        assert!(other.claimed(7));
+        assert!(!other.claim(7), "the other agent's plugin does not restore it again");
+        assert!(other.claim(8));
     }
 }

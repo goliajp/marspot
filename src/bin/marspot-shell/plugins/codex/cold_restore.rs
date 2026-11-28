@@ -27,10 +27,11 @@ const FILE: &str = "last_bound.tsv";
 pub(super) struct Cold {
     pub(super) rows: Vec<LastThread>,
     gone_since: HashMap<u64, Instant>,
-    /// Panes, and threads, a restore was started for by this process:
-    /// once each.  At most `CAP` of each.
-    tried: HashSet<u64>,
+    /// Threads a restore was started for by this process: once each.
+    /// Panes are claimed on the pace, shared with every agent.
     tried_threads: HashSet<String>,
+    /// Panes whose restore this plugin started and has not seen end.
+    running: HashSet<u64>,
     pub(super) pace: Pace,
     pub(super) last_input: fn(u64) -> Option<SystemTime>,
     pub(super) ends: Arc<Mutex<Vec<(u64, pty_op::OpOutcome)>>>,
@@ -41,8 +42,8 @@ impl Default for Cold {
         Cold {
             rows: Vec::new(),
             gone_since: HashMap::new(),
-            tried: HashSet::new(),
             tried_threads: HashSet::new(),
+            running: HashSet::new(),
             pace: Pace::default(),
             last_input: cold::hub_last_input,
             ends: Arc::default(),
@@ -82,9 +83,11 @@ impl CodexPlugin {
 
     /// Rows waiting on a pane whose session process runs and has no
     /// codex: they are owed a restore or about to go, and the tick has
-    /// to keep coming until they are settled.
+    /// to keep coming until they are settled.  A pane another agent
+    /// restored waits on nothing of ours; one we restore, on its end.
     pub(super) fn cold_pending(&self, obs: &Observation) -> bool {
-        self.cold.rows.iter().any(|r| obs.session(r.sid).is_some_and(|s| s.live && s.shell.is_some() && super::pane_codex(s).is_none()))
+        let waits = |sid: u64| self.cold.running.contains(&sid) || !self.cold.pace.claimed(sid);
+        self.cold.rows.iter().any(|r| waits(r.sid) && obs.session(r.sid).is_some_and(|s| s.live && s.shell.is_some() && super::pane_codex(s).is_none()))
     }
 
     /// Everything this module does on a tick; `bound` the codex panes
@@ -146,7 +149,7 @@ impl CodexPlugin {
             .iter()
             .filter(|r| obs.session(r.sid).is_some_and(|s| s.live) && !with_codex.contains(&r.sid))
             .filter(|r| !open.contains(r.thread.as_str()) && !self.cold.tried_threads.contains(&r.thread))
-            .filter(|r| !self.cold.tried.contains(&r.sid) && !self.switches.moving(r.sid))
+            .filter(|r| !self.cold.pace.claimed(r.sid) && !self.switches.moving(r.sid))
             .collect();
         if waiting.is_empty() {
             return;
@@ -163,17 +166,21 @@ impl CodexPlugin {
         let Some((row, now)) = waiting.into_iter().find_map(|r| pane(r.sid).filter(|p| cold::owed(r, Some(p), wall)).map(|p| (r.clone(), p))) else {
             return;
         };
-        self.cold.tried.insert(row.sid);
+        if !self.cold.pace.claim(row.sid) {
+            return;
+        }
         self.cold.tried_threads.insert(row.thread.clone());
         self.start_cold_restore(host, &row, now.shell);
     }
 
     fn start_cold_restore(&mut self, host: &dyn PluginHost, row: &LastThread, shell: ProcId) {
-        let model = row.model.clone().or_else(|| last_model::thread_model(std::path::Path::new(&row.home), &row.thread)).filter(|m| record::model_ok(m));
+        // the thread's own model or none: `-m` with another thread's
+        // would run the resume on the wrong one
+        let model = row.model.clone().or_else(|| last_model::own_thread_model(std::path::Path::new(&row.home), &row.thread)).filter(|m| record::model_ok(m));
         let sid = row.sid;
         let Some(op) = cold_restore_op(row, model.as_deref(), shell) else {
-            host.log(LogLevel::Warn, "cold_restore.no_line", &format!("pane {sid}: its resume line cannot be quoted"));
-            return;
+            host.log(LogLevel::Warn, "cold_restore.no_line", &format!("pane {sid}: its resume line cannot be quoted; not tried again"));
+            return self.drop_row(host, sid);
         };
         let ends = Arc::clone(&self.cold.ends);
         let op = op.on_end(Arc::new(move |o| ends.lock().unwrap().push((sid, o.clone()))));
@@ -186,16 +193,28 @@ impl CodexPlugin {
         match host.submit_pty_op(sid, op) {
             Ok(()) => {
                 self.cold.pace.note_start();
+                self.cold.running.insert(sid);
                 host.log(LogLevel::Info, "cold_restore.start", &line);
             }
-            Err(e) => host.log(LogLevel::Warn, "cold_restore.submit_failed", &format!("pane {sid}: {e}")),
+            Err(e) => {
+                host.log(LogLevel::Warn, "cold_restore.submit_failed", &format!("pane {sid}: {e}; not tried again"));
+                self.drop_row(host, sid);
+            }
         }
+    }
+
+    fn drop_row(&mut self, host: &dyn PluginHost, sid: u64) {
+        self.cold.rows.retain(|r| r.sid != sid);
+        self.persist_last_bound(host);
     }
 
     /// Forget the row of every pane whose restore did not bring codex
     /// back: the next start of this process does not try it again.
     pub(super) fn settle_cold_ends(&mut self, host: &dyn PluginHost) {
         let ended = std::mem::take(&mut *self.cold.ends.lock().unwrap());
+        for (sid, _) in &ended {
+            self.cold.running.remove(sid);
+        }
         let failed: Vec<(u64, pty_op::OpOutcome)> = ended.into_iter().filter(|(_, o)| !o.is_done()).collect();
         for (sid, outcome) in &failed {
             host.log(LogLevel::Warn, "cold_restore.failed", &format!("pane {sid}: {outcome:?}; not tried again"));

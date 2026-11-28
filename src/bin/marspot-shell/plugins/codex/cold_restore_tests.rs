@@ -194,3 +194,83 @@ fn a_failed_restore_forgets_the_pane() {
     let saved = std::fs::read_to_string(dir.join("state").join("last_bound.tsv")).unwrap();
     assert!(!saved.contains(&thread(9)), "{saved}");
 }
+
+fn rollout(home: &std::path::Path, thread: &str, cwd: &str, model: &str) {
+    let day = home.join("sessions/2026/11/28");
+    std::fs::create_dir_all(&day).unwrap();
+    let meta = format!(r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}"}}}}"#);
+    let turn = format!(r#"{{"type":"turn_context","payload":{{"cwd":"{cwd}","model":"{model}","effort":"high"}}}}"#);
+    std::fs::write(day.join(format!("rollout-2026-11-28T01-00-00-{thread}.jsonl")), format!("{meta}\n{turn}\n")).unwrap();
+}
+
+/// The model a pane's row keeps is its own thread's: another thread of
+/// the same directory, or the account's default, would resume it on
+/// the wrong one.  Unknown, the resume names none.
+#[test]
+fn a_row_keeps_only_its_own_threads_model_and_a_resume_names_no_other() {
+    let dir = TempDir::new("codex-cold-model");
+    let home = dir.join("codex-home");
+    rollout(&home, &thread(1), "/w", "gpt-5.5");
+    let mut index = super::super::rollout::RolloutIndex::default();
+    assert!(index.facts_for_cwd(&home, "/w").is_some());
+    assert_eq!(index.thread_model("/w", &thread(1)).as_deref(), Some("gpt-5.5"));
+    assert_eq!(index.thread_model("/w", &thread(2)), None, "the directory's facts are thread 1's");
+
+    let host = host(&dir);
+    let home_s = home.to_str().unwrap().to_string();
+    let unknown = LastThread { home: home_s.clone(), model: None, ..row(2) };
+    let mut plugin = plugin_with(vec![unknown]);
+    plugin.cold_restore(&host, &obs(&[2]), &[], &HashSet::new(), new_shell);
+    let line = host.sent.lock().unwrap()[0].1.clone();
+    assert!(line.contains(&format!("codex resume {}", thread(2))) && !line.contains(" -m "), "no model of its own, none named: {line}");
+
+    let known = LastThread { home: home_s, model: None, ..row(1) };
+    let mut plugin = plugin_with(vec![known]);
+    plugin.cold_restore(&host, &obs(&[1]), &[], &HashSet::new(), new_shell);
+    let line = host.sent.lock().unwrap()[1].1.clone();
+    assert!(line.contains(&format!("codex resume {} -m gpt-5.5", thread(1))), "its own rollout's model: {line}");
+}
+
+/// A pane the claude plugin already restored is not restored again by
+/// codex, and its row keeps no tick coming.
+#[test]
+fn a_pane_restored_by_another_agent_is_not_restored_again() {
+    let dir = TempDir::new("codex-cold-claimed");
+    let host = host(&dir);
+    let mut plugin = plugin_with(vec![row(6)]);
+    let claude = plugin.cold.pace.clone();
+    assert!(claude.claim(6));
+    let o = obs(&[6]);
+    assert!(!plugin.cold_pending(&o));
+    plugin.cold_restore(&host, &o, &[], &HashSet::new(), new_shell);
+    assert!(host.sent.lock().unwrap().is_empty());
+}
+
+/// A host whose op queue refuses every run.
+struct Refusing(std::path::PathBuf);
+
+impl crate::plugins::PluginHost for Refusing {
+    fn state_dir(&self) -> Result<std::path::PathBuf, crate::plugins::PluginError> {
+        std::fs::create_dir_all(&self.0)?;
+        Ok(self.0.clone())
+    }
+    fn log(&self, _: crate::plugins::LogLevel, _: &str, _: &str) {}
+    fn submit_pty_op_at(&self, _: u64, _: pty_op::PtyOp, _: usize) -> Result<(), crate::plugins::PluginError> {
+        Err(crate::plugins::PluginError::Other("queue full".into()))
+    }
+}
+
+/// A restore the queue refused is not tried again, and its row goes,
+/// so no tick keeps coming for it.
+#[test]
+fn a_refused_restore_drops_the_row() {
+    let dir = TempDir::new("codex-cold-refused");
+    let host = Refusing(dir.join("state"));
+    let mut plugin = plugin_with(vec![row(4)]);
+    let o = obs(&[4]);
+    assert!(plugin.cold_pending(&o));
+    plugin.cold_restore(&host, &o, &[], &HashSet::new(), new_shell);
+    assert!(plugin.cold.rows.is_empty());
+    assert!(!plugin.cold_pending(&o));
+    assert_eq!(std::fs::read_to_string(dir.join("state").join("last_bound.tsv")).unwrap(), "");
+}

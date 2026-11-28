@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.924"  # a pane whose session process started afresh gets its codex thread resumed under the home it ran under
+shell   = "0.7.925"  # a codex pane's row keeps only its own thread's model, and a pane is cold-restored once across agents
 core    = "0.12.808"  # web pane: writes to madcawl never block, the GPU linear-texture alignment is checked, the dev seam URL is read once
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

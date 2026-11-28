@@ -83,6 +83,7 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     let first = spawn_l3(sid, &shell, &path, &[]);
     let old_shell = until("the first shell", || shell_of(sid));
     let mut before = ClaudecodePlugin::new();
+    before.cold.pace = crate::plugins::cold_restore::Pace::own();
     let host = FakeHost::new(plugin_state.clone());
     before.note_bindings(&host, &bound(sid, live_claude(), 3, &home, uuid), &now());
     let saved = fs::read_to_string(plugin_state.join("last_bound.tsv")).unwrap();
@@ -122,6 +123,7 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     let client = Arc::new(ShelldClient::new(Some(proxy.clone() as Arc<dyn InjectInputProxy>)));
     let host = FakeHost::with_io(plugin_state.clone(), client.clone() as Arc<dyn pty_op::PtyIo>);
     let mut plugin = ClaudecodePlugin::new();
+    plugin.cold.pace = crate::plugins::cold_restore::Pace::own();
     plugin.shelld = Some(client.clone());
     plugin.load_last_bound(&host);
     let mut idle = scan_of(sid, CcActivity::Absent);
@@ -134,6 +136,7 @@ fn a_restarted_session_gets_claude_back_and_a_claude_started_by_hand_is_observed
     fs::copy(plugin_state.join("last_bound.tsv"), typed_state.join("last_bound.tsv")).unwrap();
     let typed_host = FakeHost::with_io(typed_state.clone(), client.clone() as Arc<dyn pty_op::PtyIo>);
     let mut typed = ClaudecodePlugin::new();
+    typed.cold.pace = crate::plugins::cold_restore::Pace::own();
     typed.shelld = Some(client.clone());
     typed.cold.last_input = |_| Some(std::time::SystemTime::now());
     typed.load_last_bound(&typed_host);

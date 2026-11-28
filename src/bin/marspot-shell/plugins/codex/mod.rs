@@ -316,16 +316,23 @@ impl Plugin for CodexPlugin {
                 ),
                 None => (pane_model, pane_effort),
             };
+            let home_set = codex_env.as_ref().is_some_and(Option::is_some);
             let profile = codex_env.and_then(profile_from);
             let text = self.hinted(sid, badge_text(profile, model.as_deref(), effort.as_deref()));
             if let Some(p) = codex {
                 with_codex.insert(sid);
                 // the thread by peerbus's binding of this very process,
                 // else the one its command line resumes
+                // (an argv's thread only when the home is known: an
+                // unreadable environment says nothing of the profile)
+                let env_read = home_set || self.env.value(&p.row, "HOME").is_some();
                 let thread = views.get(&sid).filter(|v| v.codex == p.row.id()).map(|v| (v.thread.clone(), v.home.clone()));
-                let thread = thread.or_else(|| p.argv.as_deref().and_then(cold_record::argv_thread).map(|t| (t.to_string(), pane_home.clone())));
+                let argv_thread = || p.argv.as_deref().and_then(cold_record::argv_thread).map(|t| (t.to_string(), pane_home.clone()));
+                let thread = thread.or_else(|| env_read.then(argv_thread).flatten());
                 if let Some((thread, home)) = thread.and_then(|(t, h)| Some((t, h.to_str()?.to_string()))) {
-                    threads_bound.push(cold_restore::Bound { sid, thread, home, cwd: cwd.clone(), model: model.clone() });
+                    // the thread's own model, never the badge's fallback
+                    let model = cwd.as_deref().and_then(|c| self.rollouts.thread_model(c, &thread));
+                    threads_bound.push(cold_restore::Bound { sid, thread, home, cwd: cwd.clone(), model });
                 }
                 codex_panes.push((sid, p.row.id(), p.argv.as_deref().map(<[String]>::to_vec)));
                 alloc_seen.push(alloc_wire::Seen::new(sid, p, &pane_home, cwd.clone(), &self.rollouts, model.clone(), profile));

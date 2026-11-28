@@ -26,9 +26,8 @@ const OP_NAME: &str = "cc.cold_restore";
 pub(super) struct Cold {
     pub(super) rows: Vec<LastBound>,
     gone_since: HashMap<u64, Instant>,
-    /// Panes, and sessions, a restore was started for by this process:
-    /// once each.  At most `CAP` of each.
-    tried: HashSet<u64>,
+    /// Sessions a restore was started for by this process: once each.
+    /// Panes are claimed on the pace, shared with every agent.
     tried_uuids: HashSet<String>,
     pub(super) pace: Pace,
     /// When a pane last had input; the control hub's record.
@@ -42,7 +41,6 @@ impl Default for Cold {
         Cold {
             rows: Vec::new(),
             gone_since: HashMap::new(),
-            tried: HashSet::new(),
             tried_uuids: HashSet::new(),
             pace: Pace::default(),
             last_input: crate::plugins::cold_restore::hub_last_input,
@@ -136,7 +134,7 @@ impl ClaudecodePlugin {
             .iter()
             .filter(|r| result.sessions_seen.contains(&r.sid) && !result.new_meta.contains_key(&r.sid))
             .filter(|r| !bound.contains(r.uuid.as_str()) && !self.cold.tried_uuids.contains(&r.uuid))
-            .filter(|r| !self.cold.tried.contains(&r.sid) && !self.armed.contains(&r.sid))
+            .filter(|r| !self.cold.pace.claimed(r.sid) && !self.armed.contains(&r.sid))
             .filter(|r| !self.dormant.iter().any(|d| d.shelld_sid == r.sid))
             .collect();
         if waiting.is_empty() {
@@ -154,7 +152,9 @@ impl ClaudecodePlugin {
         let Some((row, now)) = waiting.into_iter().find_map(|r| pane(r.sid).filter(|p| record::owed(r, Some(p), wall)).map(|p| (r.clone(), p))) else {
             return;
         };
-        self.cold.tried.insert(row.sid);
+        if !self.cold.pace.claim(row.sid) {
+            return;
+        }
         self.cold.tried_uuids.insert(row.uuid.clone());
         self.start_cold_restore(host, result, &row, now.shell);
     }
