@@ -1,0 +1,71 @@
+# binary	marspot-session
+# version	0.19.0
+# commit	3851c90663c9704a7326fc044bdcce739683b26c
+# file_bytes	1691232
+# budget	1835008
+# previous_budget	1835008
+# previous	0.18 1636528
+# checksum	sha256:7a786700571c32f7f097129dee684062be7addd0c445b249bfcccd052b34d042
+module	bytes	previous	delta
+(__LINKEDIT: symbols, strings, signature)	282208	276656	+5552
+std	204932	203932	+1000
+core	172110	168697	+3413
+marspot_session::main	137636	130156	+7480
+(__TEXT,__eh_frame)	101032	98392	+2640
+marspot_term::terminal	82172	82172	+0
+(__TEXT,__const)	56843	54933	+1910
+marspot_term::scrollback	50632	49208	+1424
+(__TEXT,__gcc_except_tab)	39640	38988	+652
+marspot_term::grid	38956	38528	+428
+(unmapped: headers, padding)	37457	27494	+9963
+gimli	32904	32904	+0
+alloc	31964	31652	+312
+(__DATA_CONST,__const)	29456	27408	+2048
+(__TEXT,__cstring)	19679	19033	+646
+marspot_session::pty_reader	17712	17460	+252
+marspot_term::async_writer	17228	17228	+0
+rustc_demangle	16936	16936	+0
+core <- marspot_term	16572	10696	+5876
+(__TEXT,__unwind_info)	16560	16184	+376
+crc32fast	16384	16384	+0
+marspot_session::local_session	15988	16028	-40
+miniz_oxide	15704	15704	+0
+core <- marspot_session	15620	17960	-2340
+marspot_term::(small)	14035	13903	+132
+marspot_term::session_registry	13408	12788	+620
+marspot_term::bytelog	12840	12824	+16
+std <- marspot_session	12680	13560	-880
+addr2line	10200	10200	+0
+marspot_term::settings	10076	7124	+2952
+std <- marspot_term	9804	8948	+856
+marspot_session::watch	9240	9232	+8
+marspot_session::(small)	9076	8656	+420
+marspot_session::execv_swap	8584	8388	+196
+(other small)	7944	7936	+8
+marspot_session::frames	7888	7860	+28
+marspot_term::grid_shm	7356	7308	+48
+marspot_term::exec_contract	6796	0	+6796
+marspot_term::logx	6784	6784	+0
+marspot_session::owner_watch	6776	6804	-28
+marspot_term::segment	6756	6756	+0
+marspot_term::frame_writer	5752	5256	+496
+alloc <- marspot_term	5144	3664	+1480
+marspot_session::pane_ctl	5124	5124	+0
+hashbrown <- marspot_term	3864	3864	+0
+marspot_session::session_end	3820	3868	-48
+object	3688	3688	+0
+marspot_session::keys	3456	3200	+256
+(__TEXT,__text)	3120	3120	+0
+marspot_term::osc8	2948	2948	+0
+marspot_session::watch_text	2468	2468	+0
+marspot_term::parser	2468	2468	+0
+marspot_session::line_discipline	2464	2464	+0
+alloc <- marspot_session	2416	2756	-340
+marspot_session::shadow	2408	2428	-20
+marspot_session::handoff	2360	2324	+36
+marspot_session::control_writer	2304	2304	+0
+marspot_session::uds_server	2300	2304	-4
+(__TEXT,__stub_helper)	2172	2160	+12
+(__TEXT,__stubs)	2148	2136	+12
+marspot_session::control_reader	2132	2132	+0
+marspot_term::shell_proto	2108	2048	+60

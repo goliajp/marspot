@@ -17,5 +17,23 @@
       "budget": 1048576,
       "measured": 857200
     }
+  },
+  "0.19": {
+    "marspot-shell": {
+      "budget": 8388608,
+      "measured": 7343280
+    },
+    "marspot-core": {
+      "budget": 3145728,
+      "measured": 2948800
+    },
+    "marspot-session": {
+      "budget": 1835008,
+      "measured": 1691232
+    },
+    "marspot-peer": {
+      "budget": 1048576,
+      "measured": 894432
+    }
   }
 }
