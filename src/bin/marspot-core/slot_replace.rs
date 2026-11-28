@@ -50,6 +50,7 @@ impl CoreApp {
             rows.push(MenuItem::entry(&label, REPLACE_TAG_BASE + i as u32));
         }
         self.pane_control.shadows.menu_hidden = hidden;
+        rows.extend(self.web_rows());
         MenuItem::entry(t(Msg::MenuReplaceWith), REPLACE_ROW_TAG).with_submenu(rows)
     }
 

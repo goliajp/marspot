@@ -13,6 +13,8 @@ use super::*;
 
 #[path = "web_dev.rs"]
 mod web_dev;
+#[path = "web_entry.rs"]
+mod web_entry;
 #[path = "web_input.rs"]
 mod web_input;
 

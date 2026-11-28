@@ -175,6 +175,7 @@ impl CoreApp {
                 let kin = sid.map_or_else(Vec::new, |sid| self.kin_of(sid));
                 let mut moves = moves(self);
                 moves.push(self.replace_row());
+                moves.extend(self.web_open_row());
                 menus::sidebar_menu(kin, moves)
             }
             ContextRegion::SidebarPane(sid) => {

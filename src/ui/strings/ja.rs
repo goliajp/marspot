@@ -263,6 +263,8 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         }
         Arg::ModelNowIs(to) => write!(out, "全アカウント共通のClaude Codeのデフォルトモデルは{to}になりました"),
         Arg::WebOpening(url) => write!(out, "{url} を開いています…"),
+        Arg::WebPageRow(url) => write!(out, "ウェブページ {url}"),
+        Arg::WebOpenRow(url) => write!(out, "ウェブページ {url} を開く"),
         Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
             write!(out, "madcawl の {side} はバージョン {a}–{b}、marspot は {c}–{d} に対応しています")
         }

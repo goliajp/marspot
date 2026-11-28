@@ -96,6 +96,7 @@ impl CoreApp {
         }
 
         if self.web_press(wi, x_phys, y_phys, modifiers)
+            || self.web_link_press(wi, x_phys, y_phys, modifiers)
             || self.link_press(wi, x_phys, y_phys) || self.vacant_press(wi, cell_pos_hit) {
             return;
         }

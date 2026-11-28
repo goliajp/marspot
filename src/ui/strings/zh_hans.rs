@@ -246,6 +246,8 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::ModelPutBack { to, back } => write!(out, "所有账号共用的 Claude Code 默认模型未经确认被改成了 {to}，已改回 {back}"),
         Arg::ModelNowIs(to) => write!(out, "所有账号共用的 Claude Code 默认模型现在是 {to}"),
         Arg::WebOpening(url) => write!(out, "正在打开 {url}…"),
+        Arg::WebPageRow(url) => write!(out, "网页 {url}"),
+        Arg::WebOpenRow(url) => write!(out, "打开网页 {url}"),
         Arg::WebVersion { side, theirs: Some((a, b)), ours: (c, d) } => {
             write!(out, "madcawl 的 {side} 支持版本 {a}–{b}，marspot 支持 {c}–{d}")
         }
