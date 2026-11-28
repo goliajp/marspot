@@ -71,12 +71,12 @@ impl PaneUse {
             .used
             .iter()
             .filter(|(at, c, _)| *at > from && *at <= now && *c == class)
-            .map(|(at, _, a)| a * (-lambda * (now - at) as f64).exp())
+            .map(|(at, _, a)| a * crate::detmath::exp(-lambda * (now - at) as f64))
             .sum();
         // a steady speed over the time watched reads as itself; a pane
         // watched for minutes is not averaged over fifteen hours
         let span = self.since.map_or(WINDOW_S, |s| now - s.max(from)).clamp(MIN_SPAN_S, WINDOW_S);
-        let full = 1.0 - (-lambda * span as f64).exp();
+        let full = 1.0 - crate::detmath::exp(-lambda * span as f64);
         Some(sum * lambda * 3600.0 / full)
     }
 

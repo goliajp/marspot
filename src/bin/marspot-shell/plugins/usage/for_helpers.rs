@@ -136,16 +136,15 @@ pub(in crate::plugins) fn choose(
         crate::agentsvc::sched::once(&Made { agent: agent.key(), sid: None, inputs, rule, did: Some((n, Why::Out.word())) }, None);
         Some(n)
     };
-    let rate = match (agent, class) {
-        (Agent::Claude, Class::Restricted) => RHO0 * helper_pick::fable_model().map_or(1.0, |(_, k)| k),
-        _ => RHO0,
-    };
+    let rate = if (agent, class) == (Agent::Claude, Class::Restricted) { RHO0 * helper_pick::fable_model().map_or(1.0, |(_, k)| k) } else { RHO0 };
     let to = match place_by(scene, Mover { class, rate, tokens: None, fable: None }, None, &placed.counts(), rule) {
         Placement::To(n, inputs) => chosen("placed", n, &inputs),
         // only the bands, which no Claude helper is placed by, hold one back
         Placement::HeldBack(n, inputs) => chosen("held_back_start", n, &inputs),
         Placement::Nowhere => helper_pick::unread_pick(&accounts.rooms, None, model, placed),
     };
+    // where the pane plan's routing table would have put it, in shadow
+    if agent == Agent::Claude && events.is_some() { crate::plugins::claudecode::allocation_route::shadow_helper(class, rate, to, now) }
     match to {
         Some(n) => {
             placed.note(n, class, now);

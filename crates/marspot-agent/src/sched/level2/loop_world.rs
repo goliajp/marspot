@@ -150,7 +150,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         feed.step(&acc, &err, &panes, now, STEP);
         drv.step(policy, &Read { acc: &acc, err: &err, feed: &feed, now }, &panes, now, false);
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
-            if rng.next() < 1.0 - (-rate / 12.0).exp() {
+            if rng.next() < 1.0 - crate::detmath::exp(-rate / 12.0) {
                 rest(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, policy, &drv.st, &mut w);
             }
         }

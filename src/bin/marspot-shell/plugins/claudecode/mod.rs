@@ -70,6 +70,7 @@ mod allocation_prices;
 mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;
+pub(in crate::plugins) mod allocation_route;
 mod alloc_moves;
 mod worker_loop;
 pub(crate) mod model_guard;

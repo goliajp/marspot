@@ -51,13 +51,18 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
                 Some(j) if averts => g.dead_for(p, j).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
                 _ => dead_by_gain(t_open, gain, pane.rewrite).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
             };
-            let late = averts && drains.is_none();
+            // a switch planned at the source's latest moment (a keeper's)
+            // opens the same lead before it as one planned earlier, from the
+            // pane's own earliest moment, wherever it goes
+            let at_late = from.and_then(|j| g.late[j]) == Some(hop.at as usize);
+            let late = averts && (drains.is_none() || at_late);
             // the window's length is taken as worked out: `t_dead` less the
             // opening moved up to it differs from the lead by rounding, and
             // a clean rest's chance taken on that falls under the stopping
             // rule's for about half of them
-            let w = if late { (t_dead - t_open).min(lead(pane)) } else { t_dead - t_open };
-            let t_open = if late { t_open.max(t_dead - lead(pane)) } else { t_open };
+            let floor = if late { t_open.min(pane.earliest_h.max(0.0)) } else { t_open };
+            let w = if late { (t_dead - floor).min(lead(pane)) } else { t_dead - t_open };
+            let t_open = if late { floor.max(t_dead - lead(pane)) } else { t_open };
             switches.push(Switch {
                 sid: pane.sid,
                 from: from.map_or(pane.on, |j| input.accounts[j].q.id),
@@ -94,7 +99,7 @@ fn gain(e: &mut Eval, best: &[Sched], p: usize, h: usize, with: &Totals) -> (f64
 /// opens at once.
 fn lead(p: &Pane) -> f64 {
     if p.clean_per_h > 0.0 {
-        -(1.0 - CLEAN_CHANCE).ln() / p.clean_per_h
+        -crate::detmath::ln(1.0 - CLEAN_CHANCE) / p.clean_per_h
     } else if p.long_background {
         H2
     } else {

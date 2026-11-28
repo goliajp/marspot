@@ -239,10 +239,14 @@ impl View {
     /// is missing last.
     pub(super) fn by_hand(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class) -> Option<(u8, Option<Inputs>)> {
         let inputs = self.inputs(rooms, sid, from, class, MUST_LAST_H);
-        match waste::pick(&inputs.accounts, &inputs.loads, inputs.mover, Some(from), inputs.kappa, MUST_LAST_H, &self.rule.params(), |_| true) {
+        let picked = match waste::pick(&inputs.accounts, &inputs.loads, inputs.mover, Some(from), inputs.kappa, MUST_LAST_H, &self.rule.params(), |_| true) {
             Some(to) => Some((to, Some(inputs))),
             None => unread_last(rooms, from, class).map(|to| (to, None)),
-        }
+        };
+        // where the pane plan's routing table would send it, in shadow
+        let line = super::allocation_route::shadow_pane("badge", sid, class, self.rate_of(sid, class), Some(from), picked.as_ref().map(|p| p.0), super::rooms::unix_now());
+        marspot::lx_info!("sched.route.shadow", &line);
+        picked
     }
 
     /// The cheapest of `allowed` for a pane leaving an account that runs

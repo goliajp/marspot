@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.867"  # marspot-term: frames carry the number of the last view ask applied
+shell   = "0.7.872"  # a keeper stays to its account's latest moment, then leaves like any pane
 core    = "0.12.761"  # a core attaching to a session counts its view asks on from the number the session last applied
 session = "0.11.485"  # a turn that parsed a kilobyte of pty output is bulk output, framed at the display interval

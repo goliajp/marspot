@@ -9,6 +9,7 @@
 //! its Fable window, its refusals); those move out to the per-agent
 //! adapters, leaving only what every agent shares.
 
+pub mod detmath;
 pub mod quota;
 pub mod sched;
 pub mod types;

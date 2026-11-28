@@ -163,7 +163,7 @@ fn sched_level2_gap_to_the_fluid_bound_is_reported_at_every_size() {
         // stopping rule's chance is a clean one
         for s in &plan.switches {
             let pane = p.iter().find(|x| x.sid == s.sid).expect("its pane");
-            let lead = -(1.0 - window::CLEAN_CHANCE).ln() / pane.clean_per_h;
+            let lead = -crate::detmath::ln(1.0 - window::CLEAN_CHANCE) / pane.clean_per_h;
             if pane.clean_per_h > 0.0 && s.t_open > 0.0 && (s.t_dead - s.t_open - lead).abs() < 1e-9 {
                 late += 1;
                 assert_eq!(s.kind, Kind::Clean, "{s:?}");

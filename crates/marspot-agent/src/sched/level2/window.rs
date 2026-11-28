@@ -67,7 +67,7 @@ impl Kind {
 
 /// The chance pane `p` reaches a clean rest within `hours`.
 pub fn clean_chance(p: &Pane, hours: f64) -> f64 {
-    1.0 - (-p.clean_per_h * hours.max(0.0)).exp()
+    1.0 - crate::detmath::exp(-p.clean_per_h * hours.max(0.0))
 }
 
 pub fn kind(p: &Pane, t_open: f64, t_dead: f64) -> Kind {

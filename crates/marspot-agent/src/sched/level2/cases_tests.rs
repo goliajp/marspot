@@ -24,7 +24,11 @@ fn sched_level2_a_herd_leaves_spread_over_targets_before_the_account_empties() {
     let movers: Vec<u64> = plan.switches.iter().map(|s| s.sid).collect();
     println!("herd: {} of 6 leave, refused {:?}", movers.len(), plan.refusals);
     assert!(movers.len() >= 5, "{:?}", plan.switches);
-    assert!(!movers.contains(&100));
+    // the keeper leaves, if at all, only at P1's latest moment: its window
+    // is no longer than a clean rest's lead before it
+    let lead = -crate::detmath::ln(1.0 - super::window::CLEAN_CHANCE) / p[0].clean_per_h;
+    let latest = plan.switches.iter().map(|s| s.t_dead).fold(0.0, f64::max);
+    assert!(plan.switches.iter().filter(|s| s.sid == 100).all(|s| s.t_dead >= latest - 1e-6 && s.t_dead - s.t_open <= lead + 1e-6), "{:?}", plan.switches);
     // at most one pane besides the keeper is left to the refusal
     assert!(plan.refusals.len() <= 2, "{:?}", plan.refusals);
     // when P1 empties if nobody moves
@@ -89,14 +93,19 @@ fn sched_level2_a_move_off_an_emptying_account_onto_one_renewing_opens_when_plan
     // renewing in 10 h, after the deadline, a move onto it opens when
     // planned and still closes by the deadline
     let (mut a, p) = herd();
-    let lead = -(1.0 - super::window::CLEAN_CHANCE).ln() / p[0].clean_per_h;
+    let lead = -crate::detmath::ln(1.0 - super::window::CLEAN_CHANCE) / p[0].clean_per_h;
     let far = plan(&input(&a, &p), None);
     assert!(!far.switches.is_empty() && far.switches.iter().all(|s| s.t_dead - s.t_open <= lead + 1e-6), "{:?}", far.switches);
     let deadline = far.switches.iter().map(|s| s.t_dead).fold(0.0, f64::max);
     a[1] = acct(2, a[1].q.r, 0.0, 10.0);
     let near = plan(&input(&a, &p), None);
     let onto: Vec<_> = near.switches.iter().filter(|s| s.to == 2).collect();
-    assert!(!onto.is_empty() && onto.iter().all(|s| s.t_dead <= deadline + 1e-6 && s.t_dead - s.t_open > lead + 1e-6), "{:?}", near.switches);
+    assert!(!onto.is_empty() && onto.iter().all(|s| s.t_dead <= deadline + 1e-6), "{:?}", near.switches);
+    // planned before the deadline it opens when planned; planned at P1's
+    // latest moment (the keeper's) it opens the lead before that
+    let (early, late): (Vec<&Switch>, Vec<&Switch>) = onto.iter().copied().partition(|s| s.t_open < deadline - lead - 1e-6);
+    assert!(!early.is_empty() && early.iter().all(|s| s.t_dead - s.t_open > lead + 1e-6), "{:?}", near.switches);
+    assert!(late.iter().all(|s| s.t_dead - s.t_open <= lead + 1e-6), "{:?}", near.switches);
 }
 
 #[test]

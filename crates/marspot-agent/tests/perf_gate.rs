@@ -207,6 +207,76 @@ fn sched_plan_retime_perf_gate() {
     within("sched plan re-time", p, RETIME_BUDGET);
 }
 
+/// One full search at the same size in a release build, the shell's
+/// build.  A full search runs at most once a minute (the triggers' rate
+/// limit), so 30 ms is about 0.05% of one core; the design's 5 ms is
+/// not held.
+const PLAN_RELEASE_BUDGET: Duration = Duration::from_millis(30);
+
+/// What the shell does on a 2-second tick with no full search due: the
+/// triggers asked, the standing plan re-timed (its windows against the
+/// clock), the routing table rebuilt from it and copied as publishing
+/// it copies it, at the same size in a release build.  Three times the largest
+/// P95 measured on mini2, kept well under a millisecond.
+const TICK_RELEASE_BUDGET: Duration = Duration::from_micros(216);
+
+/// A release budget is held only in a release build.
+fn within_release(what: &str, p: Duration, budget: Duration) {
+    if cfg!(debug_assertions) {
+        println!("{what}: {p:?} against {budget:?} not held in a debug build");
+        return;
+    }
+    within(what, p, budget);
+}
+
+#[test]
+fn sched_plan_release_perf_gate() {
+    let (a, p) = plan_world(16, 64);
+    let i = plan_input(&a, &p);
+    let mut times = Vec::new();
+    for _ in 0..40 {
+        let t0 = Instant::now();
+        black_box(level2::plan(black_box(&i), None));
+        times.push(t0.elapsed());
+    }
+    let full = p95(times.split_off(5));
+    println!("sched plan release P95 per full search {full:?}, budget {PLAN_RELEASE_BUDGET:?}");
+    within_release("sched plan release", full, PLAN_RELEASE_BUDGET);
+}
+
+#[test]
+fn sched_plan_tick_perf_gate() {
+    use level2::trigger::{Now, Triggers};
+    let (a, p) = plan_world(16, 64);
+    let i = plan_input(&a, &p);
+    let quants: Vec<Quant> = a.iter().map(|x| x.q.clone()).collect();
+    let high: Vec<f64> = a.iter().map(|x| p.iter().filter(|q| q.on == x.q.id).map(|q| q.high[0] + q.high[1]).sum()).collect();
+    let counted: Vec<u64> = p.iter().map(|q| q.sid).collect();
+    let now = |at: i64| Now { at, accounts: &quants, high: &high, counted: &counted, offers: 0, refused: false, ended: false, outside: &[] };
+    let (mut st, mut tr) = (level2::standing::Standing::default(), Triggers::default());
+    let t0 = 1_800_000_000;
+    assert!(tr.due(&now(t0)).is_some(), "the first pass searches");
+    let r = level2::pass::full(&mut st, &i, 1, t0);
+    tr.searched(&now(t0), &r.plan.empty.iter().map(|e| e[1]).collect::<Vec<_>>(), r.plan.cuts.get(1).copied().unwrap_or(1.0));
+    let mut times = Vec::new();
+    // ticks inside the triggers' minute: none asks for a full search
+    for k in 1..=25 {
+        let at = t0 + 2 * k;
+        let t = Instant::now();
+        assert!(black_box(tr.due(&now(at))).is_none(), "a tick asked for a full search");
+        let pass = black_box(level2::pass::retime(&mut st, black_box(&i), at)).expect("the standing structure holds");
+        // the routing table every pass rebuilds, and the copy publishing it makes
+        let table = black_box(level2::route::Routing::of(&i, &pass.plan));
+        black_box(table.clone());
+        times.push(t.elapsed());
+        assert!(!pass.plan.switches.is_empty(), "the tick evaluated no switch");
+    }
+    let p = p95(times.split_off(3));
+    println!("sched plan tick release P95 {p:?}, {} standing switches, budget {TICK_RELEASE_BUDGET:?}", st.switches.len());
+    assert!(TICK_RELEASE_BUDGET < Duration::from_millis(1), "the tick's budget stays under a millisecond");
+    within_release("sched plan tick", p, TICK_RELEASE_BUDGET);
+}
+
 /// Four accounts that last the day, five panes spread over them: each
 /// pane may stay or go to any of the other three at once, 4^5 = 1024
 /// joint choices, the exhaustive pass's cap.

@@ -30,6 +30,7 @@ mod moves;
 pub mod pass;
 mod placed;
 mod propose;
+pub mod route;
 mod search;
 mod sim;
 mod tally;
@@ -289,6 +290,8 @@ impl Sched {
 
 #[cfg(test)]
 mod cases_tests;
+#[cfg(test)]
+mod loop_digest_tests;
 #[cfg(test)]
 mod loop_plan;
 #[cfg(test)]
