@@ -106,7 +106,11 @@ pub(super) fn above(obs: &Observation, sid: u64) -> Option<u64> {
 pub(crate) fn parents() -> Vec<(u64, u64)> {
     let s = super::shared();
     if s.lock().began_ms == 0 {
-        super::rebuild::reload(s, &|| crate::observe::shared().fresh(crate::observe::INTERVAL));
+        // the latest observation, never a wait for a new one: callers ask
+        // from their ticks, and a stale view only leaves the top pane of a
+        // helper the log does not place unknown until the plugin's start
+        // reads the log again
+        super::rebuild::reload(s, &|| crate::observe::shared().latest());
     }
     s.table().map.iter().map(|(sid, h)| (*sid, h.started.parent)).collect()
 }

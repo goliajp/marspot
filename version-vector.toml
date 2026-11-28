@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.886"  # which panes are helpers is read from the log before the helpers plugin starts
+shell   = "0.7.887"  # the helpers list asked before the plugin starts reads the latest observation, never waits for one
 core    = "0.12.772"  # pane labels and sidebar rows move out of draw.rs and sidebar_view.rs
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX
