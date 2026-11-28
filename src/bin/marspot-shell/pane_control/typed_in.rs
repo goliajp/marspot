@@ -2,8 +2,9 @@
 //! send through the control socket.
 //!
 //! The key path pays only its one clock store (`Hub::key_pressed`).
-//! Which pane a key went to is settled when the focus moves: a key
-//! pressed since the focus came to a pane went to that pane.
+//! Which pane a key went to is settled when the keyboard moves (the
+//! core's `KeyboardPane`): a key pressed since the keyboard came to a
+//! pane went to that pane.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::SystemTime;

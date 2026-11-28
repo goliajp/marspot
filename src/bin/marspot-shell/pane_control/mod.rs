@@ -91,7 +91,11 @@ pub(crate) struct Hub {
     caps: AtomicU32,
     /// When the current core said hello, ms after `epoch`; 0 before.
     hello_ms: AtomicU64,
+    /// The pane keys go to; 0 for none.
     focus: AtomicU64,
+    /// The current core says which pane keys go to (`KeyboardPane`); a
+    /// core that does not is followed by its `PaneFocused`.
+    keyboard_known: AtomicBool,
     last_key_ms: AtomicU64,
     typed: typed_in::TypedIn,
     conns: AtomicUsize,
@@ -139,6 +143,7 @@ pub(crate) fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Receiver<MainCmd> {
         caps: AtomicU32::new(0),
         hello_ms: AtomicU64::new(0),
         focus: AtomicU64::new(0),
+        keyboard_known: AtomicBool::new(false),
         last_key_ms: AtomicU64::new(0),
         typed: typed_in::TypedIn::default(),
         conns: AtomicUsize::new(0),
@@ -201,7 +206,22 @@ impl Hub {
         self.last_key_ms.store(self.now_ms().max(1), Ordering::Relaxed);
     }
 
+    /// One window's focused pane changed.  It tells nothing when only
+    /// the key window changes, so it is followed only while the core
+    /// says nothing of the keyboard.
     pub(crate) fn focused(&self, sid: u64) {
+        if !self.keyboard_known.load(Ordering::Relaxed) {
+            self.keys_go_to(sid);
+        }
+    }
+
+    /// The core says keys now go to `sid`, or to no pane.
+    fn keyboard(&self, sid: Option<u64>) {
+        self.keyboard_known.store(true, Ordering::Relaxed);
+        self.keys_go_to(sid.unwrap_or(0));
+    }
+
+    fn keys_go_to(&self, sid: u64) {
         self.typed.focused(sid, self.key_at(), SystemTime::now());
         self.focus.store(sid, Ordering::Relaxed);
     }
@@ -223,7 +243,11 @@ impl Hub {
     }
 
     /// A new core said hello: until it says what it does, it does nothing.
+    /// Nor does it say where keys go until it does: every core says so
+    /// as soon as the app is active.
     fn core_hello(&self) {
+        self.keyboard_known.store(false, Ordering::Relaxed);
+        self.keys_go_to(0);
         self.caps.store(0, Ordering::Release);
         self.hello_ms.store(self.now_ms().max(1), Ordering::Release);
     }
@@ -304,6 +328,14 @@ impl Hub {
                 self.caps.store(caps, Ordering::Release);
                 marspot::lx_event!("PANE_CONTROL_CAPS_SEEN", "the core said what it does with pane control", caps = caps);
                 self.queue(MainCmd::Resync);
+            }
+            return true;
+        }
+        if msg == MsgType::KeyboardPane {
+            // here, in the core's order, so a new core's hello cannot
+            // land after the keyboard frame it precedes
+            if let Ok(sid) = marspot::shell_proto::decode_keyboard_pane(payload) {
+                self.keyboard(sid);
             }
             return true;
         }

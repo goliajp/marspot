@@ -149,6 +149,9 @@ impl CoreApp {
         };
         if now != self.terminal_focus {
             let was = std::mem::replace(&mut self.terminal_focus, now);
+            // the shell credits each key to this pane: PaneFocused does
+            // not change when only the key window does
+            self.pending_to_shell.push((MsgType::KeyboardPane, marspot::shell_proto::encode_keyboard_pane(now)));
             for (sid, focused) in [(was, false), (now, true)] {
                 let Some(sid) = sid else { continue };
                 if let Some(pane) = self.pane_by_sid_mut(sid) {
@@ -271,3 +274,7 @@ pub(super) fn read_shell_child_pid(shelld_session_id: u64) -> Option<i32> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "keyboard_pane_tests.rs"]
+mod keyboard_pane_tests;

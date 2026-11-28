@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.907"  # a pane counts as closed for its claude row only by its closed mark or its directory being gone, not by a missing entry
-core    = "0.12.798"  # process rows carry the exec flag; process samples move to a file of their own
-session = "0.11.497"  # marspot-term: settings carry sched.profile and numeric sched.* overrides (not used by session)
+shell   = "0.7.908"  # the control hub credits each key to the pane the core says keys go to (KeyboardPane), across windows
+core    = "0.12.799"  # the core tells the shell which pane keys go to on every change, also when only the key window changes
+session = "0.11.498"  # marspot-term: KeyboardPane frame; PaneFocused coding moves to a file of its own (not used by session)

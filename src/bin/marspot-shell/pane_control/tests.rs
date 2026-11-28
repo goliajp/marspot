@@ -23,6 +23,7 @@ mod proc_stop_tests;
 mod server_tests;
 mod shadow_race_tests;
 mod view_typing_tests;
+mod keyboard_tests;
 
 fn temp(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("pc-{tag}-{}-{}", std::process::id(), marspot_peer::rand::hex(4)));
@@ -38,6 +39,7 @@ fn hub_at(dir: &std::path::Path) -> (Hub, std::sync::mpsc::Receiver<MainCmd>) {
         caps: AtomicU32::new(0),
         hello_ms: AtomicU64::new(0),
         focus: AtomicU64::new(0),
+        keyboard_known: std::sync::atomic::AtomicBool::new(false),
         last_key_ms: AtomicU64::new(0),
         typed: typed_in::TypedIn::default(),
         conns: AtomicUsize::new(0),
