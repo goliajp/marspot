@@ -37,7 +37,7 @@ fn a_written_file_reads_back_as_it_was() {
             ..Resets::none(NOW - 60, "limit_reset_screen")
         },
     };
-    let mut fable = Grant { kind: "fable".into(), restores: vec!["seven_day_overage_included".into()], ..codex_grant(NOW + 600) };
+    let mut fable = Grant { kind: "claude_fable".into(), restores: vec!["seven_day_overage_included".into()], ..codex_grant(NOW + 600) };
     fable.gives_back_weekly = true;
     fable.is_next = true;
     fable.usable_now = Some(true);
@@ -112,9 +112,9 @@ fn a_card_shows_one_line_per_kind_with_counts_and_window() {
     r.grants[0].left = Some(0);
     r.grants[1].usable_now = Some(false);
     assert_eq!(lines(&r, NOW, when), ["full 1/2 to t7200 not now"], "the used one says nothing of the window");
-    r.grants.push(Grant { kind: "fable".into(), left: Some(1), ends_at: Some(NOW + 60), ..Grant::default() });
-    r.grants.push(Grant { kind: "full".into(), left: Some(2), starts_at: Some(NOW + 5), ..Grant::default() });
-    r.grants.push(Grant { kind: "weekly".into(), left: Some(1), ..Grant::default() });
+    r.grants.push(Grant { kind: "claude_fable".into(), left: Some(1), ends_at: Some(NOW + 60), ..Grant::default() });
+    r.grants.push(Grant { kind: "claude_full".into(), left: Some(2), starts_at: Some(NOW + 5), ..Grant::default() });
+    r.grants.push(Grant { kind: "session".into(), left: Some(1), ..Grant::default() });
     assert_eq!(lines(&r, NOW, when), ["full 1/2 to t7200 not now", "fable 1 to t60", "full 2 from t5"], "three kinds at most");
     r.grants[3].ends_at = Some(NOW + 50);
     assert_eq!(lines(&r, NOW, when)[2], "full 2 to t50 from t5", "the end first, so a narrow card cuts the start");
@@ -123,4 +123,19 @@ fn a_card_shows_one_line_per_kind_with_counts_and_window() {
     let no = Resets { outcome: Outcome::Ineligible, ineligible_reason: Some("surface".into()), ..Resets::none(NOW, "limit_reset_screen") };
     assert_eq!(lines(&no, NOW, when), ["resets: ineligible (surface)"]);
     assert_eq!((line_count(&no), line_count(&Resets::none(NOW, "none"))), (1, 0));
+}
+
+#[test]
+fn claudes_first_words_for_its_stored_resets_read_as_the_two_kinds() {
+    assert_eq!((kind_of("claude", "full"), kind_of("claude", "fable")), (CLAUDE_FULL.to_string(), CLAUDE_FABLE.to_string()));
+    assert_eq!(kind_of("claude", "session"), "session", "the CLI's five-hour reset stays as it is");
+    assert_eq!(kind_of("codex", "full"), "full", "only Claude's");
+    let mut a = codex(NOW);
+    a.agent = "claude".into();
+    a.resets.grants[0].kind = "fable".into();
+    a.resets.grants[1].kind = "full".into();
+    let back = parse(&render(&[a, codex(NOW)], NOW));
+    let kinds: Vec<&str> = back[0].resets.grants.iter().map(|g| g.kind.as_str()).collect();
+    assert_eq!(kinds, [CLAUDE_FABLE, CLAUDE_FULL]);
+    assert_eq!(back[1].resets.grants[0].kind, "codex_full", "a Codex word is kept");
 }

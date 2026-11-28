@@ -74,7 +74,7 @@ fn reset_screen_a_claim_of_a_stored_claude_grant_types_nothing() {
     // the chooser behind tengu_cedar_ember has never been seen on a real
     // screen: those kinds are refused before any pane is opened, which
     // here would fail on the missing control socket instead
-    for kind in ["full", "weekly", "fable", "codex_full"] {
+    for kind in ["claude_full", "claude_fable", "codex_full"] {
         let g = Grant { kind: kind.into(), grant_ref: "claude:3:g1".into(), ..Grant::default() };
         let o = super::claim(3, &g, Instant::now() + Duration::from_secs(5));
         assert_eq!(o.result, Res::Unavailable, "{kind}: {o:?}");

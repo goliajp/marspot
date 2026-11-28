@@ -13,7 +13,7 @@ const CODEX_FEED: &str = include_str!("fixtures/devops-codex-feed.json");
 fn claude_feed(generated: i64) -> String {
     format!(
         r#"{{"generated_at":"{}","accounts":[{{"name":"Claude 3","resets":{{"observed_at":"2026-11-27T01:00:00Z","source":"web_usage",
-           "grants":[{{"ref":"claude:3:g1","kind":"fable","left":1,"total":1,"ends_at":1796500000}}]}}}}]}}"#,
+           "grants":[{{"ref":"claude:3:g1","kind":"claude_fable","left":1,"total":1,"ends_at":1796500000}}]}}}}]}}"#,
         iso_utc(generated)
     )
 }

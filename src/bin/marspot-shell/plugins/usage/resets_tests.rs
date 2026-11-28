@@ -150,14 +150,16 @@ fn a_feed_that_only_counts_credits_gives_way_to_marspots_own_reading() {
 fn claude_resets_from_the_web_usage_page_are_readings_and_not_read_is_none() {
     let body = r#"{"accounts":[
         {"name":"Claude 3","resets":{"observed_at":"2026-11-27T01:00:00Z","source":"web_usage","eligible":true,
-         "grants":[{"ref":"claude:3:g1","kind":"fable","restores":["seven_day_overage_included"],"left":1,"total":1,"ends_at":1796500000}]}},
+         "grants":[{"ref":"claude:3:g1","kind":"fable","restores":["seven_day_overage_included"],"left":1,"total":1,"ends_at":1796500000},
+                   {"ref":"claude:3:g2","kind":"claude_full","left":1,"total":1,"ends_at":1796600000}]}},
         {"name":"Claude 4","resets":{"observed_at":"2026-11-27T01:00:00Z","source":"not_read","grants":[]}},
         {"name":"Claude 5"}]}"#;
     let got = claude_of_feed(body);
     assert_eq!(got.len(), 1, "{got:?}");
     let a = &got[0];
-    assert_eq!((a.agent.as_str(), a.profile, a.resets.source.as_str(), a.resets.left_total()), ("claude", 3, "web_usage", 1));
-    assert_eq!(a.resets.grants[0].kind, "fable");
+    assert_eq!((a.agent.as_str(), a.profile, a.resets.source.as_str(), a.resets.left_total()), ("claude", 3, "web_usage", 2));
+    let kinds: Vec<&str> = a.resets.grants.iter().map(|g| g.kind.as_str()).collect();
+    assert_eq!(kinds, ["claude_fable", "claude_full"], "devops' first word for the fable reset is read as the new one");
 
     let dir = marspot_term::test_env::TempDir::new("usage-resets-web");
     let mut r = Resets::new(dir.join("usage"), NOW);

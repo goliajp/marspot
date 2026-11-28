@@ -107,7 +107,7 @@ pub(super) fn claude_of_feed(body: &str) -> Vec<AccountResets> {
         .filter_map(|row| {
             let block = row.get("resets").filter(|b| b.str_at("source") == Some("web_usage"))?;
             let name = row.str_at("name")?;
-            Some(AccountResets { agent: "claude".into(), profile: profile_of(name)?, name: name.to_string(), resets: Reading::from_value(block)? })
+            Some(AccountResets { agent: "claude".into(), profile: profile_of(name)?, name: name.to_string(), resets: Reading::from_value(block)?.of_agent("claude") })
         })
         .collect()
 }

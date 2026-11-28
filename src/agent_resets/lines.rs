@@ -17,7 +17,7 @@ pub fn line_count(r: &Resets) -> usize {
 /// The lines an account card shows for `r` at `now`, one per kind of
 /// reset: `full 2/3 to 12/1 05:26`, or `full 2/3 to 12/1 05:26 from 11/28 09:00`
 /// while the first of them cannot be used yet.  A Codex credit is
-/// `full` there too.  `when` writes a time.  An account with none shows
+/// `full` there too, and Claude's stored resets `full` and `fable`.  `when` writes a time.  An account with none shows
 /// none.
 pub fn lines(r: &Resets, now: i64, when: impl Fn(i64) -> String) -> Vec<String> {
     match r.outcome {
@@ -39,7 +39,7 @@ pub fn lines(r: &Resets, now: i64, when: impl Fn(i64) -> String) -> Vec<String> 
             let left: u32 = of.iter().filter_map(|g| g.left).sum();
             let total: Option<u32> = of.iter().map(|g| g.total).sum();
             let live = || of.iter().filter(|g| g.left != Some(0));
-            let shown = k.strip_prefix("codex_").unwrap_or(k);
+            let shown = k.strip_prefix("codex_").or_else(|| k.strip_prefix("claude_")).unwrap_or(k);
             let mut line = match total {
                 Some(t) => format!("{shown} {left}/{t}"),
                 None => format!("{shown} {left}"),

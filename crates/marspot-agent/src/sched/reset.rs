@@ -12,7 +12,7 @@
 //! on, nothing more.
 
 use crate::quota::{EPS, Load, Quant};
-pub use crate::types::reset::{AGREE_WITHIN_S, Agreement, Count, Supply, agree};
+pub use crate::types::reset::{AGREE_WITHIN_S, Agreement, Count, Supply, WeekCut, agree};
 
 const WEEK_H: f64 = 168.0;
 
@@ -29,6 +29,7 @@ struct Unit {
     moves_week: bool,
     usable_below_left: Option<f64>,
     gives_back_week: bool,
+    week_cut: WeekCut,
     /// Brings back the week and the restricted window at one use.
     both: bool,
 }
@@ -83,6 +84,7 @@ fn units(supply: &[Supply], pick: impl Fn(&Supply) -> bool) -> Vec<Unit> {
                 moves_week: s.moves_week,
                 usable_below_left: s.usable_below_left,
                 gives_back_week: s.gives_back_week,
+                week_cut: s.week_cut,
                 both: s.week && s.window,
             };
             std::iter::repeat_n(u, s.left as usize)
@@ -100,6 +102,8 @@ fn units(supply: &[Supply], pick: impl Fn(&Supply) -> bool) -> Vec<Unit> {
 /// A reset that brings back both the week and the window is used once:
 /// when the week runs out if it is worth something there, and the window
 /// is refilled at that same moment; otherwise when the window runs out.
+/// One that brings back the window alone takes its `week_cut` off what
+/// the week has used by then, read without the week's own resets.
 pub fn with_supply(q: &Quant, load: &Load, window_full: f64, supply: &[Supply]) -> Quant {
     let mut out = q.clone();
     if supply.is_empty() {
@@ -130,6 +134,10 @@ pub fn with_supply(q: &Quant, load: &Load, window_full: f64, supply: &[Supply]) 
         out.f += u.gain;
         if u.unit.gives_back_week {
             out.r += u.gain;
+        }
+        if !u.unit.both {
+            let week_left = (q.r - load.total() * u.at).max(0.0);
+            out.r += u.unit.week_cut.of(1.0 - week_left);
         }
     }
     out

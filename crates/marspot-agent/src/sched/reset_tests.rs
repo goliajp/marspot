@@ -10,12 +10,12 @@ fn plain(rate: f64) -> Load {
 
 /// A reset that brings the week back any time and moves the week.
 fn any_time(ends_h: f64, left: u32) -> Supply {
-    Supply { week: true, window: false, gives_back_week: false, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(ends_h), left, usable_below_left: None }
+    Supply { week: true, window: false, gives_back_week: false, week_cut: WeekCut::Nothing, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(ends_h), left, usable_below_left: None }
 }
 
 /// A `full` reset: both windows, only once at the limit.
 fn full(ends_h: f64) -> Supply {
-    Supply { week: true, window: true, gives_back_week: false, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: Some(ends_h), left: 1, usable_below_left: None }
+    Supply { week: true, window: true, gives_back_week: false, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: Some(ends_h), left: 1, usable_below_left: None }
 }
 
 #[test]
@@ -79,11 +79,25 @@ fn a_reset_not_yet_usable_waits_for_its_start() {
 #[test]
 fn a_fable_reset_refills_the_window_and_gives_its_use_back_to_the_week() {
     let q = Quant { id: 2, r: 0.5, f: 0.05, t: 100.0, tf: 100.0, open: true, stale: false };
-    let fable = Supply { week: false, window: true, gives_back_week: true, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: Some(40.0), left: 1, usable_below_left: None };
+    let fable = Supply { week: false, window: true, gives_back_week: true, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: Some(40.0), left: 1, usable_below_left: None };
     let load = Load { restricted: 0.01, plain: 0.0 };
     let got = with_supply(&q, &load, 0.528, &[fable]);
     assert!((got.f - (0.05 + 0.528)).abs() < 1e-9, "{got:?}");
     assert!((got.r - (0.5 + 0.528)).abs() < 1e-9);
+}
+
+#[test]
+fn a_claude_fable_reset_refills_the_window_and_takes_its_cut_off_the_weeks_usage() {
+    // the window is spent at 5 h, when the week has used 0.65
+    let q = Quant { id: 2, r: 0.4, f: 0.05, t: 100.0, tf: 100.0, open: true, stale: false };
+    let fable = Supply { week: false, window: true, gives_back_week: false, week_cut: WeekCut::ShareOfUsed(0.5), moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: Some(40.0), left: 1, usable_below_left: None };
+    let load = Load { restricted: 0.01, plain: 0.0 };
+    let got = with_supply(&q, &load, 0.528, &[fable]);
+    assert!((got.f - (0.05 + 0.528)).abs() < 1e-9, "{got:?}");
+    assert!((got.r - (0.4 + 0.5 * 0.65)).abs() < 1e-9, "{got:?}");
+    let fixed = with_supply(&q, &load, 0.528, &[Supply { week_cut: WeekCut::Fixed(0.5), ..fable }]);
+    assert!((fixed.r - (0.4 + 0.5)).abs() < 1e-9, "{fixed:?}");
+    assert_eq!(WeekCut::Fixed(0.5).of(0.2), 0.2, "never more than was used");
 }
 
 #[test]
@@ -126,7 +140,7 @@ fn only_what_a_fable_reset_refills_goes_back_to_the_week() {
     // the full reset is too early for the week (empty at 50 h) and refills
     // the window at 5 h; the fable reset refills it again at 57.8 h
     let q = Quant { id: 4, r: 0.5, f: 0.05, t: 100.0, tf: 100.0, open: true, stale: false };
-    let fable = Supply { week: false, window: true, gives_back_week: true, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None };
+    let fable = Supply { week: false, window: true, gives_back_week: true, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None };
     let load = Load { restricted: 0.01, plain: 0.0 };
     let got = with_supply(&q, &load, 0.528, &[full(30.0), fable]);
     assert!((got.f - (0.05 + 2.0 * 0.528)).abs() < 1e-9, "{got:?}");

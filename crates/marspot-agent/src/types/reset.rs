@@ -12,6 +12,9 @@ pub struct Supply {
     pub window: bool,
     /// What the restricted window used comes back to the week as well.
     pub gives_back_week: bool,
+    /// What a reset of the restricted window alone also takes off the
+    /// week's usage.
+    pub week_cut: WeekCut,
     /// Using it moves the week's renewal to a week after the use.
     pub moves_week: bool,
     /// Usable only once the account is at the limit of what it brings back.
@@ -24,6 +27,29 @@ pub struct Supply {
     /// Usable only while the limit it brings back has less than this
     /// share of a full one left; `None` when any amount will do.
     pub usable_below_left: Option<f64>,
+}
+
+/// How much of the week's usage a reset of the restricted window
+/// takes off as well.  Amounts are in weeks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WeekCut {
+    Nothing,
+    /// This share of what the week has used.
+    ShareOfUsed(f64),
+    /// This much, at most what the week has used.
+    Fixed(f64),
+}
+
+impl WeekCut {
+    /// What comes back to the week when it has used `used`.
+    pub fn of(self, used: f64) -> f64 {
+        let used = used.clamp(0.0, 1.0);
+        match self {
+            WeekCut::Nothing => 0.0,
+            WeekCut::ShareOfUsed(s) => s.clamp(0.0, 1.0) * used,
+            WeekCut::Fixed(w) => w.clamp(0.0, used),
+        }
+    }
 }
 
 /// Two readings this far apart are not compared: a reset may have been

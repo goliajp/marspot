@@ -8,8 +8,11 @@
 //! that plan at that time.  Each reset that serves demand alone is a
 //! candidate; the most valuable `MAX_ENUM` are swept in every
 //! combination and the combination serving the most restricted demand,
-//! then the most demand, then with the fewest claims, is kept.  Nothing
-//! here is optimal beyond that.
+//! then the most demand, then with the fewest claims, then with the
+//! fewest that bring back both the week and the window, is kept: a
+//! reset of the window alone that serves as much is claimed in place of
+//! one that brings back both, which stays for when the week binds.
+//! Nothing here is optimal beyond that.
 
 use super::items::Item;
 use super::{Claim, Offer, Solved, World, solve};
@@ -135,6 +138,10 @@ fn edit(w: &World, s: &Solved, k: usize, o: &Offer) -> Option<Edit> {
         let x = if u.gives_back_week { gain } else { gain.min(n_left) };
         e.take_n = if u.gives_back_week { 0.0 } else { x };
         e.add.push(Item::new(a, true, true, at, phi_to, x));
+        let cut = u.week_cut.of(1.0 - week);
+        if cut > EPS {
+            e.add.push(Item::new(a, false, true, at, to, cut));
+        }
     }
     Some(e)
 }
@@ -164,12 +171,17 @@ pub(super) fn choose(w: &World, base: &[Item]) -> Chosen {
         .collect();
     cands.sort_by(|x, y| y.value.total_cmp(&x.value).then(x.offer.cmp(&y.offer)));
     let swept = cands.len().min(MAX_ENUM);
+    let both = |b: usize| {
+        let u = &w.offers[cands[b].offer].supply;
+        u.week && u.window
+    };
+    let cost = |mask: usize| (mask.count_ones(), (0..swept).filter(|b| mask & (1 << b) != 0 && both(*b)).count());
     let (mut best, mut best_served, mut best_mask) = (base.to_vec(), at_base, 0usize);
     for mask in 1..(1usize << swept) {
         let picked: Vec<&Edit> = (0..swept).filter(|b| mask & (1 << b) != 0).map(|b| &cands[b]).collect();
         let items = apply(base, &picked);
         let got = solve(w, items.clone()).served();
-        if better(got, best_served) || (!better(best_served, got) && mask.count_ones() < best_mask.count_ones()) {
+        if better(got, best_served) || (!better(best_served, got) && cost(mask) < cost(best_mask)) {
             (best, best_served, best_mask) = (items, got, mask);
         }
     }

@@ -16,9 +16,11 @@ use marspot_json::{self as json, Value, obj};
 
 mod claim;
 mod claimed;
+mod kinds;
 mod lines;
 pub use claim::{ARMED_FOR_S, Armed, ResetButtons, ResetLine, armed_text, claim_path_on, claimable};
 pub use claimed::{Claimed, claimed_text, claims_dir, last_claims};
+pub use kinds::{CLAUDE_FABLE, CLAUDE_FULL, kind_of};
 pub use lines::{MAX_LINES, line_count, lines};
 
 /// How a reading of an account's resets ended.
@@ -50,8 +52,9 @@ impl Outcome {
 /// One stored reset, or one batch of them that share their terms.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Grant {
-    /// `full`, `weekly`, `session`, `fable`, `codex_full`, or a word
-    /// nobody here knows, kept as given.
+    /// [`CLAUDE_FULL`], [`CLAUDE_FABLE`], `session` (the Claude CLI's
+    /// weekly five-hour reset), `codex_full`, or a word nobody here
+    /// knows, kept as given.
     pub kind: String,
     /// The windows it brings back: `five_hour`, `seven_day`,
     /// `seven_day_overage_included`.
@@ -103,6 +106,15 @@ impl Resets {
     /// The same without the grants that ended by `now`.
     pub fn live(mut self, now: i64) -> Resets {
         self.grants.retain(|g| g.ends_at.is_none_or(|e| e > now));
+        self
+    }
+
+    /// The same with its grants' kinds in the words used here, as
+    /// [`kind_of`] reads them for `agent`.
+    pub fn of_agent(mut self, agent: &str) -> Resets {
+        for g in &mut self.grants {
+            g.kind = kind_of(agent, &g.kind);
+        }
         self
     }
 
@@ -247,11 +259,12 @@ pub fn parse(body: &str) -> Vec<AccountResets> {
     let rows = v.get("accounts").map(Value::arr).unwrap_or_default();
     rows.iter()
         .filter_map(|r| {
+            let agent = r.str_at("agent")?;
             Some(AccountResets {
-                agent: r.str_at("agent")?.to_string(),
+                agent: agent.to_string(),
                 profile: u8::try_from(r.get("profile")?.i64()?).ok()?,
                 name: r.str_at("name").unwrap_or_default().to_string(),
-                resets: Resets::from_value(r.get("resets")?)?,
+                resets: Resets::from_value(r.get("resets")?)?.of_agent(agent),
             })
         })
         .collect()

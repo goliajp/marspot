@@ -132,7 +132,7 @@ fn sched_level1_line_has_every_part_in_points() {
 fn sched_level1_plan_cost_at_sixteen_accounts_is_reported() {
     let mut rng = Rng(5);
     let a = random_accounts(&mut rng, 16, 1.0);
-    let reset = Supply { week: false, window: true, gives_back_week: true, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None };
+    let reset = Supply { week: false, window: true, gives_back_week: true, week_cut: crate::sched::reset::WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 0.0, ends_h: None, left: 1, usable_below_left: None };
     let offers: Vec<Offer> = a.iter().take(4).map(|q| Offer { account: q.id, supply: reset }).collect();
     let buckets = [0.01, 0.02, 0.03, 0.04, 0.05, 0.01, 0.02, 0.03];
     let w = World { offers: &offers, buckets: &buckets, ..world(&a, [0.03, 0.06], 0.05) };

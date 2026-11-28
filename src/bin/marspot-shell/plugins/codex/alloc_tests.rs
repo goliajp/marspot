@@ -229,11 +229,11 @@ fn codex_alloc_heads_up_once_per_account_week() {
 /// ends; one with none reads as it always did.
 #[test]
 fn a_reset_left_before_its_end_adds_to_the_account() {
-    use marspot_agent::types::reset::Supply;
+    use marspot_agent::types::reset::{Supply, WeekCut};
     let plain = &accounts(NOW)[0];
     let before = super::alloc_decide::quant(plain, None, NOW, 0.01);
     assert_eq!(before, super::alloc_decide::quant(&AccountIn { supply: Vec::new(), ..plain.clone() }, None, NOW, 0.01));
-    let reset = Supply { week: true, window: false, gives_back_week: false, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(10.0), left: 1, usable_below_left: Some(0.8) };
+    let reset = Supply { week: true, window: false, gives_back_week: false, week_cut: WeekCut::Nothing, moves_week: true, requires_limit: false, starts_h: 0.0, ends_h: Some(10.0), left: 1, usable_below_left: Some(0.8) };
     let with = super::alloc_decide::quant(&AccountIn { supply: vec![reset], ..plain.clone() }, None, NOW, 0.01);
     // 0.70 left at 0.01 an hour, used at its end in 10 h with 0.60 left: 0.40 comes back
     assert!((before.r - 0.7).abs() < 1e-9 && (with.r - 1.1).abs() < 1e-9, "{with:?}");
