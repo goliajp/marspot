@@ -105,3 +105,21 @@ fn sched_level1_where_the_week_binds_the_full_reset_is_claimed() {
     assert_eq!(fable_only.claims.len(), 1, "alone it still brings back half the week: {:?}", fable_only.claims);
     assert!(p.served[1] > fable_only.served[1] + 0.05, "{:?} {:?}", p.served, fable_only.served);
 }
+
+#[test]
+fn sched_level1_one_full_reset_is_claimed_over_two_window_resets_that_serve_as_much() {
+    // each window reset adds only the 0.2 the week has free: one falls
+    // short, two serve everything, as does the full reset alone
+    let a = [q(3, 0.26, 0.06, 160.0)];
+    let first = Supply { ends_h: Some(20.0), ..claude_fable() };
+    let late = Supply { ends_h: Some(80.0), ..claude_fable() };
+    let full = Supply { ends_h: Some(20.0), ..claude_full() };
+    let offers = [Offer { account: 3, supply: first }, Offer { account: 3, supply: late }, Offer { account: 3, supply: full }];
+    let w = World { offers: &offers, ..world(&a, [0.0025, 0.0], 0.0025) };
+    let p = plan(&w);
+    let fables = plan(&World { offers: &offers[..2], ..w });
+    assert_eq!(fables.claims.len(), 2, "both window resets are needed: {:?}", fables.claims);
+    assert!((p.served[0] - fables.served[0]).abs() < 1e-6, "{:?} {:?}", p.served, fables.served);
+    assert_eq!(p.claims.len(), 1, "{:?}", p.claims);
+    assert_eq!(p.claims[0].offer, 2, "fewer claims first: {:?}", p.claims);
+}

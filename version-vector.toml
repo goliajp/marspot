@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.950"  # claude stored resets are claude_full and claude_fable; supply and the planner's choice by kind
-core    = "0.12.817"  # reset lines name claude_full and claude_fable as full and fable
+shell   = "0.7.951"  # a claude_fable week cut counts the week given back by earlier resets; one full reset over two window resets
+core    = "0.12.818"  # the reset lines doc is rewrapped
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

@@ -12,6 +12,16 @@
 //! fewest that bring back both the week and the window, is kept: a
 //! reset of the window alone that serves as much is claimed in place of
 //! one that brings back both, which stays for when the week binds.
+//! Fewer claims come before fewer full resets: one full reset is kept
+//! over two window resets that serve as much, because every claim spends
+//! a scarce reset, and a full one claimed where the week does not bind
+//! still refills the window.
+//!
+//! Every reset's edit is read from the plan without claims, so two resets
+//! on one account in one combination do not see each other: both refill
+//! the window from what it had left there, and each window reset takes
+//! its week cut off the week used in that plan, not after the other's
+//! cut.  The sweep may count such a pair as worth more than it is.
 //! Nothing here is optimal beyond that.
 
 use super::items::Item;

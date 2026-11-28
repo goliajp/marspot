@@ -15,10 +15,11 @@ pub fn line_count(r: &Resets) -> usize {
 }
 
 /// The lines an account card shows for `r` at `now`, one per kind of
-/// reset: `full 2/3 to 12/1 05:26`, or `full 2/3 to 12/1 05:26 from 11/28 09:00`
-/// while the first of them cannot be used yet.  A Codex credit is
-/// `full` there too, and Claude's stored resets `full` and `fable`.  `when` writes a time.  An account with none shows
-/// none.
+/// reset: `full 2/3 to 12/1 05:26`, or
+/// `full 2/3 to 12/1 05:26 from 11/28 09:00` while the first of them
+/// cannot be used yet.  A Codex credit is `full` there too, and Claude's
+/// stored resets `full` and `fable`.  `when` writes a time.  An account
+/// with none shows none.
 pub fn lines(r: &Resets, now: i64, when: impl Fn(i64) -> String) -> Vec<String> {
     match r.outcome {
         Outcome::CommandMissing => return vec!["resets: no /limit-reset".into()],
