@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use marspot_peer::json::{self, Value, obj};
+use marspot_json::{self as json, Value, obj};
 
 mod claim;
 mod claimed;

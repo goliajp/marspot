@@ -102,6 +102,11 @@ golia-ui-core = { path = "crates/ui/core" }
 # Codex app-server client).  In-tree, ours, zero deps beyond libc.
 marspot-peer = { path = "crates/marspot-peer" }
 
+# The JSON parser marspot-peer re-exports.  In-tree, ours, zero deps.
+# Named directly so the lib reads JSON without going through the
+# messaging crate.
+marspot-json = { path = "crates/marspot-json" }
+
 # What every agent shares, as pure code (account choice and its
 # simulator).  In-tree, ours, no deps beyond marspot-term.  Only the
 # shell names it.
