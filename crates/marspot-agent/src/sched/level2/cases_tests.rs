@@ -89,7 +89,7 @@ fn sched_level2_a_move_off_an_emptying_account_onto_one_renewing_opens_when_plan
     // renewing in 10 h, after the deadline, a move onto it opens when
     // planned and still closes by the deadline
     let (mut a, p) = herd();
-    let lead = -(1.0 - super::window::CLEAN_CHANCE).ln() / p[0].clean_per_h;
+    let lead = -crate::detmath::ln(1.0 - super::window::CLEAN_CHANCE) / p[0].clean_per_h;
     let far = plan(&input(&a, &p), None);
     assert!(!far.switches.is_empty() && far.switches.iter().all(|s| s.t_dead - s.t_open <= lead + 1e-6), "{:?}", far.switches);
     let deadline = far.switches.iter().map(|s| s.t_dead).fold(0.0, f64::max);

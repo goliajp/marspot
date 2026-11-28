@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.870"  # a badge click is taken out of the routing table once, and the table carries the other agents
+shell   = "0.7.871"  # the pane plan and the speeds take exp and ln that give the same bits on every machine
 core    = "0.12.761"  # a core attaching to a session counts its view asks on from the number the session last applied
 session = "0.11.485"  # a turn that parsed a kilobyte of pty output is bulk output, framed at the display interval

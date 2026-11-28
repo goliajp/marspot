@@ -94,7 +94,7 @@ fn gain(e: &mut Eval, best: &[Sched], p: usize, h: usize, with: &Totals) -> (f64
 /// opens at once.
 fn lead(p: &Pane) -> f64 {
     if p.clean_per_h > 0.0 {
-        -(1.0 - CLEAN_CHANCE).ln() / p.clean_per_h
+        -crate::detmath::ln(1.0 - CLEAN_CHANCE) / p.clean_per_h
     } else if p.long_background {
         H2
     } else {

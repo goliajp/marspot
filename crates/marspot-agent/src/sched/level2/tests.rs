@@ -56,7 +56,7 @@ fn sched_level2_a_pane_leaves_an_account_that_runs_out_before_it_does() {
     for s in &plan.switches {
         // the window opens as late as still leaves a clean rest at the
         // stopping rule's chance: 4 rests an hour
-        let lead = -(1.0 - window::CLEAN_CHANCE).ln() / 4.0;
+        let lead = -crate::detmath::ln(1.0 - window::CLEAN_CHANCE) / 4.0;
         assert!(s.sid != 11 && (s.from, s.to) == (1, 2) && (s.t_open - (s.t_dead - lead).max(0.0)).abs() < 1e-9, "{s:?}");
         assert!(s.exempt, "the switch averts a refusal within two hours");
         assert!(s.t_dead > 0.0 && s.t_dead < 2.0 / 1.5, "{s:?}");
