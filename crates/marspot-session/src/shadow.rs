@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use marspot_term::fs_watch::Watcher;
 use marspot_term::shell_proto::{
     DoneCode, Frame, MsgType, PaneDone, SHADOW_IDLE_DEFAULT_S, SHADOW_IDLE_NEVER, SessionShadow, encode_pane_done,
+    shadow_was_text,
 };
 use marspot_term::{lx_event, lx_warn, platform, session_registry};
 
@@ -48,23 +49,23 @@ pub(crate) struct ShadowCfg {
 }
 
 impl ShadowCfg {
-    /// A timeout of `SHADOW_IDLE_NEVER` is none; a pane that is no
-    /// shadow has none either.
+    /// A timeout of 0 is the default one and `SHADOW_IDLE_NEVER` none;
+    /// a pane that is no shadow has none either.
     pub(crate) fn new(parent: u64, idle_s: u32) -> Self {
-        match parent {
-            0 => Self::default(),
-            parent => Self { parent, idle_s },
+        match (parent, idle_s) {
+            (0, _) => Self::default(),
+            (parent, 0) => Self { parent, idle_s: SHADOW_IDLE_DEFAULT_S },
+            (parent, idle_s) => Self { parent, idle_s },
         }
     }
 }
 
 /// What the core asked for in the environment, which leaves it here:
 /// neither the shell nor a later image may see it.  A parent named with
-/// no timeout gets the default one.
+/// no timeout, or 0, gets the default one.
 pub(crate) fn take_env() -> ShadowCfg {
-    let read = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok());
-    let idle = read(ENV_SHADOW_IDLE_S).map_or(SHADOW_IDLE_DEFAULT_S, |v| u32::try_from(v).unwrap_or(u32::MAX));
-    let cfg = ShadowCfg::new(read(ENV_SHADOW_OF).unwrap_or(0), idle);
+    let read = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+    let cfg = ShadowCfg::new(read(ENV_SHADOW_OF), u32::try_from(read(ENV_SHADOW_IDLE_S)).unwrap_or(SHADOW_IDLE_NEVER));
     // SAFETY: first thing in main, before any other thread or the shell starts
     unsafe {
         std::env::remove_var(ENV_SHADOW_OF);
@@ -179,12 +180,13 @@ impl Shadow {
         } else {
             match write_entry(self.sid, cfg.parent) {
                 Ok(()) => {
+                    let was = self.cfg.idle_s;
                     self.cfg = cfg;
                     self.active_at = Instant::now();
                     self.follow(watcher);
                     lx_event!("L3_SHADOW_SET", "shadow parent changed on request", session_id = self.sid,
-                        parent = cfg.parent);
-                    (DoneCode::Ok, String::new())
+                        parent = cfg.parent, idle_s = cfg.idle_s);
+                    (DoneCode::Ok, shadow_was_text(was))
                 }
                 Err(e) => {
                     lx_warn!("l3.shadow.entry_write_failed", &format!("{e}"), session_id = self.sid);
@@ -278,11 +280,27 @@ mod tests {
         assert!(std::env::var_os(ENV_SHADOW_IDLE_S).is_none());
         env.set(ENV_SHADOW_OF, "42");
         env.set(ENV_SHADOW_IDLE_S, "0");
+        assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: SHADOW_IDLE_DEFAULT_S }, "0 is the default, as before");
+        env.set(ENV_SHADOW_OF, "42");
+        env.set(ENV_SHADOW_IDLE_S, &SHADOW_IDLE_NEVER.to_string());
         assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: SHADOW_IDLE_NEVER }, "no timeout");
         env.set(ENV_SHADOW_OF, "0");
         env.set(ENV_SHADOW_IDLE_S, "2");
         assert_eq!(take_env(), ShadowCfg::default());
         env.set(ENV_SHADOW_OF, "nonsense");
         assert_eq!(take_env(), ShadowCfg::default());
+    }
+
+    /// An idle timeout from an older core (0) is the default one, and a
+    /// timeout of "never" keeps no deadline at all.
+    #[test]
+    fn shadow_session_idle_zero_is_the_default_and_never_keeps_no_deadline() {
+        assert_eq!(ShadowCfg::new(7, 0), ShadowCfg { parent: 7, idle_s: SHADOW_IDLE_DEFAULT_S });
+        assert_eq!(ShadowCfg::new(0, SHADOW_IDLE_NEVER), ShadowCfg::default());
+        let never = Shadow::new(9, ShadowCfg::new(7, SHADOW_IDLE_NEVER), None);
+        assert_eq!(never.due_in(), None);
+        assert!(!never.times_out());
+        let default = Shadow::new(9, ShadowCfg::new(7, 0), None);
+        assert!(default.due_in().is_some_and(|d| d > Duration::from_secs(u64::from(SHADOW_IDLE_DEFAULT_S) - 60)));
     }
 }

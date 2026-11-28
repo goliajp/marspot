@@ -123,3 +123,15 @@ fn shadow_place_parent_changes_the_parent_where_the_pane_is() {
     app.route_pane_control(place(54, sid, PlaceWhere::Parent, 0x7777_0001));
     assert_eq!(done_for(&app, 54).expect("answered at once").text, "no such parent pane");
 }
+
+/// A move undone puts back the timeout the session said it had, and an
+/// older session's answer, which says none, the default it knew.
+#[test]
+fn shadow_place_an_undo_puts_back_the_timeout_the_session_had() {
+    use marspot::shell_proto::shadow_was_text;
+    assert_eq!(idle_before(&shadow_was_text(SHADOW_IDLE_NEVER)), SHADOW_IDLE_NEVER);
+    assert_eq!(idle_before(&shadow_was_text(90)), 90);
+    assert_eq!(idle_before(""), SHADOW_IDLE_DEFAULT_S);
+    assert_eq!(idle_for(PlaceWhere::Shadow), SHADOW_IDLE_DEFAULT_S);
+    assert_eq!(idle_for(PlaceWhere::Parent), SHADOW_IDLE_NEVER);
+}

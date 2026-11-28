@@ -148,7 +148,7 @@ pub(crate) fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L
     };
     let shadow = crate::shadow::ShadowCfg::new(
         fields.get("shadow_of").and_then(|s| s.parse().ok()).unwrap_or(0),
-        fields.get("shadow_idle_s").and_then(|s| s.parse().ok()).unwrap_or(0),
+        fields.get("shadow_idle_s").and_then(|s| s.parse().ok()).unwrap_or(marspot_term::shell_proto::SHADOW_IDLE_DEFAULT_S),
     );
     let num = |k: &str| fields.get(k).and_then(|s| s.parse::<u64>().ok());
     let socket = num("socket_dev").zip(num("socket_ino")).map(|(dev, ino)| crate::own_socket::SocketId { dev, ino });
@@ -392,6 +392,25 @@ mod tests {
         write_handoff_manifest(&sample(), &path).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("shadow"), "nothing for a pane that is none");
         assert_eq!(read_body(&dir, V2).unwrap().shadow, crate::shadow::ShadowCfg::default());
+    }
+
+    /// A child the user made crosses a swap with no timeout, written as
+    /// the value an older image reads as one far past any session's
+    /// life; a parent with no timeout written, from an older image, has
+    /// the default one.
+    #[test]
+    fn shadow_session_no_timeout_crosses_the_manifest_both_ways() {
+        use marspot_term::shell_proto::{SHADOW_IDLE_DEFAULT_S, SHADOW_IDLE_NEVER};
+        let dir = TempDir::new("handoff");
+        let path = dir.join("m.tsv");
+        let never = L3Handoff { shadow: crate::shadow::ShadowCfg::new(4_200_000_007, SHADOW_IDLE_NEVER), ..sample() };
+        write_handoff_manifest(&never, &path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("shadow_idle_s=4294967295\n"));
+        assert_eq!(read_handoff_manifest(&path).unwrap().shadow.idle_s, SHADOW_IDLE_NEVER);
+        let old = read_body(&dir, &format!("{V2}shadow_of=4200000007\n")).unwrap().shadow;
+        assert_eq!(old, crate::shadow::ShadowCfg { parent: 4_200_000_007, idle_s: SHADOW_IDLE_DEFAULT_S });
+        let zero = read_body(&dir, &format!("{V2}shadow_of=4200000007\nshadow_idle_s=0\n")).unwrap().shadow;
+        assert_eq!(zero.idle_s, SHADOW_IDLE_DEFAULT_S);
     }
 
     /// A newer writer may add fields; a reader in range ignores them

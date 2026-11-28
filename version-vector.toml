@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.877"  # every change of a pane's parent goes through one check, and pane.parent asks for one
-core    = "0.12.765"  # the sidebar shows each pane's code before its name, in a wider column
-session = "0.11.490"  # a child the user made has no idle timeout, and panes nest two levels at most
+shell   = "0.7.878"  # an agent's pane gets the shared default idle timeout constant
+core    = "0.12.766"  # a move undone puts back the timeout the session had
+session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

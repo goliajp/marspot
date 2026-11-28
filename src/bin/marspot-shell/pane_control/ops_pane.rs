@@ -22,8 +22,6 @@ use super::{Reply, names, ops_parent, panes, shadow_tree};
 
 /// How long a new pane may take to be answered for.
 const SPAWN_WITHIN: Duration = Duration::from_secs(10);
-/// A shadow pane nobody types into or reads output from ends after this.
-const SHADOW_IDLE_S: u32 = 6 * 3600;
 
 /// How a request may be asked again when nothing came back.
 #[derive(Clone, Copy, PartialEq)]
@@ -137,7 +135,8 @@ fn open_as(conn: &mut Conn, ctx: &Ctx, a: &OpenArgs, within: Duration, helper: b
         new_window: a.new_window,
         // a pane for a window opens in the window holding this one
         parent_sid: parent,
-        idle_s: SHADOW_IDLE_S,
+        // an agent's pane ends when nobody types into it or reads it for this
+        idle_s: marspot::shell_proto::SHADOW_IDLE_DEFAULT_S,
         cols: a.cols,
         rows: a.rows,
         cwd,

@@ -460,3 +460,21 @@ fn pane_control_trailing_bytes_are_ignored() {
         );
     }
 }
+
+/// The idle timeout on the wire between images of two ages: 0 is the
+/// default to both, and "never" is a value an older L3 reads as a
+/// timeout far past any session's life.
+#[test]
+fn pane_control_shadow_idle_wire_values_read_the_same_by_old_and_new() {
+    assert_eq!(SHADOW_IDLE_DEFAULT_S, 6 * 3600);
+    assert_ne!(SHADOW_IDLE_NEVER, 0, "0 keeps meaning the default");
+    let years = u64::from(SHADOW_IDLE_NEVER) / (365 * 24 * 3600);
+    assert!(years >= 100, "an older L3 times it out after {years} years");
+    let m = SessionShadow { req_id: 9, parent_sid: 5, idle_s: SHADOW_IDLE_NEVER };
+    let p = encode_session_shadow(&m);
+    assert_eq!(&p[12..16], &[0xFF; 4], "all ones on the wire");
+    assert_eq!(decode_session_shadow(&p).unwrap(), m);
+    assert_eq!(parse_shadow_was(&shadow_was_text(SHADOW_IDLE_NEVER)), Some(SHADOW_IDLE_NEVER));
+    assert_eq!(parse_shadow_was(&shadow_was_text(2)), Some(2));
+    assert_eq!(parse_shadow_was(""), None, "an older L3's answer says nothing");
+}

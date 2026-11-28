@@ -1,16 +1,13 @@
 //! Moving a pane between a window and the shadows, and changing whose
 //! child it is (`PanePlace`).
 //!
-//! Whose child a pane is and whether it is shown are two things: a
-//! pane moved into a window keeps its parent and still ends with it,
-//! and changing its parent (`Parent`) leaves it where it is shown.
-//! Taking a pane out of its window makes it the child of the pane that
-//! asked, so that session is told first (`SessionShadow`) and the pane
-//! moves only once it has answered, as with a change of parent.  The
-//! loop does not wait for that answer; it sleeps toward the earliest
-//! deadline, and a session silent for 3 s leaves the pane as it was
-//! and L1 is told nothing is known (`UNANSWERED`).  An answer that
-//! comes after that is undone with a second `SessionShadow`.
+//! Whose child a pane is and whether it is shown are two things: one
+//! moved into a window keeps its parent, and `Parent` leaves it where
+//! it is shown.  A change of parent, which a move out of a window is,
+//! is told to the session first (`SessionShadow`) and done once it has
+//! answered; the loop sleeps toward the deadline, a session silent for
+//! 3 s leaves the pane as it was (`UNANSWERED`), and a later answer is
+//! undone, its timeout put back as the session said it was.
 //!
 //! The core's own `SessionShadow`s carry request ids from a range L1
 //! never reaches; their answers stop here and never go on to L1.
@@ -20,7 +17,7 @@ use super::*;
 use marspot::pane::ControlReach;
 use marspot::shell_proto::{
     DoneCode, PanePlace, PlaceWhere, SHADOW_IDLE_DEFAULT_S, SHADOW_IDLE_NEVER, SessionShadow, decode_pane_done,
-    encode_session_shadow,
+    encode_session_shadow, parse_shadow_was,
 };
 use std::collections::VecDeque;
 
@@ -74,9 +71,7 @@ impl Places {
     }
 }
 
-/// A `SessionShadow` the core sends on its own account.  A pane taken
-/// out of a window by an agent gets the default idle timeout; one the
-/// user made a child, and one put back as it was, none.
+/// A `SessionShadow` of the core's own (timeouts: `idle_for`, `idle_before`).
 pub(super) fn session_shadow_frame(req_id: u32, parent: u64, idle_s: u32) -> Frame {
     Frame::new(MsgType::SessionShadow, encode_session_shadow(&SessionShadow { req_id, parent_sid: parent, idle_s }))
 }
@@ -86,7 +81,6 @@ fn parent_in_registry(sid: u64) -> u64 {
     session_registry::read_session_entry(sid).map_or(0, |e| e.shadow_of)
 }
 
-/// `req_id` is the core's own: nobody in the shell asked it.
 pub(super) fn is_own(req_id: u32) -> bool {
     (L2_REQ_BASE..L2_REQ_END).contains(&req_id)
 }
@@ -202,7 +196,7 @@ impl CoreApp {
             if done.code == DoneCode::Ok {
                 // the pane stayed where it was; so does the session
                 if let Some(pane) = self.pane_by_sid_mut(sid) {
-                    pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was, SHADOW_IDLE_NEVER));
+                    pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was, idle_before(&done.text)));
                 }
                 lx_warn!("core.shadow.late_answer_undone", "a session answered a move after its time; undone",
                     session = sid);
@@ -260,7 +254,7 @@ impl CoreApp {
             _ if self.find_window_pane_by_sid(p.sid).is_some() && self.last_drawn_pane(p.sid) => {
                 let sent = self
                     .pane_by_sid_mut(p.sid)
-                    .is_some_and(|pane| pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was, SHADOW_IDLE_NEVER)));
+                    .is_some_and(|pane| pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, p.was, idle_before(text))));
                 if !sent {
                     lx_warn!("core.shadow.unshadow_unsent", "the parent back for the pane that stays was not sent",
                         session = p.sid);
@@ -290,7 +284,13 @@ impl CoreApp {
     }
 }
 
-/// The idle timeout a move asks the session for.
+/// The timeout a session had before a move it answered `text` to; one
+/// that does not say had the default, the only kind an older L3 knows.
+fn idle_before(text: &str) -> u32 {
+    parse_shadow_was(text).unwrap_or(SHADOW_IDLE_DEFAULT_S)
+}
+
+/// A move into the shadows asks for the default timeout, `Parent` none.
 fn idle_for(to: PlaceWhere) -> u32 {
     if to == PlaceWhere::Shadow { SHADOW_IDLE_DEFAULT_S } else { SHADOW_IDLE_NEVER }
 }
