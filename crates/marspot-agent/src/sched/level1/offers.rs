@@ -21,7 +21,9 @@
 //! on one account in one combination do not see each other: both refill
 //! the window from what it had left there, and each window reset takes
 //! its week cut off the week used in that plan, not after the other's
-//! cut.  The sweep may count such a pair as worth more than it is.
+//! cut.  The sweep may count such a pair as worth more than it is.  A
+//! window reset's room is capped by the week's free room before its own
+//! cut is added, so with the week nearly spent it is counted short.
 //! Nothing here is optimal beyond that.
 
 use super::items::Item;
