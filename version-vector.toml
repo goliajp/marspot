@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.890"  # marspot-term: the core can ask the shell to bring a window to the front
-core    = "0.12.774"  # marspot-term: the core can ask the shell to bring a window to the front
+core    = "0.12.775"  # the sidebar lists each pane's children under it, shown anywhere or not
 session = "0.11.493"  # marspot-term: the core can ask the shell to bring a window to the front

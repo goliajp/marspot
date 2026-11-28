@@ -20,6 +20,13 @@ impl CoreApp {
                     } else if tag == MOVE_TO_NEW_WINDOW_TAG
                         || (MOVE_TO_WINDOW_TAG_BASE..MOVE_TO_NEW_WINDOW_TAG).contains(&tag)
                     {
+                        if let ContextRegion::SidebarPane(sid) = region {
+                            win!(self, wi).context_menu = None;
+                            win!(self, wi).needs_render = true;
+                            let to = (tag != MOVE_TO_NEW_WINDOW_TAG).then(|| (tag - MOVE_TO_WINDOW_TAG_BASE) as usize);
+                            self.move_other(sid, to);
+                            return true;
+                        }
                         let idx = match region {
                             ContextRegion::Pane(i)
                             | ContextRegion::SidebarSlot(i) => i,

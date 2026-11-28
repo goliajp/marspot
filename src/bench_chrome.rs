@@ -145,5 +145,5 @@ pub(crate) fn views(terminals: &[Terminal]) -> Vec<SessionView<'_>> {
 /// A sidebar row per pane.
 pub(crate) fn sidebar() -> Vec<SidebarEntry<'static>> {
     let states = [SessionState::Active, SessionState::Idle, SessionState::Exited];
-    NAMES.iter().enumerate().map(|(i, (label, _))| SidebarEntry { label, state: states[i % 3], code: Some(4100 + i as u16) }).collect()
+    NAMES.iter().enumerate().map(|(i, (label, _))| SidebarEntry::top(label, states[i % 3], Some(4100 + i as u16))).collect()
 }

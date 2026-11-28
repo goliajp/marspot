@@ -62,21 +62,45 @@ impl CoreApp {
 
     /// The code of pane `i` of window `wi`, from memory only: drawing
     /// never waits on the code file (`note_pane_code` fills it).
+    #[cfg(test)]
     pub(crate) fn pane_code(&self, wi: usize, i: usize) -> Option<u16> {
         marspot_term::pane_code::known(win!(self, wi).panes.get(i)?.shelld_session_id()?)
     }
 
-    /// The sidebar's label of each pane: the code is drawn before the
-    /// name, so a shared name loses its own copy of it.
-    pub(super) fn sidebar_labels(&self, wi: usize, resolved: &[String]) -> Vec<String> {
-        resolved
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let s = self.pane_code(wi, i).map_or(s.as_str(), |c| without_code(s, c));
-                truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS)
+    /// Each sidebar row's label, state and code.  The code is drawn
+    /// before the name, so a shared name loses its own copy of it.
+    pub(super) fn sidebar_texts(&self, wi: usize, resolved: &[String]) -> Vec<(String, SessionState, Option<u16>)> {
+        use super::sidebar_tree::RowPane;
+        let rows = self.sidebar_rows(wi);
+        // names of panes of other windows only when there are some
+        let names = rows.iter().any(|r| matches!(r.pane, RowPane::Other(_))).then(|| self.pane_names());
+        rows.iter()
+            .map(|r| {
+                let (label, pane) = match r.pane {
+                    RowPane::Slot(i) => (resolved.get(i).cloned().unwrap_or_default(), win!(self, wi).panes.get(i)),
+                    RowPane::Other(sid) => (self.label_of(sid, names.as_ref()), self.pane_of(sid)),
+                };
+                let code = pane.and_then(Pane::shelld_session_id).and_then(marspot_term::pane_code::known);
+                let s = code.map_or(label.as_str(), |c| without_code(&label, c));
+                let state = pane.map_or(SessionState::Exited, |p| p.session().state());
+                (truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS), state, code)
             })
             .collect()
+    }
+
+    /// What a pane of no slot of this window is called on screen.
+    fn label_of(&self, sid: u64, names: Option<&std::collections::HashMap<u64, String>>) -> String {
+        let named = names.and_then(|n| n.get(&sid)).filter(|n| !n.is_empty() && *n != "?");
+        let basename = || {
+            let path = self.pane_cwds.get(&sid)?;
+            std::path::Path::new(path).file_name()?.to_str()
+        };
+        named.or_else(|| self.pane_titles.get(&sid)).map(String::as_str).or_else(basename).unwrap_or("").to_string()
+    }
+
+    /// The pane whose session is `sid`, in a window or not.
+    pub(super) fn pane_of(&self, sid: u64) -> Option<&Pane> {
+        self.windows.iter().flat_map(|w| w.panes.iter()).chain(&self.shadows).find(|p| p.shelld_session_id() == Some(sid))
     }
 }
 

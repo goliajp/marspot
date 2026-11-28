@@ -64,7 +64,8 @@ pub(crate) fn paint_chrome(
     paint_grid_seams(painter, layout, n_views, focused_idx, overlay_ui_rects, &mut surfaces.seam_rects);
     paint_empty_seats(painter, layout, n_views);
     let cell_w = painter.cell_w;
-    surfaces.sidebar.frame(painter, &SidebarFrame { layout, rows: &sidebar, focused_idx, quiet: state.quiet, cell_w });
+    let selected = sidebar.iter().position(|e| e.selected).unwrap_or(focused_idx);
+    surfaces.sidebar.frame(painter, &SidebarFrame { layout, rows: &sidebar, focused_idx: selected, quiet: state.quiet, cell_w });
     paint_region_seams(painter, layout);
     let cell = (painter.cell_w, painter.cell_h, painter.ascent);
     surfaces.toolbar.frame(painter, &Toolbar::of(layout, state.on, cell));

@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "draw_labels.rs"]
 mod labels;
+#[path = "sidebar_tree.rs"]
+pub(crate) mod sidebar_tree;
 
 impl CoreApp {
     /// Where the renderer's last IOSurface frame spent its time —
@@ -105,6 +107,7 @@ impl CoreApp {
         target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
         block: bool,
     ) -> Option<(f64, f64, f64, f64)> {
+        self.sidebar_fresh(wi);
         let focused = win!(self, wi).focused_idx;
         // Everything below borrows the window — the pane grids, the
         // preedit string, the layout — while the renderer wants `&mut`
@@ -113,9 +116,6 @@ impl CoreApp {
         // `windows[key_window]` index, so move the render state out
         // for the duration of the frame and put it back at the end.
         let mut wr = std::mem::take(&mut win!(self, wi).render);
-
-        let states: Vec<SessionState> =
-            win!(self, wi).panes.iter().map(|p| p.session().state()).collect();
 
         let resolved_labels = self.pane_labels(wi);
         let titles: Vec<String> = (0..win!(self, wi).panes.len())
@@ -135,7 +135,7 @@ impl CoreApp {
                 s
             })
             .collect();
-        let sidebar_labels = self.sidebar_labels(wi, &resolved_labels);
+        let sidebar_texts = self.sidebar_texts(wi, &resolved_labels);
 
         // the titles say how many helpers only where no strip lists them
         self.place_strips(wi);
@@ -210,14 +210,18 @@ impl CoreApp {
                 v
             })
             .collect();
-        let entries: Vec<SidebarEntry> = sidebar_labels
+        let focused_row = self.focused_row(wi);
+        let entries: Vec<SidebarEntry> = sidebar_texts
             .iter()
-            .zip(states.iter())
+            .zip(self.sidebar_rows(wi))
             .enumerate()
-            .map(|(i, (label, state))| SidebarEntry {
+            .map(|(i, ((label, state, code), row))| SidebarEntry {
                 label: label.as_str(),
                 state: *state,
-                code: self.pane_code(wi, i),
+                code: *code,
+                tree: row.tree,
+                hollow: row.hollow,
+                selected: i == focused_row,
             })
             .collect();
         let (cell_w, cell_h) = self.renderer.cell_dims();

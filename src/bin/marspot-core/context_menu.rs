@@ -3,7 +3,7 @@
 use super::*;
 
 #[path = "menus.rs"]
-mod menus;
+pub(crate) mod menus;
 
 impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
@@ -136,8 +136,13 @@ impl CoreApp {
     pub(super) fn resolve_context_region(&mut self, wi: usize, x_phys: f64, y_phys: f64) -> ContextRegion {
         // Sidebar row check first — wins over the cell-area hit when
         // both overlap (the sidebar overlays the title-strip band).
-        if let Some(idx) = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row) {
-            return ContextRegion::SidebarSlot(idx);
+        if let Some(row) = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row) {
+            use super::draw::sidebar_tree::RowPane;
+            match self.sidebar_row(wi, row).map(|r| r.pane) {
+                Some(RowPane::Slot(idx)) => return ContextRegion::SidebarSlot(idx),
+                Some(RowPane::Other(sid)) => return ContextRegion::SidebarPane(sid),
+                None => {}
+            }
         }
         if let Some(idx) = win!(self, wi).layout.hit_test(x_phys, y_phys) {
             return ContextRegion::Pane(idx);
@@ -153,6 +158,7 @@ impl CoreApp {
         match region {
             ContextRegion::Pane(_) => menus::pane_menu(win!(self, wi).selection.is_some(), moves()),
             ContextRegion::SidebarSlot(_) => menus::sidebar_menu(moves()),
+            ContextRegion::SidebarPane(sid) => menus::sidebar_menu(self.moves_of(sid)),
             ContextRegion::TitleStrip => menus::title_menu(),
             // Badge menus never come through here — their items
             // arrive from L1 via PaneBadgeMenu and open through
@@ -199,6 +205,9 @@ impl CoreApp {
                 if let Some(pane) = self.focused_shown_mut(wi) {
                     pane.session_mut().forward_inject_input(b"\x1b[3J");
                 }
+            }
+            ContextMenuAction::ClosePane if let ContextRegion::SidebarPane(sid) = region => {
+                self.close_anywhere(sid, false);
             }
             ContextMenuAction::ClosePane => {
                 let idx = match region {

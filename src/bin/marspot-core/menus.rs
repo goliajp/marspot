@@ -8,7 +8,7 @@ use marspot::ui::components::{MenuItem, grouped};
 /// The cross-window rows of a pane's menu: "Move to Window N" for every
 /// window but `wi` (1-based creation order), and "Move to New Window",
 /// greyed out when it would only rebuild the one window with its one pane.
-pub(super) fn move_items(windows: usize, wi: usize, panes_here: usize) -> Vec<MenuItem> {
+pub(crate) fn move_items(windows: usize, wi: usize, panes_here: usize) -> Vec<MenuItem> {
     let mut items: Vec<MenuItem> = (0..windows)
         .filter(|ti| *ti != wi)
         .map(|ti| MenuItem::entry(&strings::text(Arg::MoveToWindow(ti + 1)), MOVE_TO_WINDOW_TAG_BASE + ti as u32))

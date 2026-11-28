@@ -21,7 +21,8 @@ impl CoreApp {
         // Target the pane under the drop point (body cells or its
         // sidebar row); a drop on chrome/padding goes to the focused
         // pane — dropping "at the terminal" should never be a no-op.
-        let sidebar_hit = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row);
+        let row = self.chrome_at(wi, x_phys, y_phys).and_then(ChromeTarget::row);
+        let sidebar_hit = row.and_then(|r| self.row_slot(wi, r));
         let idx = sidebar_hit
             .or(win!(self, wi).layout.hit_test(x_phys, y_phys))
             .filter(|i| *i < win!(self, wi).panes.len())

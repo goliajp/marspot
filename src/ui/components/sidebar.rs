@@ -9,6 +9,7 @@
 //! colours `panel_palette`'s.
 
 use marspot_term::layout::Rect;
+use marspot_term::render::SidebarTree;
 use marspot_term::session::SessionState;
 
 use crate::ui::components::controls;
@@ -88,9 +89,11 @@ fn row_fill(row: Rect) -> Rect {
     }
 }
 
-fn status_dot(row: Rect) -> Rect {
+/// The status dot of a row, indented one step for a child.
+fn status_dot(row: Rect, tree: SidebarTree) -> Rect {
+    let indent = if tree.is_child() { chrome::px(chrome::SIDEBAR_INDENT) } else { 0.0 };
     Rect {
-        x: row.x + chrome::px(chrome::SIDEBAR_PAD_X),
+        x: row.x + chrome::px(chrome::SIDEBAR_PAD_X) + indent,
         y_top: row.y_top + (row.h - chrome::px(chrome::SIDEBAR_DOT)) * 0.5,
         w: chrome::px(chrome::SIDEBAR_DOT),
         h: chrome::px(chrome::SIDEBAR_DOT),
@@ -115,46 +118,87 @@ pub(crate) fn code_text(code: u16, buf: &mut [u8; 5]) -> &str {
 /// How many mono cells of a name fit in the row `row`, after a code
 /// when it has one.  The name stops short of where the close button
 /// goes, shown or not.
-pub(crate) fn name_room(row: Rect, close: Option<&Rect>, has_code: bool, cell_w: f32) -> usize {
-    let dot = status_dot(row);
+pub(crate) fn name_room(row: Rect, close: Option<&Rect>, has_code: bool, tree: SidebarTree, cell_w: f32) -> usize {
+    let dot = status_dot(row, tree);
     let label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
     let label_right = close.map_or(row.x + row.w, |c| c.x) - chrome::px(chrome::SIDEBAR_LABEL_GAP);
     let cells = ((label_right - label_x) / cell_w as f64).floor().max(0.0) as usize;
     if has_code { cells.saturating_sub(CODE_CELLS) } else { cells }
 }
 
-/// One row in `rect`: its fill, its status dot, its code and `name`,
-/// already cut to the room it has.
-pub(crate) fn paint_row(
-    p: &mut ViewPainter,
-    rect: Rect,
-    code: Option<u16>,
-    name: &str,
-    state: SessionState,
-    selected: bool,
-    hovered: bool,
-) {
+/// What a row shows besides its name and code.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowLook {
+    pub state: SessionState,
+    pub tree: SidebarTree,
+    pub hollow: bool,
+    pub selected: bool,
+    pub hovered: bool,
+}
+
+/// One row in `rect`: its fill, its tree line, its status dot, its
+/// code and `name`, already cut to the room it has.  A parent's grey
+/// row has no dot.
+pub(crate) fn paint_row(p: &mut ViewPainter, rect: Rect, code: Option<u16>, name: &str, look: RowLook) {
     let radius = chrome::px(chrome::SIDEBAR_ROW_RADIUS) as f32;
-    if selected {
+    if look.selected {
         p.fill_rounded_rect(row_fill(rect), palette::chrome_on(), radius, (palette::none(), 0.0));
-    } else if hovered {
+    } else if look.hovered {
         p.fill_rounded_rect(row_fill(rect), palette::chrome_hover(), radius, (palette::none(), 0.0));
     }
-    let dot = status_dot(rect);
-    let dot_color = match state {
+    let dot = status_dot(rect, look.tree);
+    if look.tree.is_child() {
+        paint_tree_line(p, rect, dot, look.tree == SidebarTree::LastChild);
+    }
+    let grey = look.tree == SidebarTree::Parent;
+    if !grey {
+        paint_dot(p, dot, look.state, look.hollow);
+    }
+    let mut label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
+    let baseline = (rect.y_top + (rect.h - p.cell_h as f64) * 0.5) as f32 + p.ascent;
+    let code_fg = if grey { palette::disabled_fg() } else { palette::fg_muted() };
+    if let Some(code) = code {
+        p.text(label_x as f32, baseline, code_text(code, &mut [0; 5]), code_fg);
+        label_x += CODE_CELLS as f64 * p.cell_w as f64;
+    }
+    let fg = if grey {
+        palette::disabled_fg()
+    } else if look.selected {
+        palette::fg()
+    } else {
+        palette::chrome_fg()
+    };
+    p.text(label_x as f32, baseline, name, fg);
+}
+
+/// The dot in its state's colour: filled for a pane on screen, a ring
+/// for one in no window.
+fn paint_dot(p: &mut ViewPainter, dot: Rect, state: SessionState, hollow: bool) {
+    let color = match state {
         SessionState::Active => palette::ok(),
         SessionState::Idle => palette::chrome_icon(),
         SessionState::Exited => palette::danger(),
     };
-    p.fill_rounded_rect(dot, dot_color, (chrome::px(chrome::SIDEBAR_DOT) * 0.5) as f32, (palette::none(), 0.0));
-    let mut label_x = dot.x + dot.w + chrome::px(chrome::SIDEBAR_DOT_GAP);
-    let baseline = (rect.y_top + (rect.h - p.cell_h as f64) * 0.5) as f32 + p.ascent;
-    if let Some(code) = code {
-        p.text(label_x as f32, baseline, code_text(code, &mut [0; 5]), palette::fg_muted());
-        label_x += CODE_CELLS as f64 * p.cell_w as f64;
+    let radius = (chrome::px(chrome::SIDEBAR_DOT) * 0.5) as f32;
+    if hollow {
+        let ring = chrome::px(chrome::SIDEBAR_DOT_RING) as f32;
+        p.fill_rounded_rect(dot, palette::none(), radius, (color, ring));
+    } else {
+        p.fill_rounded_rect(dot, color, radius, (palette::none(), 0.0));
     }
-    let fg = if selected { palette::fg() } else { palette::chrome_fg() };
-    p.text(label_x as f32, baseline, name, fg);
+}
+
+/// A child's `├` or `└`: down from the row's top under its parent's
+/// dot, to the row's middle for the last child and through the row for
+/// the others, then across to just short of the child's dot.
+fn paint_tree_line(p: &mut ViewPainter, row: Rect, dot: Rect, last: bool) {
+    let t = chrome::px(chrome::SIDEBAR_TREE_LINE);
+    let x = row.x + chrome::px(chrome::SIDEBAR_PAD_X) + (chrome::px(chrome::SIDEBAR_DOT) - t) * 0.5;
+    let mid = (row.y_top + (row.h - t) * 0.5).round();
+    let down = if last { mid + t - row.y_top } else { row.h };
+    p.fill_rect(Rect { x: x.round(), y_top: row.y_top, w: t, h: down }, palette::separator());
+    let across = (dot.x - chrome::px(chrome::SIDEBAR_TREE_GAP) - x).max(0.0);
+    p.fill_rect(Rect { x: x.round(), y_top: mid, w: across, h: t }, palette::separator());
 }
 
 /// The row at the column's bottom: opaque, so a row the column is too
@@ -232,9 +276,22 @@ mod tests {
         assert_eq!(code_text(4145, &mut [0; 5]), "#4145");
         assert_eq!(code_text(7, &mut [0; 5]), "#0007");
         let row = sidebar().row_rect(0);
-        let (with, without) = (name_room(row, None, true, 7.0), name_room(row, None, false, 7.0));
+        let top = SidebarTree::Top;
+        let (with, without) = (name_room(row, None, true, top, 7.0), name_room(row, None, false, top, 7.0));
         assert_eq!(without - with, CODE_CELLS);
-        assert_eq!(name_room(Rect { w: 10.0, ..row }, None, true, 7.0), 0, "no room left for a name, none taken");
+        assert_eq!(name_room(Rect { w: 10.0, ..row }, None, true, top, 7.0), 0, "no room left for a name, none taken");
+    }
+
+    #[test]
+    fn sidebar_child_is_indented_one_step_and_has_that_much_less_room() {
+        let row = sidebar().row_rect(0);
+        let (top, child) = (status_dot(row, SidebarTree::Top), status_dot(row, SidebarTree::LastChild));
+        assert_eq!(child.x - top.x, chrome::px(chrome::SIDEBAR_INDENT));
+        assert_eq!(status_dot(row, SidebarTree::Parent).x, top.x, "a grey parent row is not indented");
+        // a cell a third of the indent, a whole number of pixels
+        let cell = (chrome::px(chrome::SIDEBAR_INDENT) / 3.0) as f32;
+        let lost = name_room(row, None, true, SidebarTree::Top, cell) - name_room(row, None, true, SidebarTree::Child, cell);
+        assert_eq!(lost, 3);
     }
 
     #[test]

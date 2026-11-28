@@ -196,7 +196,7 @@ pub struct SessionView<'a> {
 }
 
 mod view_parts;
-pub use view_parts::{ActiveHighlight, HighlightSpan, HistoryView, SearchHitView, SearchOverlayView, SidebarEntry, StripView};
+pub use view_parts::{ActiveHighlight, HighlightSpan, HistoryView, SearchHitView, SearchOverlayView, SidebarEntry, SidebarTree, StripView};
 
 #[derive(Copy, Clone, Debug)]
 pub struct SelectionView {
