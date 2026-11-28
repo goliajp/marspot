@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use marspot_peer::json::{self, Value};
 
-use crate::agentsvc::accounts::wallet::Cap;
+use marspot_agent::types::wallet::Cap;
 
 use crate::plugins::claudecode::allocation_events::{DAY, ymd};
 

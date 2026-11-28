@@ -24,11 +24,11 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::alloc::{CodexAlloc, Log, Snapshot, class_word};
+use super::alloc::{CodexAlloc, Log, Snapshot};
 use super::alloc_per_point::{Period, PeriodStore};
 use super::alloc_rollout::CxTokens;
-use crate::agentsvc::accounts::wallet::{self, Cap, Lot, View};
-use crate::plugins::allocation::Class;
+use marspot_agent::types::wallet::{Cap, Lot, View};
+use crate::plugins::usage::wallets;
 use crate::plugins::claudecode::allocation_events::{DAY, Event};
 
 /// A balance this much lower is a drop; the balance has ten decimals.
@@ -54,7 +54,8 @@ pub(super) struct Seen {
     pub at: i64,
     pub sid: u64,
     pub profile: u8,
-    pub class: Class,
+    /// The pane's class as the events spell it.
+    pub class: &'static str,
     pub week: Option<(f64, i64)>,
     pub balance: Option<f64>,
     pub cap: Option<Cap>,
@@ -197,7 +198,7 @@ impl CodexAlloc {
         if let Err(e) = self.wallets.periods.save(now) {
             log.push(("codex.wallet.periods_failed", e.to_string()));
         }
-        wallet::publish("codex", self.wallets.views(now));
+        wallets::publish("codex", self.wallets.views(now));
     }
 
     /// The fact one reading makes, if any; the amount spent when it is a
@@ -241,7 +242,7 @@ impl CodexAlloc {
         if full && !std::mem::replace(&mut a.spending_told, true) {
             log.push(("codex.wallet.spending", format!("P{} spends credits: week used up, balance {balance:.2} sid={}", s.profile, s.sid)));
         }
-        let ev = Event { at: s.at, sid: s.sid, kind: kind.to_string(), profile: Some(s.profile), class: class_word(s.class).to_string(), detail };
+        let ev = Event { at: s.at, sid: s.sid, kind: kind.to_string(), profile: Some(s.profile), class: s.class.to_string(), detail };
         if let Err(e) = self.events.append(&ev) {
             log.push(("codex.alloc.events_failed", format!("{e}")));
         }

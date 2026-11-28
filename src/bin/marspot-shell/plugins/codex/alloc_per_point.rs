@@ -300,7 +300,7 @@ mod tests {
 
     fn seen(at: i64, used: f64, renews: i64) -> Seen {
         let tokens = Some(CxTokens { input: 1000, cached: 0, output: 10 });
-        Seen { at, sid: 1, profile: 2, class: crate::plugins::allocation::Class::Plain, week: Some((used, renews)), balance: None, cap: None, tokens }
+        Seen { at, sid: 1, profile: 2, class: "plain", week: Some((used, renews)), balance: None, cap: None, tokens }
     }
 
     #[test]

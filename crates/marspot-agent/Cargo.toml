@@ -11,8 +11,10 @@ publish = false
 # messaging code.
 
 [dependencies]
-# None yet.  AgentKind comes from marspot-term (default-features = false)
-# once code here names an agent kind.
+# our own std-only reader: a balance cap is read out of an agent's
+# rate-limits object.  AgentKind comes from marspot-term
+# (default-features = false) once code here names an agent kind.
+marspot-json = { path = "../marspot-json" }
 
 [lints]
 workspace = true

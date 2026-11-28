@@ -139,3 +139,14 @@ fn claudes_first_words_for_its_stored_resets_read_as_the_two_kinds() {
     assert_eq!(kinds, [CLAUDE_FABLE, CLAUDE_FULL]);
     assert_eq!(back[1].resets.grants[0].kind, "codex_full", "a Codex word is kept");
 }
+
+#[test]
+fn claudes_two_stored_resets_bring_back_by_their_kind() {
+    let full = Grant { kind: CLAUDE_FULL.into(), ..Grant::default() };
+    let fable = Grant { kind: CLAUDE_FABLE.into(), restores: vec!["seven_day".into()], gives_back_weekly: true, ..Grant::default() };
+    assert_eq!(brings_back(&full), Brings { week: true, window: true, gives_back_week: false, week_share: None });
+    let b = brings_back(&fable);
+    assert_eq!(b, Brings { week: false, window: true, gives_back_week: false, week_share: Some(FABLE_WEEK_SHARE) }, "the kind wins over what it says");
+    let other = Grant { kind: "whole".into(), restores: vec!["seven_day".into()], ..Grant::default() };
+    assert_eq!(brings_back(&other), Brings { week: true, window: false, gives_back_week: false, week_share: None });
+}

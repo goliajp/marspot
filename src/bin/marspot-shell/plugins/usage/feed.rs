@@ -9,7 +9,7 @@ use std::path::Path;
 
 use marspot_peer::json::{obj, Value};
 
-use crate::agentsvc::accounts::wallet::{Cap, Lot};
+use marspot_agent::types::wallet::{Cap, Lot};
 
 pub(in crate::plugins) use super::iso_time::iso_utc;
 

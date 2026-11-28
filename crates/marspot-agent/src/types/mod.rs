@@ -11,6 +11,7 @@ pub mod reset;
 pub mod short_id;
 pub mod task_table;
 pub mod turn;
+pub mod wallet;
 
 pub use record::{Compacted, CompactTrigger, FoldSink, ModelId, RecordFold, Reply, TaskChange, Tokens, TurnState};
 pub use replies::Replies;

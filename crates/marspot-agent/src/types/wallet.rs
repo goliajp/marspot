@@ -1,26 +1,21 @@
 //! Each agent account's paid balance as the agent's own records last
 //! read it: the newest reading, what was spent in the last day, and the
-//! drops nothing explains.  The adapter that reads the records publishes
-//! it after each pass; the usage collector reads it for its feed, its
-//! samples and its check against another collector's reading.
+//! drops nothing explains.  The balance belongs to the account, not to
+//! the agent; adapters and services share these reading types, and the
+//! shell holds the table of readings.
 //!
 //! Only records: nothing here decides where a pane runs.
 
-use std::sync::Mutex;
-
-use marspot_peer::json::Value;
-
-/// One row per agent and account at most.
-const MAX_ROWS: usize = 512;
+use marspot_json::Value;
 
 /// A spend this recent, with the plan allowance still used up, is an
 /// account spending now.
-pub(crate) const SPENDING_WITHIN_S: i64 = 900;
+pub const SPENDING_WITHIN_S: i64 = 900;
 
 /// A spending cap the provider reports.  Every field is what the
 /// provider said; `None` where it said nothing.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Cap {
+pub struct Cap {
     pub reached: Option<bool>,
     pub limit: Option<f64>,
     pub remaining_percent: Option<f64>,
@@ -33,7 +28,7 @@ impl Cap {
     /// limit, spend-control and refusal-kind fields, and the limit's
     /// two fields, in the spelling of the record read.  `None` when the
     /// object says nothing about one.
-    pub(crate) fn of(rate: &Value, keys: [&str; 5]) -> Option<Cap> {
+    pub fn of(rate: &Value, keys: [&str; 5]) -> Option<Cap> {
         let [individual, control, reached, limit, remaining] = keys;
         let num = |v: Option<&Value>| match v {
             Some(Value::Num(n)) => Some(*n),
@@ -55,7 +50,7 @@ impl Cap {
 /// account was first seen with, ending `bound` = `latest` (the grant
 /// was no later than that sighting, so its true end may be sooner).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Lot {
+pub struct Lot {
     pub amount: f64,
     pub expires_at: i64,
     pub bound: String,
@@ -63,7 +58,7 @@ pub(crate) struct Lot {
 
 /// What one account's records say of its balance.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct View {
+pub struct View {
     /// When the newest reading was made, unix seconds.
     pub at: i64,
     pub balance: f64,
@@ -81,29 +76,9 @@ pub(crate) struct View {
 }
 
 impl View {
-    pub(crate) fn spending(&self, now: i64) -> bool {
+    pub fn spending(&self, now: i64) -> bool {
         self.week_full && self.last_spend.is_some_and(|at| at >= now - SPENDING_WITHIN_S)
     }
-}
-
-static TABLE: Mutex<Vec<(&'static str, u8, View)>> = Mutex::new(Vec::new());
-
-/// Replace `agent`'s rows with what its last pass knew.
-pub(crate) fn publish(agent: &'static str, rows: impl IntoIterator<Item = (u8, View)>) {
-    let mut t = TABLE.lock().unwrap_or_else(|p| p.into_inner());
-    t.retain(|(a, _, _)| *a != agent);
-    for (profile, view) in rows {
-        if t.len() >= MAX_ROWS {
-            break;
-        }
-        t.push((agent, profile, view));
-    }
-}
-
-/// Every account of `agent` with a reading, by account number.
-pub(crate) fn all(agent: &str) -> Vec<(u8, View)> {
-    let t = TABLE.lock().unwrap_or_else(|p| p.into_inner());
-    t.iter().filter(|(a, _, _)| *a == agent).map(|(_, p, v)| (*p, v.clone())).collect()
 }
 
 #[cfg(test)]
@@ -112,7 +87,7 @@ mod tests {
 
     #[test]
     fn a_cap_is_read_in_either_spelling_and_nothing_said_is_none() {
-        let app = marspot_peer::json::parse(
+        let app = marspot_json::parse(
             r#"{"individualLimit":{"limit":"500.5","remainingPercent":20},"spendControlReached":true,"rateLimitReachedType":"workspace_member_credits_depleted"}"#,
         )
         .unwrap();
@@ -121,7 +96,7 @@ mod tests {
             cap,
             Some(Cap { reached: Some(true), limit: Some(500.5), remaining_percent: Some(20.0), reached_type: Some("workspace_member_credits_depleted".into()) })
         );
-        let rollout = marspot_peer::json::parse(r#"{"individual_limit":null,"spend_control_reached":null,"rate_limit_reached_type":"rate_limit_reached"}"#).unwrap();
+        let rollout = marspot_json::parse(r#"{"individual_limit":null,"spend_control_reached":null,"rate_limit_reached_type":"rate_limit_reached"}"#).unwrap();
         let keys = ["individual_limit", "spend_control_reached", "rate_limit_reached_type", "limit", "remaining_percent"];
         assert_eq!(Cap::of(&rollout, keys), None, "a plain limit is no credits cap");
     }
@@ -133,14 +108,5 @@ mod tests {
         assert!(!v.spending(9_500 + SPENDING_WITHIN_S + 1), "nothing spent for a while");
         v.week_full = false;
         assert!(!v.spending(10_000));
-    }
-
-    #[test]
-    fn a_pass_replaces_its_agents_rows() {
-        const AGENT: &str = "test-wallet";
-        publish(AGENT, [(1, View { balance: 3.0, ..View::default() }), (2, View::default())]);
-        assert_eq!(all(AGENT).len(), 2);
-        publish(AGENT, [(2, View { balance: 1.0, ..View::default() })]);
-        assert_eq!(all(AGENT), vec![(2, View { balance: 1.0, ..View::default() })]);
     }
 }

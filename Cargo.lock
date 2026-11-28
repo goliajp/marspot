@@ -196,6 +196,9 @@ dependencies = [
 [[package]]
 name = "marspot-agent"
 version = "0.1.0"
+dependencies = [
+ "marspot-json",
+]
 
 [[package]]
 name = "marspot-json"

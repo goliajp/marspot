@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::agentsvc::accounts::wallet::Cap;
+use marspot_agent::types::wallet::Cap;
 use marspot::agent_resets::AccountResets;
 use marspot_peer::json::{self, Value};
 
