@@ -216,8 +216,8 @@ mod settings_modal {
     fn a_window_with_room_gets_the_panel_at_its_natural_size() {
         at_scale_1(|| {
             assert_eq!(
-                dump(1600.0, 2283.0, &Settings::default()),
-                "panel 320.0,100.0 960.0x2083.0\n\
+                dump(1600.0, 2378.9, &Settings::default()),
+                "panel 320.0,100.0 960.0x2179.0\n\
                  group \"Idle reclamation\" at 356.0,180.0 w 888.0\n\
                  card 356.0,207.0 888.0x287.7\n\
                  row ReclaimEnabled band 356.0,207.0 888.0x95.9 label 250.5 desc 284.0 ctl 1152.0,225.0 68.0x40.0\n\
@@ -241,23 +241,25 @@ mod settings_modal {
                  sep 380.0,1137.1 840.0x1.0\n\
                  row HelperStrip band 356.0,1137.1 888.0x95.9 label 1180.6 desc 1214.1 ctl 1152.0,1155.1 68.0x40.0\n\
                  group \"Claude Code\" at 356.0,1273.0 w 888.0\n\
-                 card 356.0,1300.0 888.0x191.8\n\
+                 card 356.0,1300.0 888.0x287.7\n\
                  row CcStatuslineHook band 356.0,1300.0 888.0x95.9 label 1343.5 desc 1377.0 ctl 1152.0,1318.0 68.0x40.0\n\
                  sep 380.0,1395.9 840.0x1.0\n\
                  row CcModelGuard band 356.0,1395.9 888.0x95.9 label 1439.4 desc 1472.9 ctl 1152.0,1413.9 68.0x40.0\n\
-                 group \"Scrolling\" at 356.0,1531.8 w 888.0\n\
-                 card 356.0,1558.8 888.0x95.9\n\
-                 row ScrollFactor band 356.0,1558.8 888.0x95.9 label 1602.3 desc 1635.8 ctl 892.0,1574.8 328.0x44.0\n\
-                 group \"Agent CLIs\" at 356.0,1694.7 w 888.0\n\
-                 card 356.0,1721.7 888.0x383.6\n\
-                 row InstallCli(0) band 356.0,1721.7 888.0x95.9 label 1765.2 desc 1798.7 ctl 924.2,1737.7 295.8x44.0\n\
-                 sep 380.0,1817.6 840.0x1.0\n\
-                 row InstallCli(1) band 356.0,1817.6 888.0x95.9 label 1861.1 desc 1894.6 ctl 924.2,1833.6 295.8x44.0\n\
+                 sep 380.0,1491.8 840.0x1.0\n\
+                 row SchedProfile band 356.0,1491.8 888.0x95.9 label 1535.3 desc 1568.8 ctl 930.8,1507.8 289.2x44.0\n\
+                 group \"Scrolling\" at 356.0,1627.7 w 888.0\n\
+                 card 356.0,1654.7 888.0x95.9\n\
+                 row ScrollFactor band 356.0,1654.7 888.0x95.9 label 1698.2 desc 1731.7 ctl 892.0,1670.7 328.0x44.0\n\
+                 group \"Agent CLIs\" at 356.0,1790.6 w 888.0\n\
+                 card 356.0,1817.6 888.0x383.6\n\
+                 row InstallCli(0) band 356.0,1817.6 888.0x95.9 label 1861.1 desc 1894.6 ctl 924.2,1833.6 295.8x44.0\n\
                  sep 380.0,1913.5 840.0x1.0\n\
-                 row InstallCli(2) band 356.0,1913.5 888.0x95.9 label 1957.0 desc 1990.5 ctl 924.2,1929.5 295.8x44.0\n\
+                 row InstallCli(1) band 356.0,1913.5 888.0x95.9 label 1957.0 desc 1990.5 ctl 924.2,1929.5 295.8x44.0\n\
                  sep 380.0,2009.5 840.0x1.0\n\
-                 row InstallCli(3) band 356.0,2009.5 888.0x95.9 label 2053.0 desc 2086.5 ctl 924.2,2025.5 295.8x44.0\n\
-                 footer base 2146.4\n",
+                 row InstallCli(2) band 356.0,2009.5 888.0x95.9 label 2053.0 desc 2086.5 ctl 924.2,2025.5 295.8x44.0\n\
+                 sep 380.0,2105.4 840.0x1.0\n\
+                 row InstallCli(3) band 356.0,2105.4 888.0x95.9 label 2148.9 desc 2182.4 ctl 924.2,2121.4 295.8x44.0\n\
+                 footer base 2242.3\n",
             );
         });
     }
@@ -271,8 +273,8 @@ mod settings_modal {
     fn a_narrow_window_clamps_the_width_and_the_contents_follow() {
         at_scale_1(|| {
             assert_eq!(
-                dump(800.0, 2283.0, &Settings::default()),
-                "panel 16.0,100.0 768.0x2083.0\n\
+                dump(800.0, 2378.9, &Settings::default()),
+                "panel 16.0,100.0 768.0x2179.0\n\
                  group \"Idle reclamation\" at 52.0,180.0 w 696.0\n\
                  card 52.0,207.0 696.0x287.7\n\
                  row ReclaimEnabled band 52.0,207.0 696.0x95.9 label 250.5 desc 284.0 ctl 656.0,225.0 68.0x40.0\n\
@@ -296,23 +298,25 @@ mod settings_modal {
                  sep 76.0,1137.1 648.0x1.0\n\
                  row HelperStrip band 52.0,1137.1 696.0x95.9 label 1180.6 desc 1214.1 ctl 656.0,1155.1 68.0x40.0\n\
                  group \"Claude Code\" at 52.0,1273.0 w 696.0\n\
-                 card 52.0,1300.0 696.0x191.8\n\
+                 card 52.0,1300.0 696.0x287.7\n\
                  row CcStatuslineHook band 52.0,1300.0 696.0x95.9 label 1343.5 desc 1377.0 ctl 656.0,1318.0 68.0x40.0\n\
                  sep 76.0,1395.9 648.0x1.0\n\
                  row CcModelGuard band 52.0,1395.9 696.0x95.9 label 1439.4 desc 1472.9 ctl 656.0,1413.9 68.0x40.0\n\
-                 group \"Scrolling\" at 52.0,1531.8 w 696.0\n\
-                 card 52.0,1558.8 696.0x95.9\n\
-                 row ScrollFactor band 52.0,1558.8 696.0x95.9 label 1602.3 desc 1635.8 ctl 396.0,1574.8 328.0x44.0\n\
-                 group \"Agent CLIs\" at 52.0,1694.7 w 696.0\n\
-                 card 52.0,1721.7 696.0x383.6\n\
-                 row InstallCli(0) band 52.0,1721.7 696.0x95.9 label 1765.2 desc 1798.7 ctl 428.2,1737.7 295.8x44.0\n\
-                 sep 76.0,1817.6 648.0x1.0\n\
-                 row InstallCli(1) band 52.0,1817.6 696.0x95.9 label 1861.1 desc 1894.6 ctl 428.2,1833.6 295.8x44.0\n\
+                 sep 76.0,1491.8 648.0x1.0\n\
+                 row SchedProfile band 52.0,1491.8 696.0x95.9 label 1535.3 desc 1568.8 ctl 434.8,1507.8 289.2x44.0\n\
+                 group \"Scrolling\" at 52.0,1627.7 w 696.0\n\
+                 card 52.0,1654.7 696.0x95.9\n\
+                 row ScrollFactor band 52.0,1654.7 696.0x95.9 label 1698.2 desc 1731.7 ctl 396.0,1670.7 328.0x44.0\n\
+                 group \"Agent CLIs\" at 52.0,1790.6 w 696.0\n\
+                 card 52.0,1817.6 696.0x383.6\n\
+                 row InstallCli(0) band 52.0,1817.6 696.0x95.9 label 1861.1 desc 1894.6 ctl 428.2,1833.6 295.8x44.0\n\
                  sep 76.0,1913.5 648.0x1.0\n\
-                 row InstallCli(2) band 52.0,1913.5 696.0x95.9 label 1957.0 desc 1990.5 ctl 428.2,1929.5 295.8x44.0\n\
+                 row InstallCli(1) band 52.0,1913.5 696.0x95.9 label 1957.0 desc 1990.5 ctl 428.2,1929.5 295.8x44.0\n\
                  sep 76.0,2009.5 648.0x1.0\n\
-                 row InstallCli(3) band 52.0,2009.5 696.0x95.9 label 2053.0 desc 2086.5 ctl 428.2,2025.5 295.8x44.0\n\
-                 footer base 2146.4\n"
+                 row InstallCli(2) band 52.0,2009.5 696.0x95.9 label 2053.0 desc 2086.5 ctl 428.2,2025.5 295.8x44.0\n\
+                 sep 76.0,2105.4 648.0x1.0\n\
+                 row InstallCli(3) band 52.0,2105.4 696.0x95.9 label 2148.9 desc 2182.4 ctl 428.2,2121.4 295.8x44.0\n\
+                 footer base 2242.3\n"
             );
         });
     }
@@ -363,7 +367,7 @@ mod settings_modal {
         at_scale_1(|| {
             let s = Settings::default();
             let mut m = measure();
-            let rect = panel_rect(1600.0, 2283.0, &s, &mut m, 30.0);
+            let rect = panel_rect(1600.0, 2378.9, &s, &mut m, 30.0);
             let mut all = 0usize;
             walk(rect, 0.0, &s, &mut measure(), |_| all += 1);
             let mut shown = 0usize;

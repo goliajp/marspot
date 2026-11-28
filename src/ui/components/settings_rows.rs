@@ -23,6 +23,7 @@ pub enum Row {
     ScrollFactor,
     CcStatuslineHook,
     CcModelGuard,
+    SchedProfile,
     /// Whether the agent CLI `INSTALL_CLIS[i]` is installed when missing.
     InstallCli(usize),
 }
@@ -111,6 +112,7 @@ pub const SECTIONS: &[Section] = &[
                 cost: Msg::CostClaudeCodeReportsModel,
             },
             RowSpec { row: Row::CcModelGuard, label: Msg::ClaudeCodeGuardModel, cost: Msg::CostClaudeCodeGuardModel },
+            RowSpec { row: Row::SchedProfile, label: Msg::ClaudeCodeSchedProfile, cost: Msg::CostClaudeCodeSchedProfile },
         ],
     },
     Section {
@@ -194,6 +196,10 @@ impl Row {
                 options: SCROLL_LABELS,
                 chosen: chosen_f32(SCROLL_CHOICES, s.scroll_factor),
             },
+            Row::SchedProfile => Control::Segmented {
+                options: SCHED_LABELS,
+                chosen: SCHED_CHOICES.iter().position(|p| *p == s.sched.profile).unwrap_or(usize::MAX),
+            },
             Row::InstallCli(i) => Control::Segmented {
                 options: CONSENT_LABELS,
                 chosen: CONSENT_CHOICES.iter().position(|c| *c == s.install_consent.0[i]).unwrap_or(usize::MAX),
@@ -231,6 +237,7 @@ impl Row {
             | Row::ScrollFactor
             | Row::CcStatuslineHook
             | Row::CcModelGuard
+            | Row::SchedProfile
             | Row::InstallCli(_) => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
@@ -265,6 +272,7 @@ impl Row {
             Row::FontSize => next.font_size = step_font_size(s.font_size, seg == 1)?,
             Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
             Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
+            Row::SchedProfile => next.sched.profile = *SCHED_CHOICES.get(seg)?,
             Row::InstallCli(i) => *next.install_consent.0.get_mut(i)? = *CONSENT_CHOICES.get(seg)?,
         }
         (next != *s).then_some(next)

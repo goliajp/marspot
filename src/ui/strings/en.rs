@@ -23,6 +23,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CircledDigitsWide => "Circled digits take two cells",
         Msg::ClaudeCodeReportsModel => "Let Claude Code report its model",
         Msg::ClaudeCodeGuardModel => "Guard the default model all accounts share",
+        Msg::ClaudeCodeSchedProfile => "Switch panes between accounts",
         Msg::WheelSpeed => "Wheel speed",
 
         Msg::CostReclaimIdlePanes => "coming back to one costs ~3s while its session reloads",
@@ -42,6 +43,9 @@ fn text(m: Msg) -> &'static str {
         }
         Msg::CostClaudeCodeGuardModel => {
             "/model asks again before it is sent; a change nobody confirmed is put back"
+        }
+        Msg::CostClaudeCodeSchedProfile => {
+            "freer lets less Fable quota lapse; every switch makes the session read its whole conversation again"
         }
         Msg::CostWheelSpeed => "faster gets there in fewer flicks and overshoots in one",
 
@@ -232,6 +236,9 @@ fn text(m: Msg) -> &'static str {
         Msg::ConsentAsk => "Ask",
         Msg::ConsentYes => "Install",
         Msg::ConsentNo => "Don't install",
+        Msg::SchedSteady => "Steady",
+        Msg::SchedBalanced => "Balanced",
+        Msg::SchedFull => "Full use",
     }
 }
 

@@ -74,6 +74,7 @@ pub enum Msg {
     HelperStrip,
     ClaudeCodeReportsModel,
     ClaudeCodeGuardModel,
+    ClaudeCodeSchedProfile,
     WheelSpeed,
     // Settings — the cost line under each row
     CostReclaimIdlePanes,
@@ -85,6 +86,7 @@ pub enum Msg {
     CostHelperStrip,
     CostClaudeCodeReportsModel,
     CostClaudeCodeGuardModel,
+    CostClaudeCodeSchedProfile,
     CostWheelSpeed,
     // Pane context menu
     MenuCopy,
@@ -274,6 +276,9 @@ pub enum Msg {
     ConsentAsk,
     ConsentYes,
     ConsentNo,
+    SchedSteady,
+    SchedBalanced,
+    SchedFull,
 }
 
 /// One language: the fixed sentences and the ones built around a value.

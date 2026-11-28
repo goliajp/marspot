@@ -24,6 +24,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CircledDigitsWide => "带圈数字占两格",
         Msg::ClaudeCodeReportsModel => "让 Claude Code 报告所用模型",
         Msg::ClaudeCodeGuardModel => "保护所有账号共用的默认模型",
+        Msg::ClaudeCodeSchedProfile => "窗格在账号之间切换",
         Msg::WheelSpeed => "滚轮速度",
 
         Msg::CostReclaimIdlePanes => "返回窗格时，重新载入会话约需 3 秒",
@@ -35,6 +36,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostCircledDigitsWide => "宽度与中日韩文字一致，但换行位置可能提前一列",
         Msg::CostClaudeCodeReportsModel => "在 Claude Code 的设置中添加状态行；原有的状态行继续生效，关闭此项后恢复原状",
         Msg::CostClaudeCodeGuardModel => "发送 /model 前再确认一次；没有确认过的改动会被改回去",
+        Msg::CostClaudeCodeSchedProfile => "越积极，作废的 Fable 额度越少；每切换一次，会话都要把整段对话重新读一遍",
         Msg::CostWheelSpeed => "越快越省滑动次数，但也越容易滚过头",
 
         Msg::MenuCopy => "拷贝",
@@ -213,6 +215,9 @@ fn text(m: Msg) -> &'static str {
         Msg::ConsentAsk => "先问",
         Msg::ConsentYes => "安装",
         Msg::ConsentNo => "不装",
+        Msg::SchedSteady => "稳妥",
+        Msg::SchedBalanced => "平衡",
+        Msg::SchedFull => "充分利用",
     }
 }
 
