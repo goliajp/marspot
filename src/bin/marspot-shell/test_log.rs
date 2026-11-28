@@ -28,7 +28,7 @@ pub(crate) fn text() -> String {
 /// What only a devops on this machine can make marspot write: a read
 /// of its files, a feed taken from it, a request to it that failed or
 /// was tried again, a reading compared with its own.
-const DEVOPS_ONLY: [&str; 8] = [
+const DEVOPS_ONLY: [&str; 10] = [
     ".local/state/devops",
     ".config/devops",
     "devops_feed",
@@ -37,6 +37,8 @@ const DEVOPS_ONLY: [&str; 8] = [
     "devops answered",
     "usage.resets.agree",
     "usage.resets.disagree",
+    "usage.credits.agree",
+    "usage.credits.disagree",
 ];
 
 /// The lines of `log` that show marspot depending on devops, or a

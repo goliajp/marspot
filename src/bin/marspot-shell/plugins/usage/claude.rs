@@ -173,7 +173,6 @@ fn credits_of(v: &Value) -> Option<Credits> {
     let (used, limit) = (money("used"), money("limit"));
     Some(Credits {
         enabled: flag(extra, "is_enabled").or(flag(spend, "enabled")),
-        unlimited: None,
         balance: used.zip(limit).map(|(u, l)| l - u),
         used,
         limit,
@@ -182,6 +181,7 @@ fn credits_of(v: &Value) -> Option<Credits> {
             .or_else(|| reason(extra))
             .or_else(|| (flag(extra, "user_disabled") == Some(true)).then(|| "user_disabled".into()))
             .or_else(|| (flag(extra, "credits_ever_enabled") == Some(false)).then(|| "never_enabled".into())),
+        ..Credits::default()
     })
 }
 

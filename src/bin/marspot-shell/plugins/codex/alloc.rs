@@ -118,6 +118,8 @@ pub(super) struct CodexAlloc {
     /// decided again.
     pub(super) decided: Option<u64>,
     pub(super) sched: crate::agentsvc::sched::Shadow,
+    /// Each account's paid balance as the rollouts read it.
+    pub(super) wallets: super::alloc_wallet::Wallets,
 }
 
 pub(super) type Log = Vec<(&'static str, String)>;
@@ -145,6 +147,7 @@ pub(super) fn class_of(p: &PaneIn) -> Class {
 impl CodexAlloc {
     pub(super) fn new(dir: PathBuf) -> Self {
         CodexAlloc {
+            wallets: super::alloc_wallet::Wallets::new(&dir),
             events: EventLog::for_agent(dir, "codex"),
             rebuilt: false,
             tails: Tails::default(),
@@ -181,6 +184,7 @@ impl CodexAlloc {
         self.tails.retain(&keep);
         self.told.retain(|_, week| *week > snap.now);
         self.refusals.retain(|_, r| r.at >= snap.now - WEEK_S);
+        self.settle_wallets(snap, &mut log);
         let tell = super::alloc_decide::decide(self, snap, &mut log);
         (log, tell)
     }
@@ -263,11 +267,15 @@ impl CodexAlloc {
                     l.done_at = Some(l.done_at.map_or(at, |d| d.max(at)));
                 }
                 // an earlier codex's reading may be another account's
-                Note::Limits { at, week: Some((used, renews)) } if at >= p.started_at => {
-                    if self.limits.get(&p.profile).is_none_or(|(was, _, _)| at > *was) {
+                Note::Limits { at, week, balance, cap, tokens } if at >= p.started_at => {
+                    if let Some((used, renews)) = week
+                        && self.limits.get(&p.profile).is_none_or(|(was, _, _)| at > *was)
+                    {
                         self.limits.insert(p.profile, (at, used, renews));
                     }
+                    self.wallets.seen(super::alloc_wallet::Seen { at, sid: p.sid, profile: p.profile, class, week, balance, cap, tokens });
                 }
+                Note::Model { model } => self.wallets.model(p.sid, model),
                 // what a first look finds was used before this pane was watched
                 Note::Used { at, tokens } if !first && at >= p.started_at => {
                     self.pending.entry(p.sid).or_insert((now, CxTokens::default())).1.add(&tokens);

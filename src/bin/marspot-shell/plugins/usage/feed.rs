@@ -9,6 +9,8 @@ use std::path::Path;
 
 use marspot_peer::json::{obj, Value};
 
+use crate::agentsvc::accounts::wallet::{Cap, Lot};
+
 pub(in crate::plugins) use super::iso_time::iso_utc;
 
 /// A window nobody has read for this long is dropped.
@@ -59,6 +61,23 @@ pub(super) struct Credits {
     pub limit: Option<f64>,
     pub utilization: Option<f64>,
     pub disabled_reason: Option<String>,
+    /// `credits`, `usd` or `cny`: what `balance` counts.
+    pub unit: Option<String>,
+    /// When `balance` was read, unix seconds.
+    pub observed_at: Option<i64>,
+    /// What the provider does with the balance once the plan's
+    /// allowance is used up: `auto`, `asks` or `off`.
+    pub spend: Option<String>,
+    pub spending: Option<bool>,
+    pub spent_24h: Option<f64>,
+    pub rate_per_h: Option<f64>,
+    pub lots: Option<Vec<Lot>>,
+    /// `none`, `api`, `manual` or `inferred`: where the expiry of the
+    /// balance comes from.
+    pub expiry_source: Option<String>,
+    pub cap: Option<Cap>,
+    /// `(at, amount)` of each drop with the allowance not used up.
+    pub drops: Option<Vec<(i64, f64)>>,
 }
 
 /// What one successful read of an account returned.
@@ -214,7 +233,7 @@ fn model_value(m: &ModelWindow) -> Value {
 }
 
 fn credits_value(c: &Credits) -> Value {
-    obj([
+    let mut v = obj([
         ("enabled", flag(c.enabled)),
         ("unlimited", flag(c.unlimited)),
         ("balance", num(c.balance)),
@@ -224,7 +243,9 @@ fn credits_value(c: &Credits) -> Value {
         ("disabled_reason", text(&c.disabled_reason)),
         ("resets_available", Value::Null),
         ("resets_expire_at", Value::Null),
-    ])
+    ]);
+    super::credits::wallet_fields(&mut v, c);
+    v
 }
 
 /// The feed file's text.  An account never read and not refused has
@@ -316,7 +337,9 @@ mod tests {
                 r#""reset":1794538799,"window_minutes":10080,"severity":"critical","is_active":false}],"#,
                 r#""credits":{"enabled":false,"unlimited":null,"balance":null,"used":0,"limit":null,"#,
                 r#""utilization":0,"disabled_reason":"user_disabled","resets_available":null,"#,
-                r#""resets_expire_at":null},"tier":"default_claude_max_20x","#,
+                r#""resets_expire_at":null,"unit":null,"observed_at":null,"spend":null,"spending":null,"#,
+                r#""spent_24h":null,"rate_per_h":null,"lots":null,"expiry_source":null,"cap":null,"#,
+                r#""unexplained_drops":null},"tier":"default_claude_max_20x","#,
                 r#""collected_at":"2026-11-10T05:55:08+00:00"}]}"#
             )
         );

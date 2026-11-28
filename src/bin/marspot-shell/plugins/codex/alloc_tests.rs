@@ -90,7 +90,8 @@ fn codex_rollout_sub_agent_refusal_is_recognised() {
 #[test]
 fn codex_rollout_rate_limits_reading_is_parsed() {
     let notes = notes_of(&tokens_line(NOW, 37.0, NOW + 40 * H));
-    assert_eq!(notes[0], Note::Limits { at: NOW, week: Some((0.37, NOW + 40 * H)) });
+    let tokens = Some(CxTokens { input: 23943, cached: 23808, output: 49 });
+    assert_eq!(notes[0], Note::Limits { at: NOW, week: Some((0.37, NOW + 40 * H)), balance: Some(100.0), cap: None, tokens });
     let Note::Used { at, tokens } = notes[1] else { panic!("{notes:?}") };
     assert_eq!((at, tokens), (NOW, CxTokens { input: 23943, cached: 23808, output: 49 }));
     assert!(tokens.weeks() > 0.0 && tokens.weeks() < 1e-4, "{}", tokens.weeks());

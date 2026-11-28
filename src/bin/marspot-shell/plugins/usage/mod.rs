@@ -15,6 +15,7 @@
 mod claude;
 pub(crate) mod codex;
 pub(crate) mod codex_resets;
+mod credits;
 mod feed;
 mod feed_load;
 mod feed_month;
@@ -135,6 +136,8 @@ struct Collector {
     by_devops: [Option<bool>; 2],
     /// The stored resets each pass reads.
     resets: resets::Resets,
+    /// The last check of each Codex balance against the devops feed.
+    credits: credits::Checks,
 }
 
 impl Collector {
@@ -157,6 +160,7 @@ impl Collector {
             by_devops: [None; 2],
             resets: resets::Resets::new(own_claude.parent().map(Path::to_path_buf).unwrap_or_default(), now_unix()),
             kimi_state: kimi::Kimi::default(),
+            credits: credits::Checks::default(),
             kimi_only: false,
             sources,
             own_claude,
@@ -197,10 +201,13 @@ impl Collector {
         if !by_devops || flat {
             self.codex = codex::pass(home, std::mem::take(&mut self.codex), now, &mut own_resets);
         }
+        let views = crate::agentsvc::accounts::wallet::all("codex");
         if !by_devops {
+            credits::enrich(&mut self.codex, &views, now);
             sample(&mut self.samples, "codex", &self.codex, now);
             write("codex", &self.own_codex, &self.codex, now);
         }
+        credits::pass(&mut self.samples, &mut self.credits, &self.codex, codex_feed.as_deref(), &views, now);
         self.resets.pass(codex_feed.as_deref(), claude_feed.as_deref(), own_resets, &self.kimi, now);
     }
 }

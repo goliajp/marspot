@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use marspot_peer::json::{self, Value};
 
+use crate::agentsvc::accounts::wallet::Cap;
+
 use crate::plugins::claudecode::allocation_events::{DAY, ymd};
 
 /// How much of a file's end the first look reads.
@@ -63,8 +65,13 @@ impl CxTokens {
 
     /// What they cost in weeks of an account.
     pub(super) fn weeks(&self) -> f64 {
+        self.dollars() / DOLLARS_PER_WEEK
+    }
+
+    /// What they cost at list price.
+    pub(super) fn dollars(&self) -> f64 {
         let fresh = self.input.saturating_sub(self.cached) as f64;
-        (fresh * PRICE.0 + self.cached as f64 * PRICE.1 + self.output as f64 * PRICE.2) / 1e6 / DOLLARS_PER_WEEK
+        (fresh * PRICE.0 + self.cached as f64 * PRICE.1 + self.output as f64 * PRICE.2) / 1e6
     }
 
     pub(super) fn words(&self) -> String {
@@ -85,19 +92,26 @@ pub(super) enum Note {
     Refused { at: i64, agent: bool, turn: Option<String> },
     /// A turn ended without a usage refusal.
     Done { at: i64 },
-    /// The account's readings: a week fraction used and when it renews.
-    Limits { at: i64, week: Option<(f64, i64)> },
+    /// The account's readings: a week fraction used and when it renews,
+    /// the paid balance, a spending cap, and the tokens of the reply
+    /// the reading came with.
+    Limits { at: i64, week: Option<(f64, i64)>, balance: Option<f64>, cap: Option<Cap>, tokens: Option<CxTokens> },
     Used { at: i64, tokens: CxTokens },
+    /// A turn started on this model.
+    Model { model: String },
 }
 
 /// The notes in one rollout line; most lines carry none and are not parsed.
 pub(super) fn notes_of(line: &str) -> Vec<Note> {
-    let kinds = [r#""task_complete""#, r#""token_count""#, AGENT_REFUSED];
+    let kinds = [r#""task_complete""#, r#""token_count""#, AGENT_REFUSED, r#""turn_context""#];
     if !kinds.iter().any(|k| line.contains(k)) {
         return Vec::new();
     }
     let Ok(v) = json::parse(line) else { return Vec::new() };
     let Some(p) = v.get("payload") else { return Vec::new() };
+    if v.str_at("type") == Some("turn_context") {
+        return p.str_at("model").filter(|m| !m.is_empty()).map(|m| vec![Note::Model { model: m.to_string() }]).unwrap_or_default();
+    }
     let stamp = v.str_at("timestamp").and_then(|t| marspot::cc_usage::parse_iso_utc(t.to_string()));
     match p.str_at("type") {
         Some("task_complete") => {
@@ -119,11 +133,12 @@ pub(super) fn notes_of(line: &str) -> Vec<Note> {
         Some("token_count") => {
             let Some(at) = stamp else { return Vec::new() };
             let mut out = Vec::new();
+            let tokens = p.at(&["info", "last_token_usage"]).map(CxTokens::of);
             if let Some(r) = p.get("rate_limits").filter(|r| !matches!(r, Value::Null)) {
-                out.push(Note::Limits { at, week: week_of(r) });
+                out.push(Note::Limits { at, week: week_of(r), balance: balance_of(r), cap: Cap::of(r, CAP_KEYS), tokens });
             }
-            if let Some(u) = p.at(&["info", "last_token_usage"]) {
-                out.push(Note::Used { at, tokens: CxTokens::of(u) });
+            if let Some(tokens) = tokens {
+                out.push(Note::Used { at, tokens });
             }
             out
         }
@@ -143,6 +158,19 @@ fn week_of(r: &Value) -> Option<(f64, i64)> {
         Some((w.get("used_percent").and_then(num)? / 100.0, w.get("resets_at").and_then(num)? as i64))
     })
 }
+
+/// The paid balance of a `rate_limits` record; `None` when it is not a
+/// number, never zero for it.
+fn balance_of(r: &Value) -> Option<f64> {
+    match r.at(&["credits", "balance"])? {
+        Value::Str(s) => s.parse().ok(),
+        Value::Num(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// The rollout's spelling of the cap fields.
+const CAP_KEYS: [&str; 5] = ["individual_limit", "spend_control_reached", "rate_limit_reached_type", "limit", "remaining_percent"];
 
 fn num(v: &Value) -> Option<f64> {
     match v {

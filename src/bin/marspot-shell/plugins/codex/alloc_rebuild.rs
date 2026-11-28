@@ -79,6 +79,10 @@ impl CodexAlloc {
         self.rebuilt = true;
         let events = self.events.read_since(now - KEEP_DAYS * DAY, now);
         for e in &events {
+            if matches!(e.kind.as_str(), "spend" | "wallet_drop") {
+                self.wallets.restore(e, now);
+                continue;
+            }
             if e.kind == "bound" && e.profile.is_none() {
                 self.last.remove(&e.sid);
                 self.used.remove(&e.sid);

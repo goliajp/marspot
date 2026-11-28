@@ -67,7 +67,7 @@ fn model_of(m: &Value, seen: i64) -> Option<ModelWindow> {
 }
 
 fn credits_of(c: &Value) -> Credits {
-    Credits {
+    let mut out = Credits {
         enabled: c.get("enabled").and_then(Value::bool),
         unlimited: c.get("unlimited").and_then(Value::bool),
         balance: f64_at(c, "balance"),
@@ -75,5 +75,8 @@ fn credits_of(c: &Value) -> Credits {
         limit: f64_at(c, "limit"),
         utilization: f64_at(c, "utilization"),
         disabled_reason: c.str_at("disabled_reason").map(str::to_string),
-    }
+        ..Credits::default()
+    };
+    super::credits::read_wallet_fields(c, &mut out);
+    out
 }

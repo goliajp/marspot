@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.943"  # a pass without a plan forgets held deadlines; a deadline is held per (pane, from, to) and a long-past one restarts
+shell   = "0.7.946"  # codex credits: first-seen lot with inferred expiry, stale readings kept out of per_point, cap cleared, sums as of now
 core    = "0.12.816"  # the switching row's snapshot test imports in order
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
