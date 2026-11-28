@@ -11,7 +11,8 @@
 # Run inside the lock, on the runner.  Prints the number.
 set -euo pipefail
 
-cores="$(sysctl -n hw.ncpu)"
+# getconf: the same count as hw.ncpu on macOS, and it works on Linux
+cores="$(getconf _NPROCESSORS_ONLN)"
 holders="$(/usr/local/bin/bench-lock status 2>/dev/null \
   | grep -cE '^[0-9]+[[:space:]]+heavy[[:space:]]+holding' || true)"
 (( holders >= 1 )) || holders=1

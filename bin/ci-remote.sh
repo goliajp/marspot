@@ -43,7 +43,10 @@ job_linux() {
   # marspot-agent: the planner's closed-loop digest must read the same here
   local s=(-p marspot-term -p marspot-linkify -p marspot-agent)
   cargo build "${s[@]}" --all-targets
-  cargo nextest run "${s[@]}" --no-fail-fast
+  # its share of the runner's cores, and the limits of a job that runs
+  # at nice 19 beside the runner's other heavy jobs
+  cargo nextest run "${s[@]}" --profile shared-runner \
+    --test-threads "$(bin/_runner-jobs.sh)" --no-fail-fast
   cargo clippy "${s[@]}" --all-targets -- -D warnings
 }
 
