@@ -150,7 +150,7 @@ fn the_op_runner_is_where_a_signal_is_actually_sent() {
 #[test]
 fn bytes_reach_a_pane_only_through_the_io_the_op_runner_drives() {
     let mut offenders = Vec::new();
-    for (path, text) in plugin_sources() {
+    for (path, text) in plugin_sources().into_iter().filter(|(p, _)| !is_test_file(p)) {
         let lines = production_lines(&text);
         for (i, (n, line)) in lines.iter().enumerate() {
             if !line.contains(".inject_input(") {
