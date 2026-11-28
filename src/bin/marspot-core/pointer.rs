@@ -50,7 +50,7 @@ impl CoreApp {
 
     pub(super) fn mouse_down(&mut self, wi: usize, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
         self.strip_keys_interrupted();
-        if self.menu_takes_press(wi, x_phys, y_phys) {
+        if self.menu_takes_press(wi, x_phys, y_phys) || self.close_ask_press(wi, x_phys, y_phys) {
             return;
         }
 

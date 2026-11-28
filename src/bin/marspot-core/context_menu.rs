@@ -5,7 +5,9 @@ use super::*;
 #[path = "menus.rs"]
 pub(crate) mod menus;
 #[path = "menu_pick.rs"]
-mod menu_pick;
+pub(crate) mod menu_pick;
+#[path = "menu_family.rs"]
+mod menu_family;
 
 impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
@@ -153,14 +155,21 @@ impl CoreApp {
     }
 
     pub(super) fn build_menu_items(
-        &self, wi: usize,
+        &mut self, wi: usize,
         region: ContextRegion,
     ) -> Vec<marspot::ui::components::MenuItem> {
-        let moves = || menus::move_items(self.windows.len(), wi, win!(self, wi).panes.len());
+        let moves = |app: &Self| menus::move_items(app.windows.len(), wi, win!(app, wi).panes.len());
         match region {
-            ContextRegion::Pane(_) => menus::pane_menu(win!(self, wi).selection.is_some(), moves()),
-            ContextRegion::SidebarSlot(_) => menus::sidebar_menu(moves()),
-            ContextRegion::SidebarPane(sid) => menus::sidebar_menu(self.moves_of(sid)),
+            ContextRegion::Pane(_) => menus::pane_menu(win!(self, wi).selection.is_some(), moves(self)),
+            ContextRegion::SidebarSlot(i) => {
+                let sid = win!(self, wi).panes.get(i).and_then(Pane::shelld_session_id);
+                let kin = sid.map_or_else(Vec::new, |sid| self.kin_of(sid));
+                menus::sidebar_menu(kin, moves(self))
+            }
+            ContextRegion::SidebarPane(sid) => {
+                let kin = self.kin_of(sid);
+                menus::sidebar_menu(kin, self.moves_of(sid))
+            }
             ContextRegion::TitleStrip => menus::title_menu(),
             // Badge menus never come through here — their items
             // arrive from L1 via PaneBadgeMenu and open through
@@ -209,7 +218,9 @@ impl CoreApp {
                 }
             }
             ContextMenuAction::ClosePane if let ContextRegion::SidebarPane(sid) = region => {
-                self.close_anywhere(sid, false);
+                if !self.close_asked(wi, sid) {
+                    self.close_anywhere(sid, false);
+                }
             }
             ContextMenuAction::ClosePane => {
                 let idx = match region {
@@ -218,6 +229,10 @@ impl CoreApp {
                 };
                 // on a viewed shadow pane: back to the pane under it
                 if matches!(region, ContextRegion::Pane(_)) && self.unview(wi, idx) {
+                    return;
+                }
+                // a pane with children asks first
+                if self.region_sid(wi, region).is_some_and(|sid| self.close_asked(wi, sid)) {
                     return;
                 }
                 // No floor on the pane count: closing the last pane of

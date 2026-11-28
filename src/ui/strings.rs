@@ -160,6 +160,16 @@ pub enum Msg {
     MenuToggleSidebar,
     MenuOpenLayout,
     MenuMoveToNewWindow,
+    // Whose child a pane is, from a pane's menu
+    MenuBelongsTo,
+    MenuBelongsToBlocked,
+    MenuMakeTopLevel,
+    MenuReplaceWith,
+    MenuNewShell,
+    // Asked before closing a pane with child panes
+    CloseChildrenAsk,
+    CloseChildrenConfirm,
+    CloseChildrenCancel,
     // The menu on a link in a pane
     LinkCopyUuid,
     LinkOpenUrl,
@@ -311,6 +321,8 @@ pub enum Arg<'a> {
     Helpers(u32),
     /// Badge menu: open the helper panel for a pane with so many.
     HelpersOf(u32),
+    /// After a child pane's name in a menu: whose child it is.
+    ChildOf(u16),
     /// Helper panel: how long a pane has run.
     RanFor { minutes: u64 },
     /// The shared default model changed without confirmation and was put back.

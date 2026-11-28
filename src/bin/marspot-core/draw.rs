@@ -3,7 +3,7 @@
 use super::*;
 
 #[path = "draw_labels.rs"]
-mod labels;
+pub(crate) mod labels;
 #[path = "sidebar_tree.rs"]
 pub(crate) mod sidebar_tree;
 

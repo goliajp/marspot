@@ -80,6 +80,14 @@ impl CoreApp {
     /// The close button of row `row` of window `wi`'s sidebar.
     pub(crate) fn close_row(&mut self, wi: usize, row: usize) {
         let Some(r) = self.sidebar_row(wi, row).filter(|r| r.tree != SidebarTree::Parent) else { return };
+        let sid = match r.pane {
+            RowPane::Slot(idx) => win!(self, wi).panes.get(idx).and_then(Pane::shelld_session_id),
+            RowPane::Other(sid) => Some(sid),
+        };
+        // a pane with children asks first
+        if sid.is_some_and(|sid| self.close_asked(wi, sid)) {
+            return;
+        }
         match r.pane {
             RowPane::Slot(idx) => self.close_slot(wi, idx),
             RowPane::Other(sid) => {

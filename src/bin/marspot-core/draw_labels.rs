@@ -105,7 +105,7 @@ impl CoreApp {
 }
 
 /// `label` without a trailing `#<code>` of `code`.
-fn without_code(label: &str, code: u16) -> &str {
+pub(crate) fn without_code(label: &str, code: u16) -> &str {
     match label.rsplit_once('#') {
         Some((base, digits)) if !base.is_empty() && digits.parse::<u16>().ok() == Some(code) => base,
         _ => label,

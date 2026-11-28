@@ -36,6 +36,9 @@ mod sidebar_tree;
 #[cfg(test)]
 #[path = "menu_beside_snapshot_tests.rs"]
 mod menu_beside;
+#[cfg(test)]
+#[path = "close_ask_snapshot_tests.rs"]
+mod close_ask;
 
 thread_local! {
     /// The sidebar rows of the next scene, when they are not one per pane.

@@ -37,9 +37,33 @@ pub(super) fn pane_menu(has_selection: bool, moves: Vec<MenuItem>) -> Vec<MenuIt
     ])
 }
 
-/// The menu of a sidebar row.
-pub(super) fn sidebar_menu(moves: Vec<MenuItem>) -> Vec<MenuItem> {
-    grouped([vec![MenuItem::entry(t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag())], moves])
+/// Whose child a pane is, as its menu offers to change it.
+pub(super) enum Kin {
+    /// A pane with no parent and no children: the panes it can belong to.
+    Top(Vec<MenuItem>),
+    /// A pane with children, which cannot belong to another.
+    Parent,
+    /// A child, which can be made a top-level pane.
+    Child,
+}
+
+/// The rows of a pane's menu about whose child it is.
+pub(super) fn kin_items(kin: Kin) -> Vec<MenuItem> {
+    let belongs = |rows: Vec<MenuItem>| {
+        let row = MenuItem::entry(t(Msg::MenuBelongsTo), super::menu_family::BELONGS_TAG);
+        if rows.is_empty() { row.disabled() } else { row.with_submenu(rows) }
+    };
+    vec![match kin {
+        Kin::Top(rows) => belongs(rows),
+        Kin::Parent => MenuItem::entry(t(Msg::MenuBelongsTo), super::menu_family::BELONGS_TAG)
+            .disabled_because(t(Msg::MenuBelongsToBlocked)),
+        Kin::Child => MenuItem::entry(t(Msg::MenuMakeTopLevel), super::menu_family::MAKE_TOP_TAG),
+    }]
+}
+
+/// The menu of a sidebar row: close, whose child it is, the moves.
+pub(super) fn sidebar_menu(kin: Vec<MenuItem>, moves: Vec<MenuItem>) -> Vec<MenuItem> {
+    grouped([vec![MenuItem::entry(t(Msg::MenuClosePane), ContextMenuAction::ClosePane.tag())], kin, moves])
 }
 
 /// The menu of the title strip.
