@@ -211,21 +211,21 @@ impl PaneBackend {
         matches!(self, PaneBackend::L3(_))
     }
 
-    /// Forward a keystroke to an L3 session over the control socket.
-    /// No-op for the in-process backends (they go through `write`).
+    /// A keystroke to an L3 session; in-process backends use `write`.
     pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         if let PaneBackend::L3(c) = self {
             c.forward_key(event, mods);
         }
     }
 
-    /// Forward pasted clipboard text to an L3 session.  L2 resolves the
-    /// macOS pasteboard (L3 is GUI-free) and forwards the text; L3 wraps it
-    /// in bracketed-paste markers per its own terminal mode and writes the
-    /// PTY.  No-op for in-process backends — they paste via `write`.
+    /// Pasted text, read here (L3 has no pasteboard): an L3 session wraps
+    /// it per its terminal mode, a web pane's page types it; in-process
+    /// backends paste via `write`.
     pub fn forward_paste(&mut self, text: &str) {
-        if let PaneBackend::L3(c) = self {
-            c.forward_paste(text);
+        match self {
+            PaneBackend::L3(c) => c.forward_paste(text),
+            PaneBackend::Web(w) => w.paste(text),
+            _ => {}
         }
     }
 

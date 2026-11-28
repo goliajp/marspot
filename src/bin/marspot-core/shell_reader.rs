@@ -36,7 +36,7 @@ pub(super) fn decode_frame(t: MsgType, payload: &[u8]) -> Option<CoreEvent> {
             .map(|(x, y, _, win)| CoreEvent::MouseMove(x, y, win)),
         MsgType::Scroll => decode_scroll(payload)
             .ok()
-            .map(|(_dx, dy, p, win)| CoreEvent::Scroll(dy, p, win)),
+            .map(|(dx, dy, p, win)| CoreEvent::Scroll(dx, dy, p, win)),
         MsgType::FileDrop => decode_file_drop(payload)
             .ok()
             .map(|(x, y, paths, win)| CoreEvent::FileDrop(x, y, paths, win)),

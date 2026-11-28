@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.931"  # marspot-term: PointerShape frame, the caret frame moves to a file of its own; the shell sets the pointer the core asks for
-core    = "0.12.810"  # marspot-term: PointerShape frame (the core sends it from the next build)
+shell   = "0.7.932"  # the lib: web pane input and its dev script; the web pane dev seams move to a file of their own
+core    = "0.12.811"  # web panes take the wheel both ways, keys, the pointer, copy and paste, follow their cell size and whether they are on screen, and show the pointer shape the page asks for
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

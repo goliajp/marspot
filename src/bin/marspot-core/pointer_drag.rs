@@ -64,7 +64,7 @@ impl CoreApp {
         hover_x: f64,
         hover_y: f64,
     ) {
-        if self.scrollbar_drag_to(y_phys) {
+        if self.scrollbar_drag_to(y_phys) || self.web_drag(wi, x_phys, y_phys) {
             return;
         }
         // RFC-005 step 5 — an armed title press becomes a pane drag
@@ -170,7 +170,7 @@ impl CoreApp {
     }
 
     pub(super) fn mouse_up(&mut self, wi: usize, drop_window_id: u32, drop_x: f64, drop_y: f64) {
-        if self.scrollbar_release() {
+        if self.scrollbar_release() || self.web_release(wi, drop_x, drop_y) {
             return;
         }
         // a button of the chrome pressed and let go on

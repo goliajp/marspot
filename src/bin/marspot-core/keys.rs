@@ -219,7 +219,7 @@ impl CoreApp {
         let Some(pane) = self.focused_shown_mut(wi) else { return true };
         // A key into an exited pane revives it, and an in-process pane
         // pastes in its own encoder: both are the key path's.
-        if !pane.is_l3() || pane.is_exited() {
+        if !(pane.is_l3() || matches!(pane.session(), marspot::pane::PaneBackend::Web(_))) || pane.is_exited() {
             return false;
         }
         if pane.search.as_ref().is_some_and(|s| s.bar.focused) {

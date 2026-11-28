@@ -6,10 +6,14 @@
 //! published; the thread does all the talking (`link`).
 
 mod frames;
+mod dev;
+pub mod dev_script;
 pub mod gpu;
+pub mod input;
 mod link;
+mod link_input;
 
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -17,34 +21,12 @@ use madcawl_wire::Range;
 
 use crate::grid::Grid;
 use crate::ui::strings::{self, Arg};
+pub use dev::{dev_host_program, dev_url, entry_points};
 pub use frames::Unspoken;
 use gpu::{Device, Texture};
 
 /// The socket the shell binds for madcawl's host, under the state root.
 pub const HOST_SOCKET: &str = "madcawl.sock";
-
-/// Dev seam: open one web pane on this file URL after start.  Honoured
-/// only by a dev build or under a sandbox state dir, as the other
-/// `MARSPOT_DEV_*` seams that point the app at a developer's files.
-pub fn dev_url() -> Option<&'static str> {
-    // read once: the core asks every main-loop turn
-    static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    URL.get_or_init(|| dev_var("MARSPOT_DEV_WEB_PANE")).as_deref()
-}
-
-/// Dev seam: the host program a sandbox starts, in place of the one
-/// installed at the fixed path.
-pub fn dev_host_program() -> Option<PathBuf> {
-    dev_var("MARSPOT_DEV_MADCAWL_SHELL").map(PathBuf::from)
-}
-
-fn dev_var(name: &str) -> Option<String> {
-    let sandbox = std::env::var_os("MARSPOT_STATE_DIR").is_some_and(|d| !d.is_empty());
-    if !cfg!(debug_assertions) && !sandbox {
-        return None;
-    }
-    std::env::var(name).ok().filter(|v| !v.is_empty())
-}
 
 /// What the pane says in place of the page.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +63,10 @@ struct Inner {
     shown: Option<Shown>,
     /// The newest commit a finished frame showed.
     drawn: u64,
+    /// Where the page shown is scrolled to, CSS px
+    scrolled: (u32, u32),
+    out: std::collections::VecDeque<input::Out>,
+    said: input::Said,
 }
 
 /// What the connection thread and the pane share.
@@ -99,10 +85,11 @@ impl Shared {
         (self.notify)();
     }
 
-    fn show(&self, seq: u64, texture: Texture, size: (u32, u32)) {
+    fn show(&self, seq: u64, texture: Texture, size: (u32, u32), scrolled: (u32, u32)) {
         {
             let mut g = self.lock();
             g.shown = Some(Shown { seq, texture, size });
+            g.scrolled = scrolled;
             g.note = Some(Note::Shown);
         }
         (self.notify)();
@@ -138,6 +125,13 @@ pub struct WebPane {
     told: u64,
     /// Larger each time the grid or the picture changes.
     rev: u64,
+    visible: bool,
+    /// The pane's size in device pixels and its scale, once opened
+    px: Option<((f64, f64), u32)>,
+    /// The page took a press that has not been let go of
+    pub pressed: bool,
+    /// The pointer is over the page
+    pub hovered: bool,
 }
 
 impl WebPane {
@@ -156,6 +150,10 @@ impl WebPane {
             in_flight: 0,
             told: 0,
             rev: 0,
+            visible: true,
+            px: None,
+            pressed: false,
+            hovered: false,
         };
         p.paint();
         p
@@ -181,9 +179,10 @@ impl WebPane {
         let Some((css, px)) = frames::page_size(o.px.0, o.px.1, o.scale) else {
             return self.say(Note::Failed(format!("the pane is too small: {:?}", o.px)));
         };
-        let Some((read, write)) = pipe() else {
+        let Some((read, write)) = link_input::pipe() else {
             return self.say(Note::Failed("no wake pipe".into()));
         };
+        self.px = Some((o.px, o.scale));
         let open = link::Open { socket, session: self.id, url: o.url, css, px, scale: o.scale };
         let shared = self.shared.clone();
         let spawned = std::thread::Builder::new()
@@ -223,6 +222,11 @@ impl WebPane {
         self.rev
     }
 
+    /// Where the page shown is scrolled to, CSS px.
+    pub fn scrolled(&self) -> (u32, u32) {
+        self.shared.lock().scrolled
+    }
+
     /// The size of the picture shown, device pixels.
     pub fn picture_size(&self) -> Option<(u32, u32)> {
         self.current.as_ref().map(|c| c.2)
@@ -243,12 +247,16 @@ impl WebPane {
         }
         self.told = self.in_flight;
         self.shared.lock().drawn = self.told;
+        self.wake();
+        Some(self.told)
+    }
+
+    fn wake(&self) {
         if let Some(w) = &self.wake {
             // the pipe does not block; a full one already wakes the thread
             // SAFETY: one byte from a live buffer to our own pipe
             unsafe { libc::write(std::os::fd::AsRawFd::as_raw_fd(w), [1u8].as_ptr().cast(), 1) };
         }
-        Some(self.told)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -276,22 +284,4 @@ impl WebPane {
         let row = 1u16.min(rows.saturating_sub(1));
         crate::pane_message::put(&mut self.grid, 2, row, &text);
     }
-}
-
-/// A pipe whose ends do not block and are not inherited.
-fn pipe() -> Option<(OwnedFd, OwnedFd)> {
-    let mut fds = [0; 2];
-    // SAFETY: room for two descriptors
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    for fd in fds {
-        // SAFETY: descriptors this process just made
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-        }
-    }
-    // SAFETY: as above, owned from here on
-    Some(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }

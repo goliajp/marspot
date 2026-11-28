@@ -61,6 +61,9 @@ impl CoreApp {
     }
 
     pub(super) fn key_to_pane(&mut self, wi: usize, event: &MarspotKeyEvent, modifiers: Modifiers) {
+        if self.key_to_web(wi, event, modifiers) {
+            return;
+        }
         if event.state == KeyState::Pressed && self.key_revives(wi) {
             return;
         }

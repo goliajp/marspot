@@ -43,8 +43,9 @@ pub fn hello_answer(f: &Frame, kind: u16, ours: Range) -> Result<u32, Unspoken> 
 /// What to do with one frame from the content process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// Show buffer `buffer`, the pixels of commit `seq`.
-    Show { buffer: u32, seq: u64 },
+    /// Show buffer `buffer`, the pixels of commit `seq`, the page
+    /// scrolled to `scrolled` CSS px.
+    Show { buffer: u32, seq: u64, scrolled: (u32, u32) },
     /// Not shown and not held against the peer: a commit drawn into a
     /// surface sent before this one, or a kind this build does not know.
     Pass,
@@ -93,7 +94,7 @@ impl Commits {
                 self.last = c.seq;
                 self.showing = Some(c.buffer);
                 self.held[c.buffer as usize] = Some(c.seq);
-                Verdict::Show { buffer: c.buffer, seq: c.seq }
+                Verdict::Show { buffer: c.buffer, seq: c.seq, scrolled: (c.scroll_x, c.scroll_y) }
             }
             Err(why) => {
                 self.bad += 1;

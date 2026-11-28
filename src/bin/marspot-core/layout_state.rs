@@ -63,6 +63,7 @@ impl CoreApp {
         // (Steady-state frames use Load to dodge the cross-process
         // race; see `MetalRenderer::clear_bg_required`.)
         win!(self, wi).render.mark_bg_clear_required();
+        self.web_follow_layout(wi);
     }
 
     /// F3+3.3 — reset `card_slots` to identity for the current
