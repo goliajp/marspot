@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.882"  # the state map lists the record of panes in no window
-core    = "0.12.770"  # a record of the panes in no window decides who stays hidden at boot
+shell   = "0.7.883"  # a helper panel act cut inside its parent is refused
+core    = "0.12.771"  # a helper panel act cut inside its parent is refused
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

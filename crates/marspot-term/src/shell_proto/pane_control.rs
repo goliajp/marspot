@@ -287,8 +287,9 @@ pub fn decode_helper_panel_act(p: &[u8]) -> io::Result<HelperPanelAct> {
         sid: r.u64()?,
         act: PanelAct::from_u8(r.u8()?),
         want: CwdControl::from_u8(if p.len() > 9 { r.u8()? } else { 0 }),
-        // a build before this one ends at `want`
-        parent: if p.len() >= 18 { r.u64()? } else { 0 },
+        // a build before this one ends at `want`; one cut inside the
+        // parent is refused
+        parent: if p.len() > 10 { r.u64()? } else { 0 },
     })
 }
 

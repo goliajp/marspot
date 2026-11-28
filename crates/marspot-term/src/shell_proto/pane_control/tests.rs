@@ -432,12 +432,15 @@ fn pane_control_truncated_payloads_are_refused_at_every_length() {
         assert!(decode(&p).is_ok(), "{t:?} decodes whole");
         // the last byte came later, and may be missing
         let late = match t {
-            MsgType::HelperPanelAct | MsgType::PanePlace | MsgType::PaneRetire => 1,
+            MsgType::PanePlace | MsgType::PaneRetire => 1,
             MsgType::PaneSpawned => 4,
             _ => 0,
         };
+        // as laid out by builds before a field came last: before `want`
+        // and before `parent`
+        let older: &[usize] = if matches!(t, MsgType::HelperPanelAct) { &[9, 10] } else { &[] };
         let least = p.len() - late;
-        for n in 0..least {
+        for n in (0..least).filter(|n| !older.contains(n)) {
             assert!(
                 decode(&p[..n]).is_err(),
                 "{t:?} cut to {n} of {} bytes decoded",
