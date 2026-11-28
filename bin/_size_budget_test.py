@@ -242,6 +242,22 @@ def _raise_checks(root, work, failures):
         p = sb.set_budget("marspot-peer", 0x40000, os.path.join(work, "big.tsv"), root)
         _expect(p == [], f"needed raise refused: {p}", failures)
     with _Undo(root):
+        # a module the table being replaced had and the new build lacks
+        big = os.path.join(work, "big")
+        _fake_macho(big, 0x38000)
+        sb.raw(os.path.join(work, "x.map"), big, "marspot-peer", os.path.join(work, "big.tsv"), root)
+        new = os.path.join(work, "big.tsv")
+        head, rows = sb.read_table(new)
+        _, before = sb.read_table(sb.table_path(root, "0.18", "marspot-peer"))
+        lost = next(k for k in sorted(before) if before[k] and k in rows and k != _size_map.UNMAPPED)
+        rows[_size_map.UNMAPPED] = rows.get(_size_map.UNMAPPED, 0) + rows.pop(lost)
+        with open(new, "w") as f:
+            f.writelines(f"# {k}\t{v}\n" for k, v in head.items())
+            f.write("module\tbytes\n")
+            f.writelines(f"{k}\t{v}\n" for k, v in rows.items())
+        p = sb.set_budget("marspot-peer", 0x40000, new, root)
+        _expect(p == [], f"a raise over a table with a module the build lost refused: {p}", failures)
+    with _Undo(root):
         os.makedirs(os.path.join(root, sb.TABLE_DIR, "0.19"))
         shutil.copy(sb.table_path(root, "0.18", "marspot-peer"), sb.table_path(root, "0.19", "marspot-peer"))
         _edit_budget(root, "marspot-peer", 0x30000, minor="0.19")
