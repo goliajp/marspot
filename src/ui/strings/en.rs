@@ -212,7 +212,7 @@ fn text(m: Msg) -> &'static str {
         Msg::BadgeCodexStateUnknown => "⚠ session state unknown, not switched",
         Msg::BadgeCodexSwitching => "⚠ already switching",
         Msg::BadgeCodexNotTracked => "⚠ session not tracked yet, not switched",
-        Msg::BadgeCodexTerminalBusy => "⚠ codex is at work, not switched",
+        Msg::BadgeCodexThreadUnknown => "⚠ conversation id not known, not switched (no new conversation started)",
         Msg::BadgeCodexWaitingRelease => "waiting for the old account to let go",
         Msg::BadgeCodexStillLoaded => "⚠ old account kept the session, not switched",
 

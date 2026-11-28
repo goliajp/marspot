@@ -14,6 +14,7 @@
 //! touches a socket, a file or a daemon happens on the worker thread.
 
 mod bind;
+mod bind_settled;
 pub(crate) mod claude_mcp;
 mod claude_hooks;
 mod clock;

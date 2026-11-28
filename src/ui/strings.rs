@@ -250,7 +250,7 @@ pub enum Msg {
     BadgeCodexStateUnknown,
     BadgeCodexSwitching,
     BadgeCodexNotTracked,
-    BadgeCodexTerminalBusy,
+    BadgeCodexThreadUnknown,
     BadgeCodexWaitingRelease,
     BadgeCodexStillLoaded,
     // Settings — the interface language.  A language is named in itself,

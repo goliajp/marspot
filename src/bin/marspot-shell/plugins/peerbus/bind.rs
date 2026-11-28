@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use marspot_peer::envelope::Mode;
 use marspot_peer::json::Value;
+use super::bind_settled::settled_titles;
 
 /// A pane with a Codex process, as the worker resolved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +71,7 @@ const FIRST_THREAD_MS: u64 = 10_000;
 /// an earlier process names a thread nobody shows any more, and Codex
 /// unloads that after half an hour; the rest is for a machine that
 /// slept through part of it.
-const TITLE_SETTLED_MS: u64 = 2 * 3600 * 1000;
+pub(super) const TITLE_SETTLED_MS: u64 = 2 * 3600 * 1000;
 
 /// When `assign` may next answer otherwise for a pane that waits for
 /// its title, with nothing having changed but the time: in so many
@@ -120,7 +121,8 @@ pub(super) fn assign(
     // seen under it.  So a title counts once this process is known to
     // have written it: it names a thread created after the process
     // started, or the thread the command line resumes, or it has
-    // changed since the process was first seen.
+    // changed since the process was first seen.  Failing those, a title
+    // the process has run under for hours (`settled_titles`).
     for p in panes {
         let Some(prefix) = &p.title_thread else { continue };
         let own = created_ms(prefix).is_some_and(|c| c > p.started_ms)
@@ -142,6 +144,7 @@ pub(super) fn assign(
         }
         out.insert(p.sid, r);
     }
+    settled_titles(panes, threads, current, &mut out, &mut taken);
     // Then other certain answers: a binding that still holds, then a
     // thread named on the command line.
     let by_title: Vec<u64> = out.keys().copied().collect();
@@ -230,17 +233,14 @@ pub(super) fn assign(
 
 /// Whether `thread`, the only one in the directory of the only Codex
 /// there, is that process's although its title has not been seen to
-/// say so: the title it has run under for hours names it, or the title
-/// names nothing and the thread is the one the process started with.
+/// say so: the title names nothing and the thread is the one the
+/// process started with.  A title that names a thread is settled by
+/// `assign`'s title passes.
 fn without_the_title(p: &Pane, thread: &str) -> bool {
-    match &p.title_thread {
-        Some(prefix) => p.title_expected && p.up_ms >= TITLE_SETTLED_MS && thread.starts_with(prefix.as_str()),
-        None => {
-            !p.title_moved
-                && p.up_ms >= TITLE_SILENT_MS
-                && created_ms(thread).is_some_and(|c| c > p.started_ms && c - p.started_ms <= FIRST_THREAD_MS)
-        }
-    }
+    p.title_thread.is_none()
+        && !p.title_moved
+        && p.up_ms >= TITLE_SILENT_MS
+        && created_ms(thread).is_some_and(|c| c > p.started_ms && c - p.started_ms <= FIRST_THREAD_MS)
 }
 
 /// A loaded thread's cwd, if it is one a person is talking to in a
@@ -471,18 +471,89 @@ mod tests {
         let early = Pane { up_ms: TITLE_SETTLED_MS - 1, ..p.clone() };
         assert_eq!(one(&early, &ts), Err(Unbound::AwaitingTitle));
         assert_eq!(title_wait_ms(&early), Some(1));
-        assert_eq!(one(&Pane { alone: false, ..p.clone() }, &ts), Err(Unbound::AwaitingTitle));
         assert_eq!(one(&Pane { title_expected: false, ..p.clone() }, &ts), Err(Unbound::AwaitingTitle));
-        assert_eq!(one(&p, &loaded(&[(old, "/q")])), Err(Unbound::AwaitingTitle), "a thread of another directory");
-        // the thread it started with is there too: which one it shows is not said
+        // the title is the pane's: other codexes in the directory, its
+        // own first thread still loaded, a thread of another directory
+        // do not make it name something else
+        assert_eq!(one(&Pane { alone: false, ..p.clone() }, &ts), Ok(old.into()));
         let first = born(1_795_008_855_013, 1);
-        assert_eq!(one(&p, &loaded(&[(old, "/p"), (first.as_str(), "/p")])), Err(Unbound::AwaitingTitle));
-        // and alone, it is not what the title names
-        assert_eq!(one(&p, &loaded(&[(first.as_str(), "/p")])), Err(Unbound::AwaitingTitle));
-        // another pane has it by its own title
+        assert_eq!(one(&p, &loaded(&[(old, "/p"), (first.as_str(), "/p")])), Ok(old.into()));
+        assert_eq!(one(&p, &loaded(&[(old, "/q")])), Ok(old.into()));
+        // what it names is not loaded: nothing is guessed
+        assert_eq!(one(&p, &loaded(&[(first.as_str(), "/p")])), Err(Unbound::NoThread));
+        // another pane has it by a title that process wrote
         let other = Pane { sid: 2, cwd: "/q".into(), title_moved: true, ..p.clone() };
-        let r = assign(&[p, other], &ts, &HashMap::new());
+        let r = assign(&[p.clone(), other], &ts, &HashMap::new());
         assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Ok(old.to_string())));
+        // a second pane in its directory, its title saying nothing yet
+        let beside = Pane { sid: 2, title_thread: None, up_ms: 0, ..p.clone() };
+        assert_eq!(assign(&[p, beside], &ts, &HashMap::new())[&1], Ok(old.into()));
+    }
+
+    /// Pane 487 on 2026-11-28: `codex` started after a reboot, on a
+    /// thread from two days before, its title naming that thread from
+    /// the first look on; its home's daemon sat in the same directory
+    /// and other codexes ran there.  Sixteen hours on it was still
+    /// unbound, and a switch handed it to a new conversation.
+    #[test]
+    fn a_pane_on_an_older_thread_is_bound_after_hours_beside_other_codexes() {
+        let thread = "01a218a7-e30b-7f00-8df0-b35e1e443fe7";
+        let p = Pane {
+            home: "/h2".into(),
+            title_expected: true,
+            title_thread: thread_in_title("⠴ 分析项目当前状态 | mailrs | 01a218a7-e30b-7f00-8df0-b35e1..."),
+            started_ms: 1_795_836_234_689,
+            up_ms: 14 * 3600 * 1000,
+            alone: false,
+            ..pane(487, "/m", None)
+        };
+        let ts = HashMap::from([(PathBuf::from("/h2"), vec![(thread.to_string(), "/m".to_string()), (N1.to_string(), "/m".to_string())])]);
+        assert_eq!(assign(std::slice::from_ref(&p), &ts, &HashMap::new())[&487], Ok(thread.into()));
+        // before its hours were up it waited, and said so
+        let young = Pane { up_ms: TITLE_SETTLED_MS - 1, ..p };
+        assert_eq!(assign(&[young], &ts, &HashMap::new())[&487], Err(Unbound::AwaitingTitle));
+    }
+
+    /// A pane whose hours-old title an earlier codex left names the
+    /// thread another pane runs, before that pane's title says so.
+    fn stale_title_pane(thread: &str) -> Pane {
+        Pane {
+            title_expected: true,
+            title_thread: thread_in_title(&format!("p | {thread}")),
+            started_ms: 1_795_008_854_000,
+            up_ms: TITLE_SETTLED_MS,
+            alone: false,
+            ..pane(1, "/p", None)
+        }
+    }
+
+    #[test]
+    fn a_settled_title_does_not_take_a_thread_another_pane_resumes_or_is_bound_to() {
+        let x = "01a0bca3-87a2-7aa2-8d42-d84a71b8539a";
+        let ts = loaded(&[(x, "/q")]);
+        let a = stale_title_pane(x);
+        // the other pane runs `codex resume <x>`, its title not yet seen
+        let resumes = Pane { started_ms: 1_795_008_900_000, ..pane(2, "/q", Some(x)) };
+        let r = assign(&[a.clone(), resumes], &ts, &HashMap::new());
+        assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Ok(x.to_string())));
+        // the other pane is bound to it from an earlier scan
+        let bound = Pane { title_expected: true, started_ms: 1_795_008_900_000, ..pane(2, "/q", None) };
+        let cur = HashMap::from([(2, x.to_string())]);
+        let r = assign(&[a.clone(), bound.clone()], &ts, &cur);
+        assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Ok(x.to_string())));
+        // a binding whose thread has left that pane's directory holds nothing
+        let r = assign(&[a, bound], &loaded(&[(x, "/r")]), &cur);
+        assert_eq!(r[&1], Ok(x.to_string()));
+    }
+
+    #[test]
+    fn two_settled_titles_naming_one_thread_bind_neither() {
+        let x = "01a0bca3-87a2-7aa2-8d42-d84a71b8539a";
+        let ts = loaded(&[(x, "/p")]);
+        let a = stale_title_pane(x);
+        let c = Pane { sid: 2, cwd: "/q".into(), ..a.clone() };
+        let r = assign(&[a, c], &ts, &HashMap::new());
+        assert_eq!((&r[&1], &r[&2]), (&Err(Unbound::AwaitingTitle), &Err(Unbound::AwaitingTitle)));
     }
 
     /// The title a killed Codex left in the pane names its thread, and

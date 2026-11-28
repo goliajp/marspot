@@ -74,7 +74,6 @@ fn world(argv: &[&str], bound: bool) -> World {
     let mut env = EnvGuard::new();
     env.set("HOME", home.path()).set("MARSPOT_STATE_DIR", home.join("state"));
     let mut plugin = CodexPlugin::new();
-    plugin.switches.screen = |_| None;
     let argv = Some(argv.iter().map(|a| a.to_string()).collect());
     plugin.panes.insert(SID, PaneCodex { codex: CODEX, shell_pid: i32::MAX, profile: Some(1), argv });
     let mut views = HashMap::new();
@@ -121,9 +120,6 @@ fn job_of(op: &pty_op::PtyOp, capture: bool) -> Option<std::sync::Arc<pty_op::Jo
         _ => None,
     })
 }
-
-/// codex 0.172's approval prompt, at the bottom of its screen.
-const ASKING: &str = "• Running make\n\n  Would you like to run the following command?\n\n  $ make\n\n› 1. Yes, proceed (y)\n  2. No (esc)\n";
 
 fn line_of(op: &pty_op::PtyOp) -> String {
     op.steps
@@ -181,35 +177,26 @@ fn a_custom_command_line_is_not_switched() {
     }
 }
 
+/// Pane 487 on 2026-11-28: peerbus had not bound the pane, and the
+/// pick typed a fresh codex under the other account with a summary
+/// pasted in, leaving the real conversation behind.
 #[test]
-fn a_thread_peerbus_does_not_know_is_handed_off_never_resumed_by_last() {
-    let mut w = world(&["codex"], false);
-    *w.host.quiet.lock().unwrap() = Some(Duration::from_secs(60));
-    w.pick_p2();
-    assert_eq!(w.asks.next(), None);
-    assert_eq!(w.host.names(), ["handoff.switch"], "no switch op without a thread id");
-}
-
-#[test]
-fn a_codex_waiting_on_an_approval_is_not_handed_off() {
-    let mut w = world(&["codex"], false);
-    *w.host.quiet.lock().unwrap() = Some(Duration::from_secs(60));
-    w.plugin.switches.screen = |_| Some(ASKING.into());
-    w.pick_p2();
-    assert_eq!(w.host.names(), Vec::<&str>::new(), "quiet, and not done");
-    assert_eq!(w.plugin.hint_for(SID), Some(Msg::BadgeCodexTerminalBusy));
-    assert!(!super::switch::asks_approval("  Would you like to know more? I asked earlier.\n› "), "no question at the row's end");
-}
-
-#[test]
-fn a_thread_peerbus_does_not_know_is_not_handed_off_mid_turn() {
-    let mut w = world(&["codex"], false);
-    w.pick_p2();
-    assert_eq!(w.host.names(), Vec::<&str>::new(), "its spinner is still drawing");
-    assert_eq!(w.plugin.hint_for(SID), Some(Msg::BadgeCodexTerminalBusy));
-    *w.host.quiet.lock().unwrap() = Some(Duration::from_millis(500));
-    w.pick_p2();
-    assert_eq!(w.host.names(), Vec::<&str>::new(), "half a second is a spinner's pause");
+fn a_thread_peerbus_does_not_know_is_refused_never_handed_off() {
+    for (quiet, argv) in [
+        (None, &["codex"][..]),
+        (Some(Duration::from_secs(60)), &["codex"][..]),
+        (Some(Duration::from_secs(60)), &["codex", "-m", "gpt-6.2-astra"][..]),
+        // an id on the command line that peerbus could not bind
+        (Some(Duration::from_secs(60)), &["codex", "resume", THREAD][..]),
+    ] {
+        let mut w = world(argv, false);
+        *w.host.quiet.lock().unwrap() = quiet;
+        w.pick_p2();
+        assert_eq!(w.asks.next(), None, "{argv:?}: nothing for peerbus to decide");
+        assert_eq!(w.host.names(), Vec::<&str>::new(), "{argv:?}: no switch, no hand-off");
+        assert_eq!(w.plugin.hint_for(SID), Some(Msg::BadgeCodexThreadUnknown), "{argv:?}");
+        assert!(w.plugin.hinted(SID, "P1@codex".into()).starts_with("P1@codex ⚠"), "said beside the badge");
+    }
 }
 
 /// The thread's rollout under the old home, last turn on `model`.

@@ -172,7 +172,7 @@ pub const ALL: &[Msg] = &[
     Msg::BadgeCodexStateUnknown,
     Msg::BadgeCodexSwitching,
     Msg::BadgeCodexNotTracked,
-    Msg::BadgeCodexTerminalBusy,
+    Msg::BadgeCodexThreadUnknown,
     Msg::BadgeCodexWaitingRelease,
     Msg::BadgeCodexStillLoaded,
     Msg::Language,

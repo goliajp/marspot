@@ -61,8 +61,11 @@ fn a_pick_on_claude_s_badge_makes_codex_submit_nothing() {
     }
     assert_eq!(*host.submitted.lock().unwrap(), [], "codex acted on a row of claude's menu");
 
+    assert_eq!(plugin.hint_for(SID), None, "nor said anything beside codex's badge");
+
     // the same pane, codex's own P2 row: that one is codex's, and with
-    // no thread known to resume by, the conversation is handed over
+    // no thread known to resume by it is refused, not handed over
     plugin.on_pane_badge_menu_action(&host, SID, handoff::profile_tag(Agent::Codex, 2));
-    assert_eq!(*host.submitted.lock().unwrap(), [(SID, "handoff.switch")]);
+    assert_eq!(*host.submitted.lock().unwrap(), []);
+    assert_eq!(plugin.hint_for(SID), Some(marspot::ui::strings::Msg::BadgeCodexThreadUnknown));
 }
