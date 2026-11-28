@@ -163,6 +163,9 @@ impl PanePlan {
             allocation_route::rebuild(&input, &r.plan, forecast, due.is_some().then(|| allocation_route::others_now(now)), now);
         }
         self.route_shadow(view, due.is_some(), now, &mut log);
+        if due.is_some() {
+            log.extend(allocation_route::probe().into_iter().map(|l| ("sched.route.shadow", l)));
+        }
         if let Some(r) = done {
             self.foreseen = r.plan.refusals.iter().map(|x| x.0).chain(r.plan.switches.iter().map(|s| s.sid)).collect();
             for (sid, why) in &r.ended.cancelled {

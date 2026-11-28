@@ -67,7 +67,7 @@ fn exec_at(r: &Path, ladder: Ladder, top: Step) -> Exec {
 
 /// One scan under balanced with switching live.
 fn scan(x: &mut Exec, a: &mut Allocation, s: &Snapshot, holds: &HashMap<u64, Hold>, w: &[Watch], log: &mut Vec<(&'static str, String)>) -> Vec<Order> {
-    let sc = Scan { watches: w, lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: true, reset: None };
+    let sc = Scan { watches: w, lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: true, reset: None, full: 0 };
     x.step(a, s, holds, &sc, log)
 }
 
@@ -109,7 +109,7 @@ fn allocation_exec_shadow_and_a_do_nothing_and_the_dry_run_records_and_replays()
 }
 
 #[test]
-fn allocation_exec_counts_only_rehearsed_switches_and_stops_at_its_cap() {
+fn allocation_exec_counts_only_rehearsed_switches_and_opens_c_up_to_its_cap() {
     let r = root("count");
     let mut a = Allocation::new(events_dir(&r));
     let mut x = exec_at(&r, at(Step::B), LADDER_MAX);
@@ -123,17 +123,24 @@ fn allocation_exec_counts_only_rehearsed_switches_and_stops_at_its_cap() {
     let sw = events(&a, "would_switch");
     assert!(sw.len() == 1 && sw[0].detail.contains("decided=switch:drain"), "{sw:?}");
     assert_eq!((x.ladder.dry, x.ladder.dry_notices), (1, 1));
-    // enough records do not open c in this build, live or not
+    // enough records do not open c above a cap at b
     x.ladder.dry = 20;
     x.ladder.dry_notices = 5;
+    x.top = Step::B;
     scan(&mut x, &mut a, &snap(NOW + 700, &[]), &quiet(false), &[], &mut log);
     assert_eq!(x.ladder.step, Step::B);
-    // a kept ladder above the cap loads at the cap
-    x.ladder = at(Step::D);
-    x.save(&mut log);
+    // this build's cap opens c, logged with its counters
+    x.top = LADDER_MAX;
+    log.clear();
+    scan(&mut x, &mut a, &snap(NOW + 710, &[]), &quiet(false), &[], &mut log);
+    assert_eq!(x.ladder.step, Step::C);
+    assert!(log.iter().any(|(t, l)| *t == "sched.gate.advance" && l.starts_with("step=c from=b ")), "{log:?}");
+    // a kept ladder at any step loads as kept
+    x.ladder = at(Step::E);
+    x.save(1, &mut log);
     let held = Exec::load(&r, NOW);
-    assert_eq!(held.ladder.step, LADDER_MAX);
-    assert!(held.start.iter().any(|(t, _)| *t == "sched.gate.capped"), "{:?}", held.start);
+    assert_eq!(held.ladder.step, Step::E);
+    assert!(!held.start.iter().any(|(t, _)| *t == "sched.gate.capped"), "{:?}", held.start);
     let _ = fs::remove_dir_all(&r);
 }
 
@@ -144,7 +151,7 @@ fn allocation_exec_with_switching_not_live_neither_advances_nor_orders() {
     let mut x = exec_at(&r, at(Step::A), Step::E);
     let mut log = Vec::new();
     fn off(w: &[Watch]) -> Scan<'_> {
-        Scan { watches: w, lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: false, reset: None }
+        Scan { watches: w, lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: false, reset: None, full: 0 }
     }
     x.step(&mut a, &snap(NOW, &[(441, 3, true)]), &quiet(false), &off(&[]), &mut log);
     assert_eq!(x.ladder.step, Step::A, "no advance while switching is off");
@@ -208,7 +215,7 @@ fn allocation_exec_an_unreadable_gate_holds_until_reset_and_strict_waits_are_reh
     assert_eq!(x.ladder.rolled.map(|w| w.1), Some(Why::Unreadable));
     let mut a = Allocation::new(events_dir(&r));
     let mut log = Vec::new();
-    let reset = |stamp| Scan { watches: &[], lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: true, reset: stamp };
+    let reset = |stamp| Scan { watches: &[], lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: true, reset: stamp, full: 0 };
     // a stamp left in the settings from before the file was lost does not release it
     x.step(&mut a, &snap(NOW, &[]), &quiet(false), &reset(Some(NOW - 5)), &mut log);
     assert_eq!((x.ladder.rolled.map(|w| w.1), x.ladder.reset_at), (Some(Why::Unreadable), NOW));
@@ -221,7 +228,7 @@ fn allocation_exec_an_unreadable_gate_holds_until_reset_and_strict_waits_are_reh
     assert!(x.ladder.rolled.is_some(), "a stamp applies once");
     // at e under strict protection a wait on an attended pane is recorded
     let mut y = exec_at(&r, at(Step::E), Step::E);
-    let waits = Scan { watches: &[], lim: &Limits::FULL, unforeseen: 0, refused: &[], waits: &[441], setting_live: true, reset: None };
+    let waits = Scan { watches: &[], lim: &Limits::FULL, unforeseen: 0, refused: &[], waits: &[441], setting_live: true, reset: None, full: 0 };
     y.step(&mut a, &snap(NOW + 3, &[(441, 3, false)]), &quiet(true), &waits, &mut log);
     assert!(y.ladder.attended_wait);
     assert_eq!(events(&a, "would_wait").len(), 1);
@@ -235,4 +242,28 @@ fn allocation_exec_notice_texts_name_both_accounts() {
     assert!(say::notice_body(3, 7, Kind::Drain).contains("不要启动新的"));
     assert!(say::after_switch(3, 7).contains("P7"));
     assert!(!say::carry_on_body().is_empty());
+}
+
+#[test]
+fn allocation_exec_logs_the_ladder_when_its_counters_change_at_most_once_a_full_pass() {
+    let r = root("said");
+    let mut x = exec_at(&r, Ladder::default(), LADDER_MAX);
+    let mut log = Vec::new();
+    let gate = |log: &[(&'static str, String)]| log.iter().filter(|(t, _)| *t == "sched.gate").count();
+    x.ladder.route_run = 1;
+    x.save(0, &mut log);
+    assert_eq!(gate(&log), 0, "no full pass since the last line");
+    assert!(fs::read_to_string(r.join("sched").join("gate.txt")).is_ok_and(|t| t.contains("route_run=1")), "kept at once all the same");
+    x.save(1, &mut log);
+    assert_eq!(gate(&log), 1);
+    x.ladder.route_run = 2;
+    x.save(1, &mut log);
+    x.ladder.route_run = 3;
+    x.save(1, &mut log);
+    assert_eq!(gate(&log), 1, "once per full pass");
+    x.save(2, &mut log);
+    x.save(3, &mut log);
+    assert_eq!(gate(&log), 2, "a pass with nothing new logs nothing");
+    assert!(log.last().is_some_and(|(_, l)| l.contains(" route=3/20 ")), "{log:?}");
+    let _ = fs::remove_dir_all(&r);
 }

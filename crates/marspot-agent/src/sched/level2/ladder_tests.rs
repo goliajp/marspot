@@ -109,8 +109,8 @@ fn sched_ladder_b_follows_a_and_c_needs_replayed_switches_and_notices() {
 }
 
 #[test]
-fn sched_ladder_this_build_stops_at_the_dry_run() {
-    assert_eq!(LADDER_MAX, Step::B);
+fn sched_ladder_this_build_enters_every_step_and_a_lower_cap_holds() {
+    assert_eq!(LADDER_MAX, Step::E);
     let mut l = Ladder::default();
     for k in 0..20 {
         l.routed(false, k, Step::Shadow);
@@ -122,18 +122,20 @@ fn sched_ladder_this_build_stops_at_the_dry_run() {
     for _ in 0..20 {
         l.dry_record(true, true);
     }
-    assert_eq!(l.tick(0, 23, LADDER_MAX), None, "c is above the cap");
+    assert_eq!(l.tick(0, 23, Step::B), None, "c is above a cap at b");
     assert_eq!((l.step, l.dry, l.refusals_before), (Step::B, 20, 0));
-    assert_eq!(l.tick(0, 24, Step::C).map(|c| c.to), Some(Step::C));
+    assert_eq!(l.tick(0, 24, LADDER_MAX).map(|c| c.to), Some(Step::C));
     let mut c = walked(Step::C);
     for k in 0..10 {
         c.switched(k, Step::C);
     }
     assert_eq!(c.step, Step::C, "d is above a cap at c");
-    // a kept ladder above the cap is held at it
+    // a kept ladder above a cap is held at it; nothing is above this build's
     let mut d = walked(Step::D);
-    assert!(d.cap(LADDER_MAX) && d.step == Step::B && d.dry_run());
-    assert!(!d.cap(LADDER_MAX));
+    assert!(d.cap(Step::B) && d.step == Step::B && d.dry_run());
+    assert!(!d.cap(Step::B));
+    let mut e = walked(Step::E);
+    assert!(!e.cap(LADDER_MAX) && e.protects());
 }
 
 #[test]

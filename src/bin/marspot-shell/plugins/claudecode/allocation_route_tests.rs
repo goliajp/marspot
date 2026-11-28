@@ -55,4 +55,20 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     rebuild(&i, &plan(&i, None), None, Some(vec![("codex", 0.16)]), later + 4);
     rebuild(&i, &plan(&i, None), None, None, later + 6);
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=codex=16.0"));
+    // a full pass's probes are noted like placements and leave the table as it was
+    take_noted();
+    let probes = probe();
+    assert_eq!(probes.len(), 2, "{probes:?}");
+    assert!(probes[0].starts_with("kind=probe class=plain table=P"), "{probes:?}");
+    assert_eq!(probes[1], "kind=probe class=fable table=-", "no account has Fable-usable room");
+    assert_eq!(take_noted(), vec![false], "a plain probe on an account with week of its own");
+    assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=codex=16.0"));
+    // one whose only room is Fable-usable is a wrong placement
+    let f = [Account { q: Quant { id: 3, r: 0.4, f: 0.4, t: 100.0, tf: 100.0, open: true, stale: false }, spare: 0.4, price: [1.0, 1.0] }];
+    let i = input(&f);
+    rebuild(&i, &plan(&i, None), None, None, later + 8);
+    let probes = probe();
+    assert!(probes[0].starts_with("kind=probe class=plain table=P3 ") && probes[1].starts_with("kind=probe class=fable table=P3 "), "{probes:?}");
+    assert_eq!(take_noted(), vec![true, false]);
+    assert!(live_placed(later + 8).is_empty(), "a probe is never a live placement");
 }

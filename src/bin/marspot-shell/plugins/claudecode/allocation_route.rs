@@ -13,6 +13,9 @@
 //! counts in the plan only at fleet level, so each placement is kept
 //! for its expected life (at most `KEEP_S`) and taken out of every table
 //! a pass builds until then.
+//!
+//! Each full pass also places one probe newcomer of each class without
+//! keeping it (`probe`), noted for the ladder like a real placement.
 
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level2::route::{Newcomer, OTHERS_CAP, Routing};
@@ -107,6 +110,35 @@ fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i6
             }
             None => ("table=-".into(), None),
         }
+    })
+}
+
+/// One probe newcomer of each class placed through the table as a
+/// helper would be, at the default rate and the helper life, and noted
+/// for the ladder like a real placement; the table and its kept
+/// placements are left as they were.  Run once per full plan pass, so
+/// the ladder's count does not wait on the person starting work.  The
+/// lines for `sched.route.shadow`.
+pub(super) fn probe() -> Vec<String> {
+    ROUTE.update(|r| {
+        if !r.built {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        for class in [Class::Plain, Class::Restricted] {
+            let m = Newcomer { class, rate: RHO0, high: RHO0 * high_of(class), life_h: r.helper_life_h };
+            let placed = match r.table.clone().place(&m, None) {
+                Some(p) => {
+                    if r.noted.len() < NOTED_CAP {
+                        r.noted.push(class == Class::Plain && !p.plain_only);
+                    }
+                    format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after)
+                }
+                None => "table=-".into(),
+            };
+            lines.push(format!("kind=probe class={} {placed}", class_word(class)));
+        }
+        lines
     })
 }
 

@@ -6,7 +6,12 @@ use marspot_agent::sched::level2::exec_gate::{NOTICE_ANSWER_S, RESUME_S, Rollbac
 
 use super::*;
 
+/// The rollback the executor holds; a rolled-back executor is the dry
+/// run again and orders nothing.
 fn rolled(x: &Exec) -> Option<Rollback> {
+    if x.ladder.rolled.is_some() {
+        assert!(x.ladder.dry_run() && !x.live(), "{:?}", x.ladder);
+    }
     match x.ladder.rolled {
         Some((Step::C, Why::Exec(r))) if x.ladder.step == Step::B => Some(r),
         _ => None,
@@ -75,7 +80,7 @@ fn allocation_exec_rolls_back_on_more_unforeseen_refusals_than_before() {
     let mut a = Allocation::new(events_dir(&r));
     let mut x = exec_at(&r, Ladder { refusals_before: 1, ..at(Step::C) }, Step::E);
     let mut log = Vec::new();
-    let with = |n| Scan { watches: &[], lim: &Limits::BALANCED, unforeseen: n, refused: &[], waits: &[], setting_live: true, reset: None };
+    let with = |n| Scan { watches: &[], lim: &Limits::BALANCED, unforeseen: n, refused: &[], waits: &[], setting_live: true, reset: None, full: 0 };
     x.step(&mut a, &snap(NOW, &[]), &quiet(false), &with(1), &mut log);
     assert_eq!(x.ladder.step, Step::C);
     x.step(&mut a, &snap(NOW + 1, &[]), &quiet(false), &with(2), &mut log);

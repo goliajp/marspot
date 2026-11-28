@@ -52,7 +52,7 @@ impl PanePlan {
         let unforeseen = self.refusals.iter().filter(|(at, foreseen)| !foreseen && now - at < DAY_S).count() as u32;
         let refused = std::mem::take(&mut self.run.refused_now);
         let r = &mut self.run;
-        let scan = Scan { watches: &r.watch, lim: &r.limits, unforeseen, refused: &refused, waits: &r.waits, setting_live, reset };
+        let scan = Scan { watches: &r.watch, lim: &r.limits, unforeseen, refused: &refused, waits: &r.waits, setting_live, reset, full: self.full };
         let orders = r.exec.step(a, snap, holds, &scan, &mut log);
         for sid in &self.run.exec.cancelled {
             self.standing.pin(*sid, now);

@@ -22,7 +22,8 @@
 //! live; and nothing goes above `ladder::LADDER_MAX`.
 //!
 //! The ladder is kept in `sched/gate.txt` and logged as `sched.gate` at
-//! start and whenever it changes; each advance is `sched.gate.advance`
+//! start and whenever its counters change, at most once per full plan
+//! pass; each advance is `sched.gate.advance`
 //! and each rollback `sched.exec.rollback`.  A file that cannot be read
 //! holds the ladder as if rolled back.  A person releases a rollback by
 //! writing `sched.gate_reset = <unix seconds>` in the settings file: a
@@ -106,12 +107,16 @@ pub(super) struct Scan<'a> {
     pub setting_live: bool,
     /// The settings' `sched.gate_reset` stamp.
     pub reset: Option<i64>,
+    /// Full plan passes run so far.
+    pub full: usize,
 }
 
 pub(super) struct Exec {
     pub ladder: Ladder,
     path: PathBuf,
     saved: String,
+    /// The ladder's line as last logged, and the full pass it was logged on.
+    said: (String, usize),
     /// Lines for the first scan to log.
     start: Vec<(&'static str, String)>,
     setting_live: bool,
@@ -153,7 +158,8 @@ impl Exec {
         start.insert(0, ("sched.gate", ladder.words()));
         let saved = text.unwrap_or_default();
         let (noticed, rest_from) = (HashMap::new(), HashMap::new());
-        Exec { ladder, path, saved, start, setting_live: false, top: LADDER_MAX, rest_from, noticed, written: VecDeque::new(), done: VecDeque::new(), notices: VecDeque::new(), pending: Vec::new(), landing: Vec::new(), cancelled: Vec::new() }
+        let said = (ladder.words(), 0);
+        Exec { ladder, path, saved, said, start, setting_live: false, top: LADDER_MAX, rest_from, noticed, written: VecDeque::new(), done: VecDeque::new(), notices: VecDeque::new(), pending: Vec::new(), landing: Vec::new(), cancelled: Vec::new() }
     }
 
     fn changed(&mut self, c: Option<Change>, log: &mut Vec<(&'static str, String)>) {
@@ -231,7 +237,7 @@ impl Exec {
             self.answer_all(holds, snap, "rolled_back", log);
         }
         self.changed(c, log);
-        self.save(log);
+        self.save(s.full, log);
         orders
     }
 
@@ -278,18 +284,6 @@ impl Exec {
             quiet_s: self.rest_from.get(&p.sid).map_or(0, |at| now - at),
         };
         (b, hold.focus || wrote(UNATTENDED_S))
-    }
-
-    fn save(&mut self, log: &mut Vec<(&'static str, String)>) {
-        let text = self.ladder.encode();
-        if text == self.saved {
-            return;
-        }
-        log.push(("sched.gate", self.ladder.words()));
-        if let Err(e) = say::write_atomic(&self.path, &text) {
-            log.push(("sched.gate.save_failed", format!("{e}")));
-        }
-        self.saved = text;
     }
 }
 

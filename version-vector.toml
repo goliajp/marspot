@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.934"  # the lib: a notice when text pasted into a web page is cut
+shell   = "0.7.935"  # the ladder counts a probe pair each full plan pass, logs its counters, and enters every step
 core    = "0.12.814"  # a dropped copy answer from a web pane is logged once, when it arrives
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
