@@ -1,9 +1,14 @@
 //! Refusals inside a run: who is refused at a moment and where each
 //! refused pane goes.
 
-use super::super::STALL_REFUSAL_H;
+use super::super::{FableGuard, STALL_REFUSAL_H};
 use super::{Ctx, Sim, Totals};
 use crate::quota::EPS;
+
+/// Under protection a refusal of an attended pane, which stalls the
+/// person at it mid-turn, is charged this much more, weeks (two points,
+/// what the profiles' design priced every refusal at).
+const ATTENDED_REFUSAL: f64 = 0.02;
 
 impl Sim {
     /// Marks the accounts that stopped serving at `at`, and gives the
@@ -45,7 +50,8 @@ impl Sim {
             let p = &c.input.panes[k];
             let Some(j) = self.at.on[k] else { continue };
             t.refusals += 1;
-            t.refused += p.rewrite + c.input.limits.refusal_extra;
+            let attended = p.attended && c.input.limits.fable != FableGuard::Price;
+            t.refused += p.rewrite + c.input.limits.refusal_extra + if attended { ATTENDED_REFUSAL } else { 0.0 };
             t.eff += STALL_REFUSAL_H;
             if self.refused.len() < 256 {
                 self.refused.push((k, at));

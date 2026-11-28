@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.936"  # a working pane is noticed at once when a clean rest is unlikely, and switched at the first boundary after the five minutes
+shell   = "0.7.937"  # under protection an attended pane keeps its quota first in a gap; strict never makes it wait
 core    = "0.12.814"  # a dropped copy answer from a web pane is logged once, when it arrives
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

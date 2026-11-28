@@ -40,16 +40,16 @@ pub(super) fn admits(input: &Input, p: &Pane, q: &Quant) -> bool {
     holds_both(input, p, q) || !input.accounts.iter().any(|a| a.q.id != p.on && a.q.open && !a.q.stale && holds_both(input, p, &a.q))
 }
 
-/// The other-model panes `Strict` would make wait: while Fable is short
-/// and no open account has anything but Fable-usable quota left.  Who
-/// is at a pane is not the plan's to know; the executor rehearses these
-/// waits and records any that would hold an attended pane.
+/// The unattended other-model panes `Strict` would make wait: while
+/// Fable is short and no open account has anything but Fable-usable
+/// quota left.  An attended pane keeps working; the executor rehearses
+/// these waits and records any that would hold a pane someone is at.
 pub fn waits(input: &Input) -> Vec<u64> {
     let none_else = !input.accounts.iter().any(|a| a.q.open && !a.q.stale && a.q.n() > EPS);
     if input.limits.fable != FableGuard::Strict || input.pi <= 0.0 || !none_else {
         return Vec::new();
     }
-    input.panes.iter().filter(|p| !p.restricted).map(|p| p.sid).collect()
+    input.panes.iter().filter(|p| !p.restricted && !p.attended).map(|p| p.sid).collect()
 }
 
 #[cfg(test)]

@@ -191,6 +191,7 @@ fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pa
                 barred: 0,
                 switches_left: 6,
                 disturb_left: 4,
+                attended: false,
             }
         })
         .collect();

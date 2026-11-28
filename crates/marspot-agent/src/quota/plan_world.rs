@@ -256,6 +256,7 @@ impl W {
                     barred: 0,
                     switches_left: 6usize.saturating_sub(p.planned.iter().filter(|t| now - **t < WEEK_S).count()) as u8,
                     disturb_left: 4,
+                    attended: false,
                 }
             })
             .collect();

@@ -34,6 +34,8 @@ use crate::plugins::allocation::Class;
 
 /// Background work this long or longer is long, seconds.
 const LONG_BACKGROUND_S: u32 = 900;
+/// A pane written to this recently is attended, seconds.
+const ATTENDED_S: i64 = 3600;
 /// Disturbing actions a pane may take in a day.
 const DISTURB_PER_DAY: u8 = 4;
 /// Panes planned at pane level at most.
@@ -100,6 +102,7 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             barred: 0,
             switches_left: lim.switches_left(moved(WEEK_S), moved(DAY_S)),
             disturb_left: DISTURB_PER_DAY,
+            attended: attended(a, snap, sid, now),
         });
     }
     Built {
@@ -111,6 +114,12 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
         stale_feed: snap.feed_at.is_none_or(|f| now - f > STALE_FEED_S),
         outside,
     }
+}
+
+/// Someone wrote to pane `sid` within the hour.
+fn attended(a: &Allocation, snap: &Snapshot, sid: u64, now: i64) -> bool {
+    let t = snap.panes.iter().find(|p| p.sid == sid).and_then(|p| p.transcript.as_deref());
+    t.and_then(|t| a.open_of(t, false, now).prompt_at).is_some_and(|at| now - at < ATTENDED_S)
 }
 
 /// A digest of what the plan read, in tenths of a point and minutes.
