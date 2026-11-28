@@ -40,7 +40,7 @@ use crate::plugins::allocation::{Class, KAPPA_FABLE};
 #[path = "allocation_level2_exec.rs"]
 mod exec;
 #[path = "allocation_limits.rs"]
-mod limits;
+pub(in crate::plugins) mod limits;
 
 use exec::{ExecRun, calib_line, offers_digest, watches, write_atomic};
 

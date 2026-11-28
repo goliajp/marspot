@@ -16,7 +16,7 @@ use marspot_peer::registry::Agent;
 
 use super::alloc::{AccountIn, CodexAlloc, PaneIn, Snapshot, events_dir};
 use super::alloc_rollout::rollout_of_thread;
-use super::credits::{accounts as accounts_of, feed_balances, spent_week, Acct};
+use super::credits::{accounts as accounts_of, feed_balances, pane_rate, spent_week, Credit};
 use super::rollout::RolloutIndex;
 use crate::plugins::claudecode::heads_up;
 use crate::plugins::claudecode::quota::Room;
@@ -85,7 +85,7 @@ pub(super) struct AllocPass {
 impl AllocPass {
     /// One pass; what the credits rule reads of each account, once the
     /// allocation is ready.
-    pub(super) fn run(&mut self, host: &dyn PluginHost, seen: &[Seen], obs: &crate::observe::Observation) -> Option<(i64, Vec<Acct>)> {
+    pub(super) fn run(&mut self, host: &dyn PluginHost, seen: &[Seen], obs: &crate::observe::Observation) -> Option<Credit> {
         let now = crate::plugins::claudecode::rooms::unix_now();
         self.core(now)?;
         let views = crate::plugins::peerbus::threads();
@@ -120,7 +120,8 @@ impl AllocPass {
                 alloc.credit_seen.saw(n, at, b, spent);
             }
         }
-        let credit = (now, accounts_of(&snap, &alloc.limits, &alloc.credit_seen));
+        let rates = snap.panes.iter().map(|p| (p.sid, pane_rate(alloc, p, now))).collect();
+        let credit = Credit { now, accts: accounts_of(&snap, &alloc.limits, &alloc.credit_seen), rates };
         for (tag, line) in log {
             host.log(LogLevel::Info, tag, &line);
         }

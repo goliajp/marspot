@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.966"  # sched.credits = last: a codex pane on an account spending credits moves at its next idle boundary
+shell   = "0.7.967"  # a codex pane leaves a used-up week with credits; refused or failed moves back off and are logged
 core    = "0.12.823"  # the settings panel offers sched.credits beside the switching row
 session = "0.11.501"  # marspot-term: settings carry sched.credits (not used by session)

@@ -175,7 +175,7 @@ impl CodexPlugin {
 
     fn start_switch(&mut self, host: &dyn PluginHost, sid: u64, thread: &str, home: &Path, released: Arc<pty_op::Job>) {
         let Some(m) = self.switches.moves.get(&sid) else { return };
-        let codex = m.codex;
+        let (codex, auto) = (m.codex, m.auto);
         let Some(pane) = self.panes.get(&sid).filter(|p| p.codex == codex).cloned() else {
             host.log(LogLevel::Info, "switch.no_pane", &format!("pane {sid}: its codex went before the switch began"));
             self.switches.moves.remove(&sid);
@@ -195,6 +195,9 @@ impl CodexPlugin {
             host.log(LogLevel::Warn, "switch.no_command", &format!("pane {sid}: cannot build the resume line"));
             self.switches.moves.remove(&sid);
             moving::ask(Ask::End { sid, codex });
+            if auto {
+                self.paying.switch_failed(host, sid, "switch_failed");
+            }
             return;
         };
         let to = m.dir.display().to_string();
@@ -213,6 +216,9 @@ impl CodexPlugin {
             host.log(LogLevel::Warn, "cycle.submit_failed", &format!("shelld_session={sid}: {e}"));
             self.switches.moves.remove(&sid);
             moving::ask(Ask::End { sid, codex });
+            if auto {
+                self.paying.switch_failed(host, sid, "switch_failed");
+            }
             return;
         }
         self.switches.begun.insert(sid, Instant::now());
@@ -226,6 +232,9 @@ impl CodexPlugin {
     /// back where the session still is, with the composer the switch took.
     fn switch_back(&mut self, host: &dyn PluginHost, sid: u64, m: Move) {
         self.hint(host, sid, Msg::BadgeCodexStillLoaded);
+        if m.auto {
+            self.paying.switch_failed(host, sid, "still_loaded");
+        }
         let Some(Back { pane, home, thread, cwd, held }) = m.back else { return };
         let model = last_model::thread_model(&home, &thread);
         log_model(host, sid, &model);

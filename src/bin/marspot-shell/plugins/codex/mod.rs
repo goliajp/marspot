@@ -47,8 +47,11 @@ pub(crate) mod reset_claim;
 mod rollout;
 mod stop_paying;
 mod stop_paying_screen;
+mod stop_paying_wire;
 #[cfg(test)]
 mod stop_paying_tests;
+#[cfg(test)]
+mod stop_paying_retry_tests;
 mod switch;
 mod update;
 #[cfg(test)]

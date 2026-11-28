@@ -14,7 +14,7 @@ pub(super) fn of(s: &SchedSettings) -> Limits {
     s.overrides.iter().fold(Limits::of(p), |l, (k, v)| l.with(k, *v))
 }
 
-pub(super) fn current() -> Limits {
+pub(in crate::plugins) fn current() -> Limits {
     of(&marspot::settings::get().sched)
 }
 
