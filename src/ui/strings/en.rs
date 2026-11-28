@@ -12,6 +12,7 @@ fn text(m: Msg) -> &'static str {
         Msg::SettingsIdleReclamation => "Idle reclamation",
         Msg::SettingsAppearance => "Appearance",
         Msg::SettingsClaudeCode => "Claude Code",
+        Msg::SettingsCodex => "Codex",
         Msg::SettingsScrolling => "Scrolling",
 
         Msg::ReclaimIdlePanes => "Reclaim idle claude panes",
@@ -48,7 +49,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostClaudeCodeSchedProfile => {
             "goes live in checked steps; freer wastes less Fable, a switch rereads the chat"
         }
-        Msg::CostCodexSchedCredits => "last resort moves a pane spending them to an account with plan left, between turns",
+        Msg::CostCodexSchedCredits => "last resort moves a pane off a used-up week to an account with plan left, between turns; the others move nothing yet",
         Msg::CostWheelSpeed => "faster gets there in fewer flicks and overshoots in one",
 
         Msg::MenuCopy => "Copy",

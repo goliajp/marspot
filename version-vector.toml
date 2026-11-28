@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.967"  # a codex pane leaves a used-up week with credits; refused or failed moves back off and are logged
-core    = "0.12.823"  # the settings panel offers sched.credits beside the switching row
+core    = "0.12.824"  # the codex credits row sits under its own Codex group; its cost line says hold and free move nothing yet
 session = "0.11.501"  # marspot-term: settings carry sched.credits (not used by session)

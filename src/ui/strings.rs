@@ -63,6 +63,7 @@ pub enum Msg {
     SettingsIdleReclamation,
     SettingsAppearance,
     SettingsClaudeCode,
+    SettingsCodex,
     SettingsScrolling,
     // Settings — row labels
     ReclaimIdlePanes,

@@ -11,6 +11,7 @@ pub const ALL: &[Msg] = &[
     Msg::SettingsIdleReclamation,
     Msg::SettingsAppearance,
     Msg::SettingsClaudeCode,
+    Msg::SettingsCodex,
     Msg::SettingsScrolling,
     Msg::ReclaimIdlePanes,
     Msg::IdleFor,

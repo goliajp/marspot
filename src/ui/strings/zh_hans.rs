@@ -13,6 +13,7 @@ fn text(m: Msg) -> &'static str {
         Msg::SettingsIdleReclamation => "闲置休眠",
         Msg::SettingsAppearance => "外观",
         Msg::SettingsClaudeCode => "Claude Code",
+        Msg::SettingsCodex => "Codex",
         Msg::SettingsScrolling => "滚动",
 
         Msg::ReclaimIdlePanes => "休眠闲置的 Claude 窗格",
@@ -37,7 +38,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostCircledDigitsWide => "宽度与中日韩文字一致，但换行位置可能提前一列",
         Msg::CostClaudeCodeReportsModel => "在 Claude Code 的设置中添加状态行；原有的状态行继续生效，关闭此项后恢复原状",
         Msg::CostClaudeCodeGuardModel => "发送 /model 前再确认一次；没有确认过的改动会被改回去",
-        Msg::CostCodexSchedCredits => "选「最后再用」时，正在花 credits 的窗格在两轮之间换到还有套餐额度的账号；另外两项现在不换",
+        Msg::CostCodexSchedCredits => "选「最后再用」时，周额度用完的账号上的窗格在两轮之间换到还有套餐额度的账号；另外两项现在不换",
         Msg::CostClaudeCodeSchedProfile => "按检查分步上线；越积极作废的 Fable 越少，每次切换要重读整段对话",
         Msg::CostWheelSpeed => "越快越省滑动次数，但也越容易滚过头",
 

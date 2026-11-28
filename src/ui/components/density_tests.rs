@@ -76,7 +76,7 @@ scenes_hold_at_both_scales! {
     density_settings = panel::panel_snapshot_settings, 15;
     density_settings_ja = settings_ja, 15;
     density_shortcuts = panel::panel_snapshot_shortcuts, 24;
-    density_settings_agents = agents::panel_snapshot_settings_agents, 13;
+    density_settings_agents = agents::panel_snapshot_settings_agents, 12;
     density_layout = panel::panel_snapshot_layout, 7;
     density_layout_grid = panel::panel_snapshot_layout_grid, 13;
     density_process = panel::panel_snapshot_process, 5;

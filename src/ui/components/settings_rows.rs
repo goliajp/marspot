@@ -114,8 +114,11 @@ pub const SECTIONS: &[Section] = &[
             },
             RowSpec { row: Row::CcModelGuard, label: Msg::ClaudeCodeGuardModel, cost: Msg::CostClaudeCodeGuardModel },
             RowSpec { row: Row::SchedProfile, label: Msg::ClaudeCodeSchedProfile, cost: Msg::CostClaudeCodeSchedProfile },
-            RowSpec { row: Row::SchedCredits, label: Msg::CodexSchedCredits, cost: Msg::CostCodexSchedCredits },
         ],
+    },
+    Section {
+        heading: Msg::SettingsCodex,
+        rows: &[RowSpec { row: Row::SchedCredits, label: Msg::CodexSchedCredits, cost: Msg::CostCodexSchedCredits }],
     },
     Section {
         heading: Msg::SettingsScrolling,
