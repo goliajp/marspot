@@ -5,7 +5,8 @@
 //! sidebar, and whose child either pane is does not change: nothing is
 //! asked of either session.  The keyboard follows the slot to the pane
 //! now in it.  A pane's menu and its sidebar row's menu offer the same
-//! rows and pick through the same command.
+//! rows and pick through the same command: a row of a slot of the
+//! window replaces that slot, any other row the slot in use.
 
 use marspot::ui::components::MenuItem;
 
@@ -64,7 +65,13 @@ impl CoreApp {
         };
         win!(self, wi).context_menu = None;
         win!(self, wi).needs_render = true;
-        if let (Some(with), ContextRegion::Pane(idx) | ContextRegion::SidebarSlot(idx)) = (with, region) {
+        let idx = match region {
+            ContextRegion::Pane(idx) | ContextRegion::SidebarSlot(idx) => Some(idx),
+            // the row of a pane of no slot here: the slot in use
+            ContextRegion::SidebarPane(_) => Some(win!(self, wi).focused_idx),
+            _ => None,
+        };
+        if let (Some(with), Some(idx)) = (with, idx) {
             self.replace_slot(wi, idx, with);
         }
         true

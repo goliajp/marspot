@@ -176,7 +176,10 @@ impl CoreApp {
             }
             ContextRegion::SidebarPane(sid) => {
                 let kin = self.kin_of(sid);
-                menus::sidebar_menu(kin, self.moves_of(sid))
+                // replaces what the window's focused slot shows
+                let mut moves = self.moves_of(sid);
+                moves.push(self.replace_row());
+                menus::sidebar_menu(kin, moves)
             }
             ContextRegion::TitleStrip => menus::title_menu(),
             // Badge menus never come through here — their items

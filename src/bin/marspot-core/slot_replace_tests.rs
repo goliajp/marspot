@@ -104,3 +104,36 @@ fn slot_replace_new_shell_in_a_full_window_says_why_and_changes_nothing() {
     assert!(app.shadows.is_empty(), "nothing left the window");
     assert_eq!(app.notices.shell_text(), Some(strings::text(Arg::WindowFull(n)).as_str()));
 }
+
+/// A sidebar row of a pane of no slot of the window, hidden or in
+/// another window, offers "Replace with…" too, and it replaces the slot
+/// in use; a row of a slot keeps replacing its own slot.
+#[test]
+fn slot_replace_from_a_row_of_no_slot_here_replaces_the_slot_in_use() {
+    use crate::window_state_tests::{app_in, win};
+    let sb = crate::boot_assembly_tests::Sandbox::new();
+    let v = |s| Pane::new_vacant(s, 60, 16);
+    // window 1 holds 1 and 2, window 2 holds 3; 4 and 5 are hidden children of 2
+    let mut app = app_in(sb.dir(), vec![win(1, vec![v(1), v(2)]), win(2, vec![v(3)])]);
+    app.shadows.extend([v(4), v(5)]);
+    for c in [3, 4, 5] {
+        app.pane_control.shadows.family.adopted(c, 2);
+    }
+    app.shadows_changed();
+    win!(app, 0).focused_idx = 1;
+    let pick = |app: &mut CoreApp, region: ContextRegion, sid: u64| {
+        let items = app.build_menu_items(0, region);
+        assert!(items.iter().any(|i| i.label == t(Msg::MenuReplaceWith)), "the row offers it");
+        let at = app.pane_control.shadows.menu_hidden.iter().position(|s| *s == sid).expect("listed");
+        assert!(app.pick_replace(0, region, REPLACE_TAG_BASE + at as u32));
+    };
+    pick(&mut app, ContextRegion::SidebarPane(4), 4);
+    assert_eq!(app.find_window_pane_by_sid(4), Some((0, 1)), "in the slot in use");
+    assert!(app.shadow_index(2).is_some(), "the pane it showed runs on hidden");
+    pick(&mut app, ContextRegion::SidebarPane(3), 5);
+    assert_eq!(app.find_window_pane_by_sid(5), Some((0, 1)), "a row of another window's pane: the slot in use");
+    assert_eq!(app.find_window_pane_by_sid(3), Some((1, 0)), "that pane stays where it is");
+    pick(&mut app, ContextRegion::SidebarSlot(0), 2);
+    assert_eq!(app.find_window_pane_by_sid(2), Some((0, 0)), "a slot's row replaces its own slot");
+    assert_eq!(app.pane_control.shadows.family.parents.get(&4), Some(&2), "no parent changed");
+}
