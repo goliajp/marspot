@@ -4,10 +4,9 @@
 //! `steady` is the set the planner was proved with and keeps its
 //! replays unchanged; `balanced` (the default) and `full` let a pane
 //! move sooner and more often and protect what only Fable can use more
-//! strongly; balanced charges a switch nothing beyond its rewrite, as
-//! steady does, and full a little.  Every plan line names the profile
-//! and a digest of the numbers, so one history can be replayed under
-//! each set and compared.
+//! strongly; none charges a switch anything beyond its rewrite.  Every
+//! plan line names the profile and a digest of the numbers, so one
+//! history can be replayed under each set and compared.
 
 /// The profile a user picks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -141,8 +140,10 @@ impl Limits {
         notice_gap_h: 1.0,
         notices_per_day: 8,
         notice_wait_min: 5,
-        switch_extra: 0.001,
-        refusal_extra: 0.02,
+        // as steady and balanced: with either charge, full let Fable
+        // lapse where balanced did not and refused more
+        switch_extra: 0.0,
+        refusal_extra: 0.0,
         inertia: 0.10,
         pi_full: true,
         fable: FableGuard::Strict,
