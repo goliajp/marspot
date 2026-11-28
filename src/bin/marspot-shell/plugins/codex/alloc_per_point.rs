@@ -212,7 +212,7 @@ pub(super) fn per_point(text: &str, model: &str) -> (f64, usize) {
 }
 
 /// Replace `path` in one step, so a reader never sees half a file.
-fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+pub(super) fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }

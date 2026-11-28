@@ -48,7 +48,8 @@ pub(super) fn own_balances(accounts: &[Account], views: &[(u8, View)]) -> Vec<Ba
 /// Fill the spend fields of the Codex accounts marspot writes from what
 /// their rollouts show; the newer of the two readings gives the balance
 /// and the cap.  The account's lot, once one is recorded, is its only
-/// expiry, inferred; before that both are unknown.
+/// expiry, inferred, with whose sighting dated it; before that both are
+/// unknown.
 pub(super) fn enrich(accounts: &mut [Account], views: &[(u8, View)], now: i64) {
     for a in accounts {
         let Some(c) = a.credits.as_mut() else { continue };
@@ -71,7 +72,7 @@ pub(super) fn wallet_fields(v: &mut Value, c: &Credits) {
     let num = |n: Option<f64>| n.map_or(Value::Null, Value::Num);
     let text = |s: &Option<String>| s.as_deref().map_or(Value::Null, Value::from);
     let flag = |b: Option<bool>| b.map_or(Value::Null, Value::from);
-    let lot = |l: &Lot| obj([("amount", Value::Num(l.amount)), ("expires_at", l.expires_at.into()), ("bound", l.bound.as_str().into())]);
+    let lot = |l: &Lot| obj([("amount", Value::Num(l.amount)), ("expires_at", l.expires_at.into()), ("bound", l.bound.as_str().into()), ("seen_by", text(&l.seen_by))]);
     let cap = |c: &Cap| {
         obj([("reached", flag(c.reached)), ("limit", num(c.limit)), ("remaining_percent", num(c.remaining_percent)), ("reached_type", text(&c.reached_type))])
     };
@@ -102,7 +103,11 @@ pub(super) fn read_wallet_fields(v: &Value, c: &mut Credits) {
     c.spending = v.get("spending").and_then(Value::bool);
     (c.spent_24h, c.rate_per_h) = (num(v, "spent_24h"), num(v, "rate_per_h"));
     c.lots = present("lots").map(|l| {
-        l.arr().iter().filter_map(|x| Some(Lot { amount: num(x, "amount")?, expires_at: x.get("expires_at")?.i64()?, bound: x.str_at("bound")?.to_string() })).collect()
+        let lot = |x: &Value| {
+            let seen_by = x.str_at("seen_by").map(str::to_string);
+            Some(Lot { amount: num(x, "amount")?, expires_at: x.get("expires_at")?.i64()?, bound: x.str_at("bound")?.to_string(), seen_by })
+        };
+        l.arr().iter().filter_map(lot).collect()
     });
     c.cap = present("cap").map(|x| Cap {
         reached: x.get("reached").and_then(Value::bool),
