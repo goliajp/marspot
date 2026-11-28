@@ -83,6 +83,11 @@ pub(super) struct ScanResult {
     /// The allocation core's view of this scan, filled in by the worker
     /// after the scan; `None` when there was no feed.
     pub(super) alloc: Option<super::allocation_view::View>,
+    /// The planner's switches for the main thread to make this scan, and
+    /// whether its executor is live (today's rule then makes no move to
+    /// save lapsing quota).
+    pub(super) plan_orders: Vec<super::allocation_exec::Order>,
+    pub(super) plan_live: bool,
 }
 
 impl ScanResult {

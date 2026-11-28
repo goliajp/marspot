@@ -27,7 +27,8 @@ pub mod exec_gate;
 mod finish;
 mod fit;
 mod grid;
-mod guard;
+pub mod guard;
+pub mod ladder;
 pub mod limits;
 pub mod line;
 mod moves;
@@ -280,21 +281,15 @@ impl Sched {
     }
 }
 
-#[cfg(test)]
-mod cases_tests;
-#[cfg(test)]
-mod loop_digest_tests;
-#[cfg(test)]
-mod loop_plan;
-#[cfg(test)]
-mod loop_profile_tests;
-#[cfg(test)]
-mod loop_tests;
-#[cfg(test)]
-mod loop_world;
-#[cfg(test)]
-mod oracle_tests;
-#[cfg(test)]
-mod rows_tests;
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(test)] mod cases_tests;
+#[cfg(test)] mod loop_digest_tests;
+#[cfg(test)] mod loop_plan;
+#[cfg(test)] mod loop_price;
+#[cfg(test)] mod loop_profile_tests;
+#[cfg(test)] mod loop_rest;
+#[cfg(test)] mod loop_tests;
+#[cfg(test)] mod loop_world;
+#[cfg(test)] mod oracle_tests;
+#[cfg(test)] mod rows_tests;
+#[cfg(test)] mod scene_tests;
+#[cfg(test)] pub(crate) mod tests;

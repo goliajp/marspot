@@ -236,17 +236,30 @@ impl View {
 
     /// Where a badge click sends a pane: the account where it costs
     /// least, as for a pane that has to move; an account whose reading
-    /// is missing last.
-    pub(super) fn by_hand(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class) -> Option<(u8, Option<Inputs>)> {
+    /// is missing last.  `model`: the model the pane is judged as.
+    pub(super) fn by_hand(&self, rooms: &[(u8, Room)], sid: u64, from: u8, class: Class, model: Option<&str>) -> Option<(u8, Option<Inputs>)> {
         let inputs = self.inputs(rooms, sid, from, class, MUST_LAST_H);
         let picked = match waste::pick(&inputs.accounts, &inputs.loads, inputs.mover, Some(from), inputs.kappa, MUST_LAST_H, &self.rule.params(), |_| true) {
             Some(to) => Some((to, Some(inputs))),
             None => unread_last(rooms, from, class).map(|to| (to, None)),
         };
-        // where the pane plan's routing table would send it, in shadow
-        let line = super::allocation_route::shadow_pane("badge", sid, class, self.rate_of(sid, class), Some(from), picked.as_ref().map(|p| p.0), super::rooms::unix_now());
+        match self.routed(rooms, "badge", sid, from, class, model, picked.as_ref().map(|p| p.0)) {
+            Some(to) => Some((to, None)),
+            None => picked,
+        }
+    }
+
+    /// Where the pane plan's routing table sends a pane leaving `from`
+    /// (`kind` says why), logged next to today's choice `today`; `None`
+    /// unless the table is live and its account has not refused the pane
+    /// for `model`, the model it is judged as (its own cap counts for any
+    /// model, not only Fable).
+    pub(super) fn routed(&self, rooms: &[(u8, Room)], kind: &str, sid: u64, from: u8, class: Class, model: Option<&str>, today: Option<u8>) -> Option<u8> {
+        let (line, live) = super::allocation_route::shadow_pane(kind, sid, class, self.rate_of(sid, class), Some(from), today, super::rooms::unix_now());
         marspot::lx_info!("sched.route.shadow", &line);
-        picked
+        let to = live.filter(|t| rooms.iter().any(|(n, r)| n == t && !r.refused_for(model)))?;
+        super::allocation_route::used(to, super::rooms::unix_now());
+        Some(to)
     }
 
     /// The cheapest of `allowed` for a pane leaving an account that runs

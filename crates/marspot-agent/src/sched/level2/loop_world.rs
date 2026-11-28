@@ -30,15 +30,12 @@
 //! out and both read the accounts as the shell does then.
 
 use super::loop_plan::{Driver, Feed, Read};
+use super::loop_rest::{refuse, rest};
+use super::loop_price::{self, Pricing};
 use super::oracle_tests::Rng;
-use super::standing::Standing;
 use super::tests::KAPPA;
-use crate::quota::choose::{MUST_LAST_H, Mover};
-use crate::quota::replay::Kind as Decision;
-use crate::quota::rest::is_keeper;
 use crate::quota::speed::PaneUse;
-use crate::quota::waste::{self, PARAMS, switch_cost};
-use crate::quota::{Class, Load, Quant};
+use crate::quota::{Class, Quant};
 
 const FIXTURE: &str = include_str!("../../../tests/fixtures/forecast_facts_20261126.tsv");
 const STEP: i64 = 300;
@@ -80,6 +77,10 @@ pub(super) struct Week {
     /// switches of a pane inside the profile's own stay.
     pub fable_lapsed: f64,
     pub short_stay: usize,
+    /// Switches at a rest of a pane whose context was at least `loop_price::LONG`, and pane steps spent that long and in all.
+    pub long_switches: usize,
+    pub long_steps: usize,
+    pub steps: usize,
 }
 
 /// The fleet hours recorded, `[restricted, plain]` weeks an hour.
@@ -94,10 +95,18 @@ pub(super) struct P {
     pub on: u8,
     pub restricted: bool,
     used: PaneUse,
-    stalled: bool,
+    pub(super) stalled: bool,
     pub planned: Vec<i64>,
-    moved_at: Option<i64>,
+    pub(super) moved_at: Option<i64>,
     pub left: Option<(u8, i64)>,
+    /// Its context, tokens.
+    pub ctx: u64,
+}
+
+impl P {
+    pub(super) fn class(&self) -> Class {
+        if self.restricted { Class::Restricted } else { Class::Plain }
+    }
 }
 
 /// One point of reading error either way at most.
@@ -109,6 +118,11 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
 
 /// The same run with the planner under `lim`.
 pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
+    run_priced(seed, policy, lim, Pricing::Fixed)
+}
+
+/// The same run with switches priced by `pricing`.
+pub(super) fn run_priced(seed: u64, policy: Policy, lim: super::Limits, pricing: Pricing) -> Week {
     let mut rng = Rng(seed);
     let mut noise = Rng(seed ^ 0x5DEE_CE66_D1CE_4E5B);
     let mut err = vec![[0.0; 2]; 8];
@@ -120,13 +134,15 @@ pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
             (Quant { id: k + 1, r, f: KAPPA * (0.2 + 0.8 * rng.next()), t: 0.0, tf: 0.0, open: true, stale: false }, renew)
         })
         .collect();
-    let mut panes: Vec<P> = (0..8).map(|k| P { on: 1 + (k % 8) as u8, restricted: k < 2, used: PaneUse::default(), stalled: false, planned: Vec::new(), moved_at: None, left: None }).collect();
+    let ctx = loop_price::starts(seed, 8, pricing);
+    let mut panes: Vec<P> = (0..8).map(|k| P { on: 1 + (k % 8) as u8, restricted: k < 2, used: PaneUse::default(), stalled: false, planned: Vec::new(), moved_at: None, left: None, ctx: ctx[k] }).collect();
     for p in &mut panes {
         p.used.watched(-6 * 3600);
     }
     let mut w = Week::default();
     let mut drv = Driver::default();
     drv.lim = lim;
+    drv.pricing = pricing;
     let mut feed = Feed::new(seed);
     // the last moment demand went unmet; a renewal lapses as waste when
     // demand went unmet in the week before it
@@ -162,7 +178,7 @@ pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
         drv.step(policy, &Read { acc: &acc, err: &err, feed: &feed, now }, &panes, now, false);
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
             if rng.next() < 1.0 - crate::detmath::exp(-rate / 12.0) {
-                rest(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, policy, &drv.st, drv.lim.dwell_h, &mut w);
+                rest(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, policy, &drv, &mut w);
             }
         }
         let mut refused = false;
@@ -180,6 +196,9 @@ pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
             q.r -= served_b;
             p.used.add(now, Class::Restricted, served_a);
             p.used.add(now, Class::Plain, served_b);
+            p.ctx = loop_price::grown(p.ctx, served_a + served_b, pricing);
+            w.steps += 1;
+            w.long_steps += usize::from(p.ctx >= loop_price::LONG);
             let short = (if class == 0 { a - served_a } else { 0.0 }) + b - served_b;
             if short > 1e-12 {
                 w.unmet += short;
@@ -196,7 +215,7 @@ pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
         }
         for k in 0..panes.len() {
             if panes[k].stalled {
-                refuse(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, &mut w);
+                refuse(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, pricing, &mut w);
             }
         }
         if refused {
@@ -209,91 +228,4 @@ pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
 pub(super) fn speeds(p: &P, now: i64) -> (f64, f64) {
     let (f, n, _) = p.used.rate_or_default(now, if p.restricted { Class::Restricted } else { Class::Plain });
     (f, n)
-}
-
-fn loads(q: &[Quant], panes: &[P], now: i64, skip: Option<usize>, bias: f64) -> Vec<Load> {
-    let mut l = vec![Load::default(); q.len()];
-    for (_, p) in panes.iter().enumerate().filter(|(k, _)| Some(*k) != skip) {
-        let (f, n) = speeds(p, now);
-        let (f, n) = (f * bias, n * bias);
-        if let Some(j) = q.iter().position(|x| x.id == p.on) {
-            l[j].restricted += f;
-            l[j].plain += n;
-        }
-    }
-    l
-}
-
-fn mover(p: &P, now: i64, bias: f64) -> Mover {
-    let (f, n) = speeds(p, now);
-    let (f, n) = (f * bias, n * bias);
-    Mover { class: if p.restricted { Class::Restricted } else { Class::Plain }, rate: f + n, tokens: Some(400_000), fable: Some(f) }
-}
-
-fn switch(panes: &mut [P], k: usize, to: u8, now: i64, w: &mut Week) {
-    let p = &mut panes[k];
-    w.switches += 1;
-    w.switches_r += usize::from(p.restricted);
-    let rw = switch_cost(if p.restricted { Class::Restricted } else { Class::Plain }, Some(400_000));
-    w.money += rw;
-    w.switch_rw += rw;
-    p.left = Some((p.on, now));
-    p.on = to;
-    p.moved_at = Some(now);
-    p.stalled = false;
-}
-
-fn refuse(read: &Read, panes: &mut [P], k: usize, now: i64, w: &mut Week) {
-    let q = read.quants();
-    let l = loads(&q, panes, now, Some(k), 1.0);
-    let m = mover(&panes[k], now, 1.0);
-    if let Some((to, _)) = waste::decide(&q, &l, m, panes[k].on, Some(KAPPA), &Decision::Out { horizon_h: MUST_LAST_H }, 0, &PARAMS) {
-        w.money += switch_cost(m.class, m.tokens);
-        w.refusal_rw += switch_cost(m.class, m.tokens);
-        let p = &mut panes[k];
-        p.left = Some((p.on, now));
-        p.on = to;
-        p.moved_at = Some(now);
-        p.stalled = false;
-    }
-}
-
-fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &Standing, dwell_h: f64, w: &mut Week) {
-    match policy {
-        Policy::Today { bias } => {
-            let q = read.quants();
-            let l = loads(&q, panes, now, None, bias);
-            let p = &panes[k];
-            let me = (k as u64, mover(p, now, bias).rate);
-            let same = panes.iter().enumerate().filter(|(j, y)| *j != k && y.on == p.on && y.restricted == p.restricted).map(|(j, y)| (j as u64, mover(y, now, bias).rate));
-            let kind = Decision::Rest {
-                keeper: is_keeper(me, same),
-                since_move_h: p.moved_at.map(|at| (now - at) as f64 / 3600.0),
-                left: p.left.map(|(id, at)| (id, (now - at) as f64 / 3600.0)).into_iter().collect(),
-                band_last_hour: 0,
-                demand: 0.0,
-                stale_feed: read.stale_feed(),
-                speed_known: true,
-                keeps_restricted: false,
-                moves_week: p.planned.iter().filter(|at| now - **at < WEEK).count(),
-            };
-            let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
-            if let Some((to, _)) = waste::decide(&q, &l, mover(p, now, bias), p.on, Some(KAPPA), &kind, day, &PARAMS) {
-                panes[k].planned.push(now);
-                switch(panes, k, to, now, w);
-            }
-        }
-        Policy::Planner { .. } => {
-            let sid = k as u64;
-            let Some(s) = st.switches.iter().find(|s| s.sid == sid && s.order == 0 && s.from == panes[k].on && s.open_at <= now) else { return };
-            if panes[k].planned.last().is_some_and(|t| now - t < 6 * 3600) {
-                w.double += 1;
-            }
-            if panes[k].planned.last().is_some_and(|t| ((now - t) as f64) < dwell_h * 3600.0) {
-                w.short_stay += 1;
-            }
-            panes[k].planned.push(now);
-            switch(panes, k, s.to, now, w);
-        }
-    }
 }

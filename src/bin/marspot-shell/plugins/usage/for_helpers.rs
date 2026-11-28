@@ -143,8 +143,8 @@ pub(in crate::plugins) fn choose(
         Placement::HeldBack(n, inputs) => chosen("held_back_start", n, &inputs),
         Placement::Nowhere => helper_pick::unread_pick(&accounts.rooms, None, model, placed),
     };
-    // where the pane plan's routing table would have put it, in shadow
-    if agent == Agent::Claude && events.is_some() { crate::plugins::claudecode::allocation_route::shadow_helper(class, rate, to, now) }
+    let open = |n: &u8| homes.iter().any(|(h, _)| h == n) && accounts.rooms.iter().any(|(h, r)| h == n && !r.refused_for(model));
+    let to = (agent == Agent::Claude && events.is_some()).then(|| crate::plugins::claudecode::allocation_route::shadow_helper(class, rate, to, now)).flatten().filter(open).inspect(|n| crate::plugins::claudecode::allocation_route::used(*n, now)).or(to);
     match to {
         Some(n) => {
             placed.note(n, class, now);

@@ -1,13 +1,6 @@
-//! When the executor may act, and when it goes back to its dry run.
-//!
-//! The stages: `DryRun` writes what it would do; `Unattended` acts on
-//! panes nobody is at, at most `UNATTENDED_PER_DAY` switches a day;
-//! `All` acts on every pane within the profile's limits.  `DryRun` moves
-//! on once `DRY_RECORDS` would-switch records replayed to the same
-//! decision, `DRY_NOTICES` of them notices; `Unattended` once it made
-//! `UNATTENDED_DONE` switches with no rollback.  Any of the five
-//! rollback conditions sends it back to `DryRun` for good: it does not
-//! go live again until a person has looked (`resume`).
+//! When a live executor goes back to its dry run: the five rollback
+//! conditions over the switches it made and the notices it sent.  The
+//! counts that let it go live are the ladder's (`ladder`).
 
 /// Would-switch records the dry run needs, and how many of them notices.
 pub const DRY_RECORDS: u32 = 10;
@@ -21,16 +14,8 @@ pub const RESUME_S: i64 = 120;
 /// A notice is answered (switched or told to continue) within this, seconds.
 pub const NOTICE_ANSWER_S: i64 = 1800;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Stage {
-    #[default]
-    DryRun,
-    Unattended,
-    All,
-}
-
 /// Why the executor went back to its dry run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Rollback {
     /// A switched pane did not work again within `RESUME_S`.
     NoResume,
@@ -56,6 +41,10 @@ impl Rollback {
             Rollback::Unanswered => "unanswered",
         }
     }
+
+    pub fn of(word: &str) -> Option<Rollback> {
+        [Rollback::NoResume, Rollback::TwiceInStay, Rollback::Unsafe, Rollback::Refusals, Rollback::Unanswered].into_iter().find(|r| r.word() == word)
+    }
 }
 
 /// One switch the executor made.
@@ -69,63 +58,23 @@ pub struct Done {
     pub live_unnoticed: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Gate {
-    pub stage: Stage,
-    pub rolled_back: Option<Rollback>,
-    dry: u32,
-    dry_notices: u32,
-    done_live: u32,
-    /// Unforeseen refusals in the day before going live.
-    pub refusals_before: u32,
-}
-
-impl Gate {
-    /// A would-switch record of the dry run that replayed to the same
-    /// decision; `notice`: it was a notice.
-    pub fn dry_record(&mut self, notice: bool) {
-        self.dry += 1;
-        self.dry_notices += u32::from(notice);
-        if self.stage == Stage::DryRun && self.rolled_back.is_none() && self.dry >= DRY_RECORDS && self.dry_notices >= DRY_NOTICES {
-            self.stage = Stage::Unattended;
+/// The rollback that holds over the switches made so far, at `now`:
+/// `done` with the stay in force, the notices sent (when, and whether
+/// they were answered), the refusals the plan did not foresee in the
+/// last day against the day before going live.
+pub fn rollback(done: &[Done], stay_s: i64, notices: &[(i64, bool)], unforeseen_24h: u32, refusals_before: u32, now: i64) -> Option<Rollback> {
+    let hit = done.iter().find_map(|d| {
+        if d.turn_running || d.live_unnoticed {
+            return Some(Rollback::Unsafe);
         }
-    }
-
-    /// The switches made so far and the facts around them, at `now`: the
-    /// rollback that holds, if any, and the stage after it.
-    pub fn check(&mut self, done: &[Done], stay_s: i64, notices: &[(i64, bool)], unforeseen_24h: u32, now: i64) -> Option<Rollback> {
-        if self.stage == Stage::DryRun {
-            return None;
-        }
-        let hit = done.iter().find_map(|d| {
-            if d.turn_running || d.live_unnoticed {
-                return Some(Rollback::Unsafe);
-            }
-            let late = d.resumed_at.map_or(now - d.at > RESUME_S, |r| r - d.at > RESUME_S);
-            late.then_some(Rollback::NoResume)
-        });
-        let twice = || done.iter().any(|a| done.iter().any(|b| a.sid == b.sid && b.at > a.at && b.at - a.at < stay_s));
-        let unanswered = || notices.iter().any(|(at, answered)| !answered && now - at > NOTICE_ANSWER_S);
-        let why = hit
-            .or_else(|| twice().then_some(Rollback::TwiceInStay))
-            .or_else(|| (unforeseen_24h > self.refusals_before).then_some(Rollback::Refusals))
-            .or_else(|| unanswered().then_some(Rollback::Unanswered));
-        if let Some(w) = why {
-            self.stage = Stage::DryRun;
-            self.rolled_back = Some(w);
-            return Some(w);
-        }
-        self.done_live = done.len() as u32;
-        if self.stage == Stage::Unattended && self.done_live >= UNATTENDED_DONE {
-            self.stage = Stage::All;
-        }
-        None
-    }
-
-    /// A person looked at the rollback: the dry run counts afresh.
-    pub fn resume(&mut self) {
-        *self = Gate { refusals_before: self.refusals_before, ..Gate::default() };
-    }
+        let late = d.resumed_at.map_or(now - d.at > RESUME_S, |r| r - d.at > RESUME_S);
+        late.then_some(Rollback::NoResume)
+    });
+    let twice = || done.iter().any(|a| done.iter().any(|b| a.sid == b.sid && b.at > a.at && b.at - a.at < stay_s));
+    let unanswered = || notices.iter().any(|(at, answered)| !answered && now - at > NOTICE_ANSWER_S);
+    hit.or_else(|| twice().then_some(Rollback::TwiceInStay))
+        .or_else(|| (unforeseen_24h > refusals_before).then_some(Rollback::Refusals))
+        .or_else(|| unanswered().then_some(Rollback::Unanswered))
 }
 
 #[cfg(test)]

@@ -4,16 +4,14 @@
 //! account changes, the replies after the change are compared with the
 //! ones before (`sched::switch_cost::sample`) and the result is written
 //! as a `switch_cost` fact; the fit over every kept day of those facts
-//! prices the next switch.  A switch is priced for the context the pane
-//! has: its rewrite share of that context at the cache-write price
-//! instead of the cache-read price a normal reply pays, and the
-//! thinking said again at the output price.
+//! prices the next switch for the context the pane has
+//! (`sched::switch_cost::weeks`).
 
 use std::collections::{HashMap, VecDeque};
 
-use marspot_agent::sched::switch_cost::{AFTER, BASE, Fit, Sample, Shares, Turn, sample};
+use marspot_agent::sched::switch_cost::{self, AFTER, BASE, Fit, Sample, Turn, sample};
 
-use super::super::allocation_prices::{Tokens, weeks};
+use super::super::allocation_prices::Tokens;
 use super::super::allocation_usage::Spent;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::waste::SWITCH_TOKENS;
@@ -89,14 +87,8 @@ impl SwitchCosts {
 
 /// What switching a pane of `class` with `tokens` of context costs,
 /// weeks; the typical context where it is not known.
-pub(in crate::plugins::claudecode) fn switch_weeks(sh: Shares, class: Class, tokens: Option<u64>) -> f64 {
-    let ctx = tokens.map_or(SWITCH_TOKENS, |t| t as f64);
-    let model = if class == Class::Restricted { "fable" } else { "opus" };
-    let rewrite = sh.rewrite * ctx;
-    let one_hour = (rewrite * sh.one_hour) as u64;
-    let after = Tokens { cache_1h: one_hour, cache_5m: rewrite as u64 - one_hour, output: (sh.regen * ctx) as u64, ..Tokens::default() };
-    let normal = Tokens { cache_read: rewrite as u64, ..Tokens::default() };
-    (weeks(model, &after) - weeks(model, &normal)).max(0.0)
+pub(in crate::plugins::claudecode) fn switch_weeks(fit: &Fit, class: Class, tokens: Option<u64>) -> f64 {
+    switch_cost::weeks(fit.measured(), class, tokens.unwrap_or(SWITCH_TOKENS as u64))
 }
 
 #[cfg(test)]

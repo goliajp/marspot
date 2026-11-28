@@ -3,10 +3,11 @@
 //!
 //! `steady` is the set the planner was proved with and keeps its
 //! replays unchanged; `balanced` (the default) and `full` let a pane
-//! move sooner and more often, charge a switch less for the disturbance
-//! and protect what only Fable can use more strongly.  Every plan line
-//! names the profile and a digest of the numbers, so one history can be
-//! replayed under each set and compared.
+//! move sooner and more often and protect what only Fable can use more
+//! strongly; balanced charges a switch nothing beyond its rewrite, as
+//! steady does, and full a little.  Every plan line names the profile
+//! and a digest of the numbers, so one history can be replayed under
+//! each set and compared.
 
 /// The profile a user picks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -54,7 +55,9 @@ pub struct Limits {
     pub per_day: u8,
     /// Planned switches of the fleet in a day.
     pub fleet_per_day: usize,
-    /// Planned switches a pane may hold inside the pane horizon.
+    /// Planned switches a pane may hold inside the pane horizon.  A
+    /// schedule holds at most `HOPS` (two), so every value from two up
+    /// plans alike; under two no pane is given a second switch.
     pub hops: usize,
     /// Notices of the fleet in an hour; of one session, the gap between
     /// two and the most in a day.
@@ -115,8 +118,11 @@ impl Limits {
         notice_gap_h: 2.0,
         notices_per_day: 4,
         notice_wait_min: 10,
-        switch_extra: 0.003,
-        refusal_extra: 0.02,
+        // as steady: priced by the context a pane has, a switch of a
+        // short session costs a few hundredths of a point, and any extra
+        // charge holds back the cheap early switches that avert refusals
+        switch_extra: 0.0,
+        refusal_extra: 0.0,
         inertia: 0.25,
         pi_full: true,
         fable: FableGuard::Protect,
@@ -179,7 +185,7 @@ impl Limits {
             "per_week" => self.per_week = count(0.0, 255.0).map_or(self.per_week, |v| v as u8),
             "per_day" => self.per_day = count(0.0, 255.0).map_or(self.per_day, |v| v as u8),
             "fleet_per_day" => self.fleet_per_day = count(0.0, 1000.0).map_or(self.fleet_per_day, |v| v as usize),
-            // a plan holds at most two switches per pane whatever the profile
+            // read up to six as the profiles are written; a schedule holds two
             "hops" => self.hops = count(0.0, 6.0).map_or(self.hops, |v| v as usize),
             "notices_per_hour" => self.notices_per_hour = count(0.0, 100.0).map_or(self.notices_per_hour, |v| v as usize),
             "notice_gap_h" => self.notice_gap_h = hours.unwrap_or(self.notice_gap_h),

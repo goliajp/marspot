@@ -18,7 +18,11 @@
 //! nothing because of the switch and is not sampled.
 //!
 //! Sums are integers, so a fit does not depend on the order samples
-//! are folded in.
+//! are folded in.  Until `FIT_MIN` samples are in, a switch costs what
+//! it was charged before anything was measured.
+
+use crate::quota::Class;
+use crate::quota::waste::switch_cost;
 
 /// Replies before a switch its baseline is taken from, at most.
 pub const BASE: usize = 8;
@@ -161,10 +165,21 @@ pub struct Shares {
     pub regen: f64,
 }
 
-/// Before anything is measured: the whole context is written once to
-/// the five-minute cache and nothing is thought again, which is what
-/// the cost of a switch was before it was measured.
-pub const DEFAULT: Shares = Shares { rewrite: 1.0, one_hour: 0.0, regen: 0.0 };
+/// Dollars per million tokens a switch is priced at (the control
+/// plane's prices for Fable 5.2 and Opus 5.5: cache write for five
+/// minutes and for an hour, cache read, output) and dollars a point of
+/// the week, from the accounts' own readings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Price {
+    write_5m: f64,
+    write_1h: f64,
+    read: f64,
+    output: f64,
+    per_point: f64,
+}
+
+const FABLE: Price = Price { write_5m: 10.0, write_1h: 16.0, read: 0.2, output: 40.0, per_point: 11.2 };
+const OPUS: Price = Price { write_5m: 5.0, write_1h: 8.0, read: 0.2, output: 20.0, per_point: 30.5 };
 
 impl Fit {
     pub fn add(&mut self, s: &Sample) {
@@ -175,20 +190,35 @@ impl Fit {
         self.regen += s.regen;
     }
 
-    /// The shares, or `DEFAULT` with fewer than `FIT_MIN` samples.  A
+    /// The shares, or `None` with fewer than `FIT_MIN` samples.  A
     /// rewrite is at most the context twice over, and thinking said
     /// again is never negative.
-    pub fn shares(&self) -> Shares {
+    pub fn measured(&self) -> Option<Shares> {
         if self.n < FIT_MIN || self.ctx == 0 {
-            return DEFAULT;
+            return None;
         }
         let ctx = self.ctx as f64;
-        Shares {
+        Some(Shares {
             rewrite: (self.rewrite as f64 / ctx).min(2.0),
             one_hour: if self.rewrite == 0 { 0.0 } else { self.rewrite_1h as f64 / self.rewrite as f64 },
             regen: (self.regen.max(0) as f64 / ctx).min(1.0),
-        }
+        })
     }
+}
+
+/// What switching a session of `class` with `ctx` tokens of context
+/// costs, weeks.  Measured shares price the rewrite at the cache-write
+/// price instead of the cache-read price a normal reply pays for the
+/// same tokens, and the thinking said again at the output price.  Before
+/// anything is measured, the cost every switch was charged before
+/// (`waste::switch_cost`), in proportion to the context.
+pub fn weeks(measured: Option<Shares>, class: Class, ctx: u64) -> f64 {
+    let Some(sh) = measured else { return switch_cost(class, Some(ctx)) };
+    let p = if class == Class::Restricted { FABLE } else { OPUS };
+    let rewrite = sh.rewrite * ctx as f64;
+    let write = rewrite * (sh.one_hour * p.write_1h + (1.0 - sh.one_hour) * p.write_5m);
+    let dollars = (write - rewrite * p.read + sh.regen * ctx as f64 * p.output) / 1e6;
+    (dollars / p.per_point / 100.0).max(0.0)
 }
 
 /// Context buckets a report splits samples by, upper bounds in tokens.

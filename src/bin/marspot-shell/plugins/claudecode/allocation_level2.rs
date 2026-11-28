@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use marspot_agent::quota::Quant;
-use marspot_agent::sched::calib::{Calib, Closed};
+use marspot_agent::sched::calib::Calib;
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level1::Level1;
 use marspot_agent::sched::level2::line::Said;
@@ -37,8 +37,12 @@ use super::allocation_route;
 use super::allocation_view::View;
 use crate::plugins::allocation::{Class, KAPPA_FABLE};
 
+#[path = "allocation_level2_exec.rs"]
+mod exec;
 #[path = "allocation_limits.rs"]
 mod limits;
+
+use exec::{ExecRun, calib_line, offers_digest, watches, write_atomic};
 
 const DAY_S: i64 = 86_400;
 const KEPT_EVERY_S: i64 = 3600;
@@ -65,6 +69,8 @@ pub(super) struct PanePlan {
     seen: HashSet<u64>,
     seen_once: bool,
     route_said: String,
+    /// The executor and what the last pass handed it.
+    run: ExecRun,
     /// Plan passes run, full searches among them.
     pub passes: usize,
     pub full: usize,
@@ -88,6 +94,7 @@ impl PanePlan {
             seen: HashSet::new(),
             seen_once: false,
             route_said: String::new(),
+            run: ExecRun::new(state_root),
             passes: 0,
             full: 0,
         }
@@ -125,7 +132,7 @@ impl PanePlan {
         self.passes += 1;
         let now = snap.now;
         let refused = self.note_refusals(snap);
-        let limits = limits::current();
+        let limits = self.run.limits(limits::current());
         self.standing.inertia = Some(limits.inertia);
         let mut b = build(a, snap, view, forecast, class, &self.standing, &limits);
         self.calibrate(&mut b, now, &mut log);
@@ -150,6 +157,8 @@ impl PanePlan {
             None => pass::retime(&mut self.standing, &input, now),
         };
         self.ended_last = false;
+        self.run.watch = done.as_ref().map_or_else(Vec::new, |r| watches(&r.plan, &input, now));
+        self.run.waits = marspot_agent::sched::level2::guard::waits(&input);
         if let Some(r) = &done {
             allocation_route::rebuild(&input, &r.plan, forecast, due.is_some().then(|| allocation_route::others_now(now)), now);
         }
@@ -210,7 +219,7 @@ impl PanePlan {
     fn route_shadow(&mut self, view: &View, full: bool, now: i64, log: &mut Vec<(&'static str, String)>) {
         for row in view.panes.iter().filter(|r| !r.4) {
             if self.seen.insert(row.0) && self.seen_once {
-                log.push(("sched.route.shadow", allocation_route::shadow_pane("pane", row.0, row.2, row.3, None, Some(row.1), now)));
+                log.push(("sched.route.shadow", allocation_route::shadow_pane("pane", row.0, row.2, row.3, None, Some(row.1), now).0));
             }
         }
         self.seen.retain(|sid| view.panes.iter().any(|r| r.0 == *sid));
@@ -219,26 +228,6 @@ impl PanePlan {
             log.push(("sched.route", line.clone()));
             self.route_said = line;
         }
-    }
-
-    /// A pane refused since the last scan, each recorded with whether
-    /// the last plan foresaw it.
-    fn note_refusals(&mut self, snap: &Snapshot) -> bool {
-        let mut any = false;
-        for p in &snap.panes {
-            let Some(at) = p.refused_at else { continue };
-            if self.refused_seen.get(&p.sid).is_some_and(|was| *was >= at) {
-                continue;
-            }
-            self.refused_seen.insert(p.sid, at);
-            any = true;
-            if self.refusals.len() >= REFUSALS_CAP {
-                self.refusals.pop_front();
-            }
-            self.refusals.push_back((snap.now, self.foreseen.contains(&p.sid)));
-        }
-        self.refused_seen.retain(|sid, _| snap.live.contains(sid));
-        any
     }
 
     fn write_status(&mut self, plan: &Plan, input: &Input, class: &(ClassInputs, Level1), now: i64, log: &mut Vec<(&'static str, String)>) {
@@ -250,6 +239,8 @@ impl PanePlan {
         }
         self.status_said = body;
         let text = plan.status(input, now, self.standing.id, &class.1.reserve, &pins, &claims);
+        // the go-live ladder rides in the same file, read by `marspot-peer svc status sched`
+        let text = text.replacen('{', &format!("{{\"gate\":\"{}\",", self.run.exec.ladder.words()), 1);
         if let Err(e) = write_atomic(&self.status_path, &text) {
             log.push(("sched.status_failed", format!("{e}")));
         }
@@ -261,33 +252,6 @@ fn today(a: &Allocation, view: &View) -> Vec<(u64, u8)> {
     let mut v: Vec<(u64, u8)> = view.panes.iter().filter_map(|r| a.last.get(&r.0).and_then(|l| l.would).filter(|t| *t != r.1).map(|t| (r.0, t))).collect();
     v.sort_unstable();
     v
-}
-
-fn offers_digest(ci: &ClassInputs) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{:?}", ci.offers).hash(&mut h);
-    h.finish()
-}
-
-fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// A closed calibration window for the log: the ratio, the factor in
-/// force, and each counted account's loss / ask in points.
-fn calib_line(c: &Closed, factor: f64) -> String {
-    let ratio = c.ratio.map_or("-".to_string(), |r| format!("{r:.3}"));
-    let mut s = format!("ratio={ratio} factor={factor:.3} used={:.1} want={:.1}", 100.0 * c.used, 100.0 * c.want);
-    for (id, used, want) in &c.accounts {
-        s.push_str(&format!(" P{id}={:.1}/{:.1}", 100.0 * used, 100.0 * want));
-    }
-    s
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ fn switch_cost_fit_order_does_not_matter_and_is_bounded() {
         y.add(&s);
     }
     assert_eq!(x, y);
-    let sh = x.shares();
+    let sh = x.measured().unwrap();
     assert!(sh.rewrite <= 2.0 && sh.regen == 0.0);
     assert!((sh.one_hour - 1800.0 / 2700.0).abs() < 1e-12);
 }
@@ -32,4 +32,23 @@ fn switch_cost_needs_a_warm_baseline() {
     let s = sample(&w, 300, None).unwrap();
     assert_eq!((s.ctx, s.rewrite, s.rewrite_1h, s.regen), (101_003, 101_003 - 1_002, 0, 700));
     assert_eq!(Sample::parse(0, "ctx=1 rw=2"), None);
+}
+
+#[test]
+fn switch_cost_prices_the_context_and_falls_back_to_the_old_charge() {
+    let near = |x: f64, y: f64| assert!((x - y).abs() < 1e-15, "{x} vs {y}");
+    // unmeasured: exactly what a switch was charged before, by context
+    for class in [Class::Plain, Class::Restricted] {
+        near(weeks(None, class, 460_000), switch_cost(class, None));
+        near(weeks(None, class, 920_000), 2.0 * switch_cost(class, None));
+    }
+    // measured: the whole context written once to the one-hour cache
+    // instead of read, and a hundredth of it said again
+    let sh = Shares { rewrite: 1.0, one_hour: 1.0, regen: 0.01 };
+    near(weeks(Some(sh), Class::Plain, 1_000_000), (8.0 - 0.2 + 0.01 * 20.0) / 30.5 / 100.0);
+    near(weeks(Some(sh), Class::Restricted, 1_000_000), (16.0 - 0.2 + 0.01 * 40.0) / 11.2 / 100.0);
+    // a long session costs more to move, in proportion
+    near(weeks(Some(sh), Class::Plain, 800_000), 4.0 * weeks(Some(sh), Class::Plain, 200_000));
+    let five = Shares { one_hour: 0.0, regen: 0.0, ..sh };
+    near(weeks(Some(five), Class::Plain, 1_000_000), (5.0 - 0.2) / 30.5 / 100.0);
 }

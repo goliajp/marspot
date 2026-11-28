@@ -19,7 +19,7 @@ use std::fs;
 use std::path::Path;
 
 use marspot_adapters::claude::switch_turns::turns;
-use marspot_agent::sched::switch_cost::{BUCKETS, Fit, Sample, by_length, sample};
+use marspot_agent::sched::switch_cost::{self, BUCKETS, Fit, Sample, by_length, sample};
 
 /// A transcript's first reply after a switch is looked for this long.
 const MATCH_S: i64 = 900;
@@ -68,8 +68,10 @@ fn print(title: &str, samples: &[Sample]) {
         lo = BUCKETS[k];
     }
     row("all".into(), &all, hits(0, u64::MAX));
-    let s = all.shares();
-    println!("  shares the shell prices with: rewrite={:.3} one_hour={:.3} regen={:.4}", s.rewrite, s.one_hour, s.regen);
+    match all.measured() {
+        Some(s) => println!("  shares the shell prices with: rewrite={:.3} one_hour={:.3} regen={:.4}", s.rewrite, s.one_hour, s.regen),
+        None => println!("  under {} samples: the shell prices switches as before anything was measured", switch_cost::FIT_MIN),
+    }
 }
 
 fn main() {

@@ -115,6 +115,10 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     if b.at >= w.dead_at - NOTICE_S - wait_s { Would::Notify(Kind::Notice) } else { Would::Wait }
 }
 
+#[path = "exec_record.rs"]
+mod record;
+pub use record::{parse, record, replay, words};
+
 #[cfg(test)]
 #[path = "exec_tests.rs"]
 mod tests;

@@ -89,7 +89,9 @@ impl ClaudecodePlugin {
     pub(super) fn follow_core(&mut self, host: &dyn PluginHost, view: &mut View, plan: &mut leave_early::Plan, result: &ScanResult, p: Resting) -> bool {
         let sid = p.sid;
         let from = p.meta.profile_num;
-        let decided = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue | Why::Waste)).cloned();
+        // once the planner's executor acts, it alone moves panes to save lapsing quota
+        let waste = super::alloc_order::waste_is_today_s(result.plan_live, p.mode);
+        let decided = view.rest.get(&sid).filter(|(_, why, _)| matches!(why, Why::Plan | Why::UOut | Why::Rescue) || (*why == Why::Waste && waste)).cloned();
         let transcript_rests = matches!(result.new_activity.get(&sid), Some(CcActivity::AwaitingUser));
         let status = host.pane_status(sid).ok().flatten();
         let rest = status.as_ref().filter(|v| matches!(v.status, marspot::pane_state::PaneStatus::AwaitingUser)).map(|v| v.held);
