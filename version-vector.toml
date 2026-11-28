@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.916"  # balanced charges a switch nothing beyond its rewrite, as steady does
+shell   = "0.7.917"  # the state map registers sched/gate.txt
 core    = "0.12.801"  # the switching row says the planner is in trial until its checks pass
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

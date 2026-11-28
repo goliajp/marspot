@@ -227,6 +227,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e(".madcawl-bind-<n>/s", Runtime, "peerbus madcawl_host_proc (bind, then rename)", "one socket", false),
     e("agents/gemini.tag", Draft, "agents (gemini install)", "one tag", true),
     e("sched/status.json", Derived, "claudecode allocation_level2 (sched)", "fixed", true),
+    e("sched/gate.txt", Draft, "claudecode allocation_exec (go-live ladder)", "fixed", true),
     // the temporary half of every atomic replace
     e("**/*.tmp", Runtime, "the writer of the file it replaces", "one per file", false),
     // the dev sandbox's own files
