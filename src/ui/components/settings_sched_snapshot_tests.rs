@@ -70,3 +70,18 @@ fn settings_sched_row_defaults_to_balanced_and_names_the_three_profiles() {
         }
     }
 }
+
+/// The credits row lights `last` for a file without the line, and a click
+/// on its first segment writes `hold`.
+#[test]
+fn settings_credits_row_defaults_to_last_and_a_click_changes_it() {
+    let s = crate::settings::parse("");
+    let Control::Segmented { options, chosen } = Row::SchedCredits.control(&s) else { panic!("the credits row is a segmented control") };
+    let zh = table(marspot_term::language::LangId::ZhHans);
+    let words: Vec<&str> = options.iter().map(|m| (zh.text)(*m)).collect();
+    assert_eq!(words, ["保留", "最后再用", "不限"]);
+    assert_eq!(chosen, 1);
+    let next = Row::SchedCredits.apply(&s, 0).expect("a change");
+    assert_eq!(next.sched.credits, crate::settings::SchedCredits::Hold);
+    assert!(Row::SchedCredits.apply(&s, 1).is_none(), "the chosen one changes nothing");
+}

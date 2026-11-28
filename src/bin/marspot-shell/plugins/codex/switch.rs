@@ -31,6 +31,8 @@ pub(super) struct Move {
     /// Its op has been submitted.
     started: bool,
     back: Option<Back>,
+    /// Ordered by the credits rule, not picked from the menu.
+    auto: bool,
 }
 
 /// Where a switch came from, to go back to when the old home kept the
@@ -52,6 +54,8 @@ pub(super) struct Switches {
     /// Panes whose op has ended, told from the op's own thread, and
     /// whether it ended because the old home kept the session.
     ended: Arc<Mutex<Vec<(u64, bool)>>>,
+    /// When each pane's last switch began, kept while the pane is.
+    begun: HashMap<u64, Instant>,
 }
 
 /// `codex` or `codex resume <id>`, either with `-m <model>`: a command
@@ -72,10 +76,27 @@ fn hint_of(h: Held) -> Msg {
     }
 }
 
+/// Why peerbus held a move, as the credits rule logs it.
+fn held_word(h: Held) -> &'static str {
+    match h {
+        Held::Busy => "busy",
+        Held::ChildRunning => "sub_agent",
+        Held::Queued => "queued",
+        Held::Moving => "switching",
+        Held::NotBound => "not_bound",
+        Held::Unknown => "state_unknown",
+    }
+}
+
 impl Switches {
     /// A switch is under way in pane `sid`.
     pub(super) fn moving(&self, sid: u64) -> bool {
         self.moves.contains_key(&sid)
+    }
+
+    /// Pane `sid`'s last switch began less than `within` ago.
+    pub(super) fn began_within(&self, sid: u64, within: Duration) -> bool {
+        self.begun.get(&sid).is_some_and(|at| at.elapsed() < within)
     }
 }
 
@@ -102,10 +123,19 @@ impl CodexPlugin {
             host.log(LogLevel::Warn, "switch.thread_unknown", &format!("pane {sid}: thread not known; not switching to P{profile}"));
             return self.hint(host, sid, Msg::BadgeCodexThreadUnknown);
         }
-        if !moving::ask(Ask::Begin { sid, codex: pane.codex }) {
-            return self.hint(host, sid, Msg::BadgeCodexStateUnknown);
+        if !self.begin_switch(sid, pane.codex, profile, dir, false) {
+            self.hint(host, sid, Msg::BadgeCodexStateUnknown);
         }
-        self.switches.moves.insert(sid, Move { codex: pane.codex, profile, dir, started: false, back: None });
+    }
+
+    /// Ask peerbus whether pane `sid` may move to `profile`; false when
+    /// there is no worker to ask.
+    pub(super) fn begin_switch(&mut self, sid: u64, codex: ProcId, profile: u8, dir: PathBuf, auto: bool) -> bool {
+        if !moving::ask(Ask::Begin { sid, codex }) {
+            return false;
+        }
+        self.switches.moves.insert(sid, Move { codex, profile, dir, started: false, back: None, auto });
+        true
     }
 
     /// Act on what peerbus decided, and forget switches that are over.
@@ -120,8 +150,12 @@ impl CodexPlugin {
                     moving::ask(Ask::End { sid, codex });
                 }
                 (Some(false), Verdict::Held(h)) => {
-                    self.switches.moves.remove(&sid);
-                    self.hint(host, sid, hint_of(h));
+                    // a move nobody asked for leaves the badge alone
+                    if self.switches.moves.remove(&sid).is_some_and(|m| m.auto) {
+                        self.paying.refused(host, sid, held_word(h));
+                    } else {
+                        self.hint(host, sid, hint_of(h));
+                    }
                 }
                 (Some(false), Verdict::Go { thread, home, released }) => self.start_switch(host, sid, &thread, &home, released.0),
             }
@@ -147,11 +181,13 @@ impl CodexPlugin {
         }
         let now = Instant::now();
         self.switches.hints.retain(|_, (_, until)| *until > now);
+        let panes = &self.panes;
+        self.switches.begun.retain(|sid, _| panes.contains_key(sid));
     }
 
     fn start_switch(&mut self, host: &dyn PluginHost, sid: u64, thread: &str, home: &Path, released: Arc<pty_op::Job>) {
         let Some(m) = self.switches.moves.get(&sid) else { return };
-        let codex = m.codex;
+        let (codex, auto) = (m.codex, m.auto);
         let Some(pane) = self.panes.get(&sid).filter(|p| p.codex == codex).cloned() else {
             host.log(LogLevel::Info, "switch.no_pane", &format!("pane {sid}: its codex went before the switch began"));
             self.switches.moves.remove(&sid);
@@ -171,6 +207,9 @@ impl CodexPlugin {
             host.log(LogLevel::Warn, "switch.no_command", &format!("pane {sid}: cannot build the resume line"));
             self.switches.moves.remove(&sid);
             moving::ask(Ask::End { sid, codex });
+            if auto {
+                self.paying.switch_failed(host, sid, "switch_failed");
+            }
             return;
         };
         let to = m.dir.display().to_string();
@@ -189,8 +228,12 @@ impl CodexPlugin {
             host.log(LogLevel::Warn, "cycle.submit_failed", &format!("shelld_session={sid}: {e}"));
             self.switches.moves.remove(&sid);
             moving::ask(Ask::End { sid, codex });
+            if auto {
+                self.paying.switch_failed(host, sid, "switch_failed");
+            }
             return;
         }
+        self.switches.begun.insert(sid, Instant::now());
         if let Some(m) = self.switches.moves.get_mut(&sid) {
             m.started = true;
             m.back = Some(Back { pane, home: home.to_path_buf(), thread: thread.to_string(), cwd, held });
@@ -201,6 +244,9 @@ impl CodexPlugin {
     /// back where the session still is, with the composer the switch took.
     fn switch_back(&mut self, host: &dyn PluginHost, sid: u64, m: Move) {
         self.hint(host, sid, Msg::BadgeCodexStillLoaded);
+        if m.auto {
+            self.paying.switch_failed(host, sid, "still_loaded");
+        }
         let Some(Back { pane, home, thread, cwd, held }) = m.back else { return };
         let model = last_model::thread_model(&home, &thread);
         log_model(host, sid, &model);

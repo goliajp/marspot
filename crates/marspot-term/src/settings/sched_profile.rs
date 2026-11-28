@@ -9,6 +9,10 @@
 //! default.  The overrides are read here as numbers by name and checked
 //! by the planner, which knows their ranges; the panel never writes
 //! them, so a hand-written line is kept as written.
+//!
+//! `sched.credits` says when a Codex account's paid credits may be
+//! spent: `last` (the default, also any unknown word) only when no other
+//! account has plan allowance left; `hold` never; `free` without limit.
 
 use super::Settings;
 
@@ -47,6 +51,33 @@ impl SchedProfile {
     }
 }
 
+/// When paid credits may be spent, see the module note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SchedCredits {
+    Hold,
+    #[default]
+    Last,
+    Free,
+}
+
+impl SchedCredits {
+    fn parse(v: &str) -> Self {
+        match v.to_ascii_lowercase().as_str() {
+            "hold" => Self::Hold,
+            "free" => Self::Free,
+            _ => Self::Last,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hold => "hold",
+            Self::Last => "last",
+            Self::Free => "free",
+        }
+    }
+}
+
 /// Overrides kept at most; a file with more keeps the first ones.
 const OVERRIDES_CAP: usize = 32;
 
@@ -54,11 +85,16 @@ const OVERRIDES_CAP: usize = 32;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SchedSettings {
     pub profile: SchedProfile,
+    pub credits: SchedCredits,
     pub overrides: Vec<(String, f64)>,
 }
 
 pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
-    (key == "sched.profile").then(|| s.sched.profile.as_str().to_string())
+    match key {
+        "sched.profile" => Some(s.sched.profile.as_str().to_string()),
+        "sched.credits" => Some(s.sched.credits.as_str().to_string()),
+        _ => None,
+    }
 }
 
 /// Apply `key = v` when it is `sched.profile` or a numeric `sched.*`
@@ -66,6 +102,10 @@ pub(super) fn value_of(s: &Settings, key: &str) -> Option<String> {
 pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
     if key == "sched.profile" {
         s.sched.profile = SchedProfile::parse(v);
+        return true;
+    }
+    if key == "sched.credits" {
+        s.sched.credits = SchedCredits::parse(v);
         return true;
     }
     let Some(name) = key.strip_prefix("sched.") else { return false };
@@ -85,7 +125,7 @@ pub(super) fn parse_key(s: &mut Settings, key: &str, v: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::SchedProfile;
+    use super::{SchedCredits, SchedProfile};
 
     #[test]
     fn sched_profile_reads_and_writes_back_and_an_unknown_word_is_steady() {
@@ -112,5 +152,19 @@ mod tests {
         assert!(out.contains("sched.profile = steady\nsched.min_stay_h = 2\nsched.min_stay_h = 2.5\n"), "{out}");
         assert_eq!(parse(&out).sched.overrides, s.sched.overrides);
         assert_eq!(SchedProfile::Full.next(), SchedProfile::Steady);
+    }
+
+    #[test]
+    fn sched_credits_reads_and_writes_back_and_an_unknown_word_is_last() {
+        assert_eq!(Settings::default().sched.credits, SchedCredits::Last);
+        for (word, want) in [("hold", SchedCredits::Hold), ("Free", SchedCredits::Free), ("last", SchedCredits::Last), ("never", SchedCredits::Last)] {
+            let body = format!("sched.credits = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.sched.credits, want, "{word:?}");
+            assert!(s.sched.overrides.is_empty(), "not a numeric override");
+            assert_eq!(parse(&render(&s, &body)).sched.credits, want, "{word:?} after a rewrite");
+        }
+        assert_eq!(value_of(&parse("sched.credits = hold\n"), "sched.credits"), "hold");
+        assert!(render(&Settings::default(), "").contains("sched.credits = last\n"));
     }
 }

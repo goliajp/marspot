@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.964"  # codex credit scan progress keys on the profile and keeps only a digest of the login, never its account id
-core    = "0.12.821"  # the codex thread-unknown refusal text, en ja zh
-session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
+shell   = "0.7.969"  # the codex credits rule reads peerbus and pane rates through the plugin
+core    = "0.12.824"  # the codex credits row sits under its own Codex group; its cost line says hold and free move nothing yet
+session = "0.11.501"  # marspot-term: settings carry sched.credits (not used by session)

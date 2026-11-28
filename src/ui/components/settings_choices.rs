@@ -3,7 +3,7 @@
 
 use marspot_term::language::LangId;
 use marspot_term::palette::ThemeId;
-use marspot_term::settings::{InstallConsent, SchedProfile};
+use marspot_term::settings::{InstallConsent, SchedCredits, SchedProfile};
 
 use crate::ui::strings::Msg;
 
@@ -48,6 +48,10 @@ pub const CONSENT_LABELS: &[Msg] = &[Msg::ConsentAsk, Msg::ConsentYes, Msg::Cons
 /// How freely panes are switched between accounts, most careful first.
 pub const SCHED_CHOICES: &[SchedProfile] = &[SchedProfile::Steady, SchedProfile::Balanced, SchedProfile::Full];
 pub const SCHED_LABELS: &[Msg] = &[Msg::SchedSteady, Msg::SchedBalanced, Msg::SchedFull];
+
+/// When a Codex account's paid credits may be spent, most careful first.
+pub const CREDITS_CHOICES: &[SchedCredits] = &[SchedCredits::Hold, SchedCredits::Last, SchedCredits::Free];
+pub const CREDITS_LABELS: &[Msg] = &[Msg::CreditsHold, Msg::CreditsLast, Msg::CreditsFree];
 
 /// The line under the language row: what choosing costs, or, while the
 /// items the system provides are still in the language Marspot was

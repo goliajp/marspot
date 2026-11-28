@@ -63,6 +63,7 @@ pub enum Msg {
     SettingsIdleReclamation,
     SettingsAppearance,
     SettingsClaudeCode,
+    SettingsCodex,
     SettingsScrolling,
     // Settings — row labels
     ReclaimIdlePanes,
@@ -75,6 +76,7 @@ pub enum Msg {
     ClaudeCodeReportsModel,
     ClaudeCodeGuardModel,
     ClaudeCodeSchedProfile,
+    CodexSchedCredits,
     WheelSpeed,
     // Settings — the cost line under each row
     CostReclaimIdlePanes,
@@ -87,6 +89,7 @@ pub enum Msg {
     CostClaudeCodeReportsModel,
     CostClaudeCodeGuardModel,
     CostClaudeCodeSchedProfile,
+    CostCodexSchedCredits,
     CostWheelSpeed,
     // Pane context menu
     MenuCopy,
@@ -279,6 +282,9 @@ pub enum Msg {
     SchedSteady,
     SchedBalanced,
     SchedFull,
+    CreditsHold,
+    CreditsLast,
+    CreditsFree,
 }
 
 /// One language: the fixed sentences and the ones built around a value.

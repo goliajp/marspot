@@ -13,6 +13,7 @@ fn text(m: Msg) -> &'static str {
         Msg::SettingsIdleReclamation => "未使用ペインの休止",
         Msg::SettingsAppearance => "外観",
         Msg::SettingsClaudeCode => "Claude Code",
+        Msg::SettingsCodex => "Codex",
         Msg::SettingsScrolling => "スクロール",
 
         Msg::ReclaimIdlePanes => "未使用のClaudeペインを休止",
@@ -25,6 +26,7 @@ fn text(m: Msg) -> &'static str {
         Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
         Msg::ClaudeCodeGuardModel => "全アカウント共通のデフォルトモデルを保護",
         Msg::ClaudeCodeSchedProfile => "アカウント間のペイン切り替え",
+        Msg::CodexSchedCredits => "Codexの有料credits",
         Msg::WheelSpeed => "ホイールの速度",
 
         Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります",
@@ -38,6 +40,7 @@ fn text(m: Msg) -> &'static str {
             "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"
         }
         Msg::CostClaudeCodeGuardModel => "/modelは送信前に確認します。確認されていない変更は元に戻します",
+        Msg::CostCodexSchedCredits => "「最後に使う」では週の枠を使い切ったアカウントのペインをターンの合間にプラン枠の残るアカウントへ移します。他の2つは今は移しません",
         Msg::CostClaudeCodeSchedProfile => "確認しながら段階的に有効化。積極的なほどFable枠の失効が減り、切り替えで会話を読み直します",
         Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります",
 
@@ -231,6 +234,9 @@ fn text(m: Msg) -> &'static str {
         Msg::SchedSteady => "慎重",
         Msg::SchedBalanced => "バランス",
         Msg::SchedFull => "使い切る",
+        Msg::CreditsHold => "保留",
+        Msg::CreditsLast => "最後に使う",
+        Msg::CreditsFree => "制限なし",
     }
 }
 

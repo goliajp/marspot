@@ -12,6 +12,7 @@ fn text(m: Msg) -> &'static str {
         Msg::SettingsIdleReclamation => "Idle reclamation",
         Msg::SettingsAppearance => "Appearance",
         Msg::SettingsClaudeCode => "Claude Code",
+        Msg::SettingsCodex => "Codex",
         Msg::SettingsScrolling => "Scrolling",
 
         Msg::ReclaimIdlePanes => "Reclaim idle claude panes",
@@ -24,6 +25,7 @@ fn text(m: Msg) -> &'static str {
         Msg::ClaudeCodeReportsModel => "Let Claude Code report its model",
         Msg::ClaudeCodeGuardModel => "Guard the default model all accounts share",
         Msg::ClaudeCodeSchedProfile => "Switch panes between accounts",
+        Msg::CodexSchedCredits => "Codex paid credits",
         Msg::WheelSpeed => "Wheel speed",
 
         Msg::CostReclaimIdlePanes => "coming back to one costs ~3s while its session reloads",
@@ -47,6 +49,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CostClaudeCodeSchedProfile => {
             "goes live in checked steps; freer wastes less Fable, a switch rereads the chat"
         }
+        Msg::CostCodexSchedCredits => "last resort moves a pane off a used-up week to an account with plan left, between turns; the others move nothing yet",
         Msg::CostWheelSpeed => "faster gets there in fewer flicks and overshoots in one",
 
         Msg::MenuCopy => "Copy",
@@ -239,6 +242,9 @@ fn text(m: Msg) -> &'static str {
         Msg::SchedSteady => "Steady",
         Msg::SchedBalanced => "Balanced",
         Msg::SchedFull => "Full use",
+        Msg::CreditsHold => "Hold",
+        Msg::CreditsLast => "Last resort",
+        Msg::CreditsFree => "Unlimited",
     }
 }
 

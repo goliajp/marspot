@@ -34,6 +34,7 @@ mod alloc_wire;
 mod alloc_wire_tests;
 mod badge;
 mod cold_record;
+mod credits;
 mod cold_restore;
 mod declare;
 mod pane;
@@ -44,6 +45,13 @@ pub(in crate::plugins) mod last_model;
 mod refresh;
 pub(crate) mod reset_claim;
 mod rollout;
+mod stop_paying;
+mod stop_paying_screen;
+mod stop_paying_wire;
+#[cfg(test)]
+mod stop_paying_tests;
+#[cfg(test)]
+mod stop_paying_retry_tests;
 mod switch;
 mod update;
 #[cfg(test)]
@@ -105,6 +113,7 @@ pub struct CodexPlugin {
     /// The pane with the cursor; None until marspot has said.
     focused: Option<u64>,
     switches: switch::Switches,
+    paying: stop_paying::StopPaying,
     alloc: alloc_wire::AllocPass,
     /// The codex processes seen in front of panes, for `launch.observed`.
     seen: crate::plugins::launches::Seen,
@@ -123,6 +132,7 @@ impl CodexPlugin {
             refresher: update::Refresher::default(),
             focused: None,
             switches: Default::default(),
+            paying: Default::default(),
             alloc: Default::default(),
             seen: Default::default(),
             cold: Default::default(),
@@ -177,20 +187,12 @@ impl Plugin for CodexPlugin {
             // A badge with nothing behind it: say so rather than open
             // an empty menu, which is indistinguishable from a click
             // that missed.
-            host.log(
-                LogLevel::Warn,
-                "badge_menu.no_codex",
-                &format!("shelld_session={shelld_session_id} has a badge but no codex"),
-            );
+            host.log(LogLevel::Warn, "badge_menu.no_codex", &format!("shelld_session={shelld_session_id} has a badge but no codex"));
             return Vec::new();
         };
         let dirs = profile_dirs();
         if dirs.is_empty() {
-            host.log(
-                LogLevel::Warn,
-                "badge_menu.no_profiles",
-                "no ~/.codex-profile-N directories; nothing to switch between",
-            );
+            host.log(LogLevel::Warn, "badge_menu.no_profiles", "no ~/.codex-profile-N directories; nothing to switch between");
             return Vec::new();
         }
         let current = pane.profile;
@@ -229,11 +231,7 @@ impl Plugin for CodexPlugin {
             // The profile went away between the menu opening and the
             // click.  Say so: silently doing nothing is the failure
             // shape this codebase keeps having to dig out again.
-            host.log(
-                LogLevel::Warn,
-                "profile.gone",
-                &format!("profile {profile} no longer exists; not switching"),
-            );
+            host.log(LogLevel::Warn, "profile.gone", &format!("profile {profile} no longer exists; not switching"));
             return;
         };
         self.switch_profile(host, shelld_session_id, profile, dir);
@@ -363,7 +361,8 @@ impl Plugin for CodexPlugin {
         self.cold_tick(host, &obs, &threads_bound, &with_codex);
         self.seen.end_pass(live);
         self.refresh_stale(host, &codex_panes);
-        self.alloc.run(host, &alloc_seen, &obs);
+        let credit = self.alloc.run(host, &alloc_seen, &obs);
+        self.stop_paying(host, credit, |sid, codex| views.get(&sid).filter(|v| v.codex == codex).map(|v| v.idle));
         super::helpers::used::look_at_codex();
     }
 }

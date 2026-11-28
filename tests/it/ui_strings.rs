@@ -27,7 +27,7 @@ fn every_message_has_text() {
 /// touching either fails here.
 #[test]
 fn every_message_is_listed() {
-    const EXPECTED: usize = 189;
+    const EXPECTED: usize = 195;
     assert_eq!(
         ALL.len(),
         EXPECTED,
@@ -181,7 +181,7 @@ fn is_sentence(m: Msg) -> bool {
 
 /// Text that reads the same in every language: names, and units nobody
 /// translates.
-const SAME_EVERYWHERE: &[&str] = &["Marspot", "Claude Code", "CPU%", "RSS", "pid", "English"];
+const SAME_EVERYWHERE: &[&str] = &["Marspot", "Claude Code", "Codex", "CPU%", "RSS", "pid", "English"];
 
 fn is_cjk(c: char) -> bool {
     matches!(c as u32,

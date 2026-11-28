@@ -161,7 +161,7 @@ fn week_of(r: &Value) -> Option<(f64, i64)> {
 
 /// The paid balance of a `rate_limits` record; `None` when it is not a
 /// number, never zero for it.
-fn balance_of(r: &Value) -> Option<f64> {
+pub(super) fn balance_of(r: &Value) -> Option<f64> {
     match r.at(&["credits", "balance"])? {
         Value::Str(s) => s.parse().ok(),
         Value::Num(n) => Some(*n),

@@ -65,7 +65,7 @@ mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
 mod allocation_level1;
-mod allocation_level2;
+pub(in crate::plugins) mod allocation_level2;
 mod allocation_level2_input;
 mod allocation_line;
 mod allocation_more;

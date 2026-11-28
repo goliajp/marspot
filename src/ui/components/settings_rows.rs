@@ -24,6 +24,7 @@ pub enum Row {
     CcStatuslineHook,
     CcModelGuard,
     SchedProfile,
+    SchedCredits,
     /// Whether the agent CLI `INSTALL_CLIS[i]` is installed when missing.
     InstallCli(usize),
 }
@@ -116,6 +117,10 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     Section {
+        heading: Msg::SettingsCodex,
+        rows: &[RowSpec { row: Row::SchedCredits, label: Msg::CodexSchedCredits, cost: Msg::CostCodexSchedCredits }],
+    },
+    Section {
         heading: Msg::SettingsScrolling,
         rows: &[RowSpec {
             row: Row::ScrollFactor,
@@ -200,6 +205,10 @@ impl Row {
                 options: SCHED_LABELS,
                 chosen: SCHED_CHOICES.iter().position(|p| *p == s.sched.profile).unwrap_or(usize::MAX),
             },
+            Row::SchedCredits => Control::Segmented {
+                options: CREDITS_LABELS,
+                chosen: CREDITS_CHOICES.iter().position(|c| *c == s.sched.credits).unwrap_or(usize::MAX),
+            },
             Row::InstallCli(i) => Control::Segmented {
                 options: CONSENT_LABELS,
                 chosen: CONSENT_CHOICES.iter().position(|c| *c == s.install_consent.0[i]).unwrap_or(usize::MAX),
@@ -238,6 +247,7 @@ impl Row {
             | Row::CcStatuslineHook
             | Row::CcModelGuard
             | Row::SchedProfile
+            | Row::SchedCredits
             | Row::InstallCli(_) => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
@@ -273,6 +283,7 @@ impl Row {
             Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
             Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
             Row::SchedProfile => next.sched.profile = *SCHED_CHOICES.get(seg)?,
+            Row::SchedCredits => next.sched.credits = *CREDITS_CHOICES.get(seg)?,
             Row::InstallCli(i) => *next.install_consent.0.get_mut(i)? = *CONSENT_CHOICES.get(seg)?,
         }
         (next != *s).then_some(next)

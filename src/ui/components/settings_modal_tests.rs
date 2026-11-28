@@ -164,7 +164,7 @@ fn a_control_scrolled_under_the_header_is_gone() {
 fn rows_are_separated_and_nothing_overflows() {
     let _scale = scale_guard();
     let s = Settings::default();
-    let rect = test_rect(1800.0, 2400.0, &s);
+    let rect = test_rect(1800.0, 2600.0, &s);
     let slots = collect(rect, &s);
     let mut m = fake_measure();
     let px = crate::ui::core::ViewPainter::px_per_pt();
@@ -413,7 +413,7 @@ fn the_panel_holds_together_at_every_density() {
         crate::ui::set_chrome_scale(scale);
         let px = crate::ui::core::ViewPainter::px_per_pt();
         let s = Settings::default();
-        let rect = test_rect(2400.0 * scale, 2400.0 * scale, &s);
+        let rect = test_rect(2400.0 * scale, 2600.0 * scale, &s);
         let slots = collect(rect, &s);
         let mut m = fake_measure();
 

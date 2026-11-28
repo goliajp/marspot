@@ -48,7 +48,7 @@ mod sched_profile;
 mod values;
 
 pub use {agent_allocation::AgentAllocation, cc_model::CcModel, rebalance::Rebalance};
-pub use sched_profile::{SchedProfile, SchedSettings};
+pub use sched_profile::{SchedCredits, SchedProfile, SchedSettings};
 pub use install_consent::{InstallConsent, InstallConsents, CLIS as INSTALL_CLIS};
 
 /// Every user-owned decision, resolved.
@@ -357,6 +357,7 @@ const KEYS: &[&str] = &[
     "claudecode.statusline_hook",
     "claude.model",
     "sched.profile",
+    "sched.credits",
     "agents.install.claude",
     "agents.install.codex",
     "agents.install.gemini",
@@ -392,9 +393,7 @@ pub fn parse(body: &str) -> Settings {
         };
         match k {
             "reclaim.enabled" => s.reclaim_enabled = parse_bool(v, s.reclaim_enabled),
-            "reclaim.idle_minutes" => {
-                s.reclaim_idle_minutes = v.parse().unwrap_or(s.reclaim_idle_minutes)
-            }
+            "reclaim.idle_minutes" => s.reclaim_idle_minutes = v.parse().unwrap_or(s.reclaim_idle_minutes),
             "reclaim.prefetch_on_return" => s.reclaim_prefetch = parse_bool(v, s.reclaim_prefetch),
             "appearance.theme" => s.appearance_theme = ThemeId::parse_setting(v, s.appearance_theme),
             "appearance.language" => {
