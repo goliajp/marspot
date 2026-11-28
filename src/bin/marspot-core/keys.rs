@@ -6,6 +6,9 @@ use marspot::shell_proto::PromptDir;
 
 use super::*;
 
+#[path = "helpers_command.rs"]
+mod helpers_command;
+
 impl CoreApp {
     pub(super) fn preedit(&mut self, wi: usize, text: String) {
         if self.model_guard_preedit(wi, &text) {
@@ -164,6 +167,7 @@ impl CoreApp {
             Command::Layout => self.toggle_panel(wi, SurfaceKind::Layout),
             Command::Processes => self.toggle_panel(wi, SurfaceKind::Processes),
             Command::Accounts => self.toggle_panel(wi, SurfaceKind::Accounts),
+            Command::Helpers => self.helpers_command(wi),
             Command::Shortcuts => self.toggle_panel(wi, SurfaceKind::Shortcuts),
             Command::ClosePanel => {
                 let key = if by_escape { SurfaceKey::Esc } else { SurfaceKey::CmdW };

@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.891"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key
-core    = "0.12.790"  # the pane cap is worked out from the layout grid; only a hidden pane is told a window is full
+core    = "0.12.791"  # a Helpers command in the View menu opens the helper panel in every state; an empty badge menu still offers it
 session = "0.11.494"  # marspot-term: the shell tells the core when a window is minimized or restored, and which window is key

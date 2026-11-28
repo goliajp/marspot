@@ -75,7 +75,7 @@ fn window_light() {
 scenes_hold_at_both_scales! {
     density_settings = panel::panel_snapshot_settings, 14;
     density_settings_ja = settings_ja, 14;
-    density_shortcuts = panel::panel_snapshot_shortcuts, 23;
+    density_shortcuts = panel::panel_snapshot_shortcuts, 24;
     density_settings_agents = agents::panel_snapshot_settings_agents, 13;
     density_layout = panel::panel_snapshot_layout, 7;
     density_layout_grid = panel::panel_snapshot_layout_grid, 13;

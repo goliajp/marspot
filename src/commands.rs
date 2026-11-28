@@ -39,6 +39,7 @@ pub enum Command {
     Layout,
     Processes,
     Accounts,
+    Helpers,
     FullScreen,
     Minimize,
     PrevPane,
@@ -277,6 +278,8 @@ pub const TABLE: &[Row] = &[
     sep(row(C::Layout, Msg::CmdLayout, chord('l', SHIFT | CMD), M::View, Always, Core)),
     row(C::Processes, Msg::CmdProcesses, chord('p', SHIFT | CMD), M::View, Always, Core),
     row(C::Accounts, Msg::CmdAccounts, chord('c', SHIFT | CMD), M::View, Always, Core),
+    // named as its panel is: the menu item and the panel are one name
+    row(C::Helpers, Msg::PanelHelpers, chord('h', SHIFT | CMD), M::View, Always, Core),
     sep(system(
         C::FullScreen,
         Msg::CmdFullScreen,
@@ -466,6 +469,7 @@ mod tests {
             ('l', SHIFT | CMD, C::Layout),
             ('p', SHIFT | CMD, C::Processes),
             ('c', SHIFT | CMD, C::Accounts),
+            ('h', SHIFT | CMD, C::Helpers),
             ('f', CTRL | CMD, C::FullScreen),
             ('[', CMD, C::PrevPane),
             (']', CMD, C::NextPane),
@@ -496,6 +500,7 @@ mod tests {
     #[test]
     fn a_chord_is_all_of_its_modifiers_and_no_others() {
         assert_eq!(command('c', SHIFT | CMD), Some(C::Accounts));
+        assert_eq!((command('h', CMD), command('h', OPT | CMD), command('h', SHIFT | CMD)), (Some(C::Hide), Some(C::HideOthers), Some(C::Helpers)));
         assert_eq!(command('c', CTRL | CMD), None);
         assert_eq!(command('f', SHIFT | CMD), None);
         assert_eq!(command('l', CMD), None);
@@ -557,7 +562,7 @@ mod tests {
         let when = |c: Command| row_of(c).when;
         for c in [
             C::NewWindow, C::Quit, C::Hide, C::HideOthers, C::Minimize, C::FullScreen, C::Settings,
-            C::Layout, C::Processes, C::Accounts, C::Shortcuts, C::Find,
+            C::Layout, C::Processes, C::Accounts, C::Helpers, C::Shortcuts, C::Find,
         ] {
             assert_eq!(when(c), Always, "{c:?}");
         }
@@ -615,6 +620,7 @@ mod tests {
                 "| Layout ⇧⌘L",
                 "Process Monitor ⇧⌘P",
                 "Agent Accounts ⇧⌘C",
+                "Helpers ⇧⌘H",
                 "| Enter or Exit Full Screen ⌃⌘F -> toggleFullScreen:",
             ]
         );
@@ -659,7 +665,7 @@ mod tests {
     fn the_reference_lists_each_chord_once_and_the_panes_as_a_range() {
         let lines: Vec<String> =
             reference().iter().map(|r| format!("{} {}", r.keys, t(r.title))).collect();
-        assert_eq!(lines.len(), 22);
+        assert_eq!(lines.len(), 23);
         assert!(lines.contains(&"⌘↑ Jump to Previous Command".to_string()), "{lines:?}");
         assert!(lines.contains(&"⌘W, Esc Close Panel".to_string()), "{lines:?}");
         assert!(lines.contains(&"⌘1 – ⌘9 Pane 1 – 9".to_string()), "{lines:?}");

@@ -39,7 +39,7 @@ static DENY_CHANGED: AtomicBool = AtomicBool::new(false);
 /// The open panel's data.
 pub(super) struct HelperPanelState {
     /// The session it is of; 0: every session.
-    of: u64,
+    pub(super) of: u64,
     /// The rows last drawn: read again only for a frame.
     groups: Rc<Vec<HelperGroup>>,
     stale: bool,

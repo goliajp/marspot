@@ -142,6 +142,7 @@ Everything not listed goes to the program in the pane, unchanged.
 | `⇧⌘L` | Layout |
 | `⇧⌘P` | Process Monitor |
 | `⇧⌘C` | Agent Accounts |
+| `⇧⌘H` | Helpers |
 | `⌃⌘F` | Enter or Exit Full Screen |
 | `⌘M` | Minimize |
 | `⌘[` | Previous Pane |
