@@ -4,6 +4,39 @@ Notable changes for people using Marspot.
 
 Per-layer version numbers live in `version-vector.toml`.
 
+## 0.20.0
+
+- The sidebar lists each pane's children under it, with a short code
+  before every name. A row's menu can make a pane the child of another
+  or a top-level pane again, and closing a pane that has children asks
+  first. Panes nest two levels at most.
+- "Replace with…", in a pane's right-click menu or its sidebar row's
+  menu, puts a hidden pane, or a new shell, into the slot of the pane
+  in use, and swaps the two.
+- A pane counts as shown only when its window really draws it: a pane
+  past a full grid is listed as hidden, and choosing it brings it into
+  view next to the current pane.
+- A pane in a minimized window has a hollow dot until the window comes
+  back. View › Helpers (⇧⌘H) opens the helper panel at any time.
+- After a restart, Claude Code and Codex panes that were idle are
+  resumed on the account and model they were using, without anyone
+  typing.
+- A Codex pane is no longer handed into a new conversation when you
+  switch its account and Marspot does not know its conversation: the
+  switch is refused with a note on the badge. Codex panes started
+  without the conversation on their command line are recognised again.
+- When a Codex account has used up its weekly allowance, its panes move
+  to another Codex account that still has allowance, at the next moment
+  nothing is running in them, instead of spending paid credits. The
+  setting sits in the settings panel's new Codex group; its other two
+  choices do not move panes yet.
+- The settings panel's switching row (steady, balanced, full use) now
+  drives the account planner, which takes over account choices step by
+  step after its checks pass, and steps back on its own if a switch
+  goes wrong.
+- Input sent by another agent wakes a pane whose agent was asleep.
+- Unix socket paths longer than 104 bytes work.
+
 ## 0.19.0
 
 - The settings panel chooses the terminal font family and size. The
