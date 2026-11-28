@@ -158,7 +158,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "madcawl-wire"
 version = "0.0.1"
-source = "git+https://github.com/goliajp/madcawl?rev=75f06f3931b91436e34efb3e7a3d741e134e455f#75f06f3931b91436e34efb3e7a3d741e134e455f"
+source = "git+https://github.com/goliajp/madcawl?rev=69e2425c48ad79528f5ad7204ad463f3a2f4037e#69e2425c48ad79528f5ad7204ad463f3a2f4037e"
 
 [[package]]
 name = "marspot"

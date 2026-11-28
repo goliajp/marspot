@@ -118,7 +118,7 @@ marspot-agent = { path = "crates/marspot-agent" }
 # must decode the same bytes, so a second copy written here would be a
 # second implementation of one trust boundary.  Pinned to a commit so a
 # clean checkout builds the same thing.
-madcawl-wire = { version = "0.0.1", git = "https://github.com/goliajp/madcawl", rev = "75f06f3931b91436e34efb3e7a3d741e134e455f" }
+madcawl-wire = { version = "0.0.1", git = "https://github.com/goliajp/madcawl", rev = "69e2425c48ad79528f5ad7204ad463f3a2f4037e" }
 libc = "0.2"
 objc2 = "0.6"
 # 0.3 framework crates dropped the "all" feature — the defaults now

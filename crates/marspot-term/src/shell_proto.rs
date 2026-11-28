@@ -642,6 +642,8 @@ pub enum MsgType {
     KeyboardPane = 152,
     /// L2 → L1: the user put input into a pane other than by a key; see `pane_focus`.
     PaneUserInput = 153,
+    /// L2 → L1: the pointer's shape over a web pane; see `caret_pointer`.
+    PointerShape = 154,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -757,6 +759,7 @@ impl MsgType {
             151 => MsgType::WindowMinimized,
             152 => MsgType::KeyboardPane,
             153 => MsgType::PaneUserInput,
+            154 => MsgType::PointerShape,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -785,6 +788,8 @@ mod install_ask;
 pub use install_ask::*;
 mod file_drop;
 pub use file_drop::{decode_file_drop, encode_file_drop};
+mod caret_pointer;
+pub use caret_pointer::*;
 mod surface_attach;
 pub use surface_attach::*;
 mod window_frames;
@@ -1829,51 +1834,6 @@ pub fn decode_selection_text(payload: &[u8]) -> io::Result<(u32, String)> {
     std::str::from_utf8(&payload[8..8 + len])
         .map(|s| (seq, s.to_string()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
-}
-
-/// CaretRect payload: `[present: u8]` then, when present == 1,
-/// `4 × f64 LE` (x, y, w, h) in view-local physical pixels with a
-/// top-left origin — the exact tuple `set_caret_rect_phys` takes.
-/// The trailing window id sits after whatever the variant carries —
-/// offset 1 for `None`, offset 33 for `Some` — because it has to go
-/// *after* the existing bytes to stay invisible to an old reader.
-pub fn encode_caret_rect(rect: Option<(f64, f64, f64, f64)>, window_id: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(37);
-    match rect {
-        None => out.push(0),
-        Some((x, y, w, h)) => {
-            out.push(1);
-            out.extend_from_slice(&x.to_le_bytes());
-            out.extend_from_slice(&y.to_le_bytes());
-            out.extend_from_slice(&w.to_le_bytes());
-            out.extend_from_slice(&h.to_le_bytes());
-        }
-    }
-    out.extend_from_slice(&window_id.to_le_bytes());
-    out
-}
-
-pub fn decode_caret_rect(payload: &[u8]) -> io::Result<(Option<(f64, f64, f64, f64)>, u32)> {
-    if payload.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "caret_rect payload empty",
-        ));
-    }
-    if payload[0] == 0 {
-        return Ok((None, trailing_window_id(payload, 1)));
-    }
-    if payload.len() < 33 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "caret_rect payload < 33 bytes",
-        ));
-    }
-    let f = |i: usize| f64::from_le_bytes(payload[i..i + 8].try_into().unwrap());
-    Ok((
-        Some((f(1), f(9), f(17), f(25))),
-        trailing_window_id(payload, 33),
-    ))
 }
 
 pub fn encode_preedit(text: &str, window_id: u32) -> Vec<u8> {
