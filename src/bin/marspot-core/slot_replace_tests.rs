@@ -89,3 +89,18 @@ fn slot_replace_new_shell_with_nothing_hidden_starts_where_the_pane_was() {
     });
     assert_eq!(reg::read_session_entry(new).unwrap().shadow_of, 0, "top-level");
 }
+
+/// A window holding as many panes as it can cannot start the new shell
+/// a slot would show, and says so; the slot keeps its pane.
+#[test]
+fn slot_replace_new_shell_in_a_full_window_says_why_and_changes_nothing() {
+    use crate::window_state_tests::{app_in, win};
+    let sb = crate::boot_assembly_tests::Sandbox::new();
+    let n = SESSION_COUNT_HARD_CAP;
+    let panes = (1..=n as u64).map(|s| Pane::new_vacant(s, 60, 16)).collect();
+    let mut app = app_in(sb.dir(), vec![win(1, panes)]);
+    app.replace_slot(0, 0, Replace::NewShell);
+    assert_eq!(win!(app, 0).panes[0].shelld_session_id(), Some(1), "the slot keeps its pane");
+    assert!(app.shadows.is_empty(), "nothing left the window");
+    assert_eq!(app.notices.shell_text(), Some(strings::text(Arg::WindowFull(n)).as_str()));
+}

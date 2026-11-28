@@ -54,13 +54,16 @@ fn sidebar_row_of_another_window_raises_it_and_focuses_the_pane() {
     rows(&mut app, 0);
     app.sidebar_row_pressed(0, 2);
     assert_eq!(raised(&app), vec![2]);
-    assert_eq!((app.key_window, win!(app, 1).focused_idx), (1, 0));
+    assert_eq!((app.key_window, win!(app, 1).focused_idx), (0, 0), "keys stay until the shell says it came forward");
+    app.focus_window(2);
+    assert_eq!(app.key_window, 1);
 
     // the grey row of window 2 goes back to the parent in window 1
     app.pending_to_shell.clear();
     rows(&mut app, 1);
     app.sidebar_row_pressed(1, 0);
     assert_eq!(raised(&app), vec![1]);
+    app.focus_window(1);
     assert_eq!((app.key_window, win!(app, 0).focused_idx), (0, 1));
 }
 
@@ -94,4 +97,36 @@ fn sidebar_close_of_a_hidden_child_closes_it_and_a_grey_row_closes_nothing() {
     app.close_row(0, 3);
     assert!(app.shadows.is_empty(), "the hidden child is closed");
     assert_eq!(rows(&mut app, 0).len(), 3);
+}
+
+/// A window of `n` panes in a grid `cols` by `rows`, and pane 1000 in no
+/// window.
+fn crowded(sb: &Sandbox, n: u64, (cols, rows): (usize, usize)) -> CoreApp {
+    let mut app = app_in(sb.dir(), vec![win(1, (1..=n).map(vacant).collect())]);
+    app.shadows.push(vacant(1000));
+    (win!(app, 0).grid_cols, win!(app, 0).grid_rows) = (cols, rows);
+    win!(app, 0).sidebar_collapsed = false;
+    app.rebuild_layout(0);
+    app
+}
+
+#[test]
+fn sidebar_hidden_pane_shown_in_a_full_six_by_six_grid_gets_a_cell() {
+    let sb = Sandbox::new();
+    let mut app = crowded(&sb, 36, (6, 6));
+    app.show_here(0, 1000);
+    let (_, at) = app.find_window_pane_by_sid(1000).expect("shown");
+    assert_eq!((win!(app, 0).grid_cols, win!(app, 0).grid_rows), (7, 6), "the grid grows past six");
+    assert!(win!(app, 0).layout.cells.len() > at, "and the pane has a cell");
+}
+
+#[test]
+fn sidebar_hidden_pane_is_refused_a_window_at_the_pane_cap_and_told_why() {
+    let sb = Sandbox::new();
+    let n = SESSION_COUNT_HARD_CAP;
+    let mut app = crowded(&sb, n as u64, (9, 9));
+    app.show_here(0, 1000);
+    assert!(app.shadow_index(1000).is_some(), "still in no window");
+    assert_eq!(win!(app, 0).panes.len(), n);
+    assert_eq!(app.notices.shell_text(), Some(strings::text(Arg::WindowFull(n)).as_str()), "says why");
 }

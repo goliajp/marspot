@@ -55,6 +55,8 @@ pub enum Arg<'a> {
     ChildOf(u16),
     /// After the child panes a question names: how many more there are.
     MoreChildren(usize),
+    /// A window holds so many panes, the most it can, and takes no more.
+    WindowFull(usize),
     /// Helper panel: how long a pane has run.
     RanFor { minutes: u64 },
     /// The shared default model changed without confirmation and was put back.

@@ -8,9 +8,6 @@ use marspot::render::SidebarTree;
 use crate::draw::sidebar_tree::{Row, RowPane};
 use super::*;
 
-/// The most a window's grid grows to take a pane shown in it.
-const GRID_MAX: usize = 6;
-
 impl CoreApp {
     /// A press on row `row` of window `wi`'s sidebar.
     pub(crate) fn sidebar_row_pressed(&mut self, wi: usize, row: usize) {
@@ -35,21 +32,24 @@ impl CoreApp {
         }
     }
 
-    /// Ask the shell to bring window `wi` to the front; the core's key
-    /// window follows at once, the shell's `WindowFocus` confirms it.
+    /// Ask the shell to bring window `wi` to the front.  The core's key
+    /// window moves only with the shell's `WindowFocus`: a shell that
+    /// does not know the frame leaves the window behind, and keys must
+    /// not go to a window the user cannot see.
     pub(crate) fn raise_window(&mut self, wi: usize) {
         let id = win!(self, wi).window_id;
         self.pending_to_shell.push((MsgType::WindowRaise, marspot::shell_proto::encode_window_raise(id)));
-        let was = self.key_window;
-        self.key_window = wi;
-        win!(self, was).needs_render = true;
         win!(self, wi).needs_render = true;
     }
 
     /// Hidden pane `sid` shown in window `wi` beside the pane in use,
     /// its parent kept, and focused; the grid grows a column, else a
-    /// row, when it has no cell for it.
+    /// row, when it has no cell for it.  A window holding as many panes
+    /// as it can says so over the pane in use instead.
     pub(crate) fn show_here(&mut self, wi: usize, sid: u64) {
+        if self.window_full(wi) {
+            return;
+        }
         let Some(i) = self.shadow_index(sid) else { return };
         let mut pane = self.take_shadow(i);
         unwatched::set(sid, false);
@@ -75,6 +75,19 @@ impl CoreApp {
         self.save_session_state();
         lx_event!("PANE_SHOWN_HERE", "a hidden pane was shown in a window from the sidebar", session = sid,
             window_id = win!(self, wi).window_id, slot = at as u32);
+    }
+
+    /// Whether window `wi` holds as many panes as a window can, in
+    /// which case it says so over the pane in use.
+    pub(crate) fn window_full(&mut self, wi: usize) -> bool {
+        let n = win!(self, wi).panes.len();
+        if n < SESSION_COUNT_HARD_CAP {
+            return false;
+        }
+        self.show_notice(strings::text(Arg::WindowFull(n)));
+        lx_event!("WINDOW_FULL", "a pane was refused a window that holds as many as it can",
+            window_id = win!(self, wi).window_id, panes = n as u32);
+        true
     }
 
     /// The close button of row `row` of window `wi`'s sidebar.
@@ -165,7 +178,9 @@ impl CoreApp {
             (Some((wj, idx)), None) => self.move_pane_to_new_window(wj, idx),
             (None, Some(to)) if to < self.windows.len() => {
                 self.show_here(to, sid);
-                self.key_window = to;
+                if to != self.key_window {
+                    self.raise_window(to);
+                }
             }
             _ => {}
         }

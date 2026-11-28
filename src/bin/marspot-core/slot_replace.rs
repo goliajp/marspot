@@ -76,6 +76,11 @@ impl CoreApp {
         if idx >= win!(self, wi).panes.len() {
             return;
         }
+        // the new shell is started as a pane of the window before it
+        // takes the slot, so a full window cannot start one
+        if with == Replace::NewShell && self.window_full(wi) {
+            return;
+        }
         self.unview(wi, idx);
         let new = match with {
             Replace::Hidden(sid) => {

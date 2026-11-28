@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.890"  # marspot-term: the core can ask the shell to bring a window to the front
-core    = "0.12.784"  # the close question stands in the window it was asked from and comes down when its pane or window goes
+core    = "0.12.785"  # a full window says why it takes no pane; keys follow a raised window only when the shell confirms it
 session = "0.11.493"  # marspot-term: the core can ask the shell to bring a window to the front

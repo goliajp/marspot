@@ -259,6 +259,7 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "helpers ({n})…"),
         Arg::ChildOf(code) => write!(out, " (child of #{code:04})"),
         Arg::MoreChildren(n) => write!(out, "…and {n} more"),
+        Arg::WindowFull(n) => write!(out, "This window already holds {n} panes, the most it can"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m}m"),
         Arg::RanFor { minutes: m } => write!(out, "{}h {}m", m / 60, m % 60),
         Arg::ModelPutBack { to, back } => write!(

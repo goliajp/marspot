@@ -234,6 +234,7 @@ fn write(a: Arg<'_>, out: &mut dyn fmt::Write) -> fmt::Result {
         Arg::HelpersOf(n) => write!(out, "帮手（{n}）…"),
         Arg::ChildOf(code) => write!(out, "（#{code:04} 的子窗格）"),
         Arg::MoreChildren(n) => write!(out, "…另外 {n} 个"),
+        Arg::WindowFull(n) => write!(out, "这个窗口已经有 {n} 个窗格，放不下更多了"),
         Arg::RanFor { minutes: m @ 0..60 } => write!(out, "{m} 分"),
         Arg::RanFor { minutes: m } => write!(out, "{} 小时 {} 分", m / 60, m % 60),
         Arg::ModelPutBack { to, back } => write!(out, "所有账号共用的 Claude Code 默认模型未经确认被改成了 {to}，已改回 {back}"),
