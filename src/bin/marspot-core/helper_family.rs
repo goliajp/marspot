@@ -23,6 +23,8 @@ pub(crate) struct Family {
     pub(crate) opening: u64,
     /// Shadow panes the panel failed to move to a window, until tried again.
     pub(crate) unmoved: HashSet<u64>,
+    /// The panes in no window as last written for the next boot.
+    recorded: Option<Vec<u64>>,
 }
 
 impl Family {
@@ -45,6 +47,17 @@ impl Family {
             }
         }
         at
+    }
+
+    /// `hidden` sorted, when it is not what was last written for the
+    /// next boot; it is taken as written.
+    pub(crate) fn to_record(&mut self, hidden: &[u64]) -> Option<Vec<u64>> {
+        let mut now = hidden.to_vec();
+        now.sort_unstable();
+        (self.recorded.as_ref() != Some(&now)).then(|| {
+            self.recorded = Some(now.clone());
+            now
+        })
     }
 
     pub(crate) fn counted(&self) -> bool {

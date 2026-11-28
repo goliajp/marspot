@@ -129,8 +129,8 @@ pub(super) fn assemble_panes_at_boot(
         .collect();
     let dir_ids: std::collections::HashSet<u64> =
         raw_list.iter().map(|e| e.id).collect();
-    // shadow panes are no window's unless a saved slot names them
-    let shadow_ids = shadow_boot::shadow_ids(&raw_list);
+    // panes in no window stay there unless a saved slot names them
+    let shadow_ids = shadow_boot::stay_hidden(&raw_list);
 
     let slot_specs = slot_specs(saved_state, n_sessions, dir_ids.difference(&shadow_ids), &closed);
 

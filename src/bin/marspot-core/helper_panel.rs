@@ -1,13 +1,12 @@
 //! The helper panel, and what the chrome says about shadow panes: the
 //! `+N` after a pane's title and the sidebar's count.
 //!
-//! The sidebar's is derived from whose child each pane is, shown or
-//! not (`helper_family.rs`), the `+N` from the strips' records
+//! The sidebar's is derived from whose child each pane is, shown or not
+//! (`helper_family.rs`), the `+N` from the strips' records
 //! (`helper_strip/count.rs`).  The counts are worked out when the
-//! shadows or a parent change, the panel's rows when
-//! the shadows, a title or the deny list do; how long a pane has run is
-//! worked out when the panel is drawn.  Nothing here wakes the loop by
-//! itself.
+//! shadows or a parent change, the panel's rows when the shadows, a
+//! title or the deny list do, and how long a pane has run when the
+//! panel is drawn.  Nothing here wakes the loop by itself.
 //!
 //! The core moves a pane to a window itself; closing and denying are
 //! the shell's (`HelperPanelAct`).
@@ -75,10 +74,11 @@ impl CoreApp {
     pub(super) fn shadows_changed(&mut self) {
         let hidden: Vec<u64> = self.shadows.iter().filter_map(Pane::shelld_session_id).collect();
         let shown: Vec<u64> = self.windows.iter().flat_map(|w| w.panes.iter()).filter_map(Pane::shelld_session_id).collect();
-        for sid in &hidden {
-            Self::note_pane_code(*sid);
-        }
+        hidden.iter().for_each(|sid| Self::note_pane_code(*sid));
         self.pane_control.shadows.family.recount(&hidden, &shown);
+        if let Some(record) = self.pane_control.shadows.family.to_record(&hidden) {
+            super::shadow_boot::write_hidden_record(&record);
+        }
         for w in &mut self.windows {
             w.needs_render = true;
         }
