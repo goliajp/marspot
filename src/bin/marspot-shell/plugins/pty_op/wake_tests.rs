@@ -75,3 +75,67 @@ fn input_from_an_agent_wakes_a_sleeping_pane() {
     run(&mut r, &host, &state, 100);
     assert_eq!(state.sent.lock().unwrap().len(), 1, "and nothing is typed twice");
 }
+
+/// Input that wakes a pane is logged as input, not as the user's focus.
+#[test]
+fn a_wake_by_input_is_logged_as_input() {
+    let (state, env, host) = setup();
+    let op = PtyOp::new("test.reclaim").step(Step::await_user()).step(Step::send(b"resume\r".to_vec()));
+    let mut r = OpRunner::new(op, env);
+    run(&mut r, &host, &state, 100);
+    assert!(PaneSession::wake_for_input(&mut r, &host));
+    let logs = host.logs.lock().unwrap();
+    assert!(logs.iter().any(|l| l == "test.reclaim.woken pane 1 by input"), "{logs:?}");
+}
+
+/// While what a wake started still runs, a refused input is told when
+/// to try again, never later than what is left of the wake's bound.
+#[test]
+fn input_refused_while_a_pane_loads_after_a_wake_is_told_when_to_retry() {
+    use crate::pane_control::mainloop::{busy, wake_for_input};
+    let (state, env, host) = setup();
+    let op = PtyOp::new("test.reclaim")
+        .wake_bound(Duration::from_secs(30))
+        .step(Step::await_user())
+        .step(Step::settle(Duration::from_secs(60)));
+    let mut r = OpRunner::new(op, env);
+    run(&mut r, &host, &state, 100);
+    assert_eq!(PaneSession::waking_for(&r), None, "not woken yet");
+
+    let dormant = wake_for_input(&mut r, &host).expect("refused while it wakes");
+    assert_eq!(dormant.retry_after_ms, Some(3_000));
+    assert!(dormant.message.contains("up to 30 s"), "{}", dormant.message);
+    run(&mut r, &host, &state, 3_200);
+    let left = PaneSession::waking_for(&r).expect("still loading");
+    assert!(left < Duration::from_secs(27) && left > Duration::from_secs(26), "{left:?}");
+    let b = busy("test.reclaim", Some(left));
+    assert_eq!((b.code, b.retry_after_ms), (ErrorCode::PaneBusy, Some(3_000)));
+
+    run(&mut r, &host, &state, 26_600);
+    let left = PaneSession::waking_for(&r).expect("still running");
+    assert_eq!(busy("test.reclaim", Some(left)).retry_after_ms, Some(500), "{left:?}");
+    run(&mut r, &host, &state, 2_000);
+    assert_eq!(PaneSession::waking_for(&r), Some(Duration::ZERO), "past the bound");
+    assert_eq!(busy("x", None).retry_after_ms, None, "a script that is no wake has no time to give");
+}
+
+/// A session that stays parked when input asks for its pane says so,
+/// and promises no retry.
+#[test]
+fn input_for_a_pane_that_cannot_be_woken_promises_no_retry() {
+    use crate::pane_control::mainloop::wake_for_input;
+    struct Asleep;
+    impl PaneSession for Asleep {
+        fn caps(&self) -> u32 {
+            0
+        }
+        fn parked(&self) -> bool {
+            true
+        }
+    }
+    let (_state, _env, host) = setup();
+    let r = wake_for_input(&mut Asleep, &host).expect("refused");
+    assert_eq!((r.code, r.retry_after_ms), (ErrorCode::PaneDormant, None));
+    assert!(!r.message.contains("waking"), "{}", r.message);
+    assert!(r.message.contains("until the user comes back"), "{}", r.message);
+}

@@ -28,18 +28,40 @@ impl MainSide {
 /// resume takes about two seconds, and the agent then loads.
 const WAKE_RETRY_MS: u64 = 3_000;
 
+/// The soonest a pane still loading after a wake is asked again.
+const LOADING_RETRY_MIN_MS: u64 = 500;
+
 /// Input for a pane whose agent sleeps (`parked`): the input wakes it,
 /// as the user coming back to it would, and waits until it is up.
 pub(crate) fn wake_for_input(s: &mut dyn PaneSession, host: &dyn PaneSessionHost) -> Option<Reject> {
     if !s.parked() {
         return None;
     }
-    s.on_focus(host);
-    let woken = !s.parked();
+    let woken = s.wake_for_input(host);
     marspot::lx_event!("PANE_CONTROL_WAKE", "input for a sleeping pane wakes it", session = host.shelld_session_id(),
         woken = woken as u32);
-    let r = Reject::new(ErrorCode::PaneDormant, "the pane's agent was put to sleep idle; it is waking for this request");
+    if !woken {
+        return Some(Reject::new(ErrorCode::PaneDormant,
+            "the pane's agent was put to sleep idle, and what holds the pane does not wake it for input: it sleeps until the user comes back to the pane"));
+    }
+    let r = match s.waking_for() {
+        Some(left) => Reject::new(ErrorCode::PaneDormant, format!(
+            "the pane's agent was put to sleep idle and is waking for this request; it may take up to {} s to load, and until then pane_busy says when to try again",
+            left.as_secs())),
+        None => Reject::new(ErrorCode::PaneDormant, "the pane's agent was put to sleep idle and is waking for this request"),
+    };
     Some(r.retry_after(WAKE_RETRY_MS))
+}
+
+/// The answer while a script runs on a pane; `waking` is what is left of
+/// the time a wake may take, while the script is bringing the pane back.
+pub(crate) fn busy(name: &str, waking: Option<std::time::Duration>) -> Reject {
+    let Some(left) = waking else {
+        return Reject::new(ErrorCode::PaneBusy, format!("a script is running on the pane ({name})"));
+    };
+    let ms = (left.as_millis() as u64).clamp(LOADING_RETRY_MIN_MS, WAKE_RETRY_MS);
+    Reject::new(ErrorCode::PaneBusy, format!("the pane's agent is still waking ({name}), for {} s more at most", left.as_secs()))
+        .retry_after(ms)
 }
 
 fn refuse(reply: Option<(u32, std::sync::mpsc::Sender<Reply>)>, r: Reject) {
@@ -75,12 +97,11 @@ impl ShellApp {
 
     /// Why a script on `sid` keeps input out, if one does.
     fn ops_hold(&mut self, sid: u64) -> Option<Reject> {
-        if let Some(r) = self.with_pane_session(sid, wake_for_input).flatten() {
+        let (dormant, waking) = self.with_pane_session(sid, |s, h| (wake_for_input(s, h), s.waking_for())).unzip();
+        if let Some(r) = dormant.flatten() {
             return Some(r);
         }
-        self.pty_ops
-            .running(sid)
-            .map(|name| Reject::new(ErrorCode::PaneBusy, format!("a script is running on the pane ({name})")))
+        self.pty_ops.running(sid).map(|name| busy(name, waking.flatten()))
     }
 
     /// A core announced itself: whatever waits sessions still hold are

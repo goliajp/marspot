@@ -59,6 +59,8 @@ pub mod dispatch;
 pub mod pty_op;
 pub mod pty_command;
 pub mod skills;
+mod session_answers;
+pub use session_answers::{EndReason, KeyHandling};
 mod ticks;
 pub(crate) mod zombie;
 #[cfg(test)]
@@ -480,6 +482,18 @@ pub trait PaneSession: Send {
         false
     }
 
+    /// Input from an agent for this parked pane wakes it, as the user
+    /// coming back would; true when it is waking.
+    fn wake_for_input(&mut self, host: &dyn PaneSessionHost) -> bool {
+        self.on_focus(host);
+        !self.parked()
+    }
+
+    /// While a wake brings the pane back, the longest it may still take.
+    fn waking_for(&self) -> Option<Duration> {
+        None
+    }
+
     /// Periodic tick at the plugin's normal cadence (or faster while
     /// any PaneSession is alive — see C5).
     fn on_tick(&mut self, host: &dyn PaneSessionHost) {
@@ -492,28 +506,6 @@ pub trait PaneSession: Send {
     fn on_end(&mut self, host: &dyn PaneSessionHost, reason: EndReason) {
         let _ = (host, reason);
     }
-}
-
-/// What the host should do after the plugin sees a keystroke.
-/// "Forward to PTY" isn't a host concern — a plugin that wants the
-/// key to reach the shell can call its own `ShelldClient::send_input_to`
-/// from within `on_user_key` and then return `Swallow`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyHandling {
-    /// Done — drop any further L2 processing.
-    Swallow,
-    /// End the session immediately; on_end fires with PluginRequested.
-    EndSession,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EndReason {
-    /// Plugin called `host.end()`.
-    PluginRequested,
-    /// User pressed Esc 3× in 5 s (L2 force-end).
-    UserEscape,
-    /// The pane's session left the registry.
-    PaneClosed,
 }
 
 /// Per-PaneSession host handle passed to every plugin callback.
