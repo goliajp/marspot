@@ -112,6 +112,17 @@ fn drawn_press_in_another_window_brings_the_undrawn_pane_here() {
 }
 
 #[test]
+fn drawn_taking_the_focused_last_undrawn_pane_leaves_its_window_a_focus() {
+    let sb = Sandbox::new();
+    let mut app = user_layout(&sb);
+    win!(app, 1).focused_idx = 6;
+    app.reach_pane(0, 9898);
+    assert_eq!(sids(&app, 1), [SMIX, 5528, 8654, 6004, 8590, 7009]);
+    assert_eq!(win!(app, 1).focused_idx, 5, "the window keeps a pane to type into");
+    assert_eq!(app.focused_session(1), Some(7009));
+}
+
+#[test]
 fn drawn_a_pane_put_into_a_full_grid_is_drawn() {
     let sb = Sandbox::new();
     let mut app = user_layout(&sb);

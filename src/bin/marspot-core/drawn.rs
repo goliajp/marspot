@@ -55,6 +55,8 @@ impl CoreApp {
         let w = &mut win!(self, wj);
         if w.focused_idx > idx {
             w.focused_idx -= 1;
+        } else if w.focused_idx == idx {
+            w.focused_idx = idx.min(w.panes.len().saturating_sub(1));
         }
         if w.selection.is_some_and(|s| s.session_idx >= idx) {
             w.selection = None;
