@@ -30,6 +30,8 @@ use marspot_agent::sched::level2::trigger::{Now, Triggers};
 use marspot_agent::sched::level2::{Input, Limits, Plan, pass};
 
 use super::allocation_adapter::Allocation;
+use super::allocation_exec::{Exec, Order, Watch, watches};
+use super::allocation_more::Hold;
 use super::allocation_inputs::Snapshot;
 use super::allocation_level1::Inputs as ClassInputs;
 use super::allocation_level2_input::{Built, build, digest};
@@ -65,6 +67,13 @@ pub(super) struct PanePlan {
     seen: HashSet<u64>,
     seen_once: bool,
     route_said: String,
+    /// The executor and its ladder; the switches it watches and the
+    /// limits they were planned under, from the last pass; panes refused
+    /// since the last scan.
+    exec: Exec,
+    watch: Vec<Watch>,
+    limits: Limits,
+    refused_now: Vec<u64>,
     /// Plan passes run, full searches among them.
     pub passes: usize,
     pub full: usize,
@@ -88,6 +97,10 @@ impl PanePlan {
             seen: HashSet::new(),
             seen_once: false,
             route_said: String::new(),
+            exec: Exec::load(state_root),
+            watch: Vec::new(),
+            limits: Limits::default(),
+            refused_now: Vec::new(),
             passes: 0,
             full: 0,
         }
@@ -125,7 +138,12 @@ impl PanePlan {
         self.passes += 1;
         let now = snap.now;
         let refused = self.note_refusals(snap);
-        let limits = limits::current();
+        let mut limits = limits::current();
+        // a live executor follows a plan that protects Fable only from step E
+        if self.exec.live() && !self.exec.ladder.protects() {
+            limits.fable = marspot_agent::sched::level2::FableGuard::Price;
+        }
+        self.limits = limits;
         self.standing.inertia = Some(limits.inertia);
         let mut b = build(a, snap, view, forecast, class, &self.standing, &limits);
         self.calibrate(&mut b, now, &mut log);
@@ -150,6 +168,7 @@ impl PanePlan {
             None => pass::retime(&mut self.standing, &input, now),
         };
         self.ended_last = false;
+        self.watch = done.as_ref().map_or_else(Vec::new, |r| watches(&r.plan, &input, now));
         if let Some(r) = &done {
             allocation_route::rebuild(&input, &r.plan, forecast, due.is_some().then(|| allocation_route::others_now(now)), now);
         }
@@ -210,7 +229,7 @@ impl PanePlan {
     fn route_shadow(&mut self, view: &View, full: bool, now: i64, log: &mut Vec<(&'static str, String)>) {
         for row in view.panes.iter().filter(|r| !r.4) {
             if self.seen.insert(row.0) && self.seen_once {
-                log.push(("sched.route.shadow", allocation_route::shadow_pane("pane", row.0, row.2, row.3, None, Some(row.1), now)));
+                log.push(("sched.route.shadow", allocation_route::shadow_pane("pane", row.0, row.2, row.3, None, Some(row.1), now).0));
             }
         }
         self.seen.retain(|sid| view.panes.iter().any(|r| r.0 == *sid));
@@ -219,6 +238,20 @@ impl PanePlan {
             log.push(("sched.route", line.clone()));
             self.route_said = line;
         }
+    }
+
+    /// The executor on this scan: the switches for the main thread, and
+    /// whether it is live.  A switch it called off pins its pane.
+    pub(super) fn execute(&mut self, a: &mut Allocation, snap: &Snapshot, holds: &HashMap<u64, Hold>) -> (Vec<Order>, bool, Vec<(&'static str, String)>) {
+        let mut log = Vec::new();
+        let now = snap.now;
+        let unforeseen = self.refusals.iter().filter(|(at, foreseen)| !foreseen && now - at < DAY_S).count() as u32;
+        let refused = std::mem::take(&mut self.refused_now);
+        let orders = self.exec.step(a, snap, holds, &self.watch, &self.limits, unforeseen, &refused, &mut log);
+        for sid in &self.exec.cancelled {
+            self.standing.pin(*sid, now);
+        }
+        (orders, self.exec.live(), log)
     }
 
     /// A pane refused since the last scan, each recorded with whether
@@ -232,6 +265,9 @@ impl PanePlan {
             }
             self.refused_seen.insert(p.sid, at);
             any = true;
+            if self.refused_now.len() < REFUSALS_CAP {
+                self.refused_now.push(p.sid);
+            }
             if self.refusals.len() >= REFUSALS_CAP {
                 self.refusals.pop_front();
             }
@@ -250,6 +286,8 @@ impl PanePlan {
         }
         self.status_said = body;
         let text = plan.status(input, now, self.standing.id, &class.1.reserve, &pins, &claims);
+        // the go-live ladder rides in the same file, read by `marspot-peer svc status sched`
+        let text = text.replacen('{', &format!("{{\"gate\":\"{}\",", self.exec.ladder.words()), 1);
         if let Err(e) = write_atomic(&self.status_path, &text) {
             log.push(("sched.status_failed", format!("{e}")));
         }

@@ -175,6 +175,8 @@ fn empty_scan() -> ScanResult {
         pane_tokens: HashMap::new(),
         speeds: Default::default(),
         alloc: None,
+        plan_orders: Vec::new(),
+        plan_live: false,
         scanned_at: SystemTime::now(),
         sessions_seen: Vec::new(),
         log_lines: Vec::new(),

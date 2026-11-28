@@ -148,6 +148,12 @@ impl ClaudecodePlugin {
             if !out_for(sid, &meta, as_judged) {
                 let part = plan.part(sid);
                 self.heads_up_if_due(host, sid, &rooms, &meta, result, as_judged, part);
+                if let Some(o) = result.plan_orders.iter().find(|o| o.sid == sid).copied()
+                    && self.follow_plan(host, &mut view, &mut plan, result, &meta, as_judged, &choice, in_flight, o)
+                {
+                    rebalanced_this_pass = true;
+                    continue;
+                }
                 if part.short {
                     rebalanced_this_pass |= !part.stays && self.leave_short(host, sid, &meta, result, as_judged, &choice, in_flight, &mut plan, &mut view);
                     continue;

@@ -243,10 +243,20 @@ impl View {
             Some(to) => Some((to, Some(inputs))),
             None => unread_last(rooms, from, class).map(|to| (to, None)),
         };
-        // where the pane plan's routing table would send it, in shadow
-        let line = super::allocation_route::shadow_pane("badge", sid, class, self.rate_of(sid, class), Some(from), picked.as_ref().map(|p| p.0), super::rooms::unix_now());
+        match self.routed(rooms, "badge", sid, from, class, picked.as_ref().map(|p| p.0)) {
+            Some(to) => Some((to, None)),
+            None => picked,
+        }
+    }
+
+    /// Where the pane plan's routing table sends a pane leaving `from`
+    /// (`kind` says why), logged next to today's choice `today`; `None`
+    /// unless the table is live and its account has not refused the pane.
+    pub(super) fn routed(&self, rooms: &[(u8, Room)], kind: &str, sid: u64, from: u8, class: Class, today: Option<u8>) -> Option<u8> {
+        let (line, live) = super::allocation_route::shadow_pane(kind, sid, class, self.rate_of(sid, class), Some(from), today, super::rooms::unix_now());
         marspot::lx_info!("sched.route.shadow", &line);
-        picked
+        let model = (class == Class::Restricted).then_some(FABLE);
+        live.filter(|t| rooms.iter().any(|(n, r)| n == t && !r.refused_for(model)))
     }
 
     /// The cheapest of `allowed` for a pane leaving an account that runs

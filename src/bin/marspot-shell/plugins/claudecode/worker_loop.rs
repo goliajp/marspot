@@ -37,7 +37,8 @@ pub(super) fn worker_main(
         allocation.set_live(marspot::settings::get().cc_rebalance == marspot::settings::Rebalance::Live, now);
         let snap = snapshot(&result, &ctx.seen, marks.read(now), now);
         let mut lines = allocation.observe(&snap);
-        lines.extend(allocation.record_more(&snap, &holds(&result, focus)));
+        let held = holds(&result, focus);
+        lines.extend(allocation.record_more(&snap, &held));
         for (tag, line) in lines {
             marspot::lx_info!(&*format!("plugin.claudecode.{tag}"), &line);
         }
@@ -55,6 +56,11 @@ pub(super) fn worker_main(
             }
             allocation.view = Some(view);
         }
+        let (orders, live, exec_lines) = pane_plan.execute(&mut allocation, &snap, &held);
+        for (tag, line) in exec_lines {
+            marspot::lx_info!(tag, &line);
+        }
+        (result.plan_orders, result.plan_live) = (orders, live);
         result.alloc = allocation.view.take();
         if res_tx.send(result).is_err() {
             // Main side hung up; nothing left to do.

@@ -75,7 +75,7 @@ fn allocation_level2_logs_a_plan_records_its_fact_and_writes_the_status() {
     assert_eq!(plan.sid, 0);
     assert!(plan.detail.contains(" prev=0000000000000000 ") && plan.detail.contains(">P7#0"), "{}", plan.detail);
     let status = fs::read_to_string(r.join("sched").join("status.json")).expect("the status file");
-    assert!(status.starts_with("{\"at\":") && status.contains("\"panes\":[") && status.ends_with("]}\n"), "{status}");
+    assert!(status.starts_with("{\"gate\":\"step=shadow ") && status.contains("\"at\":") && status.contains("\"panes\":[") && status.ends_with("]}\n"), "{status}");
     // the next scan a second later re-times only: no line, no fact
     let mut later = snap.clone();
     later.now = NOW + 2;

@@ -1,8 +1,12 @@
-//! The pane plan's routing table, in shadow: built on every plan pass
-//! and read where new work is placed (a helper started on Claude, a
-//! pane that appears, a badge click), each placement logged as
-//! `sched.route.shadow` next to the account today's rule chose.  Nothing
-//! is placed differently.
+//! The pane plan's routing table: built on every plan pass and read
+//! where new work is placed (a helper started on Claude, a pane that
+//! appears, a refused pane, a badge click), each placement logged as
+//! `sched.route.shadow` next to the account today's rule chose.  Each
+//! placement is also noted for the go-live ladder, with whether it put
+//! an other-model newcomer on an account holding only Fable-usable
+//! quota.  Once the ladder has the table live (step A), helpers, refused
+//! panes and badge clicks go where it says; a pane that appears was
+//! started already and is only shadowed.
 //!
 //! A placement takes its expected use out of the table at once, so a
 //! batch of helpers spreads over the entries.  A helper or a young pane
@@ -20,8 +24,10 @@ use crate::plugins::allocation::{Class, RHO0};
 /// A placement is taken out of the tables this long at most, seconds:
 /// a pane is in the plan's input once it is half an hour old.
 const KEEP_S: i64 = 1800;
-/// Placements kept at most.
+/// Placements kept at most, and notes for the ladder and live
+/// placements awaiting the worker.
 const KEPT_CAP: usize = 64;
+const NOTED_CAP: usize = 64;
 /// A helper's life when nothing has been measured, hours: the forecast's floor.
 const HELPER_LIFE_H: f64 = 10.0 / 60.0;
 /// A newcomer's high band over its level, by class: the forecast's
@@ -38,6 +44,12 @@ struct Route {
     /// The other agents' line as last read.
     others: Vec<(&'static str, f64)>,
     built: bool,
+    /// The ladder has the table place live work.
+    live: bool,
+    /// Placements not yet counted by the ladder: whether each went wrong.
+    noted: Vec<bool>,
+    /// Live placements of the last hour: when, and the account.
+    live_placed: Vec<(i64, u8)>,
 }
 
 static ROUTE: Published<Route> = Published::new();
@@ -74,10 +86,10 @@ pub(super) fn line() -> Option<String> {
 /// the plan's input already, on the account it leaves, and the next
 /// input has it on the one it went to, so its use only comes out of this
 /// table.
-fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i64) -> String {
+fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i64) -> (String, Option<u8>) {
     ROUTE.update(|r| {
         if !r.built {
-            return "table=-".into();
+            return ("table=-".into(), None);
         }
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: life_h.unwrap_or(r.helper_life_h) };
         match r.table.place(&m, from) {
@@ -88,11 +100,50 @@ fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, now: i6
                     }
                     r.kept.push((now, p.to, m));
                 }
-                format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after)
+                if r.noted.len() < NOTED_CAP {
+                    r.noted.push(class == Class::Plain && !p.plain_only);
+                }
+                (format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after), Some(p.to))
             }
-            None => "table=-".into(),
+            None => ("table=-".into(), None),
         }
     })
+}
+
+/// The ladder's say on whether the table places live work.
+pub(super) fn set_live(on: bool) {
+    ROUTE.update(|r| r.live = on);
+}
+
+fn live() -> bool {
+    ROUTE.get().is_some_and(|r| r.live)
+}
+
+/// The placements noted since the last call, oldest first: whether each
+/// went wrong.
+pub(super) fn take_noted() -> Vec<bool> {
+    ROUTE.update(|r| std::mem::take(&mut r.noted))
+}
+
+/// The live placements of the last hour: when, and the account.
+pub(super) fn live_placed(now: i64) -> Vec<(i64, u8)> {
+    ROUTE.update(|r| {
+        r.live_placed.retain(|(at, _)| now - at < 3600);
+        r.live_placed.clone()
+    })
+}
+
+/// `to`, the table's placement, when the table is live: kept as a live
+/// placement for the ladder's check of refusals after it.
+fn live_pick(to: Option<u8>, now: i64) -> Option<u8> {
+    let to = to.filter(|_| live())?;
+    ROUTE.update(|r| {
+        if r.live_placed.len() >= NOTED_CAP {
+            r.live_placed.remove(0);
+        }
+        r.live_placed.push((now, to));
+    });
+    Some(to)
 }
 
 fn class_word(class: Class) -> &'static str {
@@ -121,9 +172,10 @@ pub(super) fn others_now(now: i64) -> Vec<(&'static str, f64)> {
     v
 }
 
-/// A Claude helper today's rule started on `to`, with the other agents'
-/// line.  Reads the other agents' feeds: off the shell's main loop.
-pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>, now: i64) {
+/// A Claude helper today's rule would start on `to`, with the other
+/// agents' line; the table's account when the table is live.  Reads the
+/// other agents' feeds: off the shell's main loop.
+pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>, now: i64) -> Option<u8> {
     let others = others_now(now);
     // which agent the table would send it to, were the agent left open
     let agent = ROUTE.update(|r| {
@@ -135,18 +187,21 @@ pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>,
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: r.helper_life_h };
         r.table.agent_for(&m).unwrap_or("claude")
     });
-    let placed = place(class, rate, None, None, now);
+    let (placed, picked) = place(class, rate, None, None, now);
     let others: Vec<String> = others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
     let line = format!("kind=helper class={} today={} {placed} agent={agent} others={}", class_word(class), today(to), if others.is_empty() { "-".into() } else { others.join(",") });
     marspot::lx_info!("sched.route.shadow", &line);
+    live_pick(picked, now)
 }
 
-/// A pane that appeared on `on`, or a pane a badge click moves off
-/// `from` to `to`.
-pub(super) fn shadow_pane(kind: &str, sid: u64, class: Class, rate: f64, from: Option<u8>, to: Option<u8>, now: i64) -> String {
+/// A pane that appeared on `on`, or a pane a badge click or a refusal
+/// moves off `from` to `to`: the line, and the table's account when the
+/// table is live and the pane moves.
+pub(super) fn shadow_pane(kind: &str, sid: u64, class: Class, rate: f64, from: Option<u8>, to: Option<u8>, now: i64) -> (String, Option<u8>) {
     let rate = if rate > 0.0 { rate } else { RHO0 };
-    let placed = place(class, rate, Some(H2), from, now);
-    format!("kind={kind} sid={sid} class={} today={} {placed}", class_word(class), today(to))
+    let (placed, picked) = place(class, rate, Some(H2), from, now);
+    let line = format!("kind={kind} sid={sid} class={} today={} {placed}", class_word(class), today(to));
+    (line, if from.is_some() { live_pick(picked, now) } else { None })
 }
 
 #[cfg(test)]

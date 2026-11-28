@@ -116,6 +116,12 @@ impl Allocation {
         log
     }
 
+    /// What runs in the background of a pane's transcript, and when a
+    /// person last wrote to it.
+    pub(super) fn open_of(&self, transcript: &Path, child: bool, now: i64) -> super::allocation_turns::Open {
+        self.more.turns.open(transcript, child, now)
+    }
+
     fn readings(&mut self, accounts: &[AccountIn], now: i64, log: &mut Vec<(&'static str, String)>) {
         if self.more.readings.is_none() {
             let mut last = HashMap::new();

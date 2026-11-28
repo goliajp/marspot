@@ -60,6 +60,7 @@ mod bind_meta;
 mod allocation_adapter;
 mod allocation_decide;
 pub(crate) mod allocation_events;
+mod allocation_exec;
 mod allocation_forecast;
 mod allocation_hours;
 mod allocation_inputs;
