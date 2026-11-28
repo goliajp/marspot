@@ -50,7 +50,7 @@ impl ClaudecodePlugin {
         if !r.helper {
             let today = view.must_move(&rooms, sid, from, r.class);
             let to = if let quota::Move::To(t) = today.0 { Some(t) } else { None };
-            return match view.routed(&rooms, "refused", sid, from, r.class, to) {
+            return match view.routed(&rooms, "refused", sid, from, r.class, r.needs_model, to) {
                 Some(t) => (quota::Move::To(t), None),
                 None => today,
             };

@@ -36,11 +36,13 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     // every placement was noted for the ladder, none of them wrong
     assert_eq!(take_noted(), vec![false; 7]);
     assert!(take_noted().is_empty());
-    // live: a moving pane goes where the table says, kept for the ladder's
-    // check of refusals after it
+    // live: a moving pane goes where the table says; only a placement the
+    // caller acts on is kept for the ladder's check of refusals after it
     set_live(true);
     let (_, live) = shadow_pane("refused", 8, Class::Plain, 0.004, Some(2), Some(2), later + 1);
     assert_eq!(live, Some(4));
+    assert!(live_placed(later + 1).is_empty(), "a pick the caller may still drop is not counted");
+    used(4, later + 1);
     assert_eq!(live_placed(later + 1), vec![(later + 1, 4)]);
     assert!(live_placed(later + 3700).is_empty());
     set_live(false);

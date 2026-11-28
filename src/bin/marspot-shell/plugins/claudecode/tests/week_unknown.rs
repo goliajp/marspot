@@ -86,7 +86,7 @@ fn a_refused_pane_goes_to_an_unread_week_only_after_every_known_one() {
     let (to, inputs) = v.must_move(&r, 1, 1, Class::Plain);
     assert_eq!(to, Move::To(2), "ahead of the refused");
     assert!(inputs.is_none(), "no reading chose it");
-    assert_eq!(v.by_hand(&r, 1, 1, Class::Plain).map(|(t, i)| (t, i.is_none())), Some((2, true)));
+    assert_eq!(v.by_hand(&r, 1, 1, Class::Plain, None).map(|(t, i)| (t, i.is_none())), Some((2, true)));
 
     // an unread week that has refused is no place either
     let shut = [("rejected", "1", &soon() as &str, "0"), ("rejected", "null", "null", "0")];

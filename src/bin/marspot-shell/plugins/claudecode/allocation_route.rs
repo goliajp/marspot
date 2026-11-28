@@ -133,17 +133,22 @@ pub(super) fn live_placed(now: i64) -> Vec<(i64, u8)> {
     })
 }
 
-/// `to`, the table's placement, when the table is live: kept as a live
-/// placement for the ladder's check of refusals after it.
-fn live_pick(to: Option<u8>, now: i64) -> Option<u8> {
-    let to = to.filter(|_| live())?;
+/// `to`, the table's placement, when the table is live.  The caller
+/// still filters it, so it is not kept here; see `used`.
+fn live_pick(to: Option<u8>) -> Option<u8> {
+    to.filter(|_| live())
+}
+
+/// A live placement on `to` the caller acted on: kept for the ladder's
+/// check of refusals after it.  A pick the caller filtered out placed
+/// nothing and is not counted.
+pub(in crate::plugins) fn used(to: u8, now: i64) {
     ROUTE.update(|r| {
         if r.live_placed.len() >= NOTED_CAP {
             r.live_placed.remove(0);
         }
         r.live_placed.push((now, to));
     });
-    Some(to)
 }
 
 fn class_word(class: Class) -> &'static str {
@@ -191,7 +196,7 @@ pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>,
     let others: Vec<String> = others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
     let line = format!("kind=helper class={} today={} {placed} agent={agent} others={}", class_word(class), today(to), if others.is_empty() { "-".into() } else { others.join(",") });
     marspot::lx_info!("sched.route.shadow", &line);
-    live_pick(picked, now)
+    live_pick(picked)
 }
 
 /// A pane that appeared on `on`, or a pane a badge click or a refusal
@@ -201,7 +206,7 @@ pub(super) fn shadow_pane(kind: &str, sid: u64, class: Class, rate: f64, from: O
     let rate = if rate > 0.0 { rate } else { RHO0 };
     let (placed, picked) = place(class, rate, Some(H2), from, now);
     let line = format!("kind={kind} sid={sid} class={} today={} {placed}", class_word(class), today(to));
-    (line, if from.is_some() { live_pick(picked, now) } else { None })
+    (line, if from.is_some() { live_pick(picked) } else { None })
 }
 
 #[cfg(test)]

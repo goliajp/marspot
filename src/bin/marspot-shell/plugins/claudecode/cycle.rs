@@ -65,7 +65,7 @@ impl ClaudecodePlugin {
                 let mails: Vec<(u8, Option<String>)> = profiles.iter().map(|p| (*p, quota::profile_email(home, *p))).collect();
                 let accounts = allocation_inputs::accounts_of(&mails, u, rooms::unix_now());
                 let view = allocation_view::View::for_click(rooms::unix_now(), accounts, self.alloc_view.as_ref());
-                view.by_hand(&rooms, shelld_sid, meta.profile_num, class)
+                view.by_hand(&rooms, shelld_sid, meta.profile_num, class, needs.as_deref())
             }
             _ => None,
         };

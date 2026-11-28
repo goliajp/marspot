@@ -56,7 +56,7 @@ fn rebalance_an_idle_pane_is_not_moved_onto_an_account_running_short() {
         let snap = super::super::allocation_inputs::snapshot(&result, &HashMap::new(), &HashMap::new(), now);
         let mut view = super::super::allocation_view::View::of_defaults(&snap);
         let rooms = rooms::rooms_for(&[2, 3], &result.usage.as_ref().unwrap().accounts, |p| Some(mail(tag, p)), now);
-        let (_, inputs) = view.by_hand(&rooms, 301, 2, crate::plugins::allocation::Class::Plain).unwrap();
+        let (_, inputs) = view.by_hand(&rooms, 301, 2, crate::plugins::allocation::Class::Plain, None).unwrap();
         view.rest.insert(301, (3, why, inputs.expect("the core chose it")));
         result.alloc = Some(view);
         plugin.sweep_unusable_profiles(&host, &result);

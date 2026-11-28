@@ -96,7 +96,7 @@ fn allocation_view_refused_plain_pane_and_badge_click_go_where_there_is_room() {
     let panes = vec![pane(1, 1, Class::Plain), pane(2, 1, Class::Restricted), pane(3, 1, Class::Restricted), pane(4, 1, Class::Restricted)];
     let (view, rooms) = scene(feed, panes);
     assert_eq!(view.must_move(&rooms, 1, 1, Class::Plain).0, Move::To(2));
-    assert_eq!(view.by_hand(&rooms, 1, 1, Class::Plain).map(|(t, _)| t), Some(2));
+    assert_eq!(view.by_hand(&rooms, 1, 1, Class::Plain, None).map(|(t, _)| t), Some(2));
 }
 
 /// Leaving early ranks by the one objective among the accounts it is
