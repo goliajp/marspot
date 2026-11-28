@@ -134,3 +134,25 @@ fn sched_route_a_moving_pane_is_not_placed_on_the_account_it_leaves() {
     assert_eq!(q.to, 4);
     assert!((q.before - q.after - 0.004 * H2).abs() < 1e-9, "{q:?}");
 }
+
+/// 2026-11-26 06:20, P6 spent: P3 has 50 points left, all Fable-usable,
+/// P7 43 points of other-model room only, P8 98 with about 47 of it.
+/// Under balanced, with Fable short, the five Opus panes the refusal
+/// sends out go to P7 and P8 and none to P3; under steady P3 is last.
+#[test]
+fn sched_route_p3_scenario_sends_no_opus_pane_to_fable_only_quota() {
+    let mut a = [acct(6, 0.001, 0.0, 120.0), acct(3, 0.5, 0.5, 80.0), acct(7, 0.43, 0.0, 130.0), acct(8, 0.98, 0.51, 150.0)];
+    // level 1 lends the plain class a little of P3's reserve
+    a[1].spare = 0.05;
+    let p = [pane(428, 3, true, 0.004, 0.0)];
+    let mut i = input(&a, &p);
+    i.limits = crate::sched::level2::Limits::BALANCED;
+    let mut r = Routing::of(&i, &plan(&i, None));
+    assert!(!r.order(Class::Plain).contains(&3), "{:?}", r.order(Class::Plain));
+    let went: Vec<u8> = (0..5).filter_map(|_| r.place(&long(Class::Plain, 0.003), Some(6)).map(|x| x.to)).collect();
+    assert_eq!(went.len(), 5, "{went:?}");
+    assert!(went.iter().all(|to| *to == 7 || *to == 8), "{went:?}");
+    i.limits = crate::sched::level2::Limits::STEADY;
+    let s = Routing::of(&i, &plan(&i, None));
+    assert_eq!(s.order(Class::Plain).last(), Some(&3));
+}

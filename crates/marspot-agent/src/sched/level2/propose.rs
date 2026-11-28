@@ -20,7 +20,7 @@
 use super::grid::Grid;
 use super::sim::Sim;
 use super::window::kind;
-use super::{DWELL_H, H2, Input, STALL_REFUSAL_H, Sched};
+use super::{H2, Input, STALL_REFUSAL_H, Sched};
 use crate::quota::EPS;
 
 /// What a stall hour weighs when proposals are ranked, weeks.
@@ -70,11 +70,11 @@ pub(super) fn candidates(input: &Input, g: &Grid, p: usize) -> Vec<Sched> {
         if Some(k) != g.on[p] {
             out.push(Sched::one(k, r));
         }
-        if input.panes[p].switches_left < 2 {
+        if input.panes[p].switches_left < 2 || input.limits.hops < 2 {
             continue;
         }
         for &j in targets {
-            if j != k && g.cuts[r] >= g.cuts[first] + DWELL_H - 1e-9 {
+            if j != k && g.cuts[r] >= g.cuts[first] + input.limits.dwell_h - 1e-9 {
                 let mut s = Sched::one(j, first);
                 s.push(k, r);
                 out.push(s);
@@ -125,7 +125,7 @@ pub(super) fn score(input: &Input, g: &Grid, sim: &Sim, deadline: &[f64], p: usi
     let n = input.accounts.len();
     let mut cost = 0.0;
     for k in kinds(input, g, deadline, p, s) {
-        cost += pane.rewrite + if k.notice() { pane.lost_work } else { 0.0 } + RANK_STALL * k.stall();
+        cost += pane.rewrite + input.limits.switch_extra + if k.notice() { pane.lost_work } else { 0.0 } + RANK_STALL * k.stall();
     }
     let mut on = g.on[p];
     let mut hops = s.hops().iter().peekable();
@@ -141,7 +141,7 @@ pub(super) fn score(input: &Input, g: &Grid, sim: &Sim, deadline: &[f64], p: usi
         let class = usize::from(!pane.restricted);
         let served = price(input, sim, n, seg, j, class).is_some() && sim.empty[j].is_none_or(|e| e >= g.cuts[seg + 1]);
         if !served {
-            cost += pane.rewrite + RANK_STALL * STALL_REFUSAL_H + (pane.speed[0] + pane.speed[1]) * (H2 - g.cuts[seg]);
+            cost += pane.rewrite + input.limits.refusal_extra + RANK_STALL * STALL_REFUSAL_H + (pane.speed[0] + pane.speed[1]) * (H2 - g.cuts[seg]);
             break;
         }
         let pa = price(input, sim, n, seg, j, 0).unwrap_or(1.0);

@@ -67,7 +67,6 @@ mod allocation_level2_input;
 mod allocation_line;
 mod allocation_more;
 mod allocation_prices;
-mod allocation_switch_cost;
 mod allocation_turns;
 mod allocation_usage;
 mod allocation_view;

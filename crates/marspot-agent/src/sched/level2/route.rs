@@ -15,14 +15,14 @@
 //! restricted class: every account whose window it can use), then room
 //! that lapses at a renewal inside the pane horizon, earliest renewal
 //! first, then the account that lasts longest at its planned load.  A
-//! long-lived newcomer only goes where the room lasts it `LASTS_H` at
+//! long-lived newcomer only goes where the room lasts it the profile's `lasts_h` at
 //! its high band, or to the renewal when that comes first.
 //!
 //! The other agents have a line each with what their best account has
 //! left; a request that leaves the agent open goes where the most is
 //! left for its use.
 
-use super::{H2, Input, LASTS_H, Plan};
+use super::{H2, Input, Plan};
 use crate::quota::{Class, EPS};
 
 /// A newcomer under this many hours is short-lived.
@@ -93,8 +93,8 @@ impl Newcomer {
     }
 
     /// What the room must hold for it.
-    fn needs(&self, renews: f64) -> f64 {
-        if self.short() { self.usage(renews) } else { self.usage(renews).max(self.high * LASTS_H.min(renews.max(0.0))) }
+    fn needs(&self, renews: f64, lasts_h: f64) -> f64 {
+        if self.short() { self.usage(renews) } else { self.usage(renews).max(self.high * lasts_h.min(renews.max(0.0))) }
     }
 }
 
@@ -104,6 +104,11 @@ pub struct Routing {
     rooms: Vec<Room>,
     /// Other agents: name, what their best account has left, weeks.
     pub others: Vec<(&'static str, f64)>,
+    /// How long a long-lived newcomer's target must last it, hours.
+    lasts_h: f64,
+    /// The profile protects what only Fable can use, and Fable is short:
+    /// another model's newcomer goes only where it has room of its own.
+    protect: bool,
 }
 
 /// Where a placement went, and its entry's room before and after, weeks.
@@ -159,7 +164,8 @@ impl Routing {
                 }
             })
             .collect();
-        Routing { rooms, others: Vec::new() }
+        let protect = input.limits.fable != super::FableGuard::Price && input.pi > 0.0;
+        Routing { rooms, others: Vec::new(), lasts_h: input.limits.lasts_h, protect }
     }
 
     /// The other agents' lines, at most `OTHERS_CAP`.
@@ -170,7 +176,7 @@ impl Routing {
 
     /// The accounts in the order a newcomer of `class` tries them.
     pub fn order(&self, class: Class) -> Vec<u8> {
-        let mut v: Vec<&Room> = self.rooms.iter().filter(|r| r.left(class) > EPS).collect();
+        let mut v: Vec<&Room> = self.rooms.iter().filter(|r| r.left(class) > EPS && !(self.protect && class == Class::Plain && !r.plain_only)).collect();
         let lapses = |r: &Room| r.renews(class) < H2;
         let tier = |r: &Room| match class {
             Class::Plain => u8::from(!r.plain_only),
@@ -190,7 +196,7 @@ impl Routing {
     /// is taken out of the table.  A pane that moves names the account
     /// it leaves in `except`.
     pub fn place(&mut self, m: &Newcomer, except: Option<u8>) -> Option<Placed> {
-        let to = self.order(m.class).into_iter().filter(|id| Some(*id) != except).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class)) - EPS))?;
+        let to = self.order(m.class).into_iter().filter(|id| Some(*id) != except).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS))?;
         self.take(to, m)
     }
 
@@ -217,8 +223,8 @@ impl Routing {
     /// hold `m`'s whole use (and, for a long-lived one, six hours at its
     /// high band).
     pub fn agent_for(&self, m: &Newcomer) -> Option<&'static str> {
-        let own = self.order(m.class).into_iter().filter_map(|id| self.rooms.iter().find(|r| r.id == id)).find(|r| r.left(m.class) >= m.needs(r.renews(m.class)) - EPS).map_or(0.0, |r| r.left(m.class));
-        let need = m.needs(f64::INFINITY);
+        let own = self.order(m.class).into_iter().filter_map(|id| self.rooms.iter().find(|r| r.id == id)).find(|r| r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS).map_or(0.0, |r| r.left(m.class));
+        let need = m.needs(f64::INFINITY, self.lasts_h);
         self.others.iter().filter(|o| o.1 >= need - EPS && o.1 > own + EPS).max_by(|a, b| a.1.total_cmp(&b.1)).map(|o| o.0)
     }
 

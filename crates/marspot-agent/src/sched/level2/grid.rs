@@ -14,7 +14,7 @@ use std::cell::OnceCell;
 
 use super::ctx::Ctx;
 use super::window::dead_by_exhaustion;
-use super::{Account, H2, Input, LASTS_H, Pane};
+use super::{Account, H2, Input, Pane};
 use crate::quota::EPS;
 
 const BUCKET_H: f64 = 6.0;
@@ -186,7 +186,7 @@ impl Grid {
 
     /// Account `j` passes the hard filters for pane `p` now.
     pub fn target(&self, input: &Input, p: usize, j: usize) -> bool {
-        self.admits(input, p, j) && lasts_high(input, &self.on, j, Some(p)) >= LASTS_H
+        self.admits(input, p, j) && lasts_high(input, &self.on, j, Some(p)) >= input.limits.lasts_h
     }
 
     /// Every filter but how long the target lasts.
@@ -203,7 +203,7 @@ impl Grid {
         if pane.left.is_some_and(|(id, h)| id == q.id && h > 0.0) {
             return false;
         }
-        true
+        super::guard::admits(input, pane, q)
     }
 
     /// Account `k` may take pane `p` once it renews: open, fresh, not

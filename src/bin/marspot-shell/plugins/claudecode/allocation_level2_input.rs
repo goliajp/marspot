@@ -21,15 +21,15 @@ use std::hash::{Hash, Hasher};
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level1::{H2, Level1};
 use marspot_agent::sched::level2::standing::Standing;
-use marspot_agent::sched::level2::{Account, DWELL_H, FLEET_PER_DAY, Pane, planned_speed};
+use marspot_agent::sched::level2::{Account, Limits, Pane, planned_speed};
 
 use super::allocation_adapter::{Allocation, WEEK_S};
+use super::allocation_events::DAY as DAY_S;
 use super::allocation_decide::STALE_FEED_S;
 use super::allocation_inputs::Snapshot;
 use super::allocation_level1::Inputs as ClassInputs;
-use super::allocation_switch_cost::switch_weeks;
+use super::allocation_adapter::switch_cost::switch_weeks;
 use super::allocation_view::View;
-use crate::plugins::allocation::rest::MOVES_PER_WEEK;
 use crate::plugins::allocation::Class;
 
 /// Background work this long or longer is long, seconds.
@@ -51,7 +51,7 @@ pub(super) struct Built {
     pub outside: Vec<u64>,
 }
 
-pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Option<&Forecast>, class: &(ClassInputs, Level1), standing: &Standing) -> Built {
+pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Option<&Forecast>, class: &(ClassInputs, Level1), standing: &Standing, lim: &Limits) -> Built {
     let now = snap.now;
     let (ci, l1) = class;
     let accounts = ci.accounts.iter().enumerate().map(|(j, q)| Account { q: q.clone(), spare: l1.spare[j], price: l1.price[j].unwrap_or([0.0, 0.0]) }).collect();
@@ -83,7 +83,7 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
         let hours = |at: i64| (now - at) as f64 / 3600.0;
         let since = last.and_then(|l| l.bound_at).map_or(f64::INFINITY, hours);
         let pinned = standing.pinned_h(sid, now).unwrap_or(0.0);
-        let moves_week = last.map_or(0, |l| l.rest_moves.iter().filter(|t| now - **t < WEEK_S).count());
+        let moved = |span: i64| last.map_or(0, |l| l.rest_moves.iter().filter(|t| now - **t < span).count());
         let tokens = view.tokens.get(&sid).copied();
         panes.push(Pane {
             sid,
@@ -95,10 +95,10 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
             lost_work: speed[1] * f64::from(fp.background_s.unwrap_or(0)) / 3600.0,
             clean_per_h: fp.clean_per_h,
             long_background: fp.background_s.is_some_and(|s| s >= LONG_BACKGROUND_S),
-            earliest_h: (DWELL_H - since).max(0.0).max(pinned).min(H2),
-            left: last.and_then(|l| l.left).map(|(id, at)| (id, DWELL_H - hours(at))),
+            earliest_h: (lim.dwell_h - since).max(0.0).max(pinned).min(H2),
+            left: last.and_then(|l| l.left).map(|(id, at)| (id, lim.dwell_h - hours(at))),
             barred: 0,
-            switches_left: MOVES_PER_WEEK.saturating_sub(moves_week) as u8,
+            switches_left: lim.switches_left(moved(WEEK_S), moved(DAY_S)),
             disturb_left: DISTURB_PER_DAY,
         });
     }
@@ -106,8 +106,8 @@ pub(super) fn build(a: &Allocation, snap: &Snapshot, view: &View, forecast: Opti
         accounts,
         panes,
         young,
-        pi: l1.pi,
-        fleet_left: FLEET_PER_DAY.saturating_sub(a.day_moves.len() + a.day_pending.len()),
+        pi: lim.pi(l1.pi),
+        fleet_left: lim.fleet_per_day.saturating_sub(a.day_moves.len() + a.day_pending.len()),
         stale_feed: snap.feed_at.is_none_or(|f| now - f > STALE_FEED_S),
         outside,
     }

@@ -17,22 +17,22 @@ const RECORDED: u64 = 0xd3aa_f6ea_84d1_c20f;
 /// rule on four weeks; driven as the shell with the forecast three times
 /// low and its three-hour speed as wrong, the run whose refusals read
 /// 152 on one machine and 178 on another, on one.
-const RUNS: [(u64, u64, Policy); 3] = [
+pub(super) const RUNS: [(u64, u64, Policy); 3] = [
     (1000, 1004, Policy::Today { bias: 1.0 }),
     (1000, 1004, Policy::Planner { bias: 1.0, short: 1.0, shell: false }),
     (1000, 1001, Policy::Planner { bias: 1.0 / 3.0, short: 1.0 / 3.0, shell: true }),
 ];
 
-struct Fnv(u64);
+pub(super) struct Fnv(pub u64);
 
 impl Fnv {
-    fn eat(&mut self, x: u64) {
+    pub(super) fn eat(&mut self, x: u64) {
         for b in x.to_le_bytes() {
             self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
         }
     }
 
-    fn week(&mut self, w: &Week) {
+    pub(super) fn week(&mut self, w: &Week) {
         for x in [w.money, w.unmet, w.switch_rw, w.refusal_rw, w.lapsed] {
             self.eat(x.to_bits());
         }

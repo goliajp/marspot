@@ -85,7 +85,7 @@ pub(super) fn accounts(r: &Row) -> (Vec<Account>, f64) {
 pub(super) fn plan_row(r: &Row, scale: f64) -> Plan {
     let (acc, pi) = accounts(r);
     let panes = panes(r, scale);
-    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false };
+    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false, limits: crate::sched::level2::Limits::STEADY };
     plan(&i, None)
 }
 
@@ -160,7 +160,7 @@ fn sched_level2_rows_print_what_441_weighs() {
     let r = &rows()[3];
     let (acc, pi) = accounts(r);
     let panes = panes(r, 1.0);
-    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false };
+    let i = Input { accounts: &acc, panes: &panes, young: [0.0; 2], window_full: KAPPA, pi, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false, limits: crate::sched::level2::Limits::STEADY };
     let plan = plan(&i, None);
     println!("row 3: pi {pi:.3}; {}", acc.iter().map(|a| format!("P{} r={:.3} phi={:.3} spare={:.3} price={:.2}/{:.2}", a.q.id, a.q.r, a.q.phi(), a.spare, a.price[0], a.price[1])).collect::<Vec<_>>().join("; "));
     let k = panes.iter().position(|p| p.sid == 441).unwrap();

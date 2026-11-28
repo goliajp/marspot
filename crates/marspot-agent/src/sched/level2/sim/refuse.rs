@@ -45,7 +45,7 @@ impl Sim {
             let p = &c.input.panes[k];
             let Some(j) = self.at.on[k] else { continue };
             t.refusals += 1;
-            t.refused += p.rewrite;
+            t.refused += p.rewrite + c.input.limits.refusal_extra;
             t.eff += STALL_REFUSAL_H;
             if self.refused.len() < 256 {
                 self.refused.push((k, at));

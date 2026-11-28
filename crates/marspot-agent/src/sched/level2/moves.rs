@@ -11,7 +11,7 @@
 use super::grid::{Grid, lasts_high};
 use super::propose::{allowed, proposals};
 use super::search::{Eval, better};
-use super::{Input, LASTS_H, Sched};
+use super::{Input, Sched};
 
 const CHAIN_TARGETS: usize = 3;
 const CHAIN_MOVERS: usize = 4;
@@ -64,7 +64,7 @@ fn swap(e: &Eval, cur: &[Sched], p: usize, q: usize) -> Option<Vec<Sched>> {
     }
     let mut on = g.on.clone();
     on.swap(p, q);
-    if lasts_high(input, &on, j, None) < LASTS_H || lasts_high(input, &on, i, None) < LASTS_H {
+    if lasts_high(input, &on, j, None) < input.limits.lasts_h || lasts_high(input, &on, i, None) < input.limits.lasts_h {
         return None;
     }
     let at = g.first[p].max(g.first[q]);

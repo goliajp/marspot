@@ -29,7 +29,7 @@ pub(crate) fn pane(sid: u64, on: u8, restricted: bool, a: f64, b: f64) -> Pane {
 }
 
 pub(crate) fn input<'a>(accounts: &'a [Account], panes: &'a [Pane]) -> Input<'a> {
-    Input { accounts, panes, young: [0.0; 2], window_full: KAPPA, pi: 0.5, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false }
+    Input { accounts, panes, young: [0.0; 2], window_full: KAPPA, pi: 0.5, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false, limits: crate::sched::level2::Limits::STEADY }
 }
 
 fn targets(p: &Plan, sid: u64) -> Vec<u8> {

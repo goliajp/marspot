@@ -84,7 +84,7 @@ pub(super) struct Allocation {
     pub(super) view: Option<super::allocation_view::View>,
     pub(super) sched: crate::agentsvc::sched::Shadow,
     pub(super) more: super::allocation_more::More,
-    pub(super) switch: super::allocation_switch_cost::SwitchCosts,
+    pub(super) switch: switch_cost::SwitchCosts,
 }
 
 /// Events in `dir` under the claudecode plugin's state directory.
@@ -304,6 +304,9 @@ impl Allocation {
 
 #[path = "allocation_caps.rs"]
 mod caps;
+
+#[path = "allocation_switch_cost.rs"]
+pub(super) mod switch_cost;
 
 #[cfg(test)]
 #[path = "allocation_adapter_tests.rs"]

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use marspot_agent::sched::switch_cost::{self, Shares};
 
-use super::super::allocation_usage::Readers;
+use super::super::super::allocation_usage::Readers;
 use super::*;
 
 const SESSION: &str = include_str!("../../../../../crates/marspot-adapters/src/claude/fixtures/switch_session.jsonl");

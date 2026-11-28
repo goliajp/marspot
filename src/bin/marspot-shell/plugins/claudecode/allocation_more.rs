@@ -10,6 +10,8 @@
 //! - `compacted`: the context before and after, from the transcript.
 //! - `reading`: an account's week and Fable readings and renewals,
 //!   whenever one of them changes.
+//! - `expiry`: what an account's cycle left unused, when it is spent
+//!   and when it renews (`allocation_expiry`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,6 +21,9 @@ use super::allocation_events::{DAY, Event};
 use super::allocation_hours::Hours;
 use super::allocation_inputs::{AccountIn, Snapshot};
 use super::allocation_turns::Turns;
+
+#[path = "allocation_expiry.rs"]
+mod expiry;
 
 /// At most one `boundary` row per pane in this many seconds.
 pub(super) const BOUNDARY_GAP: i64 = 30;
@@ -56,11 +61,12 @@ pub(super) struct More {
     pub(super) hours: Hours,
     /// The roll-up failed and said so; quiet until it works again.
     hours_failing: bool,
+    expiry: expiry::Expiry,
 }
 
 impl More {
     pub(super) fn new(hours: Hours) -> Self {
-        More { turns: Turns::default(), panes: HashMap::new(), readings: None, hours, hours_failing: false }
+        More { turns: Turns::default(), panes: HashMap::new(), readings: None, hours, hours_failing: false, expiry: Default::default() }
     }
 }
 
@@ -120,7 +126,15 @@ impl Allocation {
             }
             self.more.readings = Some(last);
         }
+        let profiles: Vec<u8> = accounts.iter().map(|a| a.profile).collect();
+        self.more.expiry.retain(&profiles);
         for a in accounts {
+            if let Some(detail) = self.more.expiry.note(a) {
+                let ev = Event { at: now, sid: 0, kind: "expiry".into(), profile: Some(a.profile), class: "plain".into(), detail };
+                if let Err(e) = self.events.append(&ev) {
+                    log.push(("alloc.events_failed", format!("{e}")));
+                }
+            }
             let detail = reading_detail(a);
             let key = reading_key(&detail).to_string();
             if self.more.readings.as_ref().and_then(|r| r.get(&a.profile)) == Some(&key) {

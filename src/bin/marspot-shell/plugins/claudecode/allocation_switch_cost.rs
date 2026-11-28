@@ -13,8 +13,8 @@ use std::collections::{HashMap, VecDeque};
 
 use marspot_agent::sched::switch_cost::{AFTER, BASE, Fit, Sample, Shares, Turn, sample};
 
-use super::allocation_prices::{Tokens, weeks};
-use super::allocation_usage::Spent;
+use super::super::allocation_prices::{Tokens, weeks};
+use super::super::allocation_usage::Spent;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::waste::SWITCH_TOKENS;
 
@@ -31,9 +31,9 @@ struct Watch {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct SwitchCosts {
+pub(in crate::plugins::claudecode) struct SwitchCosts {
     panes: HashMap<u64, Watch>,
-    pub(super) fit: Fit,
+    pub(in crate::plugins::claudecode) fit: Fit,
 }
 
 fn turn_of(at: i64, t: &Tokens) -> Turn {
@@ -42,7 +42,7 @@ fn turn_of(at: i64, t: &Tokens) -> Turn {
 
 impl SwitchCosts {
     /// Pane `sid` was put on another account, noticed at `now`.
-    pub(super) fn bound(&mut self, sid: u64, now: i64) {
+    pub(in crate::plugins::claudecode) fn bound(&mut self, sid: u64, now: i64) {
         let Some(w) = self.panes.get_mut(&sid) else { return };
         let at = match w.turns.back() {
             Some(t) if t.cold() && now - t.at <= LATE_S => t.at - 1,
@@ -52,7 +52,7 @@ impl SwitchCosts {
     }
 
     /// One reply read of pane `sid`; the sample it completes, if any.
-    pub(super) fn spent(&mut self, sid: u64, s: &Spent) -> Option<Sample> {
+    pub(in crate::plugins::claudecode) fn spent(&mut self, sid: u64, s: &Spent) -> Option<Sample> {
         if !s.main {
             return None;
         }
@@ -82,14 +82,14 @@ impl SwitchCosts {
         Some(got)
     }
 
-    pub(super) fn retain(&mut self, live: impl Fn(u64) -> bool) {
+    pub(in crate::plugins::claudecode) fn retain(&mut self, live: impl Fn(u64) -> bool) {
         self.panes.retain(|sid, _| live(*sid));
     }
 }
 
 /// What switching a pane of `class` with `tokens` of context costs,
 /// weeks; the typical context where it is not known.
-pub(super) fn switch_weeks(sh: Shares, class: Class, tokens: Option<u64>) -> f64 {
+pub(in crate::plugins::claudecode) fn switch_weeks(sh: Shares, class: Class, tokens: Option<u64>) -> f64 {
     let ctx = tokens.map_or(SWITCH_TOKENS, |t| t as f64);
     let model = if class == Class::Restricted { "fable" } else { "opus" };
     let rewrite = sh.rewrite * ctx;

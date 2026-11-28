@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.896"  # marspot-term: settings carry sched.profile and numeric sched.* overrides
+shell   = "0.7.897"  # the planner reads its limits from sched.profile, protects Fable-only quota by rule and records expiries
 core    = "0.12.795"  # marspot-term: settings carry sched.profile and numeric sched.* overrides
 session = "0.11.497"  # marspot-term: settings carry sched.profile and numeric sched.* overrides (not used by session)

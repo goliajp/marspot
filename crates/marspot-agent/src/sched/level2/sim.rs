@@ -197,7 +197,7 @@ impl Sim {
             let p = &c.input.panes[k];
             let dead = self.at.on[k].map_or(H2, |j| c.deadline[j]);
             let kd = kind(p, c.grid.cuts[s], dead);
-            t.rewrites += p.rewrite;
+            t.rewrites += p.rewrite + c.input.limits.switch_extra;
             if kd.notice() {
                 t.lost_work += p.lost_work;
             }

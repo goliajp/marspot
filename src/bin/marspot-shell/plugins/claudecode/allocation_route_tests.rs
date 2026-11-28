@@ -7,7 +7,7 @@ fn acct(id: u8, r: f64, t: f64) -> Account {
 }
 
 fn input(a: &[Account]) -> Input<'_> {
-    Input { accounts: a, panes: &[], young: [0.0; 2], window_full: 0.528, pi: 0.5, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false }
+    Input { accounts: a, panes: &[], young: [0.0; 2], window_full: 0.528, pi: 0.5, fleet_left: FLEET_PER_DAY, notices_left: NOTICES_PER_HOUR, stale_feed: false, limits: marspot_agent::sched::level2::Limits::STEADY }
 }
 
 // one test: the table is the process's one published value
