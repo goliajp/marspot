@@ -227,16 +227,11 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             let mut menu = MenuRender::new(
                 (420.0, 300.0),
                 layout.top_inset,
-                vec![
-                    item("Split right", "⌘D", true),
-                    item("Split down", "⇧⌘D", true),
-                    MenuItem::divider(),
-                    item("Never reclaim this pane", "", true),
-                    item("Copy pane title", "", true),
-                    MenuItem::divider(),
-                    item("Close pane", "⌘W", true),
-                    item("Close other panes", "", false),
-                ],
+                marspot::ui::components::context_menu::grouped([
+                    vec![item("Split right", "⌘D", true), item("Split down", "⇧⌘D", true)],
+                    vec![item("Never reclaim this pane", "", true), item("Copy pane title", "", true)],
+                    vec![item("Close pane", "⌘W", true), item("Close other panes", "", false)],
+                ]),
             );
             menu.surface.borrow_mut().lay_out(renderer.font_mut(), &menu, (phys_w as f64, phys_h as f64));
             menu.pointer = menu.surface.borrow().row_centre(3);
