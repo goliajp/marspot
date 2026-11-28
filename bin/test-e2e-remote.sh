@@ -20,6 +20,9 @@
 #                                                  # behind it (`bench-lock status`)
 #   E2E_FEATURES=latency-trace bin/test-e2e-remote.sh measure-latency.sh
 #   REMOTE_NAME=my-tree bin/test-e2e-remote.sh     # a remote tree of its own
+#   E2E_EXCLUSIVE="test-session-ownership.sh" bin/test-e2e-remote.sh test-session-ownership.sh
+#                                                  # built under the shared hold, then
+#                                                  # run under the exclusive one
 #
 # The update suites sign their feed with a key generated for the run;
 # the build they test accepts it only with the `test-update-key` feature
@@ -209,9 +212,10 @@ for suite in "${SUITES[@]}"; do
   if [[ ${E2E_LOCK:-heavy} == bench ]]; then
     lock="bench --max-wait $MAX_WAIT $(until_for $((BUILD_TIMEOUT + SUITE_TIMEOUT)))"
     run="bin/_build_then.sh $BUILD_TIMEOUT $SUITE_TIMEOUT ${E2E_FEATURES:--} $suite"
-  elif is_measurement "$suite"; then
+  elif is_measurement "$suite" || [[ " ${E2E_EXCLUSIVE:-} " == *" $suite "* ]]; then
     # built above already; a reading taken next to other heavy work
-    # would only ever come back busy
+    # would only ever come back busy, and a suite named in E2E_EXCLUSIVE
+    # needs a Dock no other job of the host's lock shares
     lock="bench --max-wait $MAX_WAIT $(until_for "$SUITE_TIMEOUT")"
     run="bin/_bounded.sh $SUITE_TIMEOUT bin/$suite"
   else
