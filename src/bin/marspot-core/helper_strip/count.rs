@@ -35,3 +35,7 @@ pub(super) fn assert_counted_as_reached(app: &CoreApp, root: u64) {
 #[cfg(test)]
 #[path = "plain_tests.rs"]
 mod plain_tests;
+
+#[cfg(test)]
+#[path = "mark_tests.rs"]
+mod mark_tests;

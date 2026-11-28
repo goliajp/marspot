@@ -295,6 +295,9 @@ dev_wipe_state
 rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
 mkdir -p "$MARSPOT_STATE_DIR/logs"
 rm -f "$APPLOG" "$MARSPOT_STATE_DIR"/control-deny.tsv
+# The +N after a title is drawn only while no strip of helpers is: the
+# shadow panes get rows in the strip, so the strip is turned off here.
+printf 'appearance.helper_strip = false\n' > "$MARSPOT_STATE_DIR/settings.toml"
 HELPER_STEPS=(
   wait:9000
   click:helpers-mark wait:1000
