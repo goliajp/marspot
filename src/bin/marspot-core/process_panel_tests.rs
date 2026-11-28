@@ -18,6 +18,7 @@ fn row(pid: i32, ppid: i32, comm: &str) -> ProcRow {
         tty_dev: 0,
         tty_fg_pgid: 0,
         status: libc::SSLEEP,
+        execed: true,
     }
 }
 

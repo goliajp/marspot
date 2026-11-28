@@ -206,6 +206,7 @@ mod tests {
             tty_dev: 0,
             tty_fg_pgid: 0,
             status: libc::SSLEEP,
+            execed: true,
         }
     }
 

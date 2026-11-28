@@ -54,6 +54,7 @@ pub(super) fn row(pid: i32, ppid: i32, pgid: i32, start: u64, comm: &str) -> Pro
         tty_dev: 0,
         tty_fg_pgid: 0,
         status: libc::SRUN,
+        execed: true,
     }
 }
 
