@@ -63,6 +63,18 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'package(marspot-agent) & test(/closed_loop/)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# Each of the closed-loop tests in `loop_tests` starts a thread per week
+# and rule, sixteen to forty, so it already uses every core: nextest
+# runs it as one that needs them all.  Counted as one thread, two of
+# them and the digest ran together with 84 threads on twelve cores, and
+# the single-threaded tests beside them were starved:
+# `allocation_sim_step4_gate`, 2.9 s alone, passed its minute.  The
+# digest is left out: most of its time is one shell-driven week on one
+# thread.
+[[profile.default.overrides]]
+filter = 'package(marspot-agent) & test(/^sched::level2::loop_tests::sched_level2_closed_loop/)'
+threads-required = "num-cpus"
+
 # The Linux job on a shared runner: at nice 19 beside a dozen other
 # heavy jobs, the scheduler's simulations get a sliver of a core, and
 # ones that take 6 to 8 s alone in a debug build passed their minute

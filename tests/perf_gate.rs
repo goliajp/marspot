@@ -1,6 +1,7 @@
 //! Cost gates: the time hot or recurring work takes.  Each budget is 3x
 //! the P95 measured on the reference machine (mini2, Apple silicon Mac
-//! mini, debug test build) and is widened only after measuring again.
+//! mini, debug test build; a ratio the optimiser changes has a release
+//! multiple of its own) and is widened only after measuring again.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -24,9 +25,17 @@ const ZOMBIE_CHECK_P95_BUDGET: Duration = Duration::from_micros(17_401);
 /// timed in the same run.  A fixed time failed on a hosted runner about
 /// 3x slower than mini; the ratio holds across machines and still blows
 /// when a check re-reads whole transcripts or folds them quadratically.
-/// P95/floor 1.52 to 1.85 over six runs (P95 176 to 263 ms, floor p50
-/// 116 to 144 ms) measured 2026-11-26.
-const ZOMBIE_APPENDED_P95_FLOOR_MULTIPLE: f64 = 5.5;
+///
+/// It does not hold across build profiles: the optimiser makes the floor,
+/// a plain scan for line ends, about 25 times faster and the check's
+/// parse about 5 times, so a release build reads about five times the
+/// debug ratio and has its own multiple.  Debug: P95/floor 1.85 to 1.92
+/// over four runs on mini2 2026-11-28 (P95 138 to 149 ms, floor p50 74
+/// to 77 ms; 1.52 to 1.85 on mini 2026-11-26).  Release: 9.07 to 12.30
+/// over ten runs on mini2 2026-11-28 at load1 2 to 150 (P95 27 to 43
+/// ms, floor p50 2.9 to 3.7 ms).  A check that re-read a whole 200 MB
+/// transcript would read over thirty times the bytes appended.
+const ZOMBIE_APPENDED_P95_FLOOR_MULTIPLE: f64 = if cfg!(debug_assertions) { 5.8 } else { 36.9 };
 const APPENDED_PANES: usize = 4;
 const APPENDED: usize = 6 << 20;
 const APPENDED_CHECKS: u64 = 20;
