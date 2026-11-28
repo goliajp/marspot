@@ -23,7 +23,6 @@ use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use marspot_term::bytelog::ByteLog;
@@ -569,6 +568,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{self, TryRecvError};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     /// What the `line_discipline` tests read off a pane.
