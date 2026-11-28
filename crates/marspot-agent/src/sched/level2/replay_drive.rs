@@ -179,24 +179,32 @@ impl W<'_> {
     }
 
     /// Where the routing table places a pane opened now.
-    pub(super) fn place_new(&mut self, class: Class) -> Option<u8> {
+    pub(super) fn place_new(&mut self, class: Class, today: u8) -> Option<u8> {
         let m = Newcomer { class, rate: RHO0, high: RHO0 * high_of(class), life_h: H2 };
-        let to = self.table.as_mut()?.place(&m, None)?.to;
+        let to = self.table.as_mut()?.place_or(&m, None, Some(today))?.to;
         self.open(to).then_some(to)
     }
 
-    /// Where a refused pane goes: the routing table's entry, else today's objective.
+    /// Where a refused pane goes: the routing table's entry, else today's
+    /// objective, which is also the table's pick when it is short.
     pub(super) fn place_refused(&mut self, now: i64, sid: u64) -> Option<u8> {
         let sp = self.speeds(sid, now);
         let p = &self.panes[&sid];
-        let (on, class, ctx) = (p.on, p.class, p.ctx);
+        let (on, class) = (p.on, p.class);
         let rate = if sp[0] + sp[1] > 0.0 { sp[0] + sp[1] } else { RHO0 };
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: H2 };
-        match self.table.as_mut().map(|t| t.place_refused(&m, on, sid)) {
-            Some(RefusedTo::To(x)) if self.open(x.to) => return Some(x.to),
-            Some(RefusedTo::Wait) => return None,
-            _ => {}
+        let today = self.today_out(now, sid, rate, sp[0]);
+        match self.table.as_mut().map(|t| t.place_refused(&m, on, sid, today)) {
+            Some(RefusedTo::To(x)) if self.open(x.to) => Some(x.to),
+            Some(RefusedTo::Wait) => None,
+            _ => today,
         }
+    }
+
+    /// Today's rule's account for refused pane `sid`.
+    fn today_out(&self, now: i64, sid: u64, rate: f64, fable: f64) -> Option<u8> {
+        let p = &self.panes[&sid];
+        let (on, class, ctx) = (p.on, p.class, p.ctx);
         let q: Vec<_> = self.accs.iter().map(|a| a.q.clone()).collect();
         let mut loads = vec![Load::default(); q.len()];
         for (s, x) in self.panes.iter().filter(|(s, _)| **s != sid) {
@@ -206,7 +214,7 @@ impl W<'_> {
                 loads[j].plain += v[1];
             }
         }
-        let mover = Mover { class, rate, tokens: Some(ctx), fable: Some(sp[0]) };
+        let mover = Mover { class, rate, tokens: Some(ctx), fable: Some(fable) };
         waste::decide(&q, &loads, mover, on, Some(KAPPA_FABLE), &Decision::Out { horizon_h: MUST_LAST_H }, 0, &PARAMS).map(|(t, _)| t)
     }
 }

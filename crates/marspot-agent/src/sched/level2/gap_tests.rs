@@ -1,7 +1,7 @@
 //! The gap: demand twice what the accounts hold over the pane horizon,
 //! two attended panes and six nobody is at.
 
-use super::route::{Newcomer, Routing};
+use super::route::{Newcomer, RefusedTo, Routing};
 use super::tests::{acct, input, pane};
 use super::*;
 
@@ -48,7 +48,8 @@ fn sched_gap_balanced_refuses_no_attended_pane_while_others_hold_quota() {
 /// Every account down to what only Fable can use, Fable short: under
 /// strict protection the unattended other-model panes are the ones that
 /// wait, the attended one keeps working, and no other-model newcomer is
-/// placed on an account with nothing else left.  With Fable not short
+/// placed: level 1 lends the plain class nothing of the reserve, so no
+/// account has anything for it.  With Fable not short
 /// (level 1 finds it cannot use the quota) nobody waits.
 #[test]
 fn sched_gap_strict_keeps_other_models_off_what_only_fable_can_use() {
@@ -62,7 +63,9 @@ fn sched_gap_strict_keeps_other_models_off_what_only_fable_can_use() {
     assert_eq!(guard::waits(&i), vec![6, 7, 8], "the unattended Opus panes wait, the attended one does not");
     let mut r = Routing::of(&i, &plan(&i, None));
     let m = Newcomer { class: crate::quota::Class::Plain, rate: 0.004, high: 0.006, life_h: H2 };
-    assert_eq!(r.place(&m, None), None, "no other-model newcomer on what only Fable can use");
+    assert!(r.kept_off_all(m.class), "protection leaves it no account with other-model week");
+    assert_eq!(r.clone().place_refused(&m, 4, 8, Some(1)), RefusedTo::Wait, "a refused unattended one waits");
+    assert_eq!(r.place(&m, None), None, "nothing lent to other models");
     i.pi = 0.0;
     assert!(guard::waits(&i).is_empty(), "Fable cannot use it all: other models may");
     i.limits = Limits::BALANCED;
