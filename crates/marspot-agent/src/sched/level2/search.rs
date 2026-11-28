@@ -13,6 +13,8 @@
 //! 4. When a sweep keeps nothing: pair swaps and two-step chains among
 //!    the eight dearest (`moves`).
 //! 5. Repeat, at most four rounds.
+//! 6. Each of the eight dearest active panes tries every schedule it may
+//!    hold once against the result.
 //!
 //! With at most six movable panes of at most four targets each, their
 //! joint choices are enumerated instead (`mode=exact`: no schedule of
@@ -25,7 +27,7 @@ use super::exact;
 use super::fit::{fit, prune};
 use super::grid::Grid;
 use super::moves;
-use super::propose::{key, proposals, score};
+use super::propose::{allowed, candidates, key, proposals, score};
 use super::ctx::Ctx;
 use super::sim::Sim;
 use super::tally::{Stage, Tally};
@@ -33,6 +35,8 @@ use super::{EXEMPT_H, H2, Input, MIN_GAIN, MIN_GAIN_EFF, Mode, Plan, Sched, TIE,
 
 const ROUNDS: usize = 4;
 const KEEP: usize = 2;
+/// Panes whose every schedule is tried once at the end of a search.
+const POLISH: usize = 8;
 /// A proposal is simulated only when its linear score beats staying by this.
 const SCREEN: f64 = 1e-7;
 pub(super) const NOISE: f64 = 1e-9;
@@ -192,7 +196,27 @@ pub(super) fn solve(e: &mut Eval, start: &[Sched]) -> (Vec<Sched>, Mode, usize) 
             break;
         }
     }
+    let mut dear: Vec<usize> = by_stay_cost(e, &cur, &active).into_iter().take(POLISH).collect();
+    dear.sort_unstable();
+    polish(e, &mut cur, &mut cost, &dear);
+    e.mark(Stage::Try);
     (cur, Mode::Search, active.len())
+}
+
+/// Each of the dearest active panes' every allowed schedule tried once
+/// against the plan found, in input order (at most `POLISH` panes, as
+/// many as the fleet has today): the sweep tries only the proposals
+/// ranked first at linear prices, which miss a switch whose worth lies in
+/// what it leaves the panes it parts from.
+fn polish(e: &mut Eval, cur: &mut [Sched], cost: &mut Cost, active: &[usize]) {
+    for &p in active {
+        let all: Vec<Sched> = candidates(e.input(), e.grid(), p).into_iter().filter(|s| allowed(e.input(), e.grid(), &e.ctx.deadline, p, s)).collect();
+        for s in std::iter::once(Sched::STAY).chain(all) {
+            if s != cur[p] {
+                e.try_pane(cur, cost, p, s);
+            }
+        }
+    }
 }
 
 /// One sweep over `order`: each pane's best proposals that beat staying

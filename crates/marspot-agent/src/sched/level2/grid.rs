@@ -42,7 +42,7 @@ pub struct Grid {
     /// Each account's restricted renewal cut, when it comes before the week's.
     pub renews_f: Vec<Option<usize>>,
     /// Each pane is a keeper: it uses up its account's rest and is not
-    /// moved off it.
+    /// moved off it before the account's latest moment (`late`).
     pub keeper: Vec<bool>,
     /// Each account's cut at `dead`.
     pub late: Vec<Option<usize>>,
@@ -77,19 +77,40 @@ impl Grid {
     /// The grid, with a cut at the latest moment a switch off each
     /// account that empties inside the horizon averts the refusal.
     pub fn new(input: &Input) -> Grid {
-        let mut base = Grid::build(input, &[]);
+        let base = Grid::build(input, &[]);
         let deadline = Ctx::deadlines(input, &base);
         let dead: Vec<f64> = deadline.iter().enumerate().map(|(j, d)| if *d < H2 { dead_by_exhaustion(*d, base.load[j]) } else { H2 }).collect();
         let late: Vec<Option<f64>> = dead.iter().map(|t| (*t < H2 && *t > 0.0).then_some(*t)).collect();
-        if late.iter().all(Option::is_none) {
-            (base.deadline, base.dead) = (deadline, dead);
-            return base;
-        }
-        let extra: Vec<f64> = late.iter().flatten().copied().collect();
-        let mut g = Grid::build(input, &extra);
-        g.late = late.iter().map(|t| t.and_then(|t| cut_at(&g.cuts, t))).collect();
+        let mut g = if late.iter().all(Option::is_none) {
+            base
+        } else {
+            let extra: Vec<f64> = late.iter().flatten().copied().collect();
+            let mut g = Grid::build(input, &extra);
+            g.late = late.iter().map(|t| t.and_then(|t| cut_at(&g.cuts, t))).collect();
+            g
+        };
         (g.deadline, g.dead) = (deadline, dead);
+        g.keepers_wait();
         g
+    }
+
+    /// A keeper stays to use up its account's rest until the latest
+    /// moment a switch off it averts the refusal, and from then may leave
+    /// like any pane: a refusal is a loss the user sees, and staying on
+    /// to be refused buys nothing.  An account that lasts the horizon
+    /// keeps its keeper throughout.
+    fn keepers_wait(&mut self) {
+        for p in 0..self.keeper.len() {
+            let Some(j) = self.on[p].filter(|_| self.keeper[p]) else { continue };
+            let wait = match self.late[j] {
+                Some(c) => c,
+                // past the last cut, or no deadline inside the horizon
+                None if self.dead[j] > 0.0 => self.segs(),
+                // the latest moment has passed: free now
+                None => continue,
+            };
+            self.first[p] = self.first[p].max(wait);
+        }
     }
 
     /// Every switch of pane `p` off an account that empties inside the
@@ -200,7 +221,7 @@ impl Grid {
 
     /// The pane may hold a planned switch at all.
     pub fn movable(&self, input: &Input, p: usize) -> bool {
-        !input.stale_feed && !self.keeper[p] && input.panes[p].switches_left > 0 && self.first[p] < self.segs()
+        !input.stale_feed && input.panes[p].switches_left > 0 && self.first[p] < self.segs()
     }
 }
 

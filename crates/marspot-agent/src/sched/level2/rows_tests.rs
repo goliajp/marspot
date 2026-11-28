@@ -98,21 +98,27 @@ fn line(plan: &Plan) -> String {
 }
 
 /// What the rows must give at the logged loads: 441 leaves P3 for P7,
-/// 428 stays as the keeper, 482 stays, P8 is never a target.  Where 481
-/// goes is printed, not asserted: P3 empties at the high band within
-/// two hours, and of 481 and 430, which run at nearly the same plain
-/// speed, the plan moves 430, whose rewrite costs half of 481's
-/// (481 holds 0.9 M tokens), and lets 481 stay with the keeper.
+/// 428 stays as the keeper until P3's latest moment and may leave then
+/// like any pane, 482 stays, P8 is no target before P3's latest moment.
+/// Where 481 goes is printed, not asserted: P3 empties at the high band
+/// within two hours, and of 481 and 430, which run at nearly the same
+/// plain speed, the plan moves 430 early, whose rewrite costs half of
+/// 481's (481 holds 0.9 M tokens), and 481 stays with the keeper to the
+/// latest moment.
 fn check(plan: &Plan, what: &str) -> Vec<String> {
     let mut bad = Vec::new();
+    let latest = plan.switches.iter().filter(|s| s.from == 3).map(|s| s.t_dead).fold(0.0, f64::max);
+    // a switch held to P3's latest moment: its window opens after now and
+    // closes at that moment
+    let at_latest = |s: &Switch| s.from == 3 && s.t_open > 0.0 && (s.t_dead - latest).abs() < 1e-6;
     if to_of(plan, 441) != vec![7] {
         bad.push(format!("{what}: 441 goes {:?}", to_of(plan, 441)));
     }
-    if !to_of(plan, 428).is_empty() || !to_of(plan, 482).is_empty() {
-        bad.push(format!("{what}: 428 or 482 moves"));
+    if plan.switches.iter().any(|s| s.sid == 428 && !at_latest(s)) || !to_of(plan, 482).is_empty() {
+        bad.push(format!("{what}: 428 leaves before P3's latest moment, or 482 moves"));
     }
-    if plan.switches.iter().any(|s| s.to == 8) {
-        bad.push(format!("{what}: P8 is a target"));
+    if plan.switches.iter().any(|s| s.to == 8 && !at_latest(s)) {
+        bad.push(format!("{what}: P8 is a target before P3's latest moment"));
     }
     bad
 }

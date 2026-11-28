@@ -51,21 +51,28 @@ fn sched_level2_a_pane_leaves_an_account_that_runs_out_before_it_does() {
     let a = [acct(1, 0.02, 0.0, 100.0), acct(2, 0.6, 0.0, 120.0)];
     let p = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002), pane(12, 1, false, 0.0, 0.004)];
     let plan = plan(&input(&a, &p), None);
-    // the slowest stays to use the rest; the others leave before the refusal
-    assert_eq!(plan.switches.len(), 2, "{:?}", plan.switches);
+    // the slowest is the keeper: it stays to the account's latest moment,
+    // which comes before P1 has anything left to use up, and leaves then
+    // with the others, before the refusal
+    assert!(Grid::new(&input(&a, &p)).keeper[1]);
+    assert_eq!(plan.switches.len(), 3, "{:?}", plan.switches);
     for s in &plan.switches {
         // the window opens as late as still leaves a clean rest at the
         // stopping rule's chance: 4 rests an hour
         let lead = -crate::detmath::ln(1.0 - window::CLEAN_CHANCE) / 4.0;
-        assert!(s.sid != 11 && (s.from, s.to) == (1, 2) && (s.t_open - (s.t_dead - lead).max(0.0)).abs() < 1e-9, "{s:?}");
+        assert!((s.from, s.to) == (1, 2) && (s.t_open - (s.t_dead - lead).max(0.0)).abs() < 1e-9, "{s:?}");
         assert!(s.exempt, "the switch averts a refusal within two hours");
         assert!(s.t_dead > 0.0 && s.t_dead < 2.0 / 1.5, "{s:?}");
     }
-    assert_eq!(plan.refusals.len(), 1, "the keeper is refused at the end");
-    assert_eq!(plan.refusals[0].0, 11);
-    // one pane alone gains 0.2 stall hours by leaving early and the
-    // rewrite is paid either way: under the bar, so it stays
-    let one = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002)];
+    assert!(plan.refusals.is_empty(), "{:?}", plan.refusals);
+    // two panes: each gains 0.2 stall hours by leaving before the refusal
+    // and the rewrite is paid either way; the keeper leaves at the latest
+    // moment too, so together they pass the bar
+    let two = [pane(10, 1, false, 0.0, 0.006), pane(11, 1, false, 0.0, 0.002)];
+    let pl = super::plan(&input(&a, &two), None);
+    assert_eq!(pl.switches.len(), 2, "{:?}", pl.switches);
+    // the keeper alone gains 0.2 stall hours: under the bar, so it stays
+    let one = [pane(11, 1, false, 0.0, 0.002)];
     assert!(super::plan(&input(&a, &one), None).switches.is_empty());
 }
 

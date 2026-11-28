@@ -8,18 +8,13 @@
 //!   planner refuses no more panes and spends no more than today's rule
 //!   (a count of weeks lost is not held: the planner refuses more than
 //!   today in about three weeks in ten on 638 weeks, so over twenty it
-//!   moves by several weeks with the draw);
+//!   moves by several weeks with the draw), and no single week refuses
+//!   more panes than today's rule by more than two or a tenth, whichever
+//!   is more;
 //! - with the forecast three times low, the planner refuses at most 5%
 //!   more panes than today's rule; three times high, it spends at most
 //!   5% more;
 //! - no pane is switched twice by plan inside six hours.
-//!
-//! The bar that no single week refuses more panes than today's rule by
-//! more than two or a tenth, whichever is more, is printed with the
-//! weeks over it and not held yet: the planner's keeper stays on an
-//! account until it is refused there (a Fable keeper most of all), and
-//! weeks where several panes on one account find no target that lasts
-//! them six hours end in refusals in the same step.
 //!
 //! Twenty weeks on the seeds the planner was tuned on and twenty it
 //! never was are held to the same bars.  With the forecast wrong, the
@@ -98,6 +93,7 @@ fn no_worse(what: &str, today: &[Week], planner: &[Week]) {
         .map(|(k, (t, p))| format!("week {} {} against {}", k + 1, p.refusals, t.refusals))
         .collect();
     println!("closed loop {what}: weeks over today's refusals by more than max(2, 10%): {} {over:?}", over.len());
+    assert!(over.is_empty(), "{what}: weeks over today's refusals by more than max(2, 10%): {over:?}");
 }
 
 /// The forecast three times low: at most 5% more refusals than today.

@@ -158,7 +158,7 @@ impl Standing {
         let mut keep = Vec::with_capacity(self.switches.len());
         for s in self.switches.clone() {
             let on = input.panes.iter().find(|p| p.sid == s.sid).map(|p| p.on);
-            let gain = timed.and_then(|t| t.switches.iter().find(|x| x.sid == s.sid && x.order == s.order)).map(|x| (x.gain, x.gain_eff));
+            let gain = timed.and_then(|t| t.switches.iter().find(|x| x.sid == s.sid && x.order == s.order)).map(|x| (x.gain, x.gain_eff, x.exempt));
             let why = if s.open_at > now || s.order > 0 {
                 None
             } else if on.is_none() || on == Some(s.to) {
@@ -168,7 +168,11 @@ impl Standing {
                 Some("missed")
             } else if timed.is_none() {
                 Some("target fails a filter")
-            } else if gain.is_none_or(|(g, eff)| !still_gains(g, eff)) {
+            // one that averts a refusal soon stays while it costs no money
+            // and saves any stall: the refusal pays the same rewrite, so the
+            // refusal's stall is all it saves, and a keeper's switch at its
+            // account's latest moment saves no more than that
+            } else if gain.is_none_or(|(g, eff, averts)| !still_gains(g, eff) && !(averts && g >= -NOISE && eff > 0.0)) {
                 Some("gain gone")
             } else {
                 None

@@ -55,3 +55,10 @@ threads-required = "num-cpus"
 [[profile.default.overrides]]
 filter = 'package(marspot-session) & test(=build_sha_without_repo::a_session_built_without_a_repository_names_the_passed_commit)'
 slow-timeout = { period = "60s", terminate-after = 5 }
+
+# The pane plan's closed-loop weeks run a week to a thread and take half
+# a minute in a debug build on an idle runner; beside the rest of the
+# suite they can pass a minute without hanging.
+[[profile.default.overrides]]
+filter = 'package(marspot-agent) & test(/closed_loop/)'
+slow-timeout = { period = "30s", terminate-after = 4 }
