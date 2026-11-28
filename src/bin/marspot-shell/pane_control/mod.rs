@@ -50,7 +50,7 @@ mod shadow_tree;
 mod wait;
 
 pub(crate) use mainloop::MainSide;
-pub(crate) use panes::PaneView;
+pub(crate) use panes::{PaneView, in_window};
 
 /// A frame for the main loop to send to the core, with how to answer
 /// when it cannot.

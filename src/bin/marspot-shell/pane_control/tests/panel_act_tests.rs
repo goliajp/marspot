@@ -138,16 +138,38 @@ fn helper_panel_a_pane_in_a_window_is_not_closed() {
     live_entries(&sandbox, &[1, 2]);
     let (closed, counts) = closes(act(1, PanelAct::CloseHelper));
     assert_eq!((closed.len(), counts), (0, (0, 1)));
-    // a shadow when the panel asked, in a window by now
+    // a shadow when the panel asked, a top pane by now
     let entry_2 = marspot_term::session_registry::read_session_entry(2).unwrap();
     marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 0, ..entry_2 }).unwrap();
-    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| moved(c, &[(2, 0)]), "refused: in a window", &[]);
+    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| moved(c, &[(2, 0)]), "refused: no longer a child", &[]);
     assert_eq!((closed.len(), counts), (0, (0, 1)));
     assert!(log.contains("pane.close"), "{log}");
 }
 
-/// A move just done is in the session's registry entry before any view
-/// of the sessions has it.
+/// A child shown in a window keeps its parent: the layout the core
+/// saves, not whose child it is, says it is in a window.
+#[test]
+fn helper_panel_a_child_shown_in_a_window_is_not_closed() {
+    let sandbox = marspot_term::test_env::sandbox_state_dir();
+    live_entries(&sandbox, &[1, 2, 3, 4]);
+    in_layout(&[1, 2]);
+    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| c.obs.clone(), "refused: in a window", &[]);
+    assert_eq!((closed.len(), counts), (0, (0, 1)));
+    assert!(log.contains("pane.close"), "{log}");
+    let (closed, counts) = closes(act(1, PanelAct::CloseAllOfParent));
+    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3], "all but the one in a window");
+    assert_eq!(counts, (2, 1));
+}
+
+/// One window holding `sids`, as the core saves it.
+pub(crate) fn in_layout(sids: &[u64]) {
+    let panes = sids.iter().map(|&sid| marspot::state::SavedPane { sid, ..Default::default() }).collect();
+    let win = marspot::state::SavedWindowLayout { grid_cols: sids.len() as u16, grid_rows: 1, focused_idx: 0, panes };
+    marspot::state::write(&marspot::state::SavedState { windows: vec![win], key_window: 0 }).unwrap();
+}
+
+/// A change of parent just made is in the session's registry entry
+/// before any view of the sessions has it.
 #[test]
 fn helper_panel_a_pane_just_moved_to_a_window_is_not_closed() {
     let sandbox = marspot_term::test_env::sandbox_state_dir();
@@ -155,11 +177,11 @@ fn helper_panel_a_pane_just_moved_to_a_window_is_not_closed() {
     let entry_2 = marspot_term::session_registry::read_session_entry(2).unwrap();
     marspot_term::session_registry::rewrite_session_entry(&SessionEntry { shadow_of: 0, ..entry_2 }).unwrap();
     // every view still has 2 for a shadow of 1
-    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| c.obs.clone(), "refused: in a window", &[]);
+    let (closed, counts, log) = closes_seeing(act(2, PanelAct::CloseHelper), |c| c.obs.clone(), "refused: no longer a child", &[]);
     assert_eq!((closed.len(), counts), (0, (0, 1)));
     assert!(log.contains("pane.close"), "{log}");
     let (closed, counts) = closes(act(1, PanelAct::CloseAllOfParent));
-    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3], "all but the one in a window");
+    assert_eq!(closed.iter().map(|c| c.0).collect::<Vec<_>>(), [4, 3], "all but the one made a top pane");
     assert_eq!(counts, (2, 1));
 }
 

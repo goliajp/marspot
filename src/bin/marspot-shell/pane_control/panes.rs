@@ -21,7 +21,8 @@ pub(crate) struct PaneView {
 
 pub(crate) type PaneViews = HashMap<u64, PaneView>;
 
-/// The parent of a shadow pane, 0 for a pane that is not one.
+/// The parent of a child pane, 0 for a top one.  Whose child a pane is
+/// says nothing of whether it is in a window: see [`in_window`].
 pub(super) fn shadow_of(entry: &SessionEntry) -> u64 {
     entry.shadow_of
 }
@@ -37,6 +38,16 @@ static CELLS: std::sync::LazyLock<std::sync::Mutex<Cells>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Cells { stamp: None, cells: HashMap::new() }));
 
 pub(super) fn cells() -> HashMap<u64, (usize, usize, usize)> {
+    fresh_cells().cells.clone()
+}
+
+/// Pane `sid` is in a window, open or closed, by the layout L2 saves:
+/// a pane in none is hidden, a child or not.
+pub(crate) fn in_window(sid: u64) -> bool {
+    fresh_cells().cells.contains_key(&sid)
+}
+
+fn fresh_cells() -> std::sync::MutexGuard<'static, Cells> {
     let path = marspot::state::state_file_path();
     let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
     let mut c = CELLS.lock().unwrap_or_else(|p| p.into_inner());
@@ -44,5 +55,5 @@ pub(super) fn cells() -> HashMap<u64, (usize, usize, usize)> {
         c.stamp = stamp;
         c.cells = super::names::layout_cells();
     }
-    c.cells.clone()
+    c
 }

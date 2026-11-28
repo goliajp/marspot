@@ -82,15 +82,14 @@ pub fn cwd_of_entry(sid: u64) -> Option<String> {
     Some(shell.map_or(e.cwd, |p| p.to_string_lossy().into_owned()))
 }
 
-/// Every pane with what naming needs, its shadow mark read from its
-/// registry entry.  May read the code file, so not for the main
-/// thread's hot paths.
+/// Every pane with what naming needs, marked a shadow when it is in no
+/// window, as the core names it, whose child it is or not.  May read
+/// the code file and the layout, so not for the main thread's hot paths.
 pub fn pane_refs_in(obs: &Observation) -> Vec<marspot::pane_name::PaneRef> {
-    // live_panes lists obs.sessions in order
+    let cells = super::panes::cells();
     live_panes(obs)
         .into_iter()
-        .zip(&obs.sessions)
-        .map(|((sid, cwd, _), s)| marspot::pane_name::PaneRef::new(sid, cwd).with_shadow(super::panes::shadow_of(&s.entry) != 0))
+        .map(|(sid, cwd, _)| marspot::pane_name::PaneRef::new(sid, cwd).with_shadow(!cells.contains_key(&sid)))
         .collect()
 }
 

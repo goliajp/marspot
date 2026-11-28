@@ -10,15 +10,15 @@ A new pane is a shadow pane by default: it has no window, and it ends when the
 pane that opened it ends. `--new-window` opens one alone in a new window, with
 no parent; closing it closes the window.
 
-Panes are for driving a terminal. To hand work to another agent (codex,
-gemini, kimi, another claude), start a helper instead: see the
-`marspot-helpers` skill.
+Panes are for driving a terminal. To hand work to another agent, start a
+helper instead: see the `marspot-helpers` skill.
 
 ## Naming a pane
 
 `PANE` is a session id, a pane name (`spg`, `spg#3381`, `claude:spg`), a window
 cell `w(2,1,3)`, or `self` for your own pane. `pane list` shows ids, names,
-state (`detached`, `dormant`, `shadow`), place and the agent in front.
+state (`detached`, `dormant`, `shadow`: in no window), place, agent and
+(`--json`) a child's `parent`, shown or not.
 
 ## Commands
 
@@ -56,7 +56,7 @@ the text starts; text starting with `-` goes after `--`.
   `run` can be met by it.
 - `send`/`run` refuse with `user_typing` when the person is typing in that pane,
   and `place peek`/`unpeek` when they are typing where it is shown; `--force`
-  does it anyway. Prefer waiting and trying again.
+  overrides. Prefer waiting and trying again.
 
 ## Exit codes
 

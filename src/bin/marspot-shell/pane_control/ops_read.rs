@@ -31,7 +31,7 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
     let agent_of = |code: Option<u16>| {
         table.iter().find(|p| p.code.is_some() && p.code == code).and_then(|p| p.agent.clone()).map_or(Value::Null, Value::from)
     };
-    let row = |sid: u64, cwd: String, parent: u64| {
+    let row = |sid: u64, cwd: String, parent: u64, hidden: bool| {
         let r = marspot::pane_name::PaneRef::new(sid, cwd.clone());
         let view = views.get(&sid);
         // a closed window keeps its place in the saved layout, to be reopened
@@ -41,7 +41,8 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
             ("id", (sid as i64).into()),
             ("name", r.full_name().into()),
             ("cwd", cwd.into()),
-            ("shadow", (parent != 0).into()),
+            // in no window; whose child it is is `parent`, shown or not
+            ("shadow", hidden.into()),
             ("parent", if parent != 0 { (parent as i64).into() } else { Value::Null }),
             ("detached", (parent == 0 && shown.is_none()).into()),
             ("cell", cell),
@@ -57,10 +58,13 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
     let mut out = Vec::new();
     for (sid, cwd, _) in names::live_panes(&ctx.obs) {
         let Some(s) = ctx.obs.session(sid).filter(|_| live.contains(&sid) && !recent.closed_lately(sid, now)) else { continue };
-        out.push(row(sid, cwd, panes::shadow_of(&s.entry)));
+        // one too new for the layout is where it was opened
+        let opened = recent.opened_after(ctx.obs.at, now).find(|o| o.sid == sid).map(|o| o.parent);
+        let hidden = !cells.contains_key(&sid) && opened.is_none_or(|p| p != 0);
+        out.push(row(sid, cwd, panes::shadow_of(&s.entry), hidden));
     }
     for o in recent.opened_after(ctx.obs.at, now).filter(|o| !live.contains(&o.sid)) {
-        out.push(row(o.sid, o.cwd.clone(), o.parent));
+        out.push(row(o.sid, o.cwd.clone(), o.parent, o.parent != 0));
     }
     obj([("panes", Value::Arr(out))])
 }

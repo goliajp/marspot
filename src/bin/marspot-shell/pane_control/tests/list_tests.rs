@@ -145,3 +145,43 @@ fn pane_control_only_a_helpers_pane_is_said_to_be_one() {
     });
     assert_eq!(*said.lock().unwrap(), [false, true]);
 }
+
+/// A child the user put into a window keeps its parent: the list says
+/// whose child it is and that it is no shadow, and its opener's close
+/// recycles it as any pane in a window instead of deleting it.
+#[test]
+fn pane_control_a_child_shown_in_a_window_is_listed_and_closed_as_shown() {
+    let _sandbox = marspot_term::test_env::sandbox_state_dir();
+    let (hub, rx) = hub_at(&temp("childshown"));
+    let panes = vec![registered(10, 0), registered(4246, 10), registered(4247, 10)];
+    let c = ctx(CallerKey::Pane(10), panes, Config::default());
+    super::panel_act_tests::in_layout(&[10, 4246]);
+    let modes = std::sync::Mutex::new(Vec::new());
+    let answer = |hub: &Hub, msg: MsgType, p: &[u8]| {
+        let Some(Ok(m)) = (msg == MsgType::PaneRetire).then(|| decode_pane_retire(p)) else { return };
+        modes.lock().unwrap().push((m.sid, m.mode));
+        let done = PaneDone { req_id: m.req_id, code: DoneCode::Ok, text: String::new() };
+        hub.links.route(MsgType::PaneDone, &encode_pane_done(&done).unwrap());
+    };
+    let (list, shown, hidden) = with_core(&hub, rx, answer, || {
+        let mut conn = Conn::new(&hub, Peer::default(), None);
+        hub.limits.lock().unwrap().opened(CallerKey::Pane(10), 4246, true);
+        hub.limits.lock().unwrap().opened(CallerKey::Pane(10), 4247, true);
+        let list = ops_read::list(&conn, &c);
+        (list, ops_pane::close(&mut conn, &c, "4246").unwrap(), ops_pane::close(&mut conn, &c, "4247").unwrap())
+    });
+    let shown_row = row(&list, 4246).unwrap();
+    assert_eq!(shown_row.get("parent").and_then(Value::i64), Some(10));
+    assert_eq!(shown_row.get("shadow").and_then(Value::bool), Some(false), "shown in a window");
+    let hidden_row = row(&list, 4247).unwrap();
+    assert_eq!((hidden_row.get("parent").and_then(Value::i64), hidden_row.get("shadow").and_then(Value::bool)), (Some(10), Some(true)));
+    assert_eq!(shown.get("recycled").and_then(Value::bool), Some(true));
+    assert_eq!(hidden.get("recycled").and_then(Value::bool), Some(false), "a hidden child its caller opened is deleted");
+    // named and titled as a pane in a window: the core names it so too
+    let refs = super::super::names::pane_refs_in(&c.obs);
+    let shadow = |sid| refs.iter().find(|r| r.sid == sid).map(|r| r.shadow);
+    assert_eq!((shadow(4246), shadow(4247)), (Some(false), Some(true)));
+    assert!(crate::pane_control::in_window(4246) && !crate::pane_control::in_window(4247));
+    use marspot::shell_proto::RetireMode;
+    assert_eq!(*modes.lock().unwrap(), [(4246, RetireMode::Recycle), (4247, RetireMode::Delete)]);
+}
