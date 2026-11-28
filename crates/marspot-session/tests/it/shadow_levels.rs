@@ -73,10 +73,11 @@ fn shadow_levels_an_image_swap_flattens_a_third_level() {
     let (mut c, rc) = pane(&mut sandbox, 33, SLEEP, Some((sid(32), 0)));
     // b becomes a child as an image before the rule could have made it;
     // stopped, so nothing of its own writes its entry back meanwhile.
-    // The stop has a deadline of its own: a test killed while b is
-    // stopped leaves a session that goes on and ends as any other
-    // a group of its own and no stdio, so its sleep holds nothing of the
-    // test's and goes with it
+    // the stop has a deadline of its own: if this test is killed while b
+    // is stopped, this sh still sends SIGCONT later and b goes on and ends
+    // as any other session would. it runs in a process group of its own
+    // and without the test's stdio, so a kill aimed at the test's group
+    // does not take it along and it holds no pipe of the test open
     let resume = std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(format!("sleep {STOPPED_AT_MOST_S}; kill -CONT {}", b.pid()))
