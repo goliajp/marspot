@@ -2,7 +2,7 @@
 #
 # The scripts that would start a real agent CLI refuse on a runner
 # (bin/_real-agent-guard.sh): bin/record-codex-exchange.sh,
-# bin/test-kimi.sh, bin/test-helpers-real.sh, and
+# bin/record-kimi-exchange.sh, bin/test-helpers-real.sh, and
 # bin/test-fresh-install.sh with FRESH_VENDOR=1 aimed at a runner.  Each
 # refusal is checked to come before anything is fetched or copied.
 #
@@ -41,15 +41,16 @@ ROOT="$SB/copy" MARSPOT_RUNNER_HOSTS=none runner_reason >/dev/null \
   && ok "a remote copy (.remote-sync at its top) is a runner" || fail "a remote copy was not called a runner"
 is_runner_host mini2 && is_runner_host lx64.local && ! is_runner_host studio \
   && ok "runner host names: mini2 and lx64 are, studio is not" || fail "is_runner_host"
-for s in test-kimi.sh test-helpers-real.sh; do
-  MARSPOT_RUNNER_MARKERS="$SB/marker" MARSPOT_RUNNER_HOSTS=none refused "$ROOT/bin/$s" \
-    && ok "a runner marker present: $s refuses" || fail "$s ran with a runner marker present"
+for s in "record-kimi-exchange.sh $SB/kimi $SB/rec" test-helpers-real.sh; do
+  # shellcheck disable=SC2086
+  MARSPOT_RUNNER_MARKERS="$SB/marker" MARSPOT_RUNNER_HOSTS=none refused "$ROOT/bin/"$s \
+    && ok "a runner marker present: ${s%% *} refuses" || fail "${s%% *} ran with a runner marker present"
 done
 FRESH_VENDOR=1 HOST=mini2 refused "$ROOT/bin/test-fresh-install.sh" "$SB/none.dmg" \
   && ok "FRESH_VENDOR=1 for mini2: test-fresh-install refuses" || fail "test-fresh-install would run the vendors' installers on mini2"
 
 if why="$(runner_reason)"; then
-  for s in "record-codex-exchange.sh $SB/rec" test-kimi.sh test-helpers-real.sh; do
+  for s in "record-codex-exchange.sh $SB/rec" "record-kimi-exchange.sh $SB/kimi $SB/rec" test-helpers-real.sh; do
     # shellcheck disable=SC2086
     refused "$ROOT/bin/"$s \
       && ok "on this runner ($why) ${s%% *} refuses with no override" || fail "${s%% *} ran on this runner ($why)"

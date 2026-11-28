@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Kimi Code in a pane, end to end: a sandbox marspot, the real kimi
-# binary, the real registry, and a model stand-in on 127.0.0.1.
+# Kimi Code in a pane, end to end: a sandbox marspot, the kimi
+# stand-in (bin/kimi-standin), the real registry, and a model stand-in
+# on 127.0.0.1.
 #
 # What it proves:
 #   - configuration: what marspot writes into a kimi home (the MCP
@@ -30,23 +31,22 @@
 # the KIMI_MODEL_* variables.  The other session is played by
 # `_peerbus_claude_side.py`, speaking the Claude Code socket protocol.
 #
-# The kimi binary is fetched once with the vendor's installer into
-# ~/.cache/marspot-e2e and copied from there; later runs need no network.
+# The kimi in the pane is bin/kimi-standin, never the real CLI: a
+# compiled `kimi` (the kernel's name for the process is what marspot
+# looks for) over a Python TUI that draws, writes and asks what one
+# recorded exchange with Kimi Code 2.7.3 shows (its session record,
+# index and lock, its hooks' input, its MCP calls, its 429 record), so
+# the suite runs on a runner.  bin/record-kimi-exchange.sh records it
+# again.
 #
 # Sandbox-only: MARSPOT_STATE_DIR *and* HOME are redirected, so the
 # kimi home, the registry and the profiles are this test's own.  It
-# runs the real kimi, so it runs on the interactive machine only (it
-# refuses on a runner) until a kimi stand-in exists; it opens sandbox
-# windows there.
+# opens sandbox windows: run it through bin/test-e2e-remote.sh.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-source "$ROOT/bin/_real-agent-guard.sh"
-refuse_real_agent_on_runner "the real Kimi CLI"
 source "$ROOT/bin/_dev-sandbox.sh"
-
-KIMI_INSTALLER=https://code.kimi.com/kimi-code/install.sh
-KIMI_CACHE="$HOME/.cache/marspot-e2e/kimi"
+source "$ROOT/bin/_kimi-standin.sh"
 
 # A scratch directory of this run's own, removed when the run passes:
 # the fixed name was shared by every run of the suite on the machine.
@@ -99,20 +99,10 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" || ! -x "$SESSION_BIN" || ! -x "$PEE
     && cargo build --release -p marspot-peer 2>&1 | tail -3 )
 fi
 
-# ── kimi, as its installer leaves it ──────────────────────────────
-if [[ ! -x "$KIMI_CACHE/.kimi-code/bin/kimi" ]]; then
-  echo "==> installing kimi with the vendor's script"
-  rm -rf "$KIMI_CACHE"; mkdir -p "$KIMI_CACHE"
-  curl -fsSL --max-time 120 -o "$KIMI_CACHE/install.sh" "$KIMI_INSTALLER" || { echo "download failed"; exit 1; }
-  env -i HOME="$KIMI_CACHE" PATH=/usr/bin:/bin KIMI_NO_MODIFY_PATH=1 /bin/bash "$KIMI_CACHE/install.sh" > "$KIMI_CACHE/install.log" 2>&1 \
-    || { echo "the installer failed"; tail -20 "$KIMI_CACHE/install.log"; exit 1; }
-  [[ -x "$KIMI_CACHE/.kimi-code/bin/kimi" ]] || { echo "the installer left no kimi"; exit 1; }
-fi
-
 # ── this test's own HOME: a default kimi home and a second account ─
 rm -rf "$SB"; mkdir -p "$SB/proj" "$REGISTRY" "$SB/home/.kimi-code/bin" "$SB/home/.kimi-code-profile-2"
 mkdir -p "$SB/home/.kimi-code-profile-3" "$SB/home/.kimi-code-profile-4" # the quota steps' accounts
-cp "$KIMI_CACHE/.kimi-code/bin/kimi" "$SB/home/.kimi-code/bin/kimi"
+kimi_standin_build "$SB/home/.kimi-code/bin/kimi" || { echo "the kimi stand-in did not build"; exit 1; }
 
 python3 "$ROOT/bin/_kimi_mock_model.py" "$SB/port" "$REQUESTS" "$SB/accounts" > "$SB/mock.log" 2>&1 &
 echo $! > "$SB/mock.pid"

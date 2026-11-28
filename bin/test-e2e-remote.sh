@@ -92,6 +92,7 @@ DEFAULT_SUITES=(
   test-codex-follow.sh
   test-agent-handoff.sh
   test-peerbus.sh
+  test-kimi.sh
   test-zombie-watch.sh
   test-model-guard.sh
   test-real-update.sh

@@ -6,6 +6,8 @@
 // sends and leaves with the child's status.
 //
 //   cc -DPYTHON='"/path/python3"' -DSTANDIN='"/path/standin.py"' -o codex launcher.c
+//
+// The kimi stand-in is built from it too, with -DNAME='"kimi"'.
 #include <libproc.h>
 #include <signal.h>
 #include <stdio.h>
@@ -13,6 +15,10 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#ifndef NAME
+#define NAME "codex"
+#endif
 
 static pid_t child;
 
@@ -34,7 +40,7 @@ int main(int argc, char **argv) {
     if (child < 0) return 71;
     if (child == 0) {
         execv(PYTHON, args);
-        perror("codex stand-in: " PYTHON);
+        perror(NAME " stand-in: " PYTHON);
         _exit(127);
     }
     int sigs[] = {SIGTERM, SIGHUP, SIGINT, SIGQUIT, SIGWINCH};

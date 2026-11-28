@@ -1,0 +1,714 @@
+{
+ "rows": 40,
+ "cols": 120,
+ "exit": 0,
+ "asked": [
+  "\u001b]11;?\u0007",
+  "\u001b[c",
+  "\u001b[?u",
+  "\u001b]11;?\u0007"
+ ],
+ "segments": [
+  {
+   "name": "start",
+   "out": [
+    [
+     2.858,
+     "\u001b]11;?\u0007"
+    ],
+    [
+     2.925,
+     "\u001b[?2026h\u001b[?2026l"
+    ],
+    [
+     2.925,
+     "\u001b[?25l"
+    ],
+    [
+     2.982,
+     "\u001b[?2004h"
+    ],
+    [
+     2.982,
+     "\u001b[>7u\u001b[?u\u001b]7501;?\u001b\\\u001b[c\u001b[?25l"
+    ],
+    [
+     2.986,
+     "\u001b[?1004h"
+    ],
+    [
+     2.986,
+     "\u001b[?2031h\u001b]11;?\u0007\u001b[?996n"
+    ],
+    [
+     2.988,
+     "\u001b[>4;2m"
+    ],
+    [
+     2.991,
+     "\u001b[?2026h \u001b[0m\u001b]8;;\u0007\r\r\n  \u001b[38;2;79;168;255m⠋\u001b[39m Preparing Kimi Code…                                                                                               \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[?25l"
+    ],
+    [
+     3.009,
+     "\u001b[?2026h\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[?25l"
+    ],
+    [
+     3.036,
+     "\u001b[?25l"
+    ],
+    [
+     3.055,
+     "\u001b[?25l"
+    ],
+    [
+     3.107,
+     "\u001b[?2026h\u001b[1A\r\u001b[2K \u001b[38;2;79;168;255m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m                                                                                                                    \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[38;2;79;168;255m▐█▛█▛█▌\u001b[39m  \u001b[1m\u001b[38;2;79;168;255mWelcome to Kimi Code!\u001b[39m\u001b[22m                                                                                    \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[38;2;79;168;255m▐█████▌\u001b[39m  \u001b[38;2;136;136;136mSend /help for help information.\u001b[39m                                        "
+    ],
+    [
+     3.107,
+     "                                 \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m                                                                                                                    \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mDirectory: \u001b[39m\u001b[22m{CWD}                                                                            \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mSession:   \u001b[39m\u001b[22m                                                                                                       \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mModel:     \u001b[39m\u001b[22mmock-model                                                                                             \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mVersion:   \u001b[39m\u001b[22m2.7.3                           "
+    ],
+    [
+     3.107,
+     "                                                                       \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m                                                                                                                    \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;136;136;136mNo session yet — one will be created on your first message.\u001b[39m                                                         \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭─────────────────────────────────────"
+    ],
+    [
+     3.107,
+     "───────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m          \u001b[38;2;107;107;107m/goal fo"
+    ],
+    [
+     3.107,
+     "r multi-step work with a clear finish line\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                   \u001b[38;2;224;224;224mcontext: 0% (0/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l"
+    ],
+    [
+     3.108,
+     "\u001b[3A\u001b[6G"
+    ],
+    [
+     3.108,
+     "\u001b[?25l"
+    ],
+    [
+     3.491,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K \u001b[38;2;79;168;255m\u001b[1m✦ Kimi K3.1 Pro is ready\u001b[22m\u001b[39m \u001b[38;2;245;245;245m\u001b[1m- use the model in a fresh session for the best results\u001b[22m\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;136;136;136mStandard: Plus/Moderato and above; Highspeed: Pro/Allegretto and above\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;136;136;136mNo session yet — one will be created on your first message.\u001b[39m                                                         \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                   "
+    ],
+    [
+     3.492,
+     "             \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m          \u001b[38;2;107;107;107m/goal for multi-step work with a clear finish line\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                   \u001b[38;2;224;224;224mcontext: 0% (0/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G"
+    ],
+    [
+     3.492,
+     "\u001b[?25l"
+    ]
+   ]
+  },
+  {
+   "name": "plain",
+   "out": [
+    [
+     6.867,
+     "\u001b[?2026h\r\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > SLOW say hello to the recording\u001b[7m \u001b[27m                                                                                 \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[37G\u001b[?25l"
+    ],
+    [
+     6.871,
+     "\u001b[?2026h\r\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.018,
+     "\u001b[?2026h\u001b[12A\r\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mSession:   \u001b[39m\u001b[22m{SESSION}                                                           \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mModel:     \u001b[39m\u001b[22mmock-model                                                                                             \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mVersion:   \u001b[39m\u001b[22m2.7.3                                                                                                  \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m  \u001b[1m\u001b[38;2;136;136;136mMCP:       \u001b[39m\u001b[22m1 connected                                                                                            \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m                                                                                                       "
+    ],
+    [
+     7.018,
+     "             \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m\u001b[1m✦ Kimi K3.1 Pro is ready\u001b[22m\u001b[39m \u001b[38;2;245;245;245m\u001b[1m- use the model in a fresh session for the best results\u001b[22m\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;136;136;136mStandard: Plus/Moderato and above; Highspeed: Pro/Allegretto and above\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;136;136;136mNo session yet — one will be created on your first message.\u001b[39m                                                         \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;78;200;126mMCP server \"marspot\" connected · 1 tool (stdio)\u001b[39m                      "
+    ],
+    [
+     7.018,
+     "                                               \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;A\u0007 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;B\u0007\u001b]133;C\u0007 \u001b[38;2;255;203;107m\u001b[1m❯ \u001b[22m\u001b[39m\u001b[38;2;255;203;107m\u001b[1mSLOW say hello to the recording\u001b[22m\u001b[39m                                                                                     \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                      "
+    ],
+    [
+     7.018,
+     "          \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m          \u001b[38;2;107;107;107m/goal for multi-step work with a clear finish line\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                   \u001b[38;2;224;224;224mcontext: 0% (0/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.028,
+     "\u001b]0;SLOW say hello to the recording\u0007"
+    ],
+    [
+     7.033,
+     "\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.098,
+     "\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.236,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.356,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G"
+    ],
+    [
+     7.356,
+     "\u001b[?25l"
+    ],
+    [
+     7.496,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.596,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.715,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.835,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     7.955,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.077,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.197,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.316,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.435,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.555,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.675,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.795,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     8.915,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l"
+    ],
+    [
+     8.916,
+     "\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.034,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.155,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.276,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.395,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.515,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.636,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.756,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.878,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     9.995,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.114,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.235,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.355,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.475,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.595,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.715,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.836,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     10.956,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.075,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.195,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.315,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.435,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.555,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.675,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.795,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     11.915,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.035,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.154,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.275,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.395,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.516,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────"
+    ],
+    [
+     12.516,
+     "────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2A\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.634,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.755,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l"
+    ],
+    [
+     12.755,
+     "\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.878,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l"
+    ],
+    [
+     12.878,
+     "\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     12.995,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.115,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.236,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G"
+    ],
+    [
+     13.236,
+     "\u001b[?25l"
+    ],
+    [
+     13.355,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.475,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.595,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.715,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.835,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     13.955,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.077,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G"
+    ],
+    [
+     14.077,
+     "\u001b[?25l"
+    ],
+    [
+     14.195,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌔\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.315,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌕\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.435,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌖\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.555,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌗\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.675,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌘\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.796,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     14.915,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌒\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     15.035,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  🌓\u001b[38;2;136;136;136m · Tip: /sessions to browse and resume earlier sessions\u001b[39m                                                            \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ],
+    [
+     15.13,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K\u001b]133;A\u0007 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;B\u0007\u001b]133;C\u0007 \u001b[38;2;224;224;224m● \u001b[39mmock reply done                                                                                                     \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /goal for multi-step work with a clear finish line\u001b[39m                                                         \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰──────"
+    ],
+    [
+     15.13,
+     "──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                  \u001b[38;2;224;224;224mcontext: 1% (87/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     15.137,
+     "\u001b[6G"
+    ],
+    [
+     15.137,
+     "\u001b[?25l"
+    ],
+    [
+     15.154,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  \u001b[38;2;136;136;136mWorked for 8s · done 11:47 PM\u001b[39m                                                                                        \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ]
+   ],
+   "typed": "SLOW say hello to the recording"
+  },
+  {
+   "name": "tool",
+   "out": [
+    [
+     17.512,
+     "\u001b[?2026h\r\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > Send probe the text RECORDED with context\u001b[7m \u001b[27m                                                                       \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[47G\u001b[?25l"
+    ],
+    [
+     17.514,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K\u001b]133;A\u0007 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;B\u0007\u001b]133;C\u0007 \u001b[38;2;255;203;107m\u001b[1m❯ \u001b[22m\u001b[39m\u001b[38;2;255;203;107m\u001b[1mSend probe the text RECORDED with context\u001b[22m\u001b[39m                                                                           \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: /tasks to check agent activity and background tasks\u001b[39m                                                        \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n"
+    ],
+    [
+     17.514,
+     "\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                  \u001b[38;2;224;224;224mcontext: 1% (87/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     17.53,
+     "\u001b[6G\u001b[?25l"
+    ],
+    [
+     17.573,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K\u001b]133;A\u0007 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;224;224;224m● \u001b[39m\u001b[3mUserPromptSubmit hook\u001b[23m                                                                                               \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                                       \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;B\u0007\u001b]133;C\u0007   PROBE-CONTEXT from the hook                                                                                         \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: ! to run a shell command\u001b[39m                                                                                   \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭───────────────────────────────────────────────────────────────────────────────────────────────────────────"
+    ],
+    [
+     17.574,
+     "─────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                  \u001b[38;2;224;224;224mcontext: 1% (87/256k)\u001b[39m\u001b[0"
+    ],
+    [
+     17.574,
+     "m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     17.595,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K \u001b[38;2;224;224;224m● \u001b[39mUsing \u001b[38;2;79;168;255m\u001b[1mSendMessage\u001b[22m\u001b[39m\u001b[2m · MCP/marspot\u001b[22m\u001b[2m (\u001b[22m\u001b[2mprobe\u001b[22m\u001b[2m)\u001b[22m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: ! to run a shell command\u001b[39m                                                                                   \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰──────────────────────"
+    ],
+    [
+     17.595,
+     "──────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                 \u001b[38;2;224;224;224mcontext: 1% (143/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     17.609,
+     "\u001b[?2026h\u001b[4A\r\u001b[2K \u001b[38;2;78;200;126m● \u001b[39mUsed \u001b[38;2;79;168;255m\u001b[1mSendMessage\u001b[22m\u001b[39m\u001b[2m · MCP/marspot\u001b[22m\u001b[2m (\u001b[22m\u001b[2mprobe\u001b[22m\u001b[2m)\u001b[22m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[2msent\u001b[22m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: ! to run a shell command\u001b[39m                                                                                   \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────"
+    ],
+    [
+     17.61,
+     "────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                 \u001b[38;2;224;224;224mcontext: 1% (143/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     17.626,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K\u001b]133;A\u0007 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;B\u0007\u001b]133;C\u0007 \u001b[38;2;224;224;224m● \u001b[39mdone                                                                                                                \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: ! to run a shell command\u001b[39m                                                                                   \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰──────"
+    ],
+    [
+     17.626,
+     "──────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                 \u001b[38;2;224;224;224mcontext: 1% (149/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     17.64,
+     "\u001b[?2026h\u001b[2A\r\u001b[2K  \u001b[38;2;136;136;136mWorked for 1s · done 11:47 PM\u001b[39m                                                                                        \u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[2B\u001b[6G\u001b[?25l"
+    ]
+   ],
+   "typed": "Send probe the text RECORDED with context"
+  },
+  {
+   "name": "quota",
+   "out": [
+    [
+     19.988,
+     "\u001b[?2026h\r\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > QUOTA-EXHAUSTED now\u001b[7m \u001b[27m                                                                                             \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[25G\u001b[?25l"
+    ],
+    [
+     19.989,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K\u001b]133;A\u0007 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K\u001b]133;B\u0007\u001b]133;C\u0007 \u001b[38;2;255;203;107m\u001b[1m❯ \u001b[22m\u001b[39m\u001b[38;2;255;203;107m\u001b[1mQUOTA-EXHAUSTED now\u001b[22m\u001b[39m                                                                                                 \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K  🌑\u001b[38;2;136;136;136m · Tip: ask Kimi to schedule tasks, e.g. \"remind me at 5pm\"\u001b[39m                                                        \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n"
+    ],
+    [
+     19.99,
+     "\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                 \u001b[38;2;224;224;224mcontext: 1% (149/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     20.008,
+     "\u001b[6G\u001b[?25l"
+    ],
+    [
+     20.031,
+     "\u001b[6G\u001b[?25l"
+    ],
+    [
+     20.047,
+     "\u001b[?2026h\u001b[3A\r\u001b[2K   \u001b[38;2;232;84;84mError: [provider.api_error] You have exceeded your current quota.\u001b[39m                                                   \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K   \u001b[38;2;136;136;136mIf this persists, run `/export-debug-zip` and share the file with us for diagnosis. Please don't share it publicly.\u001b[39m \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰──────────────────────"
+    ],
+    [
+     20.047,
+     "──────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;232;168;56m\u001b[1mAsk When Needed\u001b[22m\u001b[39m  \u001b[38;2;224;224;224mmock-model thinking\u001b[39m  \u001b[38;2;136;136;136m…{SB_TAIL}/proj\u001b[39m                 \u001b[38;2;107;107;107m@: mention files | ! to run a shell command\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K                                                                                                 \u001b[38;2;224;224;224mcontext: 1% (155/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     20.063,
+     "\u001b[6G\u001b[?25l"
+    ]
+   ],
+   "typed": "QUOTA-EXHAUSTED now"
+  },
+  {
+   "name": "exit",
+   "out": [
+    [
+     22.415,
+     "\u001b[?2026h\u001b[1A\r\u001b[2K \u001b[38;2;79;168;255m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m│\u001b[39m > \u001b[38;2;79;168;255m\u001b[1m/exit\u001b[7m\u001b[22m\u001b[39m \u001b[27m                                                                                                           \u001b[38;2;79;168;255m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;79;168;255m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8"
+    ],
+    [
+     22.415,
+     ";;\u0007\u001b[?2026l\u001b[1A\u001b[11G\u001b[?25l"
+    ],
+    [
+     22.418,
+     "\u001b[?2026h\u001b[1A\r\u001b[2K \u001b[38;2;90;90;90m╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m│\u001b[39m > \u001b[7m \u001b[27m                                                                                                                \u001b[38;2;90;90;90m│\u001b[39m\u001b[0m\u001b]8;;\u0007\r\r\n\u001b[2K \u001b[38;2;90;90;90m╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[1A\u001b[6G\u001b[?25l\u001b[?2031l\u001b[?1004"
+    ],
+    [
+     22.419,
+     "l"
+    ],
+    [
+     22.432,
+     "\u001b[?2026h\u001b[3B\r\u001b[2K \u001b[38;2;232;168;56m\u001b[1mShutting down… (running shutdown hooks)\u001b[22m\u001b[39m                                                         \u001b[38;2;224;224;224mcontext: 1% (155/256k)\u001b[39m\u001b[0m\u001b]8;;\u0007\u001b[?2026l\u001b[3A\u001b[6G\u001b[?25l"
+    ],
+    [
+     22.438,
+     "\u001b[<u"
+    ],
+    [
+     22.438,
+     "\u001b[>4;0m"
+    ],
+    [
+     22.488,
+     " \u001b[4B\r\r\n"
+    ],
+    [
+     22.488,
+     "\u001b[?25h\u001b[?2004l"
+    ],
+    [
+     22.489,
+     " Bye!\r\n\r\n To resume this session: kimi -r {SESSION}\r\n"
+    ],
+    [
+     22.5,
+     ""
+    ]
+   ],
+   "typed": "/exit"
+  }
+ ],
+ "wire": "{\"type\":\"metadata\",\"protocol_version\":\"1.5\",\"created_at\":1795877214439,\"min_protocol_version\":\"1.5\"}\n{\"type\":\"environment.set_binding\",\"environmentId\":\"local\",\"agentId\":\"main\",\"time\":1795877214483}\n{\"type\":\"mcp.tools_discovered\",\"agentId\":\"main\",\"serverName\":\"marspot\",\"hash\":\"b12756d9f183186e6f3bcd2f9fc26546f8605003f1c5de1489d908c7825a17ff\",\"tools\":[{\"name\":\"SendMessage\",\"description\":\"Send a message to another agent session.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"to\":{\"type\":\"string\"},\"message\":{\"type\":\"string\"}},\"required\":[\"to\",\"message\"]}}],\"enabledNames\":[\"SendMessage\"],\"time\":1795877214485}\n{\"type\":\"changeNotifier.snapshot\",\"agentId\":\"main\",\"agentsMdHash\":null,\"agentsMdFiles\":{},\"skillsHash\":\"f8f2729a601ebbacc1391fbc93d276cf24d4a74a83c30e55b3f0208576d63584\",\"subagentNames\":[\"plan\",\"agent\",\"coder\",\"explore\"],\"modelPool\":null,\"workspacePrimaryByWorkspace\":{\"{WORKSPACE}\":\"{CWD}\"},\"workspaceAdditionalDirs\":[],\"time\":1795877214507}\n{\"type\":\"profile.bind\",\"agentId\":\"main\",\"modelAlias\":\"__kimi_env_model__\",\"profileName\":\"agent\",\"thinkingEffort\":\"on\",\"systemPrompt\":\"…\",\"environmentDisclosure\":{\"cwd\":\"{CWD}\"},\"agentsMdPaths\":[],\"activeToolNames\":[\"Read\",\"Write\",\"Edit\",\"Grep\",\"Glob\",\"Bash\",\"TaskList\",\"TaskOutput\",\"TaskStop\",\"WaitFor\",\"CronCreate\",\"CronList\",\"CronDelete\",\"ReadMediaFile\",\"TodoList\",\"Skill\",\"WebSearch\",\"Agent\",\"AgentSwarm\",\"FetchURL\",\"AskUserQuestion\",\"NotifyUser\",\"ExitPlanMode\",\"CreateGoal\",\"GetGoal\",\"SetGoalBudget\",\"UpdateGoal\",\"TowerInit\",\"TowerStatus\",\"TowerTeardown\",\"mcp__*\"],\"disallowedTools\":[],\"subagents\":[\"coder\",\"explore\",\"plan\"],\"time\":1795877214507}\n{\"type\":\"permission.set_mode\",\"agentId\":\"main\",\"mode\":\"yolo\",\"time\":1795877214509}\n{\"type\":\"turn.prompt\",\"agentId\":\"main\",\"input\":[{\"type\":\"text\",\"text\":\"SLOW say hello to the recording\"}],\"origin\":{\"kind\":\"user\"},\"promptId\":\"msg_01M8H9Z69ZECF50FYHRX02H78D\",\"turnId\":0,\"trigger\":\"normal\",\"time\":1795877214561}\n{\"type\":\"context.append_message\",\"agentId\":\"main\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"SLOW say hello to the recording\"}],\"toolCalls\":[],\"id\":\"msg_01M8H9Z69ZECF50FYHRX02H78D\",\"origin\":{\"kind\":\"user\"}},\"time\":1795877214562}\n{\"type\":\"plugin.session_start\",\"agentId\":\"main\",\"content\":null,\"time\":1795877214565}\n{\"type\":\"context.append_message\",\"agentId\":\"main\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<system-reminder>\\nToday's date is 2026-11-28, in the local client machine's timezone ({TIME_ZONE}). The current date is restated in a reminder whenever it changes; rely on the latest such reminder for the current date. DO NOT mention this to the user explicitly.\\n</system-reminder>\"}],\"toolCalls\":[],\"origin\":{\"kind\":\"injection\",\"variant\":\"date_change\",\"disclosure\":{\"kind\":\"date\",\"renderGeneration\":1,\"localDate\":\"2026-11-28\",\"timeZone\":\"{TIME_ZONE}\"}}},\"time\":1795877214570}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.begin\",\"uuid\":\"73373e5a-bd5f-4244-ac6c-321b8ae1a61e\",\"turnId\":\"0\",\"step\":1},\"time\":1795877214584}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"content.part\",\"uuid\":\"6e399de8-1d42-498f-98c6-ac2fafc4d85c\",\"turnId\":\"0\",\"step\":1,\"stepUuid\":\"73373e5a-bd5f-4244-ac6c-321b8ae1a61e\",\"block\":0,\"part\":{\"type\":\"text\",\"text\":\"mock reply done\"},\"startedAt\":1795877222613,\"durationMs\":0},\"time\":1795877222615}\n{\"type\":\"usage.record\",\"agentId\":\"main\",\"model\":\"__kimi_env_model__\",\"usage\":{\"inputOther\":10,\"output\":3,\"inputCacheCreation\":0},\"usageScope\":\"turn\",\"time\":1795877222615}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.end\",\"uuid\":\"73373e5a-bd5f-4244-ac6c-321b8ae1a61e\",\"turnId\":\"0\",\"step\":1,\"finishReason\":\"end_turn\",\"usage\":{\"inputOther\":10,\"output\":3,\"inputCacheCreation\":0},\"llmFirstTokenLatencyMs\":8025,\"llmStreamDurationMs\":1,\"llmRequestBuildMs\":4,\"llmServerFirstTokenMs\":8022,\"llmServerDecodeMs\":1,\"llmClientConsumeMs\":1,\"llmClientBlockedMs\":0,\"messageId\":\"chatcmpl-mock\",\"providerFinishReason\":\"completed\",\"rawFinishReason\":\"stop\"},\"time\":1795877222617}\n{\"type\":\"turn.ended\",\"agentId\":\"main\",\"turnId\":0,\"reason\":\"completed\",\"durationMs\":8054,\"replyModel\":{\"provider\":\"openai\",\"model\":\"mock-model\"},\"modelSteps\":[{\"model\":\"mock-model\",\"provider\":\"openai\",\"isKfc\":false,\"step\":1,\"role\":\"step\"}],\"time\":1795877222617}\n{\"type\":\"token_counting.turn_recorded\",\"agentId\":\"main\",\"turnId\":0,\"length\":3,\"tokens\":87,\"time\":1795877222618}\n{\"type\":\"prompt.completed\",\"agentId\":\"main\",\"promptId\":\"msg_01M8H9Z69ZECF50FYHRX02H78D\",\"finishedAt\":\"2026-11-28T14:47:02.618Z\",\"reason\":\"completed\",\"time\":1795877222618}\n{\"type\":\"turn.prompt\",\"agentId\":\"main\",\"input\":[{\"type\":\"text\",\"text\":\"<hook_result hook_event=\\\"UserPromptSubmit\\\">\\nPROBE-CONTEXT from the hook\\n</hook_result>\",\"meta\":{\"contentType\":\"text/xml\",\"source\":\"user prompt submit hook\"}},{\"type\":\"text\",\"text\":\"Send probe the text RECORDED with context\"}],\"origin\":{\"kind\":\"user\"},\"promptId\":\"msg_01M8H9ZGHW59K4YQH14F0Q6AR1\",\"turnId\":1,\"trigger\":\"normal\",\"time\":1795877225051}\n{\"type\":\"context.append_message\",\"agentId\":\"main\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<hook_result hook_event=\\\"UserPromptSubmit\\\">\\nPROBE-CONTEXT from the hook\\n</hook_result>\",\"meta\":{\"contentType\":\"text/xml\",\"source\":\"user prompt submit hook\"}},{\"type\":\"text\",\"text\":\"Send probe the text RECORDED with context\"}],\"toolCalls\":[],\"id\":\"msg_01M8H9ZGHW59K4YQH14F0Q6AR1\",\"origin\":{\"kind\":\"user\"}},\"time\":1795877225052}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.begin\",\"uuid\":\"e0dc29c5-9979-4848-ad51-afbdd4bab6b3\",\"turnId\":\"1\",\"step\":1},\"time\":1795877225063}\n{\"type\":\"usage.record\",\"agentId\":\"main\",\"model\":\"__kimi_env_model__\",\"usage\":{\"inputOther\":10,\"output\":3,\"inputCacheCreation\":0},\"usageScope\":\"turn\",\"time\":1795877225075}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"tool.call\",\"uuid\":\"c4e64cd9-c174-4e31-9ed7-6d5fd4ddedd0\",\"turnId\":\"1\",\"step\":1,\"stepUuid\":\"e0dc29c5-9979-4848-ad51-afbdd4bab6b3\",\"toolCallId\":\"call_1795877225067\",\"name\":\"mcp__marspot__SendMessage\",\"args\":{\"to\":\"probe\",\"message\":\"RECORDED\"}},\"time\":1795877225091}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"tool.result\",\"parentUuid\":\"c4e64cd9-c174-4e31-9ed7-6d5fd4ddedd0\",\"toolCallId\":\"call_1795877225067\",\"result\":{\"output\":\"sent\",\"durationMs\":4}},\"time\":1795877225096}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.end\",\"uuid\":\"e0dc29c5-9979-4848-ad51-afbdd4bab6b3\",\"turnId\":\"1\",\"step\":1,\"finishReason\":\"tool_use\",\"usage\":{\"inputOther\":10,\"output\":3,\"inputCacheCreation\":0},\"llmFirstTokenLatencyMs\":10,\"llmStreamDurationMs\":2,\"llmRequestBuildMs\":1,\"llmServerFirstTokenMs\":9,\"llmServerDecodeMs\":1,\"llmClientConsumeMs\":0,\"llmClientBlockedMs\":2,\"messageId\":\"chatcmpl-mock\",\"providerFinishReason\":\"tool_calls\",\"rawFinishReason\":\"tool_calls\"},\"time\":1795877225097}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.begin\",\"uuid\":\"50028e2e-f08b-4140-a860-ea3fa8e6c4d9\",\"turnId\":\"1\",\"step\":2},\"time\":1795877225104}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"content.part\",\"uuid\":\"f6591e05-28d3-4a78-b563-d2905e11b65d\",\"turnId\":\"1\",\"step\":2,\"stepUuid\":\"50028e2e-f08b-4140-a860-ea3fa8e6c4d9\",\"block\":0,\"part\":{\"type\":\"text\",\"text\":\"done\"},\"startedAt\":1795877225109,\"durationMs\":0},\"time\":1795877225109}\n{\"type\":\"usage.record\",\"agentId\":\"main\",\"model\":\"__kimi_env_model__\",\"usage\":{\"inputOther\":10,\"output\":3,\"inputCacheCreation\":0},\"usageScope\":\"turn\",\"time\":1795877225110}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.end\",\"uuid\":\"50028e2e-f08b-4140-a860-ea3fa8e6c4d9\",\"turnId\":\"1\",\"step\":2,\"finishReason\":\"end_turn\",\"usage\":{\"inputOther\":10,\"output\":3,\"inputCacheCreation\":0},\"llmFirstTokenLatencyMs\":4,\"llmStreamDurationMs\":1,\"llmRequestBuildMs\":1,\"llmServerFirstTokenMs\":3,\"llmServerDecodeMs\":0,\"llmClientConsumeMs\":0,\"llmClientBlockedMs\":1,\"messageId\":\"chatcmpl-mock\",\"providerFinishReason\":\"completed\",\"rawFinishReason\":\"stop\"},\"time\":1795877225110}\n{\"type\":\"turn.ended\",\"agentId\":\"main\",\"turnId\":1,\"reason\":\"completed\",\"durationMs\":58,\"replyModel\":{\"provider\":\"openai\",\"model\":\"mock-model\"},\"modelSteps\":[{\"model\":\"mock-model\",\"provider\":\"openai\",\"isKfc\":false,\"step\":1,\"role\":\"step\"},{\"model\":\"mock-model\",\"provider\":\"openai\",\"isKfc\":false,\"step\":2,\"role\":\"step\"}],\"time\":1795877225110}\n{\"type\":\"token_counting.turn_recorded\",\"agentId\":\"main\",\"turnId\":1,\"length\":7,\"tokens\":149,\"time\":1795877225111}\n{\"type\":\"prompt.completed\",\"agentId\":\"main\",\"promptId\":\"msg_01M8H9ZGHW59K4YQH14F0Q6AR1\",\"finishedAt\":\"2026-11-28T14:47:05.111Z\",\"reason\":\"completed\",\"time\":1795877225111}\n{\"type\":\"turn.prompt\",\"agentId\":\"main\",\"input\":[{\"type\":\"text\",\"text\":\"QUOTA-EXHAUSTED now\"}],\"origin\":{\"kind\":\"user\"},\"promptId\":\"msg_01M8H9ZJZ6WXY52T03N416T4F1\",\"turnId\":2,\"trigger\":\"normal\",\"time\":1795877227521}\n{\"type\":\"context.append_message\",\"agentId\":\"main\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"QUOTA-EXHAUSTED now\"}],\"toolCalls\":[],\"id\":\"msg_01M8H9ZJZ6WXY52T03N416T4F1\",\"origin\":{\"kind\":\"user\"}},\"time\":1795877227521}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.begin\",\"uuid\":\"e2879226-9d40-43f3-bd6d-a5f4f1740e90\",\"turnId\":\"2\",\"step\":1},\"time\":1795877227527}\n{\"type\":\"context.append_loop_event\",\"agentId\":\"main\",\"event\":{\"type\":\"step.end\",\"uuid\":\"e2879226-9d40-43f3-bd6d-a5f4f1740e90\",\"turnId\":\"2\",\"step\":1,\"finishReason\":\"error\"},\"time\":1795877227543}\n{\"type\":\"turn.ended\",\"agentId\":\"main\",\"turnId\":2,\"reason\":\"failed\",\"error\":{\"code\":\"provider.api_error\",\"message\":\"You have exceeded your current quota.\",\"name\":\"APIProviderQuotaExhaustedError\",\"details\":{\"requestId\":null,\"statusCode\":429},\"retryable\":false},\"durationMs\":23,\"modelSteps\":[{\"model\":\"mock-model\",\"provider\":\"openai\",\"isKfc\":false,\"step\":1,\"role\":\"step\"}],\"time\":1795877227544}\n{\"type\":\"token_counting.turn_recorded\",\"agentId\":\"main\",\"turnId\":2,\"length\":8,\"tokens\":155,\"time\":1795877227544}\n{\"type\":\"prompt.completed\",\"agentId\":\"main\",\"promptId\":\"msg_01M8H9ZJZ6WXY52T03N416T4F1\",\"finishedAt\":\"2026-11-28T14:47:07.545Z\",\"reason\":\"failed\",\"time\":1795877227545}\n",
+ "index": "{\"sessionId\":\"{SESSION}\",\"sessionDir\":\"{KIMI_HOME}/sessions/{WORKSPACE}/{SESSION}\",\"workDir\":\"{CWD}\"}\n",
+ "locks": {
+  "{KIMI_HOME}/locks/sessions/{SESSION}.lock": "{\"version\":1,\"token\":\"{PID}:b4d5f818-5f92-4cad-b6f2-0da78c935ca1\",\"pid\":{PID},\"hostname\":\"{HOST}\",\"startedAt\":1795877214401,\"clientIdentity\":\"kimi_code_cli\",\"clientDisplayName\":\"Kimi Code CLI\"}"
+ },
+ "hooks": "{\"stdin\": \"{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"{SESSION}\\\",\\\"cwd\\\":\\\"{CWD}\\\",\\\"client_type\\\":\\\"kimi_code_cli\\\",\\\"session_title\\\":\\\"SLOW say hello to the recording\\\",\\\"prompt\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"SLOW say hello to the recording\\\"}],\\\"is_steer\\\":false}\"}\n{\"stdin\": \"{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"{SESSION}\\\",\\\"cwd\\\":\\\"{CWD}\\\",\\\"client_type\\\":\\\"kimi_code_cli\\\",\\\"session_title\\\":\\\"SLOW say hello to the recording\\\",\\\"turn_id\\\":0,\\\"step\\\":1,\\\"first_step_of_turn\\\":true,\\\"finish_reason\\\":\\\"completed\\\",\\\"usage\\\":{\\\"inputOther\\\":10,\\\"output\\\":3,\\\"inputCacheCreation\\\":0},\\\"stop_hook_active\\\":false}\"}\n{\"stdin\": \"{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"{SESSION}\\\",\\\"cwd\\\":\\\"{CWD}\\\",\\\"client_type\\\":\\\"kimi_code_cli\\\",\\\"session_title\\\":\\\"SLOW say hello to the recording\\\",\\\"prompt\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"Send probe the text RECORDED with context\\\"}],\\\"is_steer\\\":false}\"}\n{\"stdin\": \"{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"{SESSION}\\\",\\\"cwd\\\":\\\"{CWD}\\\",\\\"client_type\\\":\\\"kimi_code_cli\\\",\\\"session_title\\\":\\\"SLOW say hello to the recording\\\",\\\"turn_id\\\":1,\\\"step\\\":2,\\\"first_step_of_turn\\\":false,\\\"finish_reason\\\":\\\"completed\\\",\\\"usage\\\":{\\\"inputOther\\\":10,\\\"output\\\":3,\\\"inputCacheCreation\\\":0},\\\"stop_hook_active\\\":false}\"}\n{\"stdin\": \"{\\\"hook_event_name\\\":\\\"UserPromptSubmit\\\",\\\"session_id\\\":\\\"{SESSION}\\\",\\\"cwd\\\":\\\"{CWD}\\\",\\\"client_type\\\":\\\"kimi_code_cli\\\",\\\"session_title\\\":\\\"SLOW say hello to the recording\\\",\\\"prompt\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"QUOTA-EXHAUSTED now\\\"}],\\\"is_steer\\\":false}\"}\n",
+ "mcp": "{\"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-11-25\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"kimi-code\", \"version\": \"0.0.0\"}}, \"jsonrpc\": \"2.0\", \"id\": 0}\n{\"method\": \"notifications/initialized\", \"jsonrpc\": \"2.0\"}\n{\"method\": \"tools/list\", \"jsonrpc\": \"2.0\", \"id\": 1}\n{\"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-11-25\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"kimi-code\", \"version\": \"0.0.0\"}}, \"jsonrpc\": \"2.0\", \"id\": 0}\n{\"method\": \"notifications/initialized\", \"jsonrpc\": \"2.0\"}\n{\"method\": \"tools/list\", \"jsonrpc\": \"2.0\", \"id\": 1}\n{\"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-11-25\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"kimi-code\", \"version\": \"0.0.0\"}}, \"jsonrpc\": \"2.0\", \"id\": 0}\n{\"method\": \"notifications/initialized\", \"jsonrpc\": \"2.0\"}\n{\"method\": \"tools/list\", \"jsonrpc\": \"2.0\", \"id\": 1}\n{\"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-11-25\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"kimi-code\", \"version\": \"0.0.0\"}}, \"jsonrpc\": \"2.0\", \"id\": 0}\n{\"method\": \"notifications/initialized\", \"jsonrpc\": \"2.0\"}\n{\"method\": \"tools/list\", \"jsonrpc\": \"2.0\", \"id\": 1}\n{\"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-11-25\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"kimi-code\", \"version\": \"0.0.0\"}}, \"jsonrpc\": \"2.0\", \"id\": 0}\n{\"method\": \"notifications/initialized\", \"jsonrpc\": \"2.0\"}\n{\"method\": \"tools/list\", \"jsonrpc\": \"2.0\", \"id\": 1}\n{\"method\": \"tools/call\", \"params\": {\"name\": \"SendMessage\", \"arguments\": {\"to\": \"probe\", \"message\": \"RECORDED\"}}, \"jsonrpc\": \"2.0\", \"id\": 2}\n",
+ "doctor": {
+  "code": 0,
+  "out": "Kimi doctor\n\nOK config.toml  {KIMI_HOME}/config.toml\nOK tui.toml     {KIMI_HOME}/tui.toml\n\nAll checked config files are valid.\n",
+  "err": ""
+ },
+ "version": "2.7.3",
+ "files": [
+  "bin",
+  "bin/kimi",
+  "cache",
+  "cache/client-configs",
+  "cache/client-configs/global%3A%2Fclient_configs%3Aestimated_cache_duration.json",
+  "cache/client-configs/global%3A%2Fclient_configs%3Asurvey_popup.json",
+  "cache/query-store",
+  "cache/query-store/cluster.indexes.json",
+  "cache/query-store/cluster.meta.json",
+  "cache/query-store/shard-00",
+  "cache/query-store/shard-00/db.indexes.json",
+  "cache/query-store/shard-00/db.wal",
+  "cache/query-store/shard-01",
+  "cache/query-store/shard-01/db.indexes.json",
+  "cache/query-store/shard-01/db.wal",
+  "cache/query-store/shard-02",
+  "cache/query-store/shard-02/db.indexes.json",
+  "cache/query-store/shard-02/db.wal",
+  "cache/query-store/shard-03",
+  "cache/query-store/shard-03/CURRENT",
+  "cache/query-store/shard-03/db.indexes.json",
+  "cache/query-store/shard-03/db.wal",
+  "cache/query-store/shard-03/generations",
+  "cache/query-store/shard-03/generations/g-000001",
+  "cache/query-store/shard-03/generations/g-000001/compound.index",
+  "cache/query-store/shard-03/generations/g-000001/dt.index",
+  "cache/query-store/shard-03/generations/g-000001/manifest.json",
+  "cache/query-store/shard-03/generations/g-000001/secondary.index",
+  "cache/query-store/shard-03/generations/g-000001/store",
+  "cache/query-store/shard-04",
+  "cache/query-store/shard-04/db.indexes.json",
+  "cache/query-store/shard-04/db.wal",
+  "cache/query-store/shard-05",
+  "cache/query-store/shard-05/db.indexes.json",
+  "cache/query-store/shard-05/db.wal",
+  "cache/query-store/shard-06",
+  "cache/query-store/shard-06/db.indexes.json",
+  "cache/query-store/shard-06/db.wal",
+  "cache/query-store/shard-07",
+  "cache/query-store/shard-07/db.indexes.json",
+  "cache/query-store/shard-07/db.wal",
+  "cache/query-store/shard-08",
+  "cache/query-store/shard-08/db.indexes.json",
+  "cache/query-store/shard-08/db.wal",
+  "cache/query-store/shard-09",
+  "cache/query-store/shard-09/db.indexes.json",
+  "cache/query-store/shard-09/db.wal",
+  "cache/query-store/shard-10",
+  "cache/query-store/shard-10/db.indexes.json",
+  "cache/query-store/shard-10/db.wal",
+  "cache/query-store/shard-11",
+  "cache/query-store/shard-11/db.indexes.json",
+  "cache/query-store/shard-11/db.wal",
+  "cache/query-store/shard-12",
+  "cache/query-store/shard-12/db.indexes.json",
+  "cache/query-store/shard-12/db.wal",
+  "cache/query-store/shard-13",
+  "cache/query-store/shard-13/db.indexes.json",
+  "cache/query-store/shard-13/db.wal",
+  "cache/query-store/shard-14",
+  "cache/query-store/shard-14/db.indexes.json",
+  "cache/query-store/shard-14/db.wal",
+  "cache/query-store/shard-15",
+  "cache/query-store/shard-15/db.indexes.json",
+  "cache/query-store/shard-15/db.wal",
+  "config.toml",
+  "device_id",
+  "locks",
+  "locks/sessions",
+  "logs",
+  "logs/kimi-code.log",
+  "mcp.json",
+  "projects.json",
+  "region.json",
+  "session_index.jsonl",
+  "sessions",
+  "sessions/{WORKSPACE}",
+  "sessions/{WORKSPACE}/{SESSION}",
+  "sessions/{WORKSPACE}/{SESSION}/agents",
+  "sessions/{WORKSPACE}/{SESSION}/agents/main",
+  "sessions/{WORKSPACE}/{SESSION}/agents/main/wire.jsonl",
+  "sessions/{WORKSPACE}/{SESSION}/logs",
+  "sessions/{WORKSPACE}/{SESSION}/logs/kimi-code.log",
+  "sessions/{WORKSPACE}/{SESSION}/notify",
+  "sessions/{WORKSPACE}/{SESSION}/notify/state.json",
+  "sessions/{WORKSPACE}/{SESSION}/state.json",
+  "tui.toml",
+  "user-history",
+  "user-history/1de27452b1aa28ab4876afb849721c26.jsonl"
+ ]
+}
