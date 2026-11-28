@@ -13,9 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use marspot::pane_state::{Activity, PaneStatus};
@@ -23,6 +21,7 @@ use marspot::{lx_debug, lx_info, lx_warn};
 
 use super::{LogLevel, PaneSession, PluginError, PluginHost};
 
+pub(crate) mod core_asks;
 mod inject;
 use inject::InjectInputForwarder;
 pub use inject::{HostPtyIo, InjectInputRequest, InjectWhat};

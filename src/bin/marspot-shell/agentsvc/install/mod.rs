@@ -10,7 +10,7 @@
 //! was updated is not lost.  A CLI that is already there is never asked
 //! about; after a no, marspot does not update it either.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 use marspot::settings::{InstallConsent, InstallConsents, INSTALL_CLIS};
 use marspot::shell_proto::InstallAsk;
@@ -43,6 +43,8 @@ pub(crate) fn gate(ask: InstallAsk, answers: &InstallConsents) -> Gate {
 }
 
 fn keep(ask: InstallAsk) {
+    static REGISTERED: Once = Once::new();
+    REGISTERED.call_once(|| crate::plugins::host::core_asks::register(pending));
     {
         let mut asks = ASKS.lock().unwrap_or_else(|p| p.into_inner());
         let full = asks.len() >= INSTALL_CLIS.len();
@@ -70,6 +72,12 @@ pub(crate) fn to_send(answers: &InstallConsents, all: bool) -> Vec<InstallAsk> {
             a.0.clone()
         })
         .collect()
+}
+
+/// The questions to send the core, against the answers in the settings
+/// now: what the host hands the active core.
+fn pending(all: bool) -> Vec<InstallAsk> {
+    to_send(&marspot::settings::get().install_consent, all)
 }
 
 /// Whether `now` answers yes for a CLI `before` did not: the installer

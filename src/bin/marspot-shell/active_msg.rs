@@ -6,7 +6,7 @@ impl ShellApp {
     /// The questions before an agent CLI's first install that the
     /// active core has not been sent, or every unanswered one when `all`.
     pub(super) fn send_install_asks(&mut self, all: bool) {
-        for ask in crate::agentsvc::install::to_send(&marspot::settings::get().install_consent, all) {
+        for ask in self.plugin_host.core_asks(all) {
             self.send(MsgType::InstallAsk, marspot::shell_proto::encode_install_ask(&ask));
         }
     }
