@@ -9,6 +9,7 @@
 use super::alloc::{CodexAlloc, PaneIn, Snapshot};
 use super::alloc_tests::{H, accounts, append, iso, rows, world};
 use crate::plugins::usage::wallets;
+use marspot_agent::types::wallet::Lot;
 
 const CROSS: &str = include_str!("fixtures/codex-credits-cross.jsonl");
 const RENEWS: i64 = 1_796_051_701;
@@ -58,12 +59,12 @@ fn a_week_running_out_and_the_balance_falling_makes_one_spend_per_drop() {
     let (_, view) = wallets::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
     assert!((view.balance - 59_769.088_765).abs() < 1e-6 && view.week_full && view.spending(AFTER));
     assert!((view.spent_24h - sum).abs() < 1e-6 && view.last_spend == Some(view.at), "{view:?}");
-    // the first balance seen is one lot, ending 180 days on at the latest
+    // the first balance seen, after 2026-11-13, is a lot ending 180 days on at the latest
     let lot = view.lot.clone().expect("a lot");
     let first_seen = lot.expires_at - 180 * 86_400;
-    assert!((lot.amount - 59_775.634_925).abs() < 1e-6 && lot.bound == "latest" && first_seen < AFTER, "{lot:?}");
+    assert!((lot.amount - 59_775.634_925).abs() < 1e-6 && lot.bound == "latest" && lot.seen_by.as_deref() == Some("marspot") && first_seen < AFTER, "{lot:?}");
     let lots = || std::fs::read_to_string(w.dir.parent().unwrap().join("credit_lots.tsv")).unwrap();
-    assert_eq!(lots(), format!("{first_seen}\t2\t59775.634925\t{}\tlatest\n", lot.expires_at));
+    assert_eq!(lots(), format!("{first_seen}\t2\t59775.634925\t{}\tlatest\tmarspot\t{AFTER}\n", lot.expires_at));
 
     // a restart reads the tail again and writes none of it twice
     let mut again = CodexAlloc::new(w.dir.clone());
@@ -156,4 +157,38 @@ fn a_restart_reading_the_tail_again_does_not_lower_per_point() {
         got.push(credits_per_dollar(&w.dir));
     }
     assert!((got[0] - got[1]).abs() < 1e-6 * got[0], "the reading read again counts on neither side: {got:?}");
+}
+
+#[test]
+fn an_accounts_lot_is_dated_from_its_first_balance_in_the_shared_rollouts() {
+    let w = world("codex-wallet-lot-scan");
+    let home = w.dir.parent().unwrap().join("home").join(".codex-profile-2");
+    let day = home.join("sessions").join("2026").join("09").join("27");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(home.join("auth.json"), r#"{"tokens":{"account_id":"acct-test-1"}}"#).unwrap();
+    std::fs::write(day.join("rollout-grant.jsonl"), include_str!("fixtures/codex-credits-grant.jsonl")).unwrap();
+    let mut a = CodexAlloc::new(w.dir.clone());
+    a.observe(&snap(&w.rollout, AFTER - 600, 0));
+    append(&w.rollout, &CROSS.lines().map(str::to_string).collect::<Vec<_>>());
+    a.observe(&snap(&w.rollout, AFTER, 0));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while a.wallets.lots.scanning() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    a.observe(&snap(&w.rollout, AFTER + 60, 0));
+    let (_, view) = wallets::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
+    // 2026-09-30 11:05:21 UTC, seen before 2026-11-13: twelve months
+    let want = Lot { amount: 62_500.0, expires_at: 1_822_302_321, bound: "latest".into(), seen_by: Some("rollout".into()) };
+    assert_eq!(view.lot, Some(want.clone()));
+    let text = std::fs::read_to_string(w.dir.parent().unwrap().join("credit_lots.tsv")).unwrap();
+    let by: Vec<&str> = text.lines().map(|l| l.split('\t').nth(5).unwrap()).collect();
+    assert_eq!(by, ["marspot", "rollout"], "marspot's own first sight stays its own line: {text}");
+    assert!(text.lines().nth(1).unwrap().starts_with("1790766321\t2\t62500.000000\t1822302321\tlatest\trollout\t"), "{text}");
+
+    // a restart takes the same lot and scans no more
+    let mut again = CodexAlloc::new(w.dir.clone());
+    again.observe(&snap(&w.rollout, AFTER + 120, 0));
+    assert!(!again.wallets.lots.scanning());
+    let (_, view) = wallets::all("codex").into_iter().find(|(p, _)| *p == 2).unwrap();
+    assert_eq!(view.lot, Some(want));
 }

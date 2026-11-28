@@ -54,6 +54,9 @@ pub struct Lot {
     pub amount: f64,
     pub expires_at: i64,
     pub bound: String,
+    /// Whose sighting dated it: `rollout`, `devops` or `marspot`;
+    /// `None` when the source did not say.
+    pub seen_by: Option<String>,
 }
 
 /// What one account's records say of its balance.

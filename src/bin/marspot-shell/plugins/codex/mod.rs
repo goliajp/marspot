@@ -20,6 +20,8 @@ mod alloc_per_point;
 mod alloc_rebuild;
 mod alloc_rollout;
 mod alloc_wallet;
+mod credit_lots;
+mod credit_scan;
 #[cfg(test)]
 mod alloc_wallet_tests;
 #[cfg(test)]

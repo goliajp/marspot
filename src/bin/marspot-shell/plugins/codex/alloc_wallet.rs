@@ -15,19 +15,18 @@
 //! last balance from the newest `spend` or `wallet_drop` fact, so the
 //! tail read again yields no fact twice.  Nothing here decides anything.
 //!
-//! The balance an account is first seen with is one lot, appended once
-//! to `credit_lots.tsv` and kept for good: it ends 180 days after that
-//! sighting at the latest, since the grant came no later.
+//! The balance an account is first seen with is written once to
+//! `credit_lots.tsv`, and the account's lot is dated from it or from an
+//! earlier sighting in the shared rollouts (`credit_lots`).
 
 use std::collections::{HashMap, VecDeque};
-use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use super::alloc::{CodexAlloc, Log, Snapshot};
 use super::alloc_per_point::{Period, PeriodStore};
 use super::alloc_rollout::CxTokens;
-use marspot_agent::types::wallet::{Cap, Lot, View};
+use super::credit_lots::LotLog;
+use marspot_agent::types::wallet::{Cap, View};
 use crate::plugins::usage::wallets;
 use crate::plugins::claudecode::allocation_events::{DAY, Event};
 
@@ -41,9 +40,6 @@ const DROPS_FOR_S: i64 = 7 * DAY;
 /// Spends of the last day kept per account; a reply every few seconds
 /// for a day is far fewer.
 const SPENDS_KEPT: usize = 32_768;
-
-/// The latest a lot can end after the account was first seen with it.
-const LOT_LASTS_S: i64 = 180 * DAY;
 
 /// A week used at least this much is used up.
 const FULL: f64 = 1.0 - 1e-9;
@@ -81,8 +77,7 @@ pub(super) struct Wallets {
     models: HashMap<u64, String>,
     accounts: HashMap<u8, Acct>,
     pub(super) periods: PeriodStore,
-    lots_file: PathBuf,
-    lots: HashMap<u8, Lot>,
+    pub(super) lots: LotLog,
 }
 
 impl Wallets {
@@ -90,9 +85,8 @@ impl Wallets {
     /// beside it.
     pub(super) fn new(events: &Path) -> Wallets {
         let dir = events.parent().unwrap_or(events);
-        let lots_file = dir.join("credit_lots.tsv");
-        let lots = fs::read_to_string(&lots_file).unwrap_or_default().lines().filter_map(parse_lot).collect();
-        Wallets { pending: Vec::new(), models: HashMap::new(), accounts: HashMap::new(), periods: PeriodStore::new(dir), lots_file, lots }
+        let lots = LotLog::new(dir.join("credit_lots.tsv"), homes(dir));
+        Wallets { pending: Vec::new(), models: HashMap::new(), accounts: HashMap::new(), periods: PeriodStore::new(dir), lots }
     }
 
     pub(super) fn seen(&mut self, s: Seen) {
@@ -138,7 +132,7 @@ impl Wallets {
                     spent_1h: since(&a.spends, now - 3600),
                     last_spend: a.spends.back().map(|(at, _)| *at),
                     drops: a.drops.iter().copied().collect(),
-                    lot: self.lots.get(p).cloned(),
+                    lot: self.lots.lot(*p),
                 };
                 Some((*p, view))
             })
@@ -148,19 +142,15 @@ impl Wallets {
     }
 }
 
-/// One line of `credit_lots.tsv`: first seen, account, amount, latest
-/// end, bound.
-fn parse_lot(line: &str) -> Option<(u8, Lot)> {
-    let f: Vec<&str> = line.split('\t').collect();
-    let [_, profile, amount, expires_at, bound] = f[..] else { return None };
-    Some((profile.parse().ok()?, Lot { amount: amount.parse().ok()?, expires_at: expires_at.parse().ok()?, bound: bound.to_string() }))
+/// Where the codex accounts' homes are; a test's are beside its state.
+#[cfg(not(test))]
+fn homes(_state: &Path) -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
-fn append_lot(path: &Path, line: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    fs::OpenOptions::new().create(true).append(true).open(path)?.write_all(line.as_bytes())
+#[cfg(test)]
+fn homes(state: &Path) -> PathBuf {
+    state.join("home")
 }
 
 fn push_capped(q: &mut VecDeque<(i64, f64)>, item: (i64, f64), cap: usize) {
@@ -178,13 +168,15 @@ impl CodexAlloc {
         pending.sort_by_key(|s| s.at);
         for s in pending {
             // a reading already decided from, read again, counts nowhere
-            let Some(spent) = self.wallet_fact(&s, log) else { continue };
+            let Some(spent) = self.wallet_fact(&s, snap.now, log) else { continue };
             let model = self.wallets.models.get(&s.sid).cloned();
             if let Some(done) = self.wallets.periods.take(&s, model.as_deref(), spent) {
                 self.period_done(s.profile, done, snap.now, log);
             }
         }
         let now = snap.now;
+        let seen: Vec<u8> = self.wallets.accounts.iter().filter(|(_, a)| a.balance.is_some()).map(|(p, _)| *p).collect();
+        self.wallets.lots.scan(seen, now, log);
         for a in self.wallets.accounts.values_mut() {
             while a.spends.front().is_some_and(|(at, _)| *at <= now - DAY) {
                 a.spends.pop_front();
@@ -203,7 +195,7 @@ impl CodexAlloc {
 
     /// The fact one reading makes, if any; the amount spent when it is a
     /// spend, `None` for a reading no newer than the last decided from.
-    fn wallet_fact(&mut self, s: &Seen, log: &mut Log) -> Option<f64> {
+    fn wallet_fact(&mut self, s: &Seen, now: i64, log: &mut Log) -> Option<f64> {
         let a = self.wallets.accounts.entry(s.profile).or_default();
         if s.at <= a.at {
             return None;
@@ -218,14 +210,7 @@ impl CodexAlloc {
         let Some(balance) = s.balance else { return Some(0.0) };
         let drop = a.balance.map_or(0.0, |was| was - balance);
         a.balance = Some(balance);
-        if !self.wallets.lots.contains_key(&s.profile) {
-            let lot = Lot { amount: balance, expires_at: s.at + LOT_LASTS_S, bound: "latest".into() };
-            let line = format!("{}\t{}\t{balance:.6}\t{}\t{}\n", s.at, s.profile, lot.expires_at, lot.bound);
-            if let Err(e) = append_lot(&self.wallets.lots_file, &line) {
-                log.push(("codex.wallet.lots_failed", e.to_string()));
-            }
-            self.wallets.lots.insert(s.profile, lot);
-        }
+        self.wallets.lots.sighted(s.profile, s.at, balance, now, log);
         if drop <= DROP_EPS {
             return Some(0.0);
         }

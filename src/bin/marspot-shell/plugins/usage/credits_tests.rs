@@ -107,12 +107,12 @@ fn the_spend_fields_come_from_the_rollouts_and_unknown_ones_stay_null() {
     assert_eq!(load(&body), accounts);
 
     // a recorded lot is the inferred expiry; spending is judged now, long after the last spend
-    v.lot = Some(Lot { amount: 62_000.0, expires_at: NOW + 180 * 86_400, bound: "latest".into() });
+    v.lot = Some(Lot { amount: 62_000.0, expires_at: NOW + 180 * 86_400, bound: "latest".into(), seen_by: Some("rollout".into()) });
     enrich(&mut accounts, &[(2, v)], NOW + 3600);
     let c = accounts[0].credits.clone().unwrap();
     assert_eq!((c.spending, c.expiry_source.as_deref()), (Some(false), Some("inferred")));
     let body = feed::render(&accounts, NOW);
-    assert!(body.contains(&format!(r#""lots":[{{"amount":62000,"expires_at":{},"bound":"latest"}}],"expiry_source":"inferred""#, NOW + 180 * 86_400)), "{body}");
+    assert!(body.contains(&format!(r#""lots":[{{"amount":62000,"expires_at":{},"bound":"latest","seen_by":"rollout"}}],"expiry_source":"inferred""#, NOW + 180 * 86_400)), "{body}");
     assert_eq!(load(&body), accounts);
 }
 
