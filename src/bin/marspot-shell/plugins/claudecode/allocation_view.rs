@@ -29,6 +29,7 @@ use crate::host::published::Published;
 /// Why a pane that has to move stays where it is.
 pub(super) const ALL_OUT: &str = "every account is out";
 pub(super) const NOWHERE: &str = "nowhere else to go";
+pub(super) const FOR_ATTENDED: &str = "the accounts left are for attended panes";
 
 /// The last sweep's view, for a helper started between sweeps.
 static LAST: Published<View> = Published::new();
@@ -244,22 +245,28 @@ impl View {
             None => unread_last(rooms, from, class).map(|to| (to, None)),
         };
         match self.routed(rooms, "badge", sid, from, class, model, picked.as_ref().map(|p| p.0)) {
-            Some(to) => Some((to, None)),
-            None => picked,
+            Some(Move::To(to)) => Some((to, None)),
+            _ => picked,
         }
     }
 
     /// Where the pane plan's routing table sends a pane leaving `from`
     /// (`kind` says why), logged next to today's choice `today`; `None`
-    /// unless the table is live and its account has not refused the pane
-    /// for `model`, the model it is judged as (its own cap counts for any
-    /// model, not only Fable).
-    pub(super) fn routed(&self, rooms: &[(u8, Room)], kind: &str, sid: u64, from: u8, class: Class, model: Option<&str>, today: Option<u8>) -> Option<u8> {
+    /// unless the table is live and either its account has not refused
+    /// the pane for `model`, the model it is judged as (its own cap counts
+    /// for any model, not only Fable), or it holds a refused pane nobody is
+    /// at off the accounts attended panes are on.
+    pub(super) fn routed(&self, rooms: &[(u8, Room)], kind: &str, sid: u64, from: u8, class: Class, model: Option<&str>, today: Option<u8>) -> Option<Move> {
+        use super::allocation_route::Pick;
         let (line, live) = super::allocation_route::shadow_pane(kind, sid, class, self.rate_of(sid, class), Some(from), today, super::rooms::unix_now());
         marspot::lx_info!("sched.route.shadow", &line);
-        let to = live.filter(|t| rooms.iter().any(|(n, r)| n == t && !r.refused_for(model)))?;
+        let to = match live {
+            Pick::Wait => return Some(Move::Hold(FOR_ATTENDED)),
+            Pick::None => return None,
+            Pick::To(t) => Some(t).filter(|t| rooms.iter().any(|(n, r)| n == t && !r.refused_for(model)))?,
+        };
         super::allocation_route::used(to, super::rooms::unix_now());
-        Some(to)
+        Some(Move::To(to))
     }
 
     /// The cheapest of `allowed` for a pane leaving an account that runs

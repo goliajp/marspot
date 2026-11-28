@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.939"  # a notice waits until the profile's lead before the deadline; steady never switches over live background work
+shell   = "0.7.940"  # probes count only plain ones on a new table; a refused unattended pane keeps off an attended pane's account
 core    = "0.12.815"  # the switching row no longer says the planner is in trial: it goes live in checked steps
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

@@ -156,3 +156,28 @@ fn sched_route_p3_scenario_sends_no_opus_pane_to_fable_only_quota() {
     let s = Routing::of(&i, &plan(&i, None));
     assert_eq!(s.order(Class::Plain).last(), Some(&3));
 }
+
+#[test]
+fn sched_route_under_protection_a_refused_unattended_pane_keeps_off_an_attended_pane_s_account() {
+    // pane 10 is refused on P1; P2 has an attended pane and lasts longest,
+    // P3 holds pane 12 nobody is at; pane 11 is attended, pane 10 is not
+    let a = [acct(1, 0.01, 0.0, 100.0), acct(2, 0.6, 0.0, 120.0), acct(3, 0.3, 0.0, 110.0)];
+    let mut p = [pane(10, 1, false, 0.0, 0.004), pane(11, 2, false, 0.0, 0.004), pane(12, 3, false, 0.0, 0.004)];
+    p[1].attended = true;
+    let m = long(Class::Plain, 0.004);
+    let mut i = input(&a, &p);
+    i.limits = crate::sched::level2::Limits::BALANCED;
+    let pl = plan(&i, None);
+    let to = |r: RefusedTo| if let RefusedTo::To(x) = r { Some(x.to) } else { None };
+    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 1, 10)), Some(3), "not onto the attended pane's account");
+    // the attended pane itself, and an unknown pane, take the best account
+    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 3, 11)), Some(2));
+    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 1, 99)), Some(2));
+    // with P3 gone, the unattended pane waits rather than take P2
+    let b = [a[0].clone(), a[1].clone(), acct(3, 0.0, 0.0, 110.0)];
+    let i2 = Input { accounts: &b, ..i };
+    assert_eq!(Routing::of(&i2, &plan(&i2, None)).place_refused(&m, 1, 10), RefusedTo::Wait);
+    // steady prices Fable and keeps nothing back
+    let steady = Input { limits: crate::sched::level2::Limits::STEADY, ..i2 };
+    assert_eq!(to(Routing::of(&steady, &plan(&steady, None)).place_refused(&m, 1, 10)), Some(2));
+}
