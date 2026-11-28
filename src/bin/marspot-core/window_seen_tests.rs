@@ -80,11 +80,12 @@ fn minimized_windows_are_kept_by_id_once_each_until_they_close() {
 }
 
 #[test]
-fn a_pane_in_a_minimized_window_is_still_on_screen_for_replacing_though_drawn_hollow() {
+fn a_pane_in_a_minimized_window_is_not_shown_so_it_is_offered_to_replace_with() {
     let sb = Sandbox::new();
     let mut app = two_windows(&sb);
+    assert!(app.not_shown(8).is_empty());
     minimized(&mut app, 2, true);
-    assert!(app.on_screen(3), "a pane in a minimized window's cell is not a hidden pane to replace with");
-    assert!(!app.on_visible_screen(3), "but its dot is hollow");
+    assert_eq!(app.not_shown(8), [3, 5], "the panes of the minimized window, and only those");
+    assert!(!app.on_visible_screen(3), "its dot is hollow");
     assert!(app.on_visible_screen(1));
 }

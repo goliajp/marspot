@@ -1,7 +1,8 @@
 //! What a press on a sidebar row does.  A row is a pane of this
 //! window, of another one or of none: the first is focused, the second
 //! is focused in its window, which comes to the front, and the third is
-//! shown in this window beside the pane in use.
+//! shown in this window beside the pane in use.  A pane in a slot that
+//! is not drawn is shown beside the pane in use too, wherever it is.
 
 use marspot::render::SidebarTree;
 
@@ -13,6 +14,7 @@ impl CoreApp {
     pub(crate) fn sidebar_row_pressed(&mut self, wi: usize, row: usize) {
         let Some(r) = self.sidebar_row(wi, row) else { return };
         match r.pane {
+            RowPane::Slot(idx) if !Self::slot_drawn(&win!(self, wi), idx) => self.show_undrawn_here(wi, wi, idx),
             RowPane::Slot(idx) => self.focus_pane(wi, idx),
             RowPane::Other(sid) => self.reach_pane(wi, sid),
         }
@@ -23,7 +25,9 @@ impl CoreApp {
     /// Pane `sid`, of no slot of window `wi`: focused in the window it
     /// is in, which comes to the front, or shown in `wi`.
     pub(crate) fn reach_pane(&mut self, wi: usize, sid: u64) {
-        if let Some((wj, idx)) = self.find_window_pane_by_sid(sid) {
+        if let Some((wj, idx)) = self.find_window_pane_by_sid(sid).filter(|(wj, idx)| !Self::slot_drawn(&win!(self, *wj), *idx)) {
+            self.show_undrawn_here(wi, wj, idx);
+        } else if let Some((wj, idx)) = self.find_window_pane_by_sid(sid) {
             self.raise_window(wj);
             self.focus_pane(wj, idx);
             win!(self, wj).needs_render = true;
@@ -55,22 +59,7 @@ impl CoreApp {
         unwatched::set(sid, false);
         // a shadow's frames were not read while it was one
         pane.pump();
-        let w = &mut win!(self, wi);
-        let at = (w.focused_idx + 1).min(w.panes.len());
-        if w.panes.len() + 1 > w.grid_cols * w.grid_rows {
-            if w.grid_cols < GRID_MAX {
-                w.grid_cols += 1;
-            } else if w.grid_rows < GRID_MAX {
-                w.grid_rows += 1;
-            }
-        }
-        w.panes.insert(at, pane);
-        w.focused_idx = at;
-        if w.selection.is_some_and(|s| s.session_idx >= at) {
-            w.selection = None;
-            w.selection_dragging = false;
-        }
-        self.rebuild_layout(wi);
+        let at = self.insert_beside_focus(wi, pane);
         self.shadows_changed();
         self.save_session_state();
         lx_event!("PANE_SHOWN_HERE", "a hidden pane was shown in a window from the sidebar", session = sid,

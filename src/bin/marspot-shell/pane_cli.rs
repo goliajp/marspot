@@ -29,8 +29,8 @@ impl ShellApp {
             .map(|marspot::pane_name::PaneRef { sid, cwd, .. }| {
                 let name = named.get(&sid).cloned().unwrap_or_default();
                 let addr = match cells.get(&sid) {
-                    Some((w, x, y)) => format!("{name}  w({w},{x},{y})"),
-                    None => name,
+                    Some((w, Some((x, y)))) => format!("{name}  w({w},{x},{y})"),
+                    _ => name,
                 };
                 (sid, cwd, addr)
             })

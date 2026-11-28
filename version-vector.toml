@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.917"  # the state map registers sched/gate.txt
-core    = "0.12.801"  # the switching row says the planner is in trial until its checks pass
+shell   = "0.7.918"  # pane list names no cell for a pane in a slot past its window's grid
+core    = "0.12.802"  # shown means drawn: a slot past the grid is hollow, offered to replace with (slots swap), given a cell when pressed or placed
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)
