@@ -150,8 +150,10 @@ pub struct Ladder {
 
 impl Ladder {
     /// The ladder put in place of a kept one that could not be read.
+    /// Only a reset stamped after `now` releases it: a stamp left in the
+    /// settings from before predates the loss and says nothing about it.
     pub fn unreadable(now: i64) -> Ladder {
-        Ladder { since: now, rolled: Some((Step::Shadow, Why::Unreadable)), ..Ladder::default() }
+        Ladder { since: now, rolled: Some((Step::Shadow, Why::Unreadable)), reset_at: now, ..Ladder::default() }
     }
 
     fn go(&mut self, to: Step, why: Option<Why>, now: i64) -> Option<Change> {

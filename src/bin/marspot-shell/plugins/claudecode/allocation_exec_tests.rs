@@ -209,16 +209,20 @@ fn allocation_exec_an_unreadable_gate_holds_until_reset_and_strict_waits_are_reh
     let mut a = Allocation::new(events_dir(&r));
     let mut log = Vec::new();
     let reset = |stamp| Scan { watches: &[], lim: &Limits::BALANCED, unforeseen: 0, refused: &[], waits: &[], setting_live: true, reset: stamp };
+    // a stamp left in the settings from before the file was lost does not release it
     x.step(&mut a, &snap(NOW, &[]), &quiet(false), &reset(Some(NOW - 5)), &mut log);
-    assert_eq!((x.ladder.rolled, x.ladder.reset_at), (None, NOW - 5));
+    assert_eq!((x.ladder.rolled.map(|w| w.1), x.ladder.reset_at), (Some(Why::Unreadable), NOW));
+    assert!(!log.iter().any(|(t, _)| *t == "sched.gate.reset"), "{log:?}");
+    x.step(&mut a, &snap(NOW + 1, &[]), &quiet(false), &reset(Some(NOW + 1)), &mut log);
+    assert_eq!((x.ladder.rolled, x.ladder.reset_at), (None, NOW + 1));
     assert!(log.iter().any(|(t, _)| *t == "sched.gate.reset"), "{log:?}");
     x.ladder.rolled = Some((Step::C, Why::Unreadable));
-    x.step(&mut a, &snap(NOW + 1, &[]), &quiet(false), &reset(Some(NOW - 5)), &mut log);
+    x.step(&mut a, &snap(NOW + 2, &[]), &quiet(false), &reset(Some(NOW + 1)), &mut log);
     assert!(x.ladder.rolled.is_some(), "a stamp applies once");
     // at e under strict protection a wait on an attended pane is recorded
     let mut y = exec_at(&r, at(Step::E), Step::E);
     let waits = Scan { watches: &[], lim: &Limits::FULL, unforeseen: 0, refused: &[], waits: &[441], setting_live: true, reset: None };
-    y.step(&mut a, &snap(NOW + 2, &[(441, 3, false)]), &quiet(true), &waits, &mut log);
+    y.step(&mut a, &snap(NOW + 3, &[(441, 3, false)]), &quiet(true), &waits, &mut log);
     assert!(y.ladder.attended_wait);
     assert_eq!(events(&a, "would_wait").len(), 1);
     let _ = fs::remove_dir_all(&r);

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.913"  # the planner's executor stays a dry run in this build and acts only while switching is live
+shell   = "0.7.914"  # a gate file that cannot be read is released only by a reset stamped after it was lost
 core    = "0.12.801"  # the switching row says the planner is in trial until its checks pass
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)

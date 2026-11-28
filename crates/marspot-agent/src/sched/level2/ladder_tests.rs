@@ -212,6 +212,7 @@ fn sched_ladder_survives_a_restart() {
 #[test]
 fn sched_ladder_an_unreadable_file_holds_until_a_person_resets() {
     let mut l = Ladder::unreadable(50);
+    assert_eq!(l.reset_at, 50, "only a stamp after the loss counts");
     assert_eq!(Ladder::decode(&l.encode()), Some(l.clone()));
     for k in 0..40 {
         l.routed(false, 100 + k, Step::E);
