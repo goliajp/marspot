@@ -203,7 +203,7 @@ impl Collector {
         }
         let views = crate::agentsvc::accounts::wallet::all("codex");
         if !by_devops {
-            credits::enrich(&mut self.codex, &views);
+            credits::enrich(&mut self.codex, &views, now);
             sample(&mut self.samples, "codex", &self.codex, now);
             write("codex", &self.own_codex, &self.codex, now);
         }

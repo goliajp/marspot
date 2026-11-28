@@ -14,14 +14,20 @@
 //! sum over a span is the balance's drop over it.  A restart takes the
 //! last balance from the newest `spend` or `wallet_drop` fact, so the
 //! tail read again yields no fact twice.  Nothing here decides anything.
+//!
+//! The balance an account is first seen with is one lot, appended once
+//! to `credit_lots.tsv` and kept for good: it ends 180 days after that
+//! sighting at the latest, since the grant came no later.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::fs;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use super::alloc::{CodexAlloc, Log, Snapshot, class_word};
 use super::alloc_per_point::{Period, PeriodStore};
 use super::alloc_rollout::CxTokens;
-use crate::agentsvc::accounts::wallet::{self, Cap, View};
+use crate::agentsvc::accounts::wallet::{self, Cap, Lot, View};
 use crate::plugins::allocation::Class;
 use crate::plugins::claudecode::allocation_events::{DAY, Event};
 
@@ -36,6 +42,9 @@ const DROPS_FOR_S: i64 = 7 * DAY;
 /// for a day is far fewer.
 const SPENDS_KEPT: usize = 32_768;
 
+/// The latest a lot can end after the account was first seen with it.
+const LOT_LASTS_S: i64 = 180 * DAY;
+
 /// A week used at least this much is used up.
 const FULL: f64 = 1.0 - 1e-9;
 
@@ -49,7 +58,8 @@ pub(super) struct Seen {
     pub week: Option<(f64, i64)>,
     pub balance: Option<f64>,
     pub cap: Option<Cap>,
-    pub tokens: CxTokens,
+    /// `None` when the reading came without the reply's usage.
+    pub tokens: Option<CxTokens>,
 }
 
 #[derive(Debug, Default)]
@@ -70,13 +80,18 @@ pub(super) struct Wallets {
     models: HashMap<u64, String>,
     accounts: HashMap<u8, Acct>,
     pub(super) periods: PeriodStore,
+    lots_file: PathBuf,
+    lots: HashMap<u8, Lot>,
 }
 
 impl Wallets {
     /// `events` is the codex events directory; the period files sit
     /// beside it.
     pub(super) fn new(events: &Path) -> Wallets {
-        Wallets { pending: Vec::new(), models: HashMap::new(), accounts: HashMap::new(), periods: PeriodStore::new(events.parent().unwrap_or(events)) }
+        let dir = events.parent().unwrap_or(events);
+        let lots_file = dir.join("credit_lots.tsv");
+        let lots = fs::read_to_string(&lots_file).unwrap_or_default().lines().filter_map(parse_lot).collect();
+        Wallets { pending: Vec::new(), models: HashMap::new(), accounts: HashMap::new(), periods: PeriodStore::new(dir), lots_file, lots }
     }
 
     pub(super) fn seen(&mut self, s: Seen) {
@@ -106,18 +121,45 @@ impl Wallets {
         }
     }
 
-    fn views(&self) -> Vec<(u8, View)> {
+    /// Each account with a balance, its spends summed as of `now`.
+    fn views(&self, now: i64) -> Vec<(u8, View)> {
+        let since = |q: &VecDeque<(i64, f64)>, from: i64| q.iter().rev().take_while(|(at, _)| *at > from).map(|(_, x)| x).sum::<f64>();
         let mut out: Vec<(u8, View)> = self
             .accounts
             .iter()
             .filter_map(|(p, a)| {
-                let view = View { at: a.at, balance: a.balance?, week_full: a.week_full, cap: a.cap.clone(), spends: a.spends.iter().copied().collect(), drops: a.drops.iter().copied().collect() };
+                let view = View {
+                    at: a.at,
+                    balance: a.balance?,
+                    week_full: a.week_full,
+                    cap: a.cap.clone(),
+                    spent_24h: since(&a.spends, now - DAY),
+                    spent_1h: since(&a.spends, now - 3600),
+                    last_spend: a.spends.back().map(|(at, _)| *at),
+                    drops: a.drops.iter().copied().collect(),
+                    lot: self.lots.get(p).cloned(),
+                };
                 Some((*p, view))
             })
             .collect();
         out.sort_by_key(|(p, _)| *p);
         out
     }
+}
+
+/// One line of `credit_lots.tsv`: first seen, account, amount, latest
+/// end, bound.
+fn parse_lot(line: &str) -> Option<(u8, Lot)> {
+    let f: Vec<&str> = line.split('\t').collect();
+    let [_, profile, amount, expires_at, bound] = f[..] else { return None };
+    Some((profile.parse().ok()?, Lot { amount: amount.parse().ok()?, expires_at: expires_at.parse().ok()?, bound: bound.to_string() }))
+}
+
+fn append_lot(path: &Path, line: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::OpenOptions::new().create(true).append(true).open(path)?.write_all(line.as_bytes())
 }
 
 fn push_capped(q: &mut VecDeque<(i64, f64)>, item: (i64, f64), cap: usize) {
@@ -134,7 +176,8 @@ impl CodexAlloc {
         let mut pending = std::mem::take(&mut self.wallets.pending);
         pending.sort_by_key(|s| s.at);
         for s in pending {
-            let spent = self.wallet_fact(&s, log);
+            // a reading already decided from, read again, counts nowhere
+            let Some(spent) = self.wallet_fact(&s, log) else { continue };
             let model = self.wallets.models.get(&s.sid).cloned();
             if let Some(done) = self.wallets.periods.take(&s, model.as_deref(), spent) {
                 self.period_done(s.profile, done, snap.now, log);
@@ -154,34 +197,41 @@ impl CodexAlloc {
         if let Err(e) = self.wallets.periods.save(now) {
             log.push(("codex.wallet.periods_failed", e.to_string()));
         }
-        wallet::publish("codex", self.wallets.views());
+        wallet::publish("codex", self.wallets.views(now));
     }
 
-    /// The fact one reading makes, if any; the amount spent when it is a spend.
-    fn wallet_fact(&mut self, s: &Seen, log: &mut Log) -> f64 {
+    /// The fact one reading makes, if any; the amount spent when it is a
+    /// spend, `None` for a reading no newer than the last decided from.
+    fn wallet_fact(&mut self, s: &Seen, log: &mut Log) -> Option<f64> {
         let a = self.wallets.accounts.entry(s.profile).or_default();
         if s.at <= a.at {
-            return 0.0;
+            return None;
         }
         a.at = s.at;
-        if s.cap.is_some() {
-            a.cap = s.cap.clone();
-        }
+        a.cap = s.cap.clone();
         let full = s.week.is_some_and(|(used, _)| used >= FULL);
         a.week_full = full;
         if !full {
             a.spending_told = false;
         }
-        let Some(balance) = s.balance else { return 0.0 };
+        let Some(balance) = s.balance else { return Some(0.0) };
         let drop = a.balance.map_or(0.0, |was| was - balance);
         a.balance = Some(balance);
+        if !self.wallets.lots.contains_key(&s.profile) {
+            let lot = Lot { amount: balance, expires_at: s.at + LOT_LASTS_S, bound: "latest".into() };
+            let line = format!("{}\t{}\t{balance:.6}\t{}\t{}\n", s.at, s.profile, lot.expires_at, lot.bound);
+            if let Err(e) = append_lot(&self.wallets.lots_file, &line) {
+                log.push(("codex.wallet.lots_failed", e.to_string()));
+            }
+            self.wallets.lots.insert(s.profile, lot);
+        }
         if drop <= DROP_EPS {
-            return 0.0;
+            return Some(0.0);
         }
         let (kind, detail) = if full {
             push_capped(&mut a.spends, (s.at, drop), SPENDS_KEPT);
             let model = self.wallets.models.get(&s.sid).map_or("-", String::as_str);
-            ("spend", format!("amount={drop:.6} balance={balance:.6} {} model={model}", s.tokens.words()))
+            ("spend", format!("amount={drop:.6} balance={balance:.6} {} model={model}", s.tokens.as_ref().map_or_else(|| "in=- cached=- out=-".to_string(), CxTokens::words)))
         } else {
             push_capped(&mut a.drops, (s.at, drop), DROPS_KEPT);
             let week = s.week.map_or_else(|| "-".to_string(), |(u, _)| format!("{u:.2}"));
@@ -195,7 +245,7 @@ impl CodexAlloc {
         if let Err(e) = self.events.append(&ev) {
             log.push(("codex.alloc.events_failed", format!("{e}")));
         }
-        if full { drop } else { 0.0 }
+        Some(if full { drop } else { 0.0 })
     }
 
     fn period_done(&mut self, profile: u8, done: Period, now: i64, log: &mut Log) {

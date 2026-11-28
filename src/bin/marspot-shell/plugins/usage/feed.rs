@@ -9,7 +9,7 @@ use std::path::Path;
 
 use marspot_peer::json::{obj, Value};
 
-use crate::agentsvc::accounts::wallet::Cap;
+use crate::agentsvc::accounts::wallet::{Cap, Lot};
 
 pub(in crate::plugins) use super::iso_time::iso_utc;
 
@@ -71,6 +71,7 @@ pub(super) struct Credits {
     pub spending: Option<bool>,
     pub spent_24h: Option<f64>,
     pub rate_per_h: Option<f64>,
+    pub lots: Option<Vec<Lot>>,
     /// `none`, `api`, `manual` or `inferred`: where the expiry of the
     /// balance comes from.
     pub expiry_source: Option<String>,
@@ -232,7 +233,7 @@ fn model_value(m: &ModelWindow) -> Value {
 }
 
 fn credits_value(c: &Credits) -> Value {
-    obj([
+    let mut v = obj([
         ("enabled", flag(c.enabled)),
         ("unlimited", flag(c.unlimited)),
         ("balance", num(c.balance)),
@@ -242,27 +243,9 @@ fn credits_value(c: &Credits) -> Value {
         ("disabled_reason", text(&c.disabled_reason)),
         ("resets_available", Value::Null),
         ("resets_expire_at", Value::Null),
-        ("unit", text(&c.unit)),
-        ("observed_at", int(c.observed_at)),
-        ("spend", text(&c.spend)),
-        ("spending", flag(c.spending)),
-        ("spent_24h", num(c.spent_24h)),
-        ("rate_per_h", num(c.rate_per_h)),
-        // no source gives the expiry of a balance yet: unknown
-        ("lots", Value::Null),
-        ("expiry_source", text(&c.expiry_source)),
-        ("cap", c.cap.as_ref().map_or(Value::Null, cap_value)),
-        ("unexplained_drops", c.drops.as_ref().map_or(Value::Null, |d| Value::Arr(d.iter().map(|(at, amount)| obj([("at", (*at).into()), ("amount", Value::Num(*amount))])).collect()))),
-    ])
-}
-
-fn cap_value(c: &Cap) -> Value {
-    obj([
-        ("reached", flag(c.reached)),
-        ("limit", num(c.limit)),
-        ("remaining_percent", num(c.remaining_percent)),
-        ("reached_type", text(&c.reached_type)),
-    ])
+    ]);
+    super::credits::wallet_fields(&mut v, c);
+    v
 }
 
 /// The feed file's text.  An account never read and not refused has

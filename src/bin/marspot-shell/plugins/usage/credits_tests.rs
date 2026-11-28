@@ -16,10 +16,9 @@ fn account(name: &str, balance: Option<f64>, at: i64) -> Account {
     Account { name: name.into(), email: "a@b".into(), credits: Some(credits), credits_seen: at, last_read: at, ..Account::default() }
 }
 
-/// Spending 688 credits an hour, one every few seconds, up to `at`.
+/// Spending 688 credits an hour, the last spend at `at`.
 fn spending(at: i64, balance: f64) -> View {
-    let spends = (0..120).map(|i| (at - 3570 + i * 30, 688.0 / 120.0)).collect();
-    View { at, balance, week_full: true, cap: None, spends, drops: Vec::new() }
+    View { at, balance, week_full: true, spent_24h: 688.0, spent_1h: 688.0, last_spend: Some(at), ..View::default() }
 }
 
 fn feed_body(generated: i64, rows: &[(&str, f64, i64)]) -> String {
@@ -96,13 +95,33 @@ fn the_spend_fields_come_from_the_rollouts_and_unknown_ones_stay_null() {
     let mut accounts = vec![account("Codex 2", Some(47_000.0), NOW - 900), account("Codex 1", Some(60_460.5), NOW - 900)];
     let mut v = spending(NOW - 60, 46_434.0);
     v.drops = vec![(NOW - 5000, 3.5)];
-    enrich(&mut accounts, &[(2, v)]);
+    enrich(&mut accounts, &[(2, v.clone())], NOW);
     let c = accounts[0].credits.clone().unwrap();
     assert_eq!((c.balance, c.observed_at, c.spending), (Some(46_434.0), Some(NOW - 60), Some(true)));
     assert!((c.rate_per_h.unwrap() - 688.0).abs() < 1e-6 && (c.spent_24h.unwrap() - 688.0).abs() < 1e-6);
+    assert_eq!((c.lots.as_ref(), c.expiry_source.as_ref()), (None, None), "no lot recorded yet: the expiry is unknown, not none");
     let body = feed::render(&accounts, NOW);
-    assert!(body.contains(r#""unexplained_drops":[{"at":"#) && body.contains(r#""lots":null"#), "{body}");
+    assert!(body.contains(r#""unexplained_drops":[{"at":"#) && body.contains(r#""lots":null,"expiry_source":null"#), "{body}");
     let other = accounts[1].credits.as_ref().unwrap();
     assert_eq!((other.spending, other.spent_24h, other.drops.as_ref()), (None, None, None), "no rollout read: unknown");
     assert_eq!(load(&body), accounts);
+
+    // a recorded lot is the inferred expiry; spending is judged now, long after the last spend
+    v.lot = Some(Lot { amount: 62_000.0, expires_at: NOW + 180 * 86_400, bound: "latest".into() });
+    enrich(&mut accounts, &[(2, v)], NOW + 3600);
+    let c = accounts[0].credits.clone().unwrap();
+    assert_eq!((c.spending, c.expiry_source.as_deref()), (Some(false), Some("inferred")));
+    let body = feed::render(&accounts, NOW);
+    assert!(body.contains(&format!(r#""lots":[{{"amount":62000,"expires_at":{},"bound":"latest"}}],"expiry_source":"inferred""#, NOW + 180 * 86_400)), "{body}");
+    assert_eq!(load(&body), accounts);
+}
+
+#[test]
+fn the_newer_reading_sets_the_cap_and_a_cap_gone_is_cleared() {
+    let cap = Cap { reached: Some(true), ..Cap::default() };
+    let mut accounts = vec![account("Codex 2", Some(47_000.0), NOW - 900)];
+    enrich(&mut accounts, &[(2, View { cap: Some(cap.clone()), ..spending(NOW - 600, 46_900.0) })], NOW);
+    assert_eq!(accounts[0].credits.as_ref().unwrap().cap, Some(cap));
+    enrich(&mut accounts, &[(2, spending(NOW - 60, 46_800.0))], NOW);
+    assert_eq!(accounts[0].credits.as_ref().unwrap().cap, None, "the newer reading has no cap");
 }

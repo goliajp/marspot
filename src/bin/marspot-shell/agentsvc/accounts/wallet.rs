@@ -51,6 +51,16 @@ impl Cap {
     }
 }
 
+/// A batch of credits and when it ends at the latest: the balance an
+/// account was first seen with, ending `bound` = `latest` (the grant
+/// was no later than that sighting, so its true end may be sooner).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Lot {
+    pub amount: f64,
+    pub expires_at: i64,
+    pub bound: String,
+}
+
 /// What one account's records say of its balance.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct View {
@@ -60,19 +70,19 @@ pub(crate) struct View {
     /// The plan allowance was used up at that reading.
     pub week_full: bool,
     pub cap: Option<Cap>,
-    /// `(at, amount)` of each spend in the last day, oldest first.
-    pub spends: Vec<(i64, f64)>,
+    /// What was spent in the day and in the hour before the pass that
+    /// published this, and when the last spend was.
+    pub spent_24h: f64,
+    pub spent_1h: f64,
+    pub last_spend: Option<i64>,
     /// `(at, amount)` of the recent drops with the allowance not used up.
     pub drops: Vec<(i64, f64)>,
+    pub lot: Option<Lot>,
 }
 
 impl View {
-    pub(crate) fn spent_since(&self, since: i64) -> f64 {
-        self.spends.iter().filter(|(at, _)| *at > since).map(|(_, a)| a).sum()
-    }
-
-    pub(crate) fn spending(&self) -> bool {
-        self.week_full && self.spends.last().is_some_and(|(at, _)| *at >= self.at - SPENDING_WITHIN_S)
+    pub(crate) fn spending(&self, now: i64) -> bool {
+        self.week_full && self.last_spend.is_some_and(|at| at >= now - SPENDING_WITHIN_S)
     }
 }
 
@@ -118,14 +128,11 @@ mod tests {
 
     #[test]
     fn spending_needs_the_allowance_used_up_and_a_recent_spend() {
-        let mut v = View { at: 10_000, balance: 5.0, week_full: true, spends: vec![(9_000, 1.5), (9_500, 2.0)], ..View::default() };
-        assert!(v.spending());
-        assert_eq!(v.spent_since(9_000), 2.0);
-        v.at = 9_500 + SPENDING_WITHIN_S + 1;
-        assert!(!v.spending(), "nothing spent for a while");
-        v.at = 10_000;
+        let mut v = View { at: 9_000, balance: 5.0, week_full: true, last_spend: Some(9_500), ..View::default() };
+        assert!(v.spending(10_000), "judged at the time asked, not at the reading's");
+        assert!(!v.spending(9_500 + SPENDING_WITHIN_S + 1), "nothing spent for a while");
         v.week_full = false;
-        assert!(!v.spending());
+        assert!(!v.spending(10_000));
     }
 
     #[test]

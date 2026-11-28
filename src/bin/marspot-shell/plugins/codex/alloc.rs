@@ -273,7 +273,6 @@ impl CodexAlloc {
                     {
                         self.limits.insert(p.profile, (at, used, renews));
                     }
-                    let tokens = tokens.unwrap_or_default();
                     self.wallets.seen(super::alloc_wallet::Seen { at, sid: p.sid, profile: p.profile, class, week, balance, cap, tokens });
                 }
                 Note::Model { model } => self.wallets.model(p.sid, model),

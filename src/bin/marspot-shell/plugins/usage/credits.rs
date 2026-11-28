@@ -10,14 +10,16 @@
 
 use std::collections::HashMap;
 
-use marspot_peer::json::{self, Value};
+use marspot_peer::json::{self, obj, Value};
 use marspot_term::{lx_info, lx_warn};
 
 use super::feed::Account;
 use super::samples::{profile_of, Balance, Samples};
-use crate::agentsvc::accounts::wallet::View;
+use super::feed::Credits;
+use crate::agentsvc::accounts::wallet::{Cap, Lot, View};
 
-/// The window the spend rate is taken over.
+/// The window the spend rate is taken over; `View::spent_1h` is summed
+/// over it.
 const RATE_OVER_S: i64 = 3600;
 
 /// marspot's own reading of each Codex account's balance: the newer of
@@ -44,22 +46,71 @@ pub(super) fn own_balances(accounts: &[Account], views: &[(u8, View)]) -> Vec<Ba
 }
 
 /// Fill the spend fields of the Codex accounts marspot writes from what
-/// their rollouts show; the newer balance of the two readings stands.
-pub(super) fn enrich(accounts: &mut [Account], views: &[(u8, View)]) {
+/// their rollouts show; the newer of the two readings gives the balance
+/// and the cap.  The account's lot, once one is recorded, is its only
+/// expiry, inferred; before that both are unknown.
+pub(super) fn enrich(accounts: &mut [Account], views: &[(u8, View)], now: i64) {
     for a in accounts {
         let Some(c) = a.credits.as_mut() else { continue };
         let Some((_, v)) = profile_of(&a.name).and_then(|p| views.iter().find(|(q, _)| *q == p)) else { continue };
         if c.observed_at.is_none_or(|at| v.at > at) {
-            (c.balance, c.observed_at) = (Some(v.balance), Some(v.at));
+            (c.balance, c.observed_at, c.cap) = (Some(v.balance), Some(v.at), v.cap.clone());
         }
-        c.spending = Some(v.spending());
-        c.spent_24h = Some(v.spent_since(v.at - 86_400));
-        c.rate_per_h = Some(v.spent_since(v.at - RATE_OVER_S));
+        c.spending = Some(v.spending(now));
+        c.spent_24h = Some(v.spent_24h);
+        c.rate_per_h = Some(v.spent_1h);
         c.drops = Some(v.drops.clone());
-        if v.cap.is_some() {
-            c.cap = v.cap.clone();
-        }
+        c.lots = v.lot.clone().map(|l| vec![l]);
+        c.expiry_source = v.lot.as_ref().map(|_| "inferred".to_string());
     }
+}
+
+/// The spend fields of a feed's `credits` object, set on `v`; `null`
+/// for each unknown.
+pub(super) fn wallet_fields(v: &mut Value, c: &Credits) {
+    let num = |n: Option<f64>| n.map_or(Value::Null, Value::Num);
+    let text = |s: &Option<String>| s.as_deref().map_or(Value::Null, Value::from);
+    let flag = |b: Option<bool>| b.map_or(Value::Null, Value::from);
+    let lot = |l: &Lot| obj([("amount", Value::Num(l.amount)), ("expires_at", l.expires_at.into()), ("bound", l.bound.as_str().into())]);
+    let cap = |c: &Cap| {
+        obj([("reached", flag(c.reached)), ("limit", num(c.limit)), ("remaining_percent", num(c.remaining_percent)), ("reached_type", text(&c.reached_type))])
+    };
+    let drop = |(at, amount): &(i64, f64)| obj([("at", (*at).into()), ("amount", Value::Num(*amount))]);
+    v.set("unit", text(&c.unit));
+    v.set("observed_at", c.observed_at.map_or(Value::Null, Value::from));
+    v.set("spend", text(&c.spend));
+    v.set("spending", flag(c.spending));
+    v.set("spent_24h", num(c.spent_24h));
+    v.set("rate_per_h", num(c.rate_per_h));
+    v.set("lots", c.lots.as_ref().map_or(Value::Null, |l| Value::Arr(l.iter().map(lot).collect())));
+    v.set("expiry_source", text(&c.expiry_source));
+    v.set("cap", c.cap.as_ref().map_or(Value::Null, cap));
+    v.set("unexplained_drops", c.drops.as_ref().map_or(Value::Null, |d| Value::Arr(d.iter().map(drop).collect())));
+}
+
+/// The spend fields of a feed's `credits` object as `wallet_fields`
+/// wrote them, into `c`.
+pub(super) fn read_wallet_fields(v: &Value, c: &mut Credits) {
+    let num = |v: &Value, k: &str| match v.get(k) {
+        Some(Value::Num(n)) => Some(*n),
+        _ => None,
+    };
+    let text = |k: &str| v.str_at(k).map(str::to_string);
+    let present = |k: &str| v.get(k).filter(|x| **x != Value::Null);
+    (c.unit, c.spend, c.expiry_source) = (text("unit"), text("spend"), text("expiry_source"));
+    c.observed_at = v.get("observed_at").and_then(Value::i64);
+    c.spending = v.get("spending").and_then(Value::bool);
+    (c.spent_24h, c.rate_per_h) = (num(v, "spent_24h"), num(v, "rate_per_h"));
+    c.lots = present("lots").map(|l| {
+        l.arr().iter().filter_map(|x| Some(Lot { amount: num(x, "amount")?, expires_at: x.get("expires_at")?.i64()?, bound: x.str_at("bound")?.to_string() })).collect()
+    });
+    c.cap = present("cap").map(|x| Cap {
+        reached: x.get("reached").and_then(Value::bool),
+        limit: num(x, "limit"),
+        remaining_percent: num(x, "remaining_percent"),
+        reached_type: x.str_at("reached_type").map(str::to_string),
+    });
+    c.drops = present("unexplained_drops").map(|d| d.arr().iter().filter_map(|x| Some((x.get("at")?.i64()?, num(x, "amount")?))).collect());
 }
 
 /// The balances of one pass: sampled, and checked against the devops
@@ -97,7 +148,7 @@ pub(super) fn compare(body: &str, own: &[Balance], views: &[(u8, View)]) -> Vec<
             };
             let their_at = row.str_at("collected_at").and_then(|t| marspot::cc_usage::parse_iso_utc(t.to_string())).or(generated)?;
             let mine = own.iter().find(|b| b.name == name)?;
-            let rate = views.iter().find(|(p, _)| *p == mine.profile).map_or(0.0, |(_, v)| v.spent_since(v.at - RATE_OVER_S) / RATE_OVER_S as f64);
+            let rate = views.iter().find(|(p, _)| *p == mine.profile).map_or(0.0, |(_, v)| v.spent_1h / RATE_OVER_S as f64);
             let tolerance = rate * (mine.at - their_at).abs() as f64 + 1.0;
             let agree = (mine.balance - theirs).abs() <= tolerance;
             let line = format!(

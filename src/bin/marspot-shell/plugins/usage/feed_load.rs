@@ -3,7 +3,6 @@
 use marspot_peer::json::{self, Value};
 
 use super::feed::{Account, Credits, ModelWindow, Window, WEEK_MINUTES};
-use crate::agentsvc::accounts::wallet::Cap;
 
 /// The accounts in a feed file this module wrote, so a restart carries
 /// on from the last observations instead of from nothing.
@@ -68,7 +67,7 @@ fn model_of(m: &Value, seen: i64) -> Option<ModelWindow> {
 }
 
 fn credits_of(c: &Value) -> Credits {
-    Credits {
+    let mut out = Credits {
         enabled: c.get("enabled").and_then(Value::bool),
         unlimited: c.get("unlimited").and_then(Value::bool),
         balance: f64_at(c, "balance"),
@@ -76,21 +75,8 @@ fn credits_of(c: &Value) -> Credits {
         limit: f64_at(c, "limit"),
         utilization: f64_at(c, "utilization"),
         disabled_reason: c.str_at("disabled_reason").map(str::to_string),
-        unit: c.str_at("unit").map(str::to_string),
-        observed_at: c.get("observed_at").and_then(Value::i64),
-        spend: c.str_at("spend").map(str::to_string),
-        spending: c.get("spending").and_then(Value::bool),
-        spent_24h: f64_at(c, "spent_24h"),
-        rate_per_h: f64_at(c, "rate_per_h"),
-        expiry_source: c.str_at("expiry_source").map(str::to_string),
-        cap: c.get("cap").filter(|v| **v != Value::Null).map(|v| Cap {
-            reached: v.get("reached").and_then(Value::bool),
-            limit: f64_at(v, "limit"),
-            remaining_percent: f64_at(v, "remaining_percent"),
-            reached_type: v.str_at("reached_type").map(str::to_string),
-        }),
-        drops: c.get("unexplained_drops").filter(|v| **v != Value::Null).map(|v| {
-            v.arr().iter().filter_map(|d| Some((d.get("at").and_then(Value::i64)?, f64_at(d, "amount")?))).collect()
-        }),
-    }
+        ..Credits::default()
+    };
+    super::credits::read_wallet_fields(c, &mut out);
+    out
 }

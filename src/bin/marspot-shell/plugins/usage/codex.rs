@@ -211,7 +211,6 @@ fn credits_of(c: &Value) -> Credits {
         unit: Some("credits".into()),
         // codex takes credits on its own once the week is used up
         spend: Some("auto".into()),
-        expiry_source: Some("none".into()),
         ..Credits::default()
     }
 }

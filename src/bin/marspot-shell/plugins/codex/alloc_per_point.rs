@@ -103,8 +103,16 @@ impl PeriodStore {
 
     /// Count one reading into its account's week; the week it ends, if
     /// its renewal moved.  `spent` is what the reading's spend fact took.
+    /// A reading no newer than the week's newest counted is none: a
+    /// tail read again, or an older record still naming last week's
+    /// renewal, neither counts twice nor ends the week.  A reading
+    /// without the reply's usage adds no cost, and after the week ran out
+    /// its credits are left out too, so the two sides stay matched.
     pub(super) fn take(&mut self, s: &Seen, model: Option<&str>, spent: f64) -> Option<Period> {
         let (used, renews) = s.week?;
+        if self.open.get(&s.profile).is_some_and(|p| s.at <= p.through) {
+            return None;
+        }
         let done = self.open.get(&s.profile).is_some_and(|p| (p.renews - renews).abs() > SAME_RENEWAL_S).then(|| self.open.remove(&s.profile)).flatten();
         let p = self.open.entry(s.profile).or_insert_with(|| Period {
             renews,
@@ -115,19 +123,22 @@ impl PeriodStore {
             pre_cost: Vec::new(),
             post_cost: Vec::new(),
         });
-        if s.at > p.through {
-            let model = model.map_or_else(|| "-".to_string(), |m| m.replace(['\t', ' ', ',', '=', ';'], "_"));
-            if used < FULL {
-                p.pre_used = p.pre_used.max(used);
-                add(&mut p.pre_cost, &model, s.tokens.dollars());
-            } else {
-                p.pre_used = 1.0;
-                p.post_credits += spent;
-                add(&mut p.post_cost, &model, s.tokens.dollars());
+        let model = model.map_or_else(|| "-".to_string(), |m| m.replace(['\t', ' ', ',', '=', ';'], "_"));
+        let dollars = s.tokens.as_ref().map(|t| t.dollars());
+        if used < FULL {
+            p.pre_used = p.pre_used.max(used);
+            if let Some(d) = dollars {
+                add(&mut p.pre_cost, &model, d);
             }
-            p.through = s.at;
-            self.dirty = true;
+        } else {
+            p.pre_used = 1.0;
+            if let Some(d) = dollars {
+                p.post_credits += spent;
+                add(&mut p.post_cost, &model, d);
+            }
         }
+        p.through = s.at;
+        self.dirty = true;
         if done.is_some() {
             // an ended week is written at once with the facts it closes
             self.saved_at = 0;
@@ -256,6 +267,7 @@ fn parse_open(line: &str) -> Option<(u8, Period)> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::alloc_rollout::CxTokens;
     use super::*;
 
     fn period(pre: &[(&str, f64)], post: &[(&str, f64)], points: f64, credits: f64) -> Period {
@@ -284,6 +296,29 @@ mod tests {
         assert_eq!(per_point(&text, "m"), (250.0, 3));
         text += &line("260", "m");
         assert_eq!(per_point(&text, "m"), (255.0, 4));
+    }
+
+    fn seen(at: i64, used: f64, renews: i64) -> Seen {
+        let tokens = Some(CxTokens { input: 1000, cached: 0, output: 10 });
+        Seen { at, sid: 1, profile: 2, class: crate::plugins::allocation::Class::Plain, week: Some((used, renews)), balance: None, cap: None, tokens }
+    }
+
+    #[test]
+    fn a_reading_no_newer_than_the_week_counts_nowhere_and_ends_nothing() {
+        let tmp = marspot_term::test_env::TempDir::new("codex-per-point-older");
+        let mut store = PeriodStore::new(&tmp.join("codex"));
+        let week = 2_000_000;
+        assert_eq!(store.take(&seen(100, 0.2, week), Some("m"), 0.0), None);
+        assert_eq!(store.take(&seen(200, 0.4, week), Some("m"), 0.0), None);
+        let cost = store.open[&2].pre_cost.clone();
+        assert_eq!(store.take(&seen(200, 0.4, week), Some("m"), 0.0), None, "the same reading again");
+        assert_eq!(store.take(&seen(150, 0.9, week - 7 * 86_400), Some("m"), 0.0), None, "an older one naming last week's renewal");
+        let p = &store.open[&2];
+        assert_eq!((p.renews, p.through, p.pre_used, &p.pre_cost), (week, 200, 0.4, &cost), "the week goes on untouched");
+        let mut unknown = seen(300, 1.0, week);
+        unknown.tokens = None;
+        assert_eq!(store.take(&unknown, Some("m"), 50.0), None);
+        assert_eq!((store.open[&2].post_credits, store.open[&2].post_cost.len()), (0.0, 0), "no usage: neither credits nor cost");
     }
 
     #[test]

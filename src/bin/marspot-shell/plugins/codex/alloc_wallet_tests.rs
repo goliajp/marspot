@@ -56,8 +56,14 @@ fn a_week_running_out_and_the_balance_falling_makes_one_spend_per_drop() {
     assert!(first[6].contains("balance=59773.903605") && first[6].contains("model=gpt-6.2-astra") && first[6].contains(" in="), "{}", first[6]);
 
     let (_, view) = wallet::all("codex").into_iter().find(|(p, _)| *p == 2).expect("published");
-    assert!((view.balance - 59_769.088_765).abs() < 1e-6 && view.week_full && view.spending());
-    assert_eq!(view.spends.len(), 6);
+    assert!((view.balance - 59_769.088_765).abs() < 1e-6 && view.week_full && view.spending(AFTER));
+    assert!((view.spent_24h - sum).abs() < 1e-6 && view.last_spend == Some(view.at), "{view:?}");
+    // the first balance seen is one lot, ending 180 days on at the latest
+    let lot = view.lot.clone().expect("a lot");
+    let first_seen = lot.expires_at - 180 * 86_400;
+    assert!((lot.amount - 59_775.634_925).abs() < 1e-6 && lot.bound == "latest" && first_seen < AFTER, "{lot:?}");
+    let lots = || std::fs::read_to_string(w.dir.parent().unwrap().join("credit_lots.tsv")).unwrap();
+    assert_eq!(lots(), format!("{first_seen}\t2\t59775.634925\t{}\tlatest\n", lot.expires_at));
 
     // a restart reads the tail again and writes none of it twice
     let mut again = CodexAlloc::new(w.dir.clone());
@@ -66,6 +72,9 @@ fn a_week_running_out_and_the_balance_falling_makes_one_spend_per_drop() {
     append(&w.rollout, &[reading(AFTER + 100, 100.0, r#""59768.0887650000""#)]);
     again.observe(&snap(&w.rollout, AFTER + 120, 0));
     assert_eq!(amounts(&w.dir, "spend").last().map(String::as_str), Some("amount=1.000000"), "it goes on from the last balance");
+    assert_eq!(lots().lines().count(), 1, "the lot is written once, a restart reads it back");
+    let (_, view) = wallet::all("codex").into_iter().find(|(p, _)| *p == 2).unwrap();
+    assert_eq!(view.lot, Some(lot));
 }
 
 #[test]
@@ -111,4 +120,40 @@ fn a_week_that_renews_is_measured_once() {
     // 90 points measured before (10% to 100%), 200 credits after, a "-" model for want of a turn_context
     assert_eq!((f[1], f[3], f[4], f[6]), ("2", "-", "90.00", "200.000000"));
     assert_eq!(rows(&w.dir, "spend").len(), 1);
+}
+
+/// The ended week's credits over its cost after the week ran out, as
+/// written to `per_point.tsv`.
+fn credits_per_dollar(dir: &std::path::Path) -> f64 {
+    let text = std::fs::read_to_string(dir.parent().unwrap().join("per_point.tsv")).expect("the week that ended is written");
+    let f: Vec<&str> = text.lines().next().unwrap().split('\t').collect();
+    f[6].parse::<f64>().unwrap() / f[7].parse::<f64>().unwrap()
+}
+
+#[test]
+fn a_restart_reading_the_tail_again_does_not_lower_per_point() {
+    let now = 1_795_900_000;
+    let week = [reading(now - 500, 10.0, r#""500.0""#), reading(now - 400, 60.0, r#""500.0""#), reading(now - 300, 100.0, r#""400.0""#)];
+    let later = reading(now - 250, 100.0, r#""300.0""#);
+    let next = reading(now + 100, 1.0, r#""300.0""#).replace(&format!("{RENEWS}"), &format!("{}", RENEWS + 7 * 24 * H));
+    let mut got = Vec::new();
+    for restart in [false, true] {
+        let w = world(if restart { "codex-wallet-restart" } else { "codex-wallet-straight" });
+        let mut a = CodexAlloc::new(w.dir.clone());
+        a.observe(&snap(&w.rollout, now - 600, now - 10 * H));
+        append(&w.rollout, &week);
+        a.observe(&snap(&w.rollout, now, now - 10 * H));
+        // a spend within five minutes of the week's last save: the saved week does not have it
+        append(&w.rollout, std::slice::from_ref(&later));
+        a.observe(&snap(&w.rollout, now + 60, now - 10 * H));
+        if restart {
+            a = CodexAlloc::new(w.dir.clone());
+            a.observe(&snap(&w.rollout, now + 90, now - 10 * H));
+        }
+        append(&w.rollout, std::slice::from_ref(&next));
+        a.observe(&snap(&w.rollout, now + 120, now - 10 * H));
+        assert_eq!(rows(&w.dir, "spend").len(), 2);
+        got.push(credits_per_dollar(&w.dir));
+    }
+    assert!((got[0] - got[1]).abs() < 1e-6 * got[0], "the reading read again counts on neither side: {got:?}");
 }
