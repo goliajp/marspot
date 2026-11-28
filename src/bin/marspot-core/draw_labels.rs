@@ -77,11 +77,11 @@ impl CoreApp {
         rows.iter()
             .map(|r| {
                 let (label, pane) = match r.pane {
-                    RowPane::Slot(i) => (resolved.get(i).cloned().unwrap_or_default(), win!(self, wi).panes.get(i)),
+                    RowPane::Slot(i) => (resolved.get(i).map_or("", |s| s.as_str()), win!(self, wi).panes.get(i)),
                     RowPane::Other(sid) => (self.label_of(sid, names.as_ref()), self.pane_of(sid)),
                 };
                 let code = pane.and_then(Pane::shelld_session_id).and_then(marspot_term::pane_code::known);
-                let s = code.map_or(label.as_str(), |c| without_code(&label, c));
+                let s = code.map_or(label, |c| without_code(label, c));
                 let state = pane.map_or(SessionState::Exited, |p| p.session().state());
                 (truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS), state, code)
             })
@@ -89,13 +89,13 @@ impl CoreApp {
     }
 
     /// What a pane of no slot of this window is called on screen.
-    fn label_of(&self, sid: u64, names: Option<&std::collections::HashMap<u64, String>>) -> String {
+    fn label_of<'a>(&'a self, sid: u64, names: Option<&'a std::collections::HashMap<u64, String>>) -> &'a str {
         let named = names.and_then(|n| n.get(&sid)).filter(|n| !n.is_empty() && *n != "?");
         let basename = || {
             let path = self.pane_cwds.get(&sid)?;
             std::path::Path::new(path).file_name()?.to_str()
         };
-        named.or_else(|| self.pane_titles.get(&sid)).map(String::as_str).or_else(basename).unwrap_or("").to_string()
+        named.or_else(|| self.pane_titles.get(&sid)).map(|s| s.as_str()).or_else(basename).unwrap_or("")
     }
 
     /// The pane whose session is `sid`, in a window or not.

@@ -40,7 +40,9 @@
 /// the window keeps.
 /// 14 the same day: the context menu is no longer a canvas built and
 /// encoded afresh on every frame it is open.
-const CEILING: usize = 14;
+/// 2026-11-28: 13. The sidebar's texts borrow each label from the names
+/// already worked out instead of cloning it.
+const CEILING: usize = 13;
 
 /// render_inner plus the helpers it calls on every frame whose bodies
 /// moved out of it: moving an allocation into a helper does not take it
@@ -50,7 +52,7 @@ fn render_inner_body() -> String {
     assert!(body.lines().count() > 50, "render_inner came out {} lines long", body.lines().count());
     body.push('\n');
     body.push_str(&fn_body("src/bin/marspot-core/draw.rs", "fn publish_overlays("));
-    for head in ["pub(super) fn pane_labels(", "pub(super) fn sidebar_labels("] {
+    for head in ["pub(super) fn pane_labels(", "pub(super) fn sidebar_texts(", "fn label_of<"] {
         body.push('\n');
         body.push_str(&fn_body("src/bin/marspot-core/draw_labels.rs", head));
     }
