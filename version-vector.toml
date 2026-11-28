@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.944"  # codex credits: wallet samples, spend and wallet_drop facts, cap fields, per_point measurement, check against devops
+shell   = "0.7.945"  # state map: codex credit_lots.tsv row; the not-append-only list says per_point.tsv is trimmed
 core    = "0.12.816"  # the switching row's snapshot test imports in order
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
