@@ -175,9 +175,8 @@ impl FloodGate {
     /// One frame of a 120 Hz display.
     pub(crate) const FRAME: Duration = Duration::from_millis(8);
 
-    /// One read buffer of pty output: the bytelog hands on a turn shorter
-    /// than this at once, and a flood's by filling its buffers; a key's
-    /// answer in a chunk may hold this much before a frame is due.
+    /// One read buffer of pty output: a key's answer in a chunk may
+    /// hold this much before a frame is due.
     pub(crate) const BULK_BYTES: usize = 64 * 1024;
 
     /// How long after a key its answer is taken to be in the very next

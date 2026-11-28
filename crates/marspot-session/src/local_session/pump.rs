@@ -162,9 +162,9 @@ impl LocalSession {
             self.last_output = Some(Instant::now());
         }
         // The bytelog's size is what L1 reads to tell whether this pane
-        // is talking; a burst must not wait in a buffer for 64 KiB of
-        // company.  A flood fills buffers by itself, until it ends.
-        if let Some(b) = self.bytelog.as_mut().filter(|_| !more && total < crate::publish_gate::FloodGate::BULK_BYTES) {
+        // is talking; a burst must not wait in a buffer for company.  A
+        // flood's turns, starved writer's pieces too, fill buffers.
+        if let Some(b) = self.bytelog.as_mut().filter(|_| !more && total < crate::frames::BULK_TURN_BYTES) {
             b.hand_off();
         }
         self.flush_capability_responses();
