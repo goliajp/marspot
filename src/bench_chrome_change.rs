@@ -11,7 +11,7 @@
 
 use marspot::render_metal::ChromeShape;
 
-use crate::bench_chrome::{scene, sidebar, views, NAMES};
+use crate::bench_chrome::{scene, sidebar, views, FOCUSED, NAMES};
 
 const MOVES: usize = 100;
 
@@ -25,7 +25,7 @@ pub fn run(arg: &str) {
     let mut views = views(&terminals);
     let mut sidebar = sidebar();
     let mut wr = marspot::render_metal::WindowRender::new();
-    let focused = 4;
+    let focused = FOCUSED;
     let row_h = marspot::layout::sidebar_row_h();
     let row = |i: usize| (20.0, layout.top_inset + layout.sidebar_top_pad_phys + (i as f64 + 0.5) * row_h);
     let hover = |wr: &mut marspot::render_metal::WindowRender,

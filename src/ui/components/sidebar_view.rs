@@ -41,13 +41,14 @@ fn row_id(i: usize) -> WidgetId {
 
 #[path = "sidebar_rows.rs"]
 mod rows;
-pub use rows::{Blank, Rows};
+pub use rows::{selected_row, Blank, Rows};
 
 /// What the sidebar shows this frame.
 pub struct SidebarFrame<'a> {
     pub layout: &'a Layout,
     pub rows: &'a dyn Rows,
-    pub focused_idx: usize,
+    /// The row of the pane in use, if it has one.
+    pub selected: Option<usize>,
     /// A panel or a menu lies over the window: nothing lights under
     /// the pointer, though what the pointer is on is still followed.
     pub quiet: bool,
@@ -74,7 +75,7 @@ impl SidebarFrame<'_> {
             self.rows.code(i).hash(&mut h);
             (self.rows.tree(i), self.rows.hollow(i)).hash(&mut h);
         }
-        (self.focused_idx, helpers).hash(&mut h);
+        (self.selected, helpers).hash(&mut h);
         (self.quiet, self.cell_w.to_bits()).hash(&mut h);
         let (measures, add) = self.hit_shape();
         measures.map(f64::to_bits).hash(&mut h);
@@ -175,7 +176,7 @@ fn describe_rows(ui: &mut Ui<'_>, f: &SidebarFrame<'_>, column: &Sidebar, bottom
     ui.float(first.x, first.y_top, |ui| {
         for i in 0..shown {
             let rect = column.row_rect(i);
-            let selected = if i == f.focused_idx { SELECTED } else { 0 };
+            let selected = if Some(i) == f.selected { SELECTED } else { 0 };
             let close = l.close_session_rects.get(i);
             let (code, tree) = (f.rows.code(i), f.rows.tree(i));
             let name = sidebar::clip_chars(f.rows.label(i), sidebar::name_room(rect, close, code.is_some(), tree, f.cell_w));
@@ -283,7 +284,7 @@ impl SidebarSurface {
             return;
         }
         self.ready_for = Some((layout.generation, rows));
-        let f = SidebarFrame { layout, rows: &Blank(rows), focused_idx: 0, quiet: false, cell_w: font.cell_w as f32 };
+        let f = SidebarFrame { layout, rows: &Blank(rows), selected: None, quiet: false, cell_w: font.cell_w as f32 };
         if self.hit.is(&f, self.helpers > 0) {
             return;
         }

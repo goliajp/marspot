@@ -136,7 +136,11 @@ fn snapshot_on(
     // the codes of the panes in the screenshot the sidebar's design was drawn from
     const CODES: [u16; 5] = [4145, 5528, 8654, 6004, 8590];
     let sidebar: Vec<SidebarEntry> = ROWS.with(|r| r.borrow_mut().take()).unwrap_or_else(|| {
-        panes.iter().enumerate().map(|(i, p)| SidebarEntry::top(p.title, p.state, Some(CODES[i % CODES.len()]))).collect()
+        panes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| SidebarEntry { selected: i == focused, ..SidebarEntry::top(p.title, p.state, Some(CODES[i % CODES.len()])) })
+            .collect()
     });
     let layout = Layout::build(
         w as f64,

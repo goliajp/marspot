@@ -62,7 +62,7 @@ fn sidebar_surface_frame() {
         let mut surface = SidebarSurface::default();
         let mut out: Frame = Default::default();
         let (rows, renamed): (&[SidebarEntry], &[SidebarEntry]) = (&rows, &renamed);
-        let rest = SidebarFrame { layout: &l, rows: &rows, focused_idx: 4, quiet: false, cell_w };
+        let rest = SidebarFrame { layout: &l, rows: &rows, selected: Some(4), quiet: false, cell_w };
         let other = SidebarFrame { rows: &renamed, ..rest };
         let c = l.close_session_rects[2];
         let (on, off) = ((c.x + c.w * 0.5, c.y_top + c.h * 0.5), (900.0, 600.0));
@@ -107,7 +107,7 @@ fn helper_panel_count_is_on_top_of_the_rows_that_reach_it() {
                 let l = layout(&stage, window, scale, n);
                 let rows = rows(n);
                 let rows: &[SidebarEntry] = &rows;
-                let f = SidebarFrame { layout: &l, rows: &rows, focused_idx: n, quiet: false, cell_w };
+                let f = SidebarFrame { layout: &l, rows: &rows, selected: Some(n), quiet: false, cell_w };
                 let mut s = SidebarSurface::default();
                 s.set_helpers(3);
                 let mut out: Frame = Default::default();

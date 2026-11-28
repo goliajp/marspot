@@ -120,8 +120,7 @@ pub struct SidebarEntry<'a> {
     pub tree: SidebarTree,
     /// The pane is in no window: its dot is drawn hollow.
     pub hollow: bool,
-    /// The row of the pane in use.  With none so marked, the row of
-    /// the focused pane's index is.
+    /// The row of the pane in use.  With none so marked, no row is lit.
     pub selected: bool,
 }
 

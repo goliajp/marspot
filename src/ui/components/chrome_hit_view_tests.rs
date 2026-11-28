@@ -156,7 +156,7 @@ fn a_row_and_its_close_button_light_together_with_a_paint_and_nothing_else() {
         ];
         let rows: &[SidebarEntry] = &names;
         let cell_w = stage.font.cell_w as f32;
-        let f = SidebarFrame { layout: &l, rows: &rows, focused_idx: 0, quiet: false, cell_w };
+        let f = SidebarFrame { layout: &l, rows: &rows, selected: Some(0), quiet: false, cell_w };
         let mut s = SidebarSurface::default();
         let picture = |stage: &mut Stage, s: &mut SidebarSurface, p: (f64, f64)| -> Frame {
             s.kept.surface.pointer_move(p);
@@ -215,7 +215,7 @@ fn under_a_panel_the_sidebar_follows_the_pointer_and_lights_nothing() {
         let names = [entry("smix"), entry("devops"), entry("alt")];
         let rows: &[SidebarEntry] = &names;
         let cell_w = stage.font.cell_w as f32;
-        let open = SidebarFrame { layout: &l, rows: &rows, focused_idx: 0, quiet: true, cell_w };
+        let open = SidebarFrame { layout: &l, rows: &rows, selected: Some(0), quiet: true, cell_w };
         let closed = SidebarFrame { quiet: false, ..open };
         let mut s = SidebarSurface::default();
         let mut draw = |s: &mut SidebarSurface, f: &SidebarFrame<'_>| -> Frame {
