@@ -3,13 +3,13 @@
 //! and in each language (`settings_sched{,.2x}{,.ja,.zh}.png`).
 
 use super::controls;
-use super::settings_rows::{Control, Row};
-use crate::ui::strings::{Msg, table};
 use super::density_kit::at_scale;
 use super::panel_snapshot_tests::snapshot;
 use super::settings_modal;
+use super::settings_rows::{Control, Row};
 use super::settings_view::SettingsRender;
 use crate::settings::{SchedProfile, Settings};
+use crate::ui::strings::{Msg, table};
 
 /// How far down the panel the picture starts, before the scale.
 const SCROLL: f64 = 760.0;

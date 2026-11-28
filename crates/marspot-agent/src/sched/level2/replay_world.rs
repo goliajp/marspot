@@ -4,7 +4,7 @@
 //! - `Actual`: every pane where it really was; a refused pane waits for
 //!   the move that really happened.
 //! - `Planner(lim)`: the planner as the shell drives it under `lim` with
-//!   the executor live (`replay_pass`): every step a full search when a
+//!   the executor live (`replay_drive`): every step a full search when a
 //!   trigger is due, else the standing plan re-timed.  New and refused
 //!   panes go where the routing table says (refused ones by today's
 //!   objective when it has no entry).  From the first recorded boundary

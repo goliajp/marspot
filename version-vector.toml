@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.941"  # planner and executor share one attended rule: focus or a prompt within the hour
-core    = "0.12.815"  # the switching row no longer says the planner is in trial: it goes live in checked steps
+core    = "0.12.816"  # the switching row's snapshot test imports in order
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
