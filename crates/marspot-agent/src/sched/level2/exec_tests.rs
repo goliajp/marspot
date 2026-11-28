@@ -31,10 +31,14 @@ fn sched_exec_takes_the_cheapest_kind_first() {
 fn sched_exec_notices_a_working_pane_as_the_profile_allows() {
     let w = watched();
     let busy = |t| Boundary { live: true, ..at(t) };
-    // the five-minute notice is timed so it and the wait end at the deadline
+    // a pane that rests often: the five-minute notice is timed so it and
+    // the wait end at the deadline, leaving the clean rest its chance
+    let often = Watched { clean_per_h: 12.0, ..w };
     let lead = NOTICE_S + i64::from(Limits::BALANCED.notice_wait_min) * 60;
-    assert_eq!(decide(&w, &busy(4 * H - lead - 1), &Limits::BALANCED), Would::Wait);
-    assert_eq!(decide(&w, &busy(4 * H - lead), &Limits::BALANCED), Would::Notify(Kind::Notice));
+    assert_eq!(decide(&often, &busy(4 * H - lead - 1), &Limits::BALANCED), Would::Wait);
+    assert_eq!(decide(&often, &busy(4 * H - lead), &Limits::BALANCED), Would::Notify(Kind::Notice));
+    // at 0.09 clean rests an hour one is unlikely in four hours: the notice goes at once
+    assert_eq!(decide(&w, &busy(10), &Limits::BALANCED), Would::Notify(Kind::Notice));
     // a long-running manager gets the drain notice at the opening
     assert_eq!(decide(&Watched { long_background: true, ..w }, &busy(10), &Limits::BALANCED), Would::Notify(Kind::Drain));
     // steady notices a working pane only to avert a refusal
@@ -48,8 +52,10 @@ fn sched_exec_after_a_notice_switches_at_a_free_boundary_or_cancels_over_dear_wo
     let b = Limits::BALANCED;
     assert_eq!(decide(&n, &Boundary { quiet_s: 1, ..at(1100) }, &b), Would::Switch(Kind::Notice));
     let busy = |t| Boundary { live: true, ..at(t) };
-    assert_eq!(decide(&n, &busy(1100), &b), Would::Wait);
-    let over = 1000 + NOTICE_S + i64::from(b.notice_wait_min) * 60;
+    assert_eq!(decide(&n, &busy(1100), &b), Would::Wait, "inside the notice's five minutes");
+    // the first boundary after the five minutes, inside the wait for one:
+    // a pane with a process always under its agent is switched there
+    let over = 1000 + NOTICE_S;
     assert_eq!(decide(&n, &busy(over), &b), Would::Switch(Kind::Notice), "the work is worth less than the gain");
     assert_eq!(decide(&Watched { lost_work: 0.02, ..n }, &busy(over), &b), Would::Cancel);
     assert_eq!(Would::Switch(Kind::Drain).word(), "switch kind=drain");

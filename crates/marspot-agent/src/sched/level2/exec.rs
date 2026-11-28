@@ -6,12 +6,18 @@
 //!    chance of a clean rest before the deadline is under `SHORT_CHANCE`.
 //! 3. Otherwise a notice: a drain notice at the window's opening for a
 //!    session with long background work ("do not start the next one"),
-//!    else the five-minute notice timed so the notice and the profile's
-//!    wait for a boundary end at the deadline.  After a notice the
-//!    switch is taken at the first boundary with nothing live, or, once
-//!    the notice's five minutes and the wait are over, over background
-//!    work worth less than the switch's gain; background work worth more
-//!    cancels it and the session is told to carry on.
+//!    else the five-minute notice: at once for a working pane when a
+//!    clean rest before the deadline is unlikely (under `SHORT_CHANCE`),
+//!    else timed so the
+//!    notice and the profile's longest wait for a boundary end at the
+//!    deadline.  After a notice
+//!    the switch is taken at the first boundary with nothing live, or,
+//!    once the notice's five minutes are over, at the first boundary
+//!    over background work worth less than the switch's gain;
+//!    background work worth more cancels it and the session is told to
+//!    carry on.  A pane whose agent always has a process under it would
+//!    otherwise wait out the whole wait and then need one more boundary
+//!    before the deadline.
 //!
 //! Never inside a turn, never while the user is at the pane.  A profile
 //! that does not notice working panes notices only for a switch that
@@ -95,7 +101,7 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
         if !b.live {
             return Would::Switch(kind);
         }
-        if b.at < at + NOTICE_S + wait_s {
+        if b.at < at + NOTICE_S {
             return Would::Wait;
         }
         return if w.lost_work >= w.gain { Would::Cancel } else { Would::Switch(kind) };
@@ -112,7 +118,9 @@ pub fn decide(w: &Watched, b: &Boundary, lim: &Limits) -> Would {
     if w.long_background {
         return Would::Notify(Kind::Drain);
     }
-    if b.at >= w.dead_at - NOTICE_S - wait_s { Would::Notify(Kind::Notice) } else { Would::Wait }
+    // a resting pane is left to reach a short or clean boundary first
+    let unlikely = b.live && clean_chance(w.clean_per_h, w.dead_at - b.at) < SHORT_CHANCE;
+    if unlikely || b.at >= w.dead_at - NOTICE_S - wait_s { Would::Notify(Kind::Notice) } else { Would::Wait }
 }
 
 #[path = "exec_record.rs"]
