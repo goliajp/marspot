@@ -21,6 +21,7 @@ pub const ALL: &[Msg] = &[
     Msg::HelperStrip,
     Msg::ClaudeCodeReportsModel,
     Msg::ClaudeCodeGuardModel,
+    Msg::ClaudeCodeSchedProfile,
     Msg::WheelSpeed,
     Msg::CostReclaimIdlePanes,
     Msg::CostIdleFor,
@@ -31,6 +32,7 @@ pub const ALL: &[Msg] = &[
     Msg::CostHelperStrip,
     Msg::CostClaudeCodeReportsModel,
     Msg::CostClaudeCodeGuardModel,
+    Msg::CostClaudeCodeSchedProfile,
     Msg::CostWheelSpeed,
     Msg::MenuCopy,
     Msg::MenuPaste,
@@ -192,4 +194,7 @@ pub const ALL: &[Msg] = &[
     Msg::ConsentAsk,
     Msg::ConsentYes,
     Msg::ConsentNo,
+    Msg::SchedSteady,
+    Msg::SchedBalanced,
+    Msg::SchedFull,
 ];

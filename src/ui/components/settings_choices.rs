@@ -3,7 +3,7 @@
 
 use marspot_term::language::LangId;
 use marspot_term::palette::ThemeId;
-use marspot_term::settings::InstallConsent;
+use marspot_term::settings::{InstallConsent, SchedProfile};
 
 use crate::ui::strings::Msg;
 
@@ -44,6 +44,10 @@ pub const LANGUAGE_LABELS: &[Msg] =
 /// once, or never.
 pub const CONSENT_CHOICES: &[InstallConsent] = &[InstallConsent::Ask, InstallConsent::Yes, InstallConsent::No];
 pub const CONSENT_LABELS: &[Msg] = &[Msg::ConsentAsk, Msg::ConsentYes, Msg::ConsentNo];
+
+/// How freely panes are switched between accounts, most careful first.
+pub const SCHED_CHOICES: &[SchedProfile] = &[SchedProfile::Steady, SchedProfile::Balanced, SchedProfile::Full];
+pub const SCHED_LABELS: &[Msg] = &[Msg::SchedSteady, Msg::SchedBalanced, Msg::SchedFull];
 
 /// The line under the language row: what choosing costs, or, while the
 /// items the system provides are still in the language Marspot was

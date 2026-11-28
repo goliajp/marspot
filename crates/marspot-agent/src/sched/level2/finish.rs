@@ -49,7 +49,7 @@ pub(super) fn plan(e: &mut Eval, best: &[Sched], mode: Mode, active: usize, char
             let drains = g.renews[hop.to as usize].filter(|&r| (hop.at as usize) < r).map(|r| g.cuts[r]);
             let t_dead = match from {
                 Some(j) if averts => g.dead_for(p, j).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
-                _ => dead_by_gain(t_open, gain, pane.rewrite).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
+                _ => dead_by_gain(t_open, gain, pane.rewrite + input.limits.switch_extra).min(drains.unwrap_or(f64::INFINITY)).max(t_open),
             };
             // a switch planned at the source's latest moment (a keeper's)
             // opens the same lead before it as one planned earlier, from the

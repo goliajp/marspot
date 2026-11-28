@@ -154,6 +154,7 @@ pub(super) struct Driver {
     ended: bool,
     planned_once: bool,
     calib: crate::sched::calib::Calib,
+    pub lim: super::Limits,
 }
 
 impl Driver {
@@ -169,7 +170,9 @@ impl Driver {
         match policy {
             Policy::Planner { bias, short, shell: true } => self.pass(read, panes, now, [bias, short], f, refused),
             Policy::Planner { bias, shell: false, .. } if refused || now % 3600 == 0 || !self.planned_once => {
-                with_input(read, panes, now, [bias, bias], f, |i, _| {
+                let lim = self.lim;
+                self.st.inertia = Some(lim.inertia);
+                with_input(read, panes, now, [bias, bias], f, lim, |i, _| {
                     pass::full(&mut self.st, i, now as u64, now);
                 });
                 self.planned_once = true;
@@ -179,7 +182,8 @@ impl Driver {
     }
 
     fn pass(&mut self, read: &Read, panes: &[P], now: i64, bias: [f64; 2], f: f64, refused: bool) {
-        with_input(read, panes, now, bias, f, |i, outside| {
+        self.st.inertia = Some(self.lim.inertia);
+        with_input(read, panes, now, bias, f, self.lim, |i, outside| {
             let quants: Vec<_> = i.accounts.iter().map(|x| x.q.clone()).collect();
             let high: Vec<f64> = i.accounts.iter().map(|x| i.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
             let counted: Vec<u64> = i.panes.iter().map(|p| p.sid).collect();
@@ -219,7 +223,8 @@ fn handed(panes: &[P], now: i64, bias: [f64; 2]) -> Vec<[f64; 2]> {
         .collect()
 }
 
-fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, f: impl FnOnce(&Input, &[u64])) {
+#[allow(clippy::too_many_arguments)] // the shell's inputs, one by one
+fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, lim: super::Limits, f: impl FnOnce(&Input, &[u64])) {
     let q = read.quants();
     let mut outside = Vec::new();
     for (k, p) in panes.iter().enumerate() {
@@ -251,15 +256,15 @@ fn with_input(read: &Read, panes: &[P], now: i64, bias: [f64; 2], factor: f64, f
                 lost_work: 0.0,
                 clean_per_h: RESTS[k],
                 long_background: false,
-                earliest_h: (DWELL_H - since).max(0.0),
-                left: p.left.map(|(id, at)| (id, 6.0 - (now - at) as f64 / 3600.0)),
+                earliest_h: (lim.dwell_h - since).max(0.0),
+                left: p.left.map(|(id, at)| (id, lim.dwell_h - (now - at) as f64 / 3600.0)),
                 barred: 0,
-                switches_left: (6usize.saturating_sub(p.planned.iter().filter(|t| now - **t < WEEK).count())) as u8,
+                switches_left: lim.switches_left(p.planned.iter().filter(|t| now - **t < WEEK).count(), p.planned.iter().filter(|t| now - **t < 86_400).count()),
                 disturb_left: 4,
             }
         })
         .collect();
     let day = panes.iter().flat_map(|x| x.planned.iter()).filter(|at| now - **at < 86_400).count();
-    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: read.stale_feed() };
+    let i = Input { accounts: &accounts, panes: &ps, young: [0.0; 2], window_full: KAPPA, pi: lim.pi(l1.pi), fleet_left: lim.fleet_per_day.saturating_sub(day), notices_left: lim.notices_per_hour, stale_feed: read.stale_feed(), limits: lim };
     f(&i, &outside);
 }

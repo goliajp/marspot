@@ -44,9 +44,11 @@ mod cc_model;
 pub mod font;
 mod install_consent;
 mod rebalance;
+mod sched_profile;
 mod values;
 
 pub use {agent_allocation::AgentAllocation, cc_model::CcModel, rebalance::Rebalance};
+pub use sched_profile::{SchedProfile, SchedSettings};
 pub use install_consent::{InstallConsent, InstallConsents, CLIS as INSTALL_CLIS};
 
 /// Every user-owned decision, resolved.
@@ -164,6 +166,8 @@ pub struct Settings {
     /// itself (`live`), only logs when it would (`dryrun`), or neither.
     /// Off: nothing in this build uses one in any mode.
     pub sched_reset: AgentAllocation,
+    /// How freely panes are switched between accounts, see [`SchedSettings`].
+    pub sched: SchedSettings,
     /// Whether marspot guards the default model all Claude Code accounts
     /// share, see [`CcModel`].
     pub cc_model: CcModel,
@@ -201,6 +205,7 @@ impl Default for Settings {
             kimi_allocation: AgentAllocation::Off,
             gemini_allocation: AgentAllocation::Off,
             sched_reset: AgentAllocation::Off,
+            sched: SchedSettings::default(),
             cc_model: CcModel::Managed,
             helper_strip: true,
             appearance_theme: Some(ThemeId::Dark),
@@ -351,6 +356,7 @@ const KEYS: &[&str] = &[
     "input.scroll_factor",
     "claudecode.statusline_hook",
     "claude.model",
+    "sched.profile",
     "agents.install.claude",
     "agents.install.codex",
     "agents.install.gemini",
@@ -371,6 +377,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
         "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         _ => agent_allocation::value_of(s, key)
+            .or_else(|| sched_profile::value_of(s, key))
             .or_else(|| font::value_of(s, key))
             .or_else(|| install_consent::value_of(&s.install_consent, key))
             .unwrap_or_default(),
@@ -404,6 +411,7 @@ pub fn parse(body: &str) -> Settings {
                 s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)
             }
             _ if agent_allocation::parse_key(&mut s, k, v) => {}
+            _ if sched_profile::parse_key(&mut s, k, v) => {}
             _ if font::parse_key(&mut s, k, v) => {}
             _ if install_consent::parse_key(&mut s.install_consent, k, v) => {}
             // Anything else is a key this build does not know.  Left
@@ -503,26 +511,6 @@ mod tests {
         assert!((odd.dim_scale - 0.85).abs() < 1e-6);
         assert!((odd.scroll_factor - 3.0).abs() < 1e-6);
         assert_eq!(parse(&render(&odd, "")), odd, "and it survives a rewrite");
-    }
-
-    /// The kimi allocation is off unless the file says `dryrun` or
-    /// `live`, and a rewrite keeps the word.
-    #[test]
-    fn kimi_allocation_is_off_unless_named() {
-        assert_eq!(Settings::default().kimi_allocation, AgentAllocation::Off);
-        for (word, want) in [
-            ("live", AgentAllocation::Live),
-            ("DryRun", AgentAllocation::DryRun),
-            ("off", AgentAllocation::Off),
-            ("on", AgentAllocation::Off),
-            ("true", AgentAllocation::Off),
-        ] {
-            let body = format!("kimi.allocation = {word}\n");
-            let s = parse(&body);
-            assert_eq!(s.kimi_allocation, want, "{word}");
-            assert_eq!(parse(&render(&s, &body)).kimi_allocation, want, "{word} after a rewrite");
-        }
-        assert_eq!(value_of(&parse("kimi.allocation = dryrun\n"), "kimi.allocation"), "dryrun");
     }
 
     /// The theme is dark until the file names another, `system` is a

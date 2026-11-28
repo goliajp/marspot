@@ -23,7 +23,7 @@
 
 use super::grid::Grid;
 use super::search::NOISE;
-use super::{DWELL_H, Input, MIN_GAIN, MIN_GAIN_EFF, Plan, Sched};
+use super::{Input, MIN_GAIN, MIN_GAIN_EFF, Plan, Sched};
 
 /// A pin after a miss or a cancel, seconds.
 pub const PIN_S: i64 = 3600;
@@ -56,6 +56,9 @@ pub struct Standing {
     pub id: u64,
     pub switches: Vec<Planned>,
     pins: Vec<(u64, i64)>,
+    /// The share of a switch's gain a change of structure must beat;
+    /// `INERTIA` unless the profile says otherwise.
+    pub inertia: Option<f64>,
 }
 
 /// What a pass did with the structure.
@@ -139,7 +142,7 @@ impl Standing {
             } else {
                 // the rounding tolerance is for the stored window only:
                 // the dwell after the first switch is exact
-                let dwell = g.cuts[out[p].hops().first()?.at as usize] + DWELL_H;
+                let dwell = g.cuts[out[p].hops().first()?.at as usize] + input.limits.dwell_h;
                 g.cuts.iter().position(|c| *c >= open_h - SECOND_H && *c >= dwell - DWELL_EPS_H)?
             };
             if at >= g.segs() || out[p].n as usize != s.order as usize {
@@ -208,7 +211,7 @@ impl Standing {
             return Verdict::Adopted { changed: 0 };
         }
         let gain_of = |x: &(u64, u8, u8)| candidate.switches.iter().chain(&timed.switches).find(|s| (s.sid, s.to, s.order) == *x).map_or(0.0, |s| s.gain);
-        let bar: f64 = changed.iter().map(|x| MIN_GAIN.max(INERTIA * gain_of(x))).sum();
+        let bar: f64 = changed.iter().map(|x| MIN_GAIN.max(self.inertia.unwrap_or(INERTIA) * gain_of(x))).sum();
         let (c, t) = (&candidate.totals, &timed.totals);
         if c.money < t.money - bar || (c.money <= t.money + 1e-9 && c.eff <= t.eff - MIN_GAIN_EFF) {
             return self.adopt(candidate, &new, digest, now);

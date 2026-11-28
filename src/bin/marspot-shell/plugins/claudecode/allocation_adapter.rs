@@ -16,6 +16,7 @@ use super::allocation_events::{DAY, Event, EventLog, KEEP_DAYS, Tail};
 use super::allocation_inputs::{PaneIn, Snapshot, at_of};
 use super::allocation_prices::{Tokens, class_of, weeks};
 use super::allocation_usage::Readers;
+use marspot_agent::sched::switch_cost::Sample;
 use crate::plugins::allocation::Class;
 use crate::plugins::allocation::notice::Told;
 use crate::plugins::allocation::rest::MOVES_PER_WEEK;
@@ -83,6 +84,7 @@ pub(super) struct Allocation {
     pub(super) view: Option<super::allocation_view::View>,
     pub(super) sched: crate::agentsvc::sched::Shadow,
     pub(super) more: super::allocation_more::More,
+    pub(super) switch: switch_cost::SwitchCosts,
 }
 
 /// Events in `dir` under the claudecode plugin's state directory.
@@ -118,6 +120,7 @@ impl Allocation {
             view: None,
             sched: Default::default(),
             more: super::allocation_more::More::new(super::allocation_hours::Hours::new(dir_hours)),
+            switch: Default::default(),
         }
     }
 
@@ -176,6 +179,7 @@ impl Allocation {
             self.pending.remove(&sid);
         }
         self.told.retain(|sid| snap.live.contains(&sid));
+        self.switch.retain(|sid| snap.live.contains(&sid));
     }
 
     fn facts(&mut self, p: &PaneIn, now: i64, log: &mut Vec<(&'static str, String)>) {
@@ -184,6 +188,9 @@ impl Allocation {
         if last.profile != Some(p.profile) {
             let from = last.profile.map_or_else(String::new, |f| format!("from P{f}"));
             self.event(now, p.sid, "bound", Some(p.profile), p.class, from, log);
+            if last.profile.is_some() {
+                self.switch.bound(p.sid, now);
+            }
             next.left = last.profile.map(|f| (f, now));
             next.profile = Some(p.profile);
             next.bound_at = Some(now);
@@ -214,6 +221,9 @@ impl Allocation {
             }
             None => Vec::new(),
         };
+        for got in spent.iter().filter_map(|s| self.switch.spent(p.sid, s)).collect::<Vec<_>>() {
+            self.event(now, p.sid, "switch_cost", Some(p.profile), p.class, got.words(), log);
+        }
         let pend = self.pending.entry(p.sid).or_insert((now, Vec::new()));
         for s in spent {
             match pend.1.iter().position(|(m, _)| *m == s.model) {
@@ -262,6 +272,11 @@ impl Allocation {
                     l.bound_at = Some(e.at);
                     l.would = None;
                 }
+                "switch_cost" => {
+                    if let Some(got) = Sample::parse(e.at, &e.detail) {
+                        self.switch.fit.add(&got);
+                    }
+                }
                 "rest" | "busy" => l.resting = Some(e.kind == "rest"),
                 "refused" => l.refused_at = at_of(&e.detail),
                 "marked" => l.marked_at = at_of(&e.detail),
@@ -289,6 +304,9 @@ impl Allocation {
 
 #[path = "allocation_caps.rs"]
 mod caps;
+
+#[path = "allocation_switch_cost.rs"]
+pub(super) mod switch_cost;
 
 #[cfg(test)]
 #[path = "allocation_adapter_tests.rs"]

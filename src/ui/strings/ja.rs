@@ -24,6 +24,7 @@ fn text(m: Msg) -> &'static str {
         Msg::CircledDigitsWide => "丸数字を2セル幅で表示",
         Msg::ClaudeCodeReportsModel => "Claude Codeから使用モデルを取得",
         Msg::ClaudeCodeGuardModel => "全アカウント共通のデフォルトモデルを保護",
+        Msg::ClaudeCodeSchedProfile => "アカウント間のペイン切り替え",
         Msg::WheelSpeed => "ホイールの速度",
 
         Msg::CostReclaimIdlePanes => "ペインに戻ると、セッションの再開に約3秒かかります",
@@ -37,6 +38,7 @@ fn text(m: Msg) -> &'static str {
             "Claude Codeの設定にステータスラインを追加します。既存の設定は引き継がれ、オフにすると元に戻ります"
         }
         Msg::CostClaudeCodeGuardModel => "/modelは送信前に確認します。確認されていない変更は元に戻します",
+        Msg::CostClaudeCodeSchedProfile => "積極的なほど失効するFable枠が減ります。切り替えのたびに会話全体を読み直します",
         Msg::CostWheelSpeed => "速いほど少ない操作で届きますが、行き過ぎやすくなります",
 
         Msg::MenuCopy => "コピー",
@@ -226,6 +228,9 @@ fn text(m: Msg) -> &'static str {
         Msg::ConsentAsk => "確認する",
         Msg::ConsentYes => "インストール",
         Msg::ConsentNo => "しない",
+        Msg::SchedSteady => "慎重",
+        Msg::SchedBalanced => "バランス",
+        Msg::SchedFull => "使い切る",
     }
 }
 

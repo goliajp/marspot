@@ -260,7 +260,7 @@ impl W {
             })
             .collect();
         let day = self.run.planned.iter().filter(|x| now - x.0 < 86_400).count();
-        let i = Input { accounts: &accounts, panes: &panes, young: [0.0; 2], window_full: KAPPA_FABLE, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false };
+        let i = Input { accounts: &accounts, panes: &panes, young: [0.0; 2], window_full: KAPPA_FABLE, pi: l1.pi, fleet_left: FLEET_PER_DAY.saturating_sub(day), notices_left: NOTICES_PER_HOUR, stale_feed: false, limits: crate::sched::level2::Limits::STEADY };
         level2::plan(&i, None)
     }
 }

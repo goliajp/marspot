@@ -198,7 +198,14 @@ fn plan_world(accounts: u8, panes: u64) -> (Vec<level2::Account>, Vec<level2::Pa
 }
 
 fn plan_input<'a>(a: &'a [level2::Account], p: &'a [level2::Pane]) -> level2::Input<'a> {
-    level2::Input { accounts: a, panes: p, young: [0.001, 0.003], window_full: 0.528, pi: 0.5, fleet_left: 8, notices_left: 4, stale_feed: false }
+    level2::Input { accounts: a, panes: p, young: [0.001, 0.003], window_full: 0.528, pi: 0.5, fleet_left: 8, notices_left: 4, stale_feed: false, limits: level2::Limits::STEADY }
+}
+
+/// The same under each profile, its own fleet and notice counts.
+const PROFILES: [level2::Limits; 3] = [level2::Limits::STEADY, level2::Limits::BALANCED, level2::Limits::FULL];
+
+fn profile_input<'a>(a: &'a [level2::Account], p: &'a [level2::Pane], lim: level2::Limits) -> level2::Input<'a> {
+    level2::Input { fleet_left: lim.fleet_per_day, notices_left: lim.notices_per_hour, pi: lim.pi(0.5), limits: lim, ..plan_input(a, p) }
 }
 
 #[test]
@@ -276,23 +283,32 @@ fn within_release(what: &str, p: Duration, budget: Duration) {
 #[test]
 fn sched_plan_release_perf_gate() {
     let (a, p) = plan_world(16, 64);
-    let i = plan_input(&a, &p);
-    let mut times = Vec::new();
-    for _ in 0..40 {
-        let t0 = Instant::now();
-        black_box(level2::plan(black_box(&i), None));
-        times.push(t0.elapsed());
+    for lim in PROFILES {
+        let i = profile_input(&a, &p, lim);
+        let mut times = Vec::new();
+        for _ in 0..40 {
+            let t0 = Instant::now();
+            black_box(level2::plan(black_box(&i), None));
+            times.push(t0.elapsed());
+        }
+        let full = p95(times.split_off(5));
+        let name = lim.profile.word();
+        println!("sched plan release P95 per full search {full:?} ({name}), budget {PLAN_RELEASE_BUDGET:?}");
+        within_release(&format!("sched plan release {name}"), full, PLAN_RELEASE_BUDGET);
     }
-    let full = p95(times.split_off(5));
-    println!("sched plan release P95 per full search {full:?}, budget {PLAN_RELEASE_BUDGET:?}");
-    within_release("sched plan release", full, PLAN_RELEASE_BUDGET);
 }
 
 #[test]
 fn sched_plan_tick_perf_gate() {
+    for lim in PROFILES {
+        tick_gate(lim);
+    }
+}
+
+fn tick_gate(lim: level2::Limits) {
     use level2::trigger::{Now, Triggers};
     let (a, p) = plan_world(16, 64);
-    let i = plan_input(&a, &p);
+    let i = profile_input(&a, &p, lim);
     let quants: Vec<Quant> = a.iter().map(|x| x.q.clone()).collect();
     let high: Vec<f64> = a.iter().map(|x| p.iter().filter(|q| q.on == x.q.id).map(|q| q.high[0] + q.high[1]).sum()).collect();
     let counted: Vec<u64> = p.iter().map(|q| q.sid).collect();
@@ -316,7 +332,7 @@ fn sched_plan_tick_perf_gate() {
         assert!(!pass.plan.switches.is_empty(), "the tick evaluated no switch");
     }
     let p = p95(times.split_off(3));
-    println!("sched plan tick release P95 {p:?}, {} standing switches, budget {TICK_RELEASE_BUDGET:?}", st.switches.len());
+    println!("sched plan tick release P95 {p:?} ({}), {} standing switches, budget {TICK_RELEASE_BUDGET:?}", lim.profile.word(), st.switches.len());
     assert!(TICK_RELEASE_BUDGET < Duration::from_millis(1), "the tick's budget stays under a millisecond");
     within_release("sched plan tick", p, TICK_RELEASE_BUDGET);
 }

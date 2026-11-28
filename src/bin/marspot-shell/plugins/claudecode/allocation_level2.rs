@@ -27,7 +27,7 @@ use marspot_agent::sched::level1::Level1;
 use marspot_agent::sched::level2::line::Said;
 use marspot_agent::sched::level2::standing::{Standing, Verdict, structure_of};
 use marspot_agent::sched::level2::trigger::{Now, Triggers};
-use marspot_agent::sched::level2::{FLEET_PER_DAY, Input, NOTICES_PER_HOUR, Plan, pass};
+use marspot_agent::sched::level2::{Input, Limits, Plan, pass};
 
 use super::allocation_adapter::Allocation;
 use super::allocation_inputs::Snapshot;
@@ -36,6 +36,9 @@ use super::allocation_level2_input::{Built, build, digest};
 use super::allocation_route;
 use super::allocation_view::View;
 use crate::plugins::allocation::{Class, KAPPA_FABLE};
+
+#[path = "allocation_limits.rs"]
+mod limits;
 
 const DAY_S: i64 = 86_400;
 const KEPT_EVERY_S: i64 = 3600;
@@ -122,9 +125,11 @@ impl PanePlan {
         self.passes += 1;
         let now = snap.now;
         let refused = self.note_refusals(snap);
-        let mut b = build(a, snap, view, forecast, class, &self.standing);
+        let limits = limits::current();
+        self.standing.inertia = Some(limits.inertia);
+        let mut b = build(a, snap, view, forecast, class, &self.standing, &limits);
         self.calibrate(&mut b, now, &mut log);
-        let input = Input { accounts: &b.accounts, panes: &b.panes, young: b.young, window_full: KAPPA_FABLE, pi: b.pi, fleet_left: b.fleet_left, notices_left: NOTICES_PER_HOUR, stale_feed: b.stale_feed };
+        let input = Input { accounts: &b.accounts, panes: &b.panes, young: b.young, window_full: KAPPA_FABLE, pi: b.pi, fleet_left: b.fleet_left, notices_left: limits.notices_per_hour, stale_feed: b.stale_feed, limits };
         let quants: Vec<_> = b.accounts.iter().map(|x| x.q.clone()).collect();
         let high: Vec<f64> = b.accounts.iter().map(|x| b.panes.iter().filter(|p| p.on == x.q.id).map(|p| p.high[0] + p.high[1]).sum()).collect();
         let mut counted: Vec<u64> = b.panes.iter().map(|p| p.sid).collect();
@@ -167,6 +172,7 @@ impl PanePlan {
         match &r.verdict {
             Some(Verdict::Adopted { changed }) if *changed > 0 || prev == 0 => {
                 let today = today(a, view);
+                let lim: &Limits = &input.limits;
                 self.refusals.retain(|(at, _)| now - at < DAY_S);
                 let fore = self.refusals.iter().filter(|x| x.1).count();
                 let said = Said {
@@ -174,14 +180,14 @@ impl PanePlan {
                     id: self.standing.id,
                     prev,
                     bound: class.1.money.total,
-                    fleet: (FLEET_PER_DAY - b.fleet_left.min(FLEET_PER_DAY), FLEET_PER_DAY),
-                    notices: (0, NOTICES_PER_HOUR),
+                    fleet: (lim.fleet_per_day - b.fleet_left.min(lim.fleet_per_day), lim.fleet_per_day),
+                    notices: (0, lim.notices_per_hour),
                     refusals: (fore, self.refusals.len() - fore),
                     today: &today,
                 };
                 log.push(("sched.plan", r.plan.line(input, &said)));
                 let structure: Vec<String> = structure_of(&r.plan).iter().take(64).map(|(sid, to, o)| format!("{sid}>P{to}#{o}")).collect();
-                let detail = format!("id={:016x} prev={prev:016x} digest={d:016x} trigger={why} structure={}", self.standing.id, if structure.is_empty() { "-".into() } else { structure.join(",") });
+                let detail = format!("id={:016x} prev={prev:016x} digest={d:016x} trigger={why} {} structure={}", self.standing.id, input.limits.words(), if structure.is_empty() { "-".into() } else { structure.join(",") });
                 a.event(now, 0, "plan", None, Class::Plain, detail, log);
                 self.write_status(&r.plan, input, class, now, log);
             }

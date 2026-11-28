@@ -97,6 +97,7 @@ impl Plan {
             self.sims,
             pts(self.charge),
         );
+        let _ = write!(out, " prof={}", input.limits.profile.word());
         out
     }
 

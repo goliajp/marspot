@@ -76,6 +76,10 @@ pub(super) struct Week {
     /// Switches and refusals of the restricted panes.
     pub switches_r: usize,
     pub refusals_r: usize,
+    /// The restricted window lapsing at renewals, weeks, and planned
+    /// switches of a pane inside the profile's own stay.
+    pub fable_lapsed: f64,
+    pub short_stay: usize,
 }
 
 /// The fleet hours recorded, `[restricted, plain]` weeks an hour.
@@ -100,6 +104,11 @@ pub(super) struct P {
 const READ_ERR: f64 = 0.01;
 
 pub(super) fn run(seed: u64, policy: Policy) -> Week {
+    run_with(seed, policy, super::Limits::STEADY)
+}
+
+/// The same run with the planner under `lim`.
+pub(super) fn run_with(seed: u64, policy: Policy, lim: super::Limits) -> Week {
     let mut rng = Rng(seed);
     let mut noise = Rng(seed ^ 0x5DEE_CE66_D1CE_4E5B);
     let mut err = vec![[0.0; 2]; 8];
@@ -117,6 +126,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
     }
     let mut w = Week::default();
     let mut drv = Driver::default();
+    drv.lim = lim;
     let mut feed = Feed::new(seed);
     // the last moment demand went unmet; a renewal lapses as waste when
     // demand went unmet in the week before it
@@ -125,7 +135,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
     for step in 0..(2 * WEEK / STEP) {
         let now = step * STEP;
         if now == WEEK {
-            w = Week { double: w.double, ..Week::default() };
+            w = Week { double: w.double, short_stay: w.short_stay, ..Week::default() };
         }
         if now % 3600 == 0 {
             demand = hours[rng.below(hours.len())];
@@ -139,6 +149,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
                     w.money += q.r.max(0.0);
                     w.lapsed += q.r.max(0.0);
                 }
+                w.fable_lapsed += q.f.max(0.0).min(q.r.max(0.0));
                 q.r = 1.0;
                 q.f = KAPPA;
                 *renew += WEEK;
@@ -151,7 +162,7 @@ pub(super) fn run(seed: u64, policy: Policy) -> Week {
         drv.step(policy, &Read { acc: &acc, err: &err, feed: &feed, now }, &panes, now, false);
         for (k, rate) in RESTS.iter().enumerate().take(panes.len()) {
             if rng.next() < 1.0 - crate::detmath::exp(-rate / 12.0) {
-                rest(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, policy, &drv.st, &mut w);
+                rest(&Read { acc: &acc, err: &err, feed: &feed, now }, &mut panes, k, now, policy, &drv.st, drv.lim.dwell_h, &mut w);
             }
         }
         let mut refused = false;
@@ -247,7 +258,7 @@ fn refuse(read: &Read, panes: &mut [P], k: usize, now: i64, w: &mut Week) {
     }
 }
 
-fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &Standing, w: &mut Week) {
+fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &Standing, dwell_h: f64, w: &mut Week) {
     match policy {
         Policy::Today { bias } => {
             let q = read.quants();
@@ -277,6 +288,9 @@ fn rest(read: &Read, panes: &mut [P], k: usize, now: i64, policy: Policy, st: &S
             let Some(s) = st.switches.iter().find(|s| s.sid == sid && s.order == 0 && s.from == panes[k].on && s.open_at <= now) else { return };
             if panes[k].planned.last().is_some_and(|t| now - t < 6 * 3600) {
                 w.double += 1;
+            }
+            if panes[k].planned.last().is_some_and(|t| ((now - t) as f64) < dwell_h * 3600.0) {
+                w.short_stay += 1;
             }
             panes[k].planned.push(now);
             switch(panes, k, s.to, now, w);

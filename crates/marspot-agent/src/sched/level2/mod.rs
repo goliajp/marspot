@@ -22,13 +22,18 @@
 
 mod ctx;
 mod exact;
+pub mod exec;
+pub mod exec_gate;
 mod finish;
 mod fit;
 mod grid;
+mod guard;
+pub mod limits;
 pub mod line;
 mod moves;
 pub mod pass;
 mod placed;
+mod planned;
 mod propose;
 pub mod route;
 mod search;
@@ -39,6 +44,8 @@ pub mod trigger;
 mod window;
 
 pub use grid::Grid;
+pub use limits::{FableGuard, Limits, Profile};
+pub use planned::planned_speed;
 pub use tally::{Stage, Tally};
 pub use window::Kind;
 
@@ -46,9 +53,13 @@ use crate::quota::Quant;
 
 pub use super::level1::H2;
 
+/// The steady profile's numbers, which the tests and replays of the
+/// planner were written against; a plan reads its own from `Input::limits`.
+///
 /// A pane stays this long after a planned switch, hours.
-pub const DWELL_H: f64 = 6.0;
-/// Planned switches a pane may hold inside the pane horizon.
+pub const DWELL_H: f64 = Limits::STEADY.dwell_h;
+/// Planned switches a pane's schedule holds inside the pane horizon,
+/// whatever the profile allows over a day.
 pub const HOPS: usize = 2;
 /// Stall hours of a refusal and of each kind of switch.
 pub const STALL_REFUSAL_H: f64 = 0.25;
@@ -62,13 +73,13 @@ pub const MIN_GAIN_EFF: f64 = 0.25;
 /// order among equals decides.
 pub const TIE: f64 = 1e-4;
 /// The fleet's planned switches a day, and notices an hour.
-pub const FLEET_PER_DAY: usize = 8;
-pub const NOTICES_PER_HOUR: usize = 4;
+pub const FLEET_PER_DAY: usize = Limits::STEADY.fleet_per_day;
+pub const NOTICES_PER_HOUR: usize = Limits::STEADY.notices_per_hour;
 /// A switch that averts a refusal forecast this soon at the high band
 /// does not count toward the fleet's day.
 pub const EXEMPT_H: f64 = 2.0;
 /// A target must last a newcomer this long at the high band.
-pub const LASTS_H: f64 = 6.0;
+pub const LASTS_H: f64 = Limits::STEADY.lasts_h;
 
 /// What a set of schedules costs, weeks and stall hours.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -152,6 +163,7 @@ pub struct Input<'a> {
     pub notices_left: usize,
     /// The feed is stale: no window opens.
     pub stale_feed: bool,
+    pub limits: Limits,
 }
 
 /// One planned switch.
@@ -224,26 +236,6 @@ pub struct Plan {
     pub cuts: Vec<f64>,
 }
 
-/// The speed a pane is planned at in one class: its 24-hour level, its
-/// short-window speed when that lies above the level's band (`hi` times
-/// the level), and the band's bottom (`lo` times the level) when the
-/// short-window speed lies below it.  A level that is off by more than
-/// its band is shown by the pane's own recent use, and planning on the
-/// level then times every switch off its account by a wrong exhaustion;
-/// a pane idle for the short window reads a speed of nothing there and
-/// is not planned as if it would stay idle.
-pub fn planned_speed(day: f64, short: f64, lo: f64, hi: f64) -> f64 {
-    if day <= 0.0 {
-        day
-    } else if short > day * hi {
-        short
-    } else if short < day * lo {
-        day * lo
-    } else {
-        day
-    }
-}
-
 /// The plan for `input`, starting from `start` (the standing plan's
 /// schedules, re-timed) when given.
 pub fn plan(input: &Input, start: Option<&[Sched]>) -> Plan {
@@ -294,6 +286,8 @@ mod cases_tests;
 mod loop_digest_tests;
 #[cfg(test)]
 mod loop_plan;
+#[cfg(test)]
+mod loop_profile_tests;
 #[cfg(test)]
 mod loop_tests;
 #[cfg(test)]
