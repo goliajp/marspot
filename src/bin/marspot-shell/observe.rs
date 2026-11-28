@@ -200,50 +200,6 @@ impl Observation {
     }
 }
 
-/// argv per process image.
-///
-/// Keyed by `ProcId` and checked against `comm`: exec keeps the pid and
-/// the start time but replaces the image, and a child read between its
-/// fork and its exec still carries its parent's argv.  Pruned every
-/// build to the processes in the newest table, so it is bounded by the
-/// live process set.
-#[derive(Default)]
-pub struct ArgvCache {
-    map: HashMap<ProcId, (String, Arc<[String]>)>,
-    reads: u64,
-}
-
-impl ArgvCache {
-    pub fn get(&mut self, row: &ProcRow) -> Option<Arc<[String]>> {
-        if let Some((comm, argv)) = self.map.get(&row.id())
-            && *comm == row.comm
-        {
-            return Some(argv.clone());
-        }
-        self.reads += 1;
-        let argv: Arc<[String]> = pidtree::proc_argv(row.pid)?.into();
-        // the pid may have been reused between the table and this read
-        if pidtree::proc_id(row.pid) != Some(row.id()) {
-            return None;
-        }
-        self.map.insert(row.id(), (row.comm.clone(), argv.clone()));
-        Some(argv)
-    }
-
-    pub fn prune(&mut self, table: &ProcTable) {
-        self.map.retain(|id, _| table.get(id.pid).is_some_and(|r| r.id() == *id));
-    }
-
-    pub fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    #[cfg(test)]
-    pub fn reads(&self) -> u64 {
-        self.reads
-    }
-}
-
 /// What the observer thread keeps between builds.
 #[derive(Default)]
 struct Builder {
@@ -476,8 +432,10 @@ impl Drop for Observer {
     }
 }
 
+mod argv_cache;
 mod env_cache;
 mod walk;
+pub use argv_cache::ArgvCache;
 pub use env_cache::EnvCache;
 pub use walk::{changes, keep_walking};
 use walk::run;

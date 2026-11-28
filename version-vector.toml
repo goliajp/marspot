@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.897"  # the planner reads its limits from sched.profile, protects Fable-only quota by rule and records expiries
-core    = "0.12.797"  # the settings panel offers the switching profile: steady, balanced, full use
+shell   = "0.7.898"  # the argv cache reads a forked child again once it execs a program of the same name
+core    = "0.12.798"  # process rows carry the exec flag; process samples move to a file of their own
 session = "0.11.497"  # marspot-term: settings carry sched.profile and numeric sched.* overrides (not used by session)

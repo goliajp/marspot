@@ -185,7 +185,7 @@ fn gemini_allocation_before_any_focus_event_the_user_may_be_in_the_pane() {
 #[test]
 fn gemini_allocation_a_tool_is_a_child_started_after_gemini() {
     let row = |pid: i32, ppid: i32, start_us: u64, argv: &[&str]| Proc {
-        row: pidtree::ProcRow { pid, ppid, comm: "x".into(), start_unix: 0, start_us, pgid: pid, tty_dev: 1, tty_fg_pgid: 10, status: libc::SSLEEP },
+        row: pidtree::ProcRow { pid, ppid, comm: "x".into(), start_unix: 0, start_us, pgid: pid, tty_dev: 1, tty_fg_pgid: 10, status: libc::SSLEEP, execed: true },
         argv: Some(argv.iter().map(|a| a.to_string()).collect::<Vec<_>>().into()),
     };
     let worker = ProcId { pid: 11, start_us: 1_000_000 };

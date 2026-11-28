@@ -15,6 +15,7 @@ fn proc(pid: i32, ppid: i32, argv: &[&str]) -> Proc {
             tty_dev: 1,
             tty_fg_pgid: 1,
             status: libc::SSLEEP,
+            execed: true,
         },
         argv: Some(argv),
     }

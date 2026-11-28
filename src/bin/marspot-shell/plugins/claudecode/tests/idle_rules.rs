@@ -277,6 +277,7 @@ fn the_two_vetoes_recognise_what_they_are_looking_for() {
         tty_dev: 1,
         tty_fg_pgid: 1,
         status: libc::SSLEEP,
+        execed: true,
     };
     let claude = 100;
     // A resting session: an MCP server, a language server with its
