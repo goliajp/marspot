@@ -179,7 +179,7 @@ pub(crate) const STATE_MAP: &[Entry] = &[
     e("plugins/codex/alloc_events/<date>.tsv", Fact, "codex alloc (claudecode allocation_events)", "15 days", true),
     e("plugins/codex/per_point.tsv", Fact, "codex alloc_per_point", "256 lines", true),
     e("plugins/codex/credit_lots.tsv", Fact, "codex alloc_wallet (credit lots)", "one line per account", true),
-    e("plugins/codex/credit_scan.tsv", Derived, "codex credit_lots (rollout scan progress)", "one row per account", true),
+    e("plugins/codex/credit_scan.tsv", Derived, "codex credit_lots (rollout scan progress)", "one row per profile", true),
     e("plugins/codex/wallet_periods.tsv", Draft, "codex alloc_per_point", "one row per account", true),
     e("plugins/gemini/alloc_events/<date>.tsv", Fact, "gemini alloc (claudecode allocation_events)", "15 days", true),
     e("plugins/kimi/alloc_events/<date>.tsv", Fact, "kimi alloc (claudecode allocation_events)", "15 days", true),
