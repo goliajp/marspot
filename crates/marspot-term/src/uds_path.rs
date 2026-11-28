@@ -13,7 +13,11 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
 /// The longest path std binds or connects to: `sun_path` less the NUL.
+#[cfg(target_os = "macos")]
 pub const STD_MAX: usize = 103;
+/// The longest path std binds or connects to: `sun_path` less the NUL.
+#[cfg(not(target_os = "macos"))]
+pub const STD_MAX: usize = 107;
 
 /// The longest path the kernel takes: `SOCK_MAXADDRLEN` less `sun_len`,
 /// `sun_family` and the NUL.

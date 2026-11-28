@@ -1,5 +1,6 @@
 use super::*;
 use crate::test_env::TempDir;
+#[cfg(target_os = "macos")]
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -20,6 +21,7 @@ fn path_of_len(dir: &TempDir, len: usize) -> PathBuf {
     p
 }
 
+#[cfg(target_os = "macos")]
 fn round_trip(path: &Path) {
     let listener = bind(path).unwrap_or_else(|e| panic!("bind {}: {e}", path.display()));
     let mut client = connect(path).unwrap_or_else(|e| panic!("connect {}: {e}", path.display()));
@@ -30,6 +32,7 @@ fn round_trip(path: &Path) {
     assert_eq!(&got, b"ping");
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn uds_path_binds_and_connects_on_both_sides_of_what_std_takes() {
     let dir = TempDir::new("uds-len");
@@ -57,6 +60,7 @@ fn uds_path_names_a_path_too_long_for_any_socket_address() {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn uds_path_connect_to_a_missing_long_socket_is_not_found() {
     let dir = TempDir::new("uds-missing");
