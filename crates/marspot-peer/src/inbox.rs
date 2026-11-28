@@ -15,7 +15,6 @@
 //! check it against, so none is checked.
 
 use std::io::Write;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -39,7 +38,7 @@ pub fn write_in(dirs: &[PathBuf], socket: &str, line: &str) -> Result<(), String
     }
     buf.push('\n');
     check_owner(dirs, socket)?;
-    let mut s = UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    let mut s = marspot_term::uds_path::connect(socket).map_err(|e| e.to_string())?;
     let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
     s.write_all(buf.as_bytes()).map_err(|e| e.to_string())
 }

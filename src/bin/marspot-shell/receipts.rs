@@ -35,7 +35,7 @@
 //! same defect with intent behind it.
 
 use std::io::{BufRead, BufReader};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -209,7 +209,7 @@ pub fn serve(receipts: Arc<Receipts>) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)?;
+    let listener = marspot_term::uds_path::bind(&path)?;
     std::thread::Builder::new()
         .name("l1-receipts".into())
         .spawn(move || {
@@ -258,7 +258,7 @@ pub fn report_from_stdin() -> i32 {
     let Ok(token) = std::env::var(TOKEN_VAR) else {
         return 0;
     };
-    let Ok(mut stream) = UnixStream::connect(socket_path()) else {
+    let Ok(mut stream) = marspot_term::uds_path::connect(socket_path()) else {
         return 0;
     };
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -360,7 +360,7 @@ mod tests {
         let sandbox = sandbox();
         let path = sandbox.path().join("s.sock");
         let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).expect("bind");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
 
         let r = Receipts::new();
         let token = token(42);

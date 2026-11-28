@@ -124,3 +124,24 @@ fn pane_control_listener_survives_running_out_of_descriptors() {
     // SAFETY: as above
     unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) };
 }
+
+/// A sandbox state dir long enough that `control.sock` is past the 104
+/// bytes a `sockaddr_un` declares: the socket is still bound, and the
+/// command line's own idea of where it is reaches it.
+#[test]
+fn pane_control_socket_works_under_a_state_dir_past_sun_len() {
+    let base = temp("long-state");
+    let state = base.join("s".repeat(150 - base.as_os_str().len()));
+    let mut env = marspot_term::test_env::EnvGuard::new();
+    env.set("MARSPOT_STATE_DIR", &state);
+    let path = marspot_peer::control::socket_path();
+    assert!(path.as_os_str().len() > 104, "{}", path.display());
+    let hub: &'static super::super::Hub = Box::leak(Box::new(hub_at(&base).0));
+    server::serve(hub).unwrap();
+    let mut client = marspot_term::uds_path::connect(&path).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    client.write_all(b"{\"v\":1}\n").unwrap();
+    let mut line = String::new();
+    BufReader::new(&client).read_line(&mut line).unwrap();
+    assert!(line.contains("bad_request"), "{line}");
+}

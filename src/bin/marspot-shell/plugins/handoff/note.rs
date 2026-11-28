@@ -26,6 +26,9 @@ pub(super) fn switch_note(leaving: &Leaving, history: Option<&Path>) -> transcri
 }
 
 fn left_codex(s: &codex_stop::Stopped) -> String {
+    if !s.daemon_running {
+        return "has exited; no codex daemon was running for its home, so nothing carries its thread on".to_string();
+    }
     match (s.goal_paused, s.turn_interrupted) {
         (true, true) => "has exited, its goal was paused and the turn it was running was interrupted",
         (true, false) => "has exited and its goal was paused",
@@ -34,3 +37,7 @@ fn left_codex(s: &codex_stop::Stopped) -> String {
     }
     .to_string()
 }
+
+#[cfg(test)]
+#[path = "note_tests.rs"]
+mod tests;

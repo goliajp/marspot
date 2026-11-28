@@ -39,7 +39,7 @@ pub fn connect_with_handshake(socket_path: &Path) -> io::Result<UnixStream> {
 /// wait 5.  `wait_and_connect`'s promise that "the deadline bounds every
 /// retry" was only true of the retry loop, not of the attempt inside it.
 pub fn connect_with_handshake_by(socket_path: &Path, deadline: Instant) -> io::Result<UnixStream> {
-    let mut stream = UnixStream::connect(socket_path)?;
+    let mut stream = crate::uds_path::connect(socket_path)?;
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .min(CONNECT_HANDSHAKE_TIMEOUT);

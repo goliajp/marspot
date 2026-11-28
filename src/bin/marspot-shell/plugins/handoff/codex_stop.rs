@@ -10,18 +10,24 @@
 //! user's, and handing the pane back should find it there — and a turn
 //! in flight is interrupted.  Paused first, or the interrupt is answered
 //! with the goal's next turn.
+//!
+//! No daemon listening at the home is an answer too: a thread lives in
+//! the daemon or in the TUI, and the TUI is taken down by the switch,
+//! so nothing is left to carry it on.
 
+use std::io;
 use std::path::Path;
 use std::time::Duration;
 
 use marspot_peer::json::{obj, Value};
-use marspot_peer::rpc::Rpc;
+use marspot_peer::rpc::{Rpc, RpcError};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What was found and done, for the handoff document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Stopped {
+    pub daemon_running: bool,
     pub goal_paused: bool,
     pub turn_interrupted: bool,
 }
@@ -30,8 +36,13 @@ pub(super) struct Stopped {
 /// daemon of the codex home it belongs to.
 pub(super) fn stop_thread(home: &Path, thread: &str) -> Result<Stopped, String> {
     let sock = home.join("app-server-control/app-server-control.sock");
-    let mut rpc = Rpc::connect(&sock, "marspot-handoff", env!("CARGO_PKG_VERSION"), &[], CALL_TIMEOUT)
-        .map_err(|e| format!("codex daemon: {e}"))?;
+    let mut rpc = match Rpc::connect(&sock, "marspot-handoff", env!("CARGO_PKG_VERSION"), &[], CALL_TIMEOUT) {
+        Ok(rpc) => rpc,
+        Err(RpcError::Io(e)) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
+            return Ok(Stopped { daemon_running: false, goal_paused: false, turn_interrupted: false });
+        }
+        Err(e) => return Err(format!("codex daemon: {e}")),
+    };
     let id = || ("threadId", Value::from(thread));
     let mut call = |method: &str, params: Value| rpc.call(method, params).map_err(|e| format!("{method}: {e}"));
 
@@ -48,7 +59,7 @@ pub(super) fn stop_thread(home: &Path, thread: &str) -> Result<Stopped, String> 
     if let Some(turn) = &running {
         call("turn/interrupt", obj([id(), ("turnId", Value::from(turn.as_str()))]))?;
     }
-    Ok(Stopped { goal_paused, turn_interrupted: running.is_some() })
+    Ok(Stopped { daemon_running: true, goal_paused, turn_interrupted: running.is_some() })
 }
 
 /// `thread/goal/get`'s answer: is there a goal that would start turns?

@@ -73,7 +73,7 @@ impl Cancel {
 }
 
 fn once(path: &Path, req: &Request, line: &str, cancel: &Cancel) -> Result<Response, Attempt> {
-    let mut s = UnixStream::connect(path).map_err(|e| Attempt::Connect(e.to_string()))?;
+    let mut s = marspot_term::uds_path::connect(path).map_err(|e| Attempt::Connect(e.to_string()))?;
     if !cancel.hold(&s).map_err(|e| Attempt::Connect(e.to_string()))? {
         return Err(Attempt::Cancelled);
     }

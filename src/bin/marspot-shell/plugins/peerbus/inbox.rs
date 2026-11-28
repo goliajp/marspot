@@ -62,7 +62,7 @@ impl Inbox {
         let (upstream, relay) = marspot_peer::relay::private_paths(private, key);
         let _ = std::fs::remove_file(&upstream);
         let _ = std::fs::remove_file(&relay);
-        let listener = UnixListener::bind(&upstream)?;
+        let listener = marspot_term::uds_path::bind(&upstream)?;
         std::fs::set_permissions(&upstream, std::fs::Permissions::from_mode(0o600))?;
         let bin = peer_bin().ok_or_else(|| std::io::Error::other("marspot-peer is not installed"))?;
         let mut child = Command::new(bin)
@@ -107,7 +107,7 @@ impl Inbox {
         let _ = self.relay_proc.wait();
         let _ = std::fs::remove_file(&self.path);
         self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.upstream);
+        let _ = marspot_term::uds_path::connect(&self.upstream);
         if let Some(h) = self.accept.take() {
             let _ = h.join();
         }
@@ -256,8 +256,13 @@ mod tests {
         // SAFETY: the only test in this binary that reads the variable
         unsafe { std::env::set_var("MARSPOT_PEER_BIN", relay_bin()) };
         let d = dir();
+        // the private sockets live in the state dir, which a sandbox can
+        // put past the 104 bytes a sockaddr_un declares
+        let private = d.join("p".repeat(140 - d.as_os_str().len()));
+        std::fs::create_dir_all(&private).unwrap();
         let (tx, rx) = sync_channel(4);
-        let inbox = Inbox::open(&d, &d, 4242, 7, tx).unwrap();
+        let inbox = Inbox::open(&d, &private, 4242, 7, tx).unwrap();
+        assert!(inbox.relay.as_os_str().len() > 104, "{}", inbox.relay.display());
         // a liveness check: connect and hang up
         drop(UnixStream::connect(&inbox.path).unwrap());
         let mut c = UnixStream::connect(&inbox.path).unwrap();

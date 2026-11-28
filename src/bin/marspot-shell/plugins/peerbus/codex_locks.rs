@@ -116,7 +116,7 @@ pub(super) fn busy(home: &Path) -> Option<String> {
     // codex makes it a link into /tmp; a socket address has room for
     // about a hundred bytes, and the home's path may be longer
     let real = sock.canonicalize().unwrap_or_else(|_| sock.clone());
-    if std::os::unix::net::UnixStream::connect(&real).is_ok() {
+    if marspot_term::uds_path::connect(&real).is_ok() {
         return Some(format!("its app-server answers on {}", sock.display()));
     }
     let dir = home.join(DIR);
