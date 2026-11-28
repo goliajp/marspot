@@ -74,6 +74,8 @@ pub(super) struct PanePlan {
     /// Plan passes run, full searches among them.
     pub passes: usize,
     pub full: usize,
+    /// The pane in focus as of this scan: attended.
+    pub focus: Option<u64>,
 }
 
 impl PanePlan {
@@ -97,6 +99,7 @@ impl PanePlan {
             run: ExecRun::new(state_root),
             passes: 0,
             full: 0,
+            focus: None,
         }
     }
 
@@ -134,7 +137,7 @@ impl PanePlan {
         let refused = self.note_refusals(snap);
         let limits = self.run.limits(limits::current());
         self.standing.inertia = Some(limits.inertia);
-        let mut b = build(a, snap, view, forecast, class, &self.standing, &limits);
+        let mut b = build(a, snap, view, forecast, class, &self.standing, &limits, self.focus);
         self.calibrate(&mut b, now, &mut log);
         let input = Input { accounts: &b.accounts, panes: &b.panes, young: b.young, window_full: KAPPA_FABLE, pi: b.pi, fleet_left: b.fleet_left, notices_left: limits.notices_per_hour, stale_feed: b.stale_feed, limits };
         let quants: Vec<_> = b.accounts.iter().map(|x| x.q.clone()).collect();

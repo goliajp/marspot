@@ -103,7 +103,7 @@ fn allocation_level2_plans_a_pane_at_its_three_hour_speed_when_that_is_off_the_b
     assert!(fp.short[1] > fp.day[1] * fc.pane_band[1].hi, "441's recent speed {} is inside the band of {}", fp.short[1], fp.day[1]);
     let mut cp = ClassPlan::default();
     cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
-    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default(), &marspot_agent::sched::level2::Limits::STEADY);
+    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default(), &marspot_agent::sched::level2::Limits::STEADY, None);
     let p = b.panes.iter().find(|p| p.sid == 441).expect("441 planned");
     assert_eq!(p.speed[1], fp.short[1]);
     let _ = fs::remove_dir_all(&r);
@@ -117,7 +117,7 @@ fn allocation_level2_checks_the_pane_speeds_against_the_account_readings() {
     snap.accounts[0].week_used = 0.5;
     let mut cp = ClassPlan::default();
     cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
-    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default(), &marspot_agent::sched::level2::Limits::STEADY);
+    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default(), &marspot_agent::sched::level2::Limits::STEADY, None);
     let asked: f64 = b.panes.iter().filter(|p| p.on == b.accounts[0].q.id).map(|p| p.speed[0] + p.speed[1]).sum();
     let mut pp = PanePlan::new(&r);
     pp.scan(&mut a, &snap, &view, Some(&fc), cp.last());
@@ -168,7 +168,7 @@ fn allocation_level2_plans_a_pane_idle_for_three_hours_at_the_bottom_of_its_band
     assert_eq!(fp.short[1], 0.0);
     let mut cp = ClassPlan::default();
     cp.scan(&snap.accounts, &view, Some(&fc), 0.0, NOW);
-    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default(), &marspot_agent::sched::level2::Limits::STEADY);
+    let b = super::super::allocation_level2_input::build(&a, &snap, &view, Some(&fc), cp.last().expect("a class plan"), &Standing::default(), &marspot_agent::sched::level2::Limits::STEADY, None);
     let p = b.panes.iter().find(|p| p.sid == 441).expect("441 planned");
     assert!(p.speed[1] > 0.0 && (p.speed[1] - fp.day[1] * fc.pane_band[1].lo).abs() < 1e-15, "{} against a level of {}", p.speed[1], fp.day[1]);
     assert!(b.outside.contains(&441));

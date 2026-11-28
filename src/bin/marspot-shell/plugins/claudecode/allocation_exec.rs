@@ -39,7 +39,7 @@ use marspot_agent::sched::level2::{Kind, Limits};
 
 use super::allocation_adapter::Allocation;
 use super::allocation_inputs::{PaneIn, Snapshot};
-use super::allocation_more::{Hold, USER_S};
+use super::allocation_more::{Hold, USER_S, attended};
 use super::allocation_route;
 
 #[path = "allocation_exec_act.rs"]
@@ -51,8 +51,6 @@ pub(super) mod say;
 
 pub(in crate::plugins::claudecode) use follow::started;
 
-/// Nobody wrote to a pane out of focus for this long: nobody is at it.
-const UNATTENDED_S: i64 = 3600;
 /// A placed pane bound this soon after a live placement on its account
 /// is taken to be that placement.
 const BIND_S: i64 = 120;
@@ -283,7 +281,7 @@ impl Exec {
             user: hold.focus || wrote(USER_S),
             quiet_s: self.rest_from.get(&p.sid).map_or(0, |at| now - at),
         };
-        (b, hold.focus || wrote(UNATTENDED_S))
+        (b, attended(hold.focus, open.prompt_at, now))
     }
 }
 

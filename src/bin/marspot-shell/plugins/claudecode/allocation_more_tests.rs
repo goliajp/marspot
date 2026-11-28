@@ -171,3 +171,11 @@ fn allocation_hours_failure_logged_once_until_it_works() {
     assert_eq!(fails(&mut a, NOW + 3600 + 60), 1, "a new failure is said");
     fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn allocation_attended_is_focus_or_a_prompt_within_the_hour() {
+    assert!(attended(true, None, NOW), "focus alone");
+    assert!(attended(false, Some(NOW - ATTENDED_S + 1), NOW));
+    assert!(!attended(false, Some(NOW - ATTENDED_S), NOW));
+    assert!(!attended(false, None, NOW));
+}

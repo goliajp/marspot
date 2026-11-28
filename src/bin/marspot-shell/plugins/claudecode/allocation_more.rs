@@ -29,6 +29,16 @@ mod expiry;
 pub(super) const BOUNDARY_GAP: i64 = 30;
 /// A person who wrote to the pane this recently is still at it.
 pub(super) const USER_S: i64 = 600;
+/// A pane in focus, or written to this recently, is attended, seconds.
+pub(super) const ATTENDED_S: i64 = 3600;
+
+/// Someone is with the pane: it has focus or was written to within
+/// `ATTENDED_S`.  The planner and the executor both read this.  The last
+/// prompt comes from the transcript, first read from its tail when the
+/// shell starts, so a restart keeps a pane written to before it attended.
+pub(super) fn attended(focus: bool, prompt_at: Option<i64>, now: i64) -> bool {
+    focus || prompt_at.is_some_and(|at| now - at < ATTENDED_S)
+}
 
 /// What the scan knows of a pane beyond its transcript.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
