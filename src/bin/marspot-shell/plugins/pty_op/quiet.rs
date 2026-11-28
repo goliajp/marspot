@@ -234,8 +234,9 @@ impl OpRunner {
                 elapsed.as_millis()
             );
             host.log(LogLevel::Info, &format!("{}.drawn_late", self.op.name), &msg);
+            // the figures are on the line above; the outcome line is
+            // for whichever step ends the run, which may not be this one
             self.late = Some((self.at, label));
-            self.why = Some(missed.to_string());
             self.advance(host);
         } else {
             self.why = Some(missed.to_string());
@@ -250,16 +251,22 @@ impl OpRunner {
         if self.late.is_none() || !types_into_pane(&step.kind) {
             return false;
         }
-        let held = match &step.kind {
-            StepKind::RestoreComposer(job) => job.text().map_or(0, |t| t.chars().count()),
-            _ => 0,
+        let sid = host.shelld_session_id();
+        let msg = match &step.kind {
+            StepKind::RestoreComposer(job) => match job.text().map(|t| t.chars().count()).filter(|&n| n > 0) {
+                // nothing was held, so nothing is left out
+                None => return true,
+                Some(n) => format!(
+                    "pane {sid} step={}: the first frame came late, their unsent line of {n} chars \
+                     is not put back into a program still drawing",
+                    step.label
+                ),
+            },
+            _ => format!(
+                "pane {sid} step={}: the first frame came late, not typing into a program still drawing",
+                step.label
+            ),
         };
-        let msg = format!(
-            "pane {} step={}: the first frame came late, not typing into a program still drawing \
-             (unsent text not put back: {held} chars)",
-            host.shelld_session_id(),
-            step.label
-        );
         host.log(LogLevel::Info, &format!("{}.skipped", self.op.name), &msg);
         self.skipped.push(step.label);
         true

@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.874"  # a first frame still drawing at its deadline is drawn late, not a failed switch
+shell   = "0.7.875"  # a handoff whose first frame comes late fails before its ledger is committed
 core    = "0.12.761"  # a core attaching to a session counts its view asks on from the number the session last applied
 session = "0.11.485"  # a turn that parsed a kilobyte of pty output is bulk output, framed at the display interval

@@ -212,18 +212,55 @@ fn a_first_frame_still_drawing_at_its_deadline_is_drawn_late_and_types_nothing()
     assert!(r.finished.as_ref().unwrap().is_done(), "drawn late is not a failure");
     assert!(state.pasted.lock().unwrap().is_empty(), "nothing put back mid-redraw");
     assert!(state.sent.lock().unwrap().is_empty(), "nothing typed mid-redraw");
-    let line = outcome_line(&host);
-    assert!(line.contains("DrawnLate") && line.contains("closest="), "{line}");
+    let late = host.logs.lock().unwrap().iter().find(|l| l.starts_with("test.cycle.drawn_late")).cloned();
+    assert!(late.as_deref().is_some_and(|l| l.contains("closest=")), "{late:?}");
+    let skipped = host.logs.lock().unwrap().iter().any(|l| l.contains("unsent line of 15 chars"));
+    assert!(skipped, "the left-out line says how much was held");
+    assert!(outcome_line(&host).contains("DrawnLate"), "{}", outcome_line(&host));
 }
 
-/// Steps that do not type still run once the frame came late: a
-/// handoff commits its ledger even when the handover is left out.
+/// With nothing held, the composer restore is not a step left out.
+#[test]
+fn a_drawn_late_run_with_nothing_held_lists_only_the_typing_it_left_out() {
+    let (state, env, host) = setup();
+    let mut r = OpRunner::new(first_frame_then_typing("", true), env);
+    run_repainting(&mut r, &host, &state, 4_000);
+    run(&mut r, &host, &state, 100);
+    assert_eq!(r.finished, Some(OpOutcome::DrawnLate { step: 0, label: "first_frame", skipped: vec!["send"] }));
+    let logs = host.logs.lock().unwrap();
+    assert!(!logs.iter().any(|l| l.contains(".skipped") && l.contains("restore_composer")), "{logs:?}");
+}
+
+/// A later step that runs out is reported with its own failure, not
+/// with the figures of the first frame that came late before it.
+#[test]
+fn a_step_that_runs_out_after_a_late_first_frame_does_not_carry_its_figures() {
+    let (state, env, host) = setup();
+    let op = PtyOp::new("test.cycle")
+        .step(
+            Step::await_quiet(Duration::from_millis(1_500))
+                .after_bytes(2048)
+                .or_composer()
+                .or_drawn_late()
+                .timeout(Duration::from_secs(3))
+                .named("first_frame"),
+        )
+        .step(Step::await_job(Job::new()).timeout(Duration::from_secs(1)).named("later"));
+    let mut r = OpRunner::new(op, env);
+    run_repainting(&mut r, &host, &state, 4_000);
+    run(&mut r, &host, &state, 2_000);
+    assert_eq!(r.finished, Some(OpOutcome::TimedOut { step: 1, label: "later" }));
+    let line = outcome_line(&host);
+    assert!(!line.contains("closest=") && !line.contains("floor="), "{line}");
+}
+
+/// Steps that do not type still run once the frame came late.
 #[test]
 fn a_drawn_late_run_still_runs_the_steps_that_do_not_type() {
     let (state, env, host) = setup();
     let called = Arc::new(Mutex::new(false));
     let flag = Arc::clone(&called);
-    let commit: CallFn = Arc::new(move || {
+    let note: CallFn = Arc::new(move || {
         *flag.lock().unwrap() = true;
         Ok(())
     });
@@ -236,15 +273,15 @@ fn a_drawn_late_run_still_runs_the_steps_that_do_not_type() {
                 .timeout(Duration::from_secs(3))
                 .named("first_frame"),
         )
-        .step(Step::call(commit).named("commit_ledger"))
-        .step(Step::paste("the handover").named("hand_over"));
+        .step(Step::call(note).named("note"))
+        .step(Step::paste("a line").named("type_line"));
     let mut r = OpRunner::new(op, env);
     run_repainting(&mut r, &host, &state, 4_000);
     run(&mut r, &host, &state, 100);
-    assert!(*called.lock().unwrap(), "the ledger is committed");
+    assert!(*called.lock().unwrap(), "the step that does not type ran");
     assert!(state.pasted.lock().unwrap().is_empty());
     assert!(
-        matches!(&r.finished, Some(OpOutcome::DrawnLate { skipped, .. }) if *skipped == vec!["hand_over"]),
+        matches!(&r.finished, Some(OpOutcome::DrawnLate { skipped, .. }) if *skipped == vec!["type_line"]),
         "{:?}",
         r.finished
     );
@@ -314,3 +351,6 @@ fn the_nearer_condition_is_named() {
 
 #[path = "quiet_pty_tests.rs"]
 mod quiet_pty_tests;
+
+#[path = "handoff_late_tests.rs"]
+mod handoff_late_tests;
