@@ -16,12 +16,14 @@
 //!
 //! Each full pass also places one probe newcomer of each class without
 //! keeping it (`probe`); a plain probe the table placed is noted for the
-//! ladder like a real placement, once per table line.
+//! ladder like a real placement, once per order of the table's accounts,
+//! while it has an account whose week is all Fable-usable to pick wrongly.
 //!
 //! While the fleet is short the table still places, on today's rule's
 //! account when protection allows it, else where the newcomer costs
-//! least, and the placement line says `short=1`; a plain newcomer
-//! protection keeps off every account says `fable_only=1`.
+//! least, and the placement line says `short=1`.  A plain newcomer placed
+//! among accounts whose week is all Fable-usable because protection left
+//! nothing else says `fable_only=1`; it is never counted as wrong.
 
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level2::route::{Newcomer, OTHERS_CAP, Placed, RefusedTo, Routing};
@@ -59,8 +61,8 @@ struct Route {
     noted: Vec<bool>,
     /// Live placements of the last hour: when, and the account.
     live_placed: Vec<(i64, u8)>,
-    /// The table's line when a probe was last noted.
-    probed: String,
+    /// The table's account order when a probe was last noted.
+    probed: [Vec<u8>; 2],
 }
 
 static ROUTE: Published<Route> = Published::new();
@@ -99,7 +101,10 @@ pub(super) fn line() -> Option<String> {
 /// table.  A refused pane (`refused`) is placed by the table's rule for
 /// refusals, and may be told to wait (`wait=1`).  When the fleet is
 /// short and no entry holds it, it goes to `today`, today's rule's
-/// account, when it may go there, else where it costs least.
+/// account, when it may go there, else where it costs least; a short
+/// placement on today's account is today's rule's pick, so the caller
+/// gets no pick for it and the ladder's check of refusals after live
+/// placements does not count it.
 fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, refused: Option<u64>, today: Option<u8>, now: i64) -> (String, Pick) {
     ROUTE.update(|r| {
         if !r.built {
@@ -123,21 +128,24 @@ fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, refused
                     r.kept.push((now, p.to, m));
                 }
                 if r.noted.len() < NOTED_CAP {
-                    r.noted.push(class == Class::Plain && !p.plain_only);
+                    r.noted.push(wrong(class, &p));
                 }
-                (placed_words(&p), Pick::To(p.to))
+                let pick = if p.short && Some(p.to) == today { Pick::None } else { Pick::To(p.to) };
+                (placed_words(&p), pick)
             }
-            None => (nowhere(&r.table, class), Pick::None),
+            None => ("table=-".into(), Pick::None),
         }
     })
 }
 
 fn placed_words(p: &Placed) -> String {
-    format!("table=P{} room={:.2}>{:.2}{}", p.to, 100.0 * p.before, 100.0 * p.after, if p.short { " short=1" } else { "" })
+    format!("table=P{} room={:.2}>{:.2}{}{}", p.to, 100.0 * p.before, 100.0 * p.after, if p.short { " short=1" } else { "" }, if p.fable_only { " fable_only=1" } else { "" })
 }
 
-fn nowhere(table: &Routing, class: Class) -> String {
-    if table.kept_off_all(class) { "table=- short=1 fable_only=1".into() } else { "table=-".into() }
+/// A plain newcomer on an account whose week is all Fable-usable while
+/// another had week beyond its Fable-usable quota.
+fn wrong(class: Class, p: &Placed) -> bool {
+    class == Class::Plain && !p.plain_only && !p.fable_only
 }
 
 /// What the table says of a placement.
@@ -161,27 +169,29 @@ impl Pick {
 /// and its kept placements are left as they were.  Run once per full
 /// plan pass, so the ladder's count does not wait on the person starting
 /// work.  Only a plain probe can go wrong (a Fable newcomer may use any
-/// account): it is noted whenever the table placed it, short or not, and
-/// it went wrong when it landed on an account whose week is all
-/// Fable-usable.  The same table line is noted once, so a quiet fleet
-/// does not count one decision twenty times.  The lines for
+/// account), and only when the table has an account whose week is all
+/// Fable-usable for it to wrongly pick, room left or not: it is noted
+/// whenever the table placed it, short or not, and it went wrong when it
+/// landed on such an account while another was left.  The same order of
+/// accounts is noted once, so a quiet fleet, or rooms that only shrink,
+/// do not count one decision twenty times.  The lines for
 /// `sched.route.shadow`.
 pub(super) fn probe() -> Vec<String> {
     ROUTE.update(|r| {
         if !r.built {
             return Vec::new();
         }
-        let line = r.table.line();
+        let order = r.table.order_ids();
         let mut lines = Vec::new();
         for class in [Class::Plain, Class::Restricted] {
             let m = Newcomer { class, rate: RHO0, high: RHO0 * high_of(class), life_h: r.helper_life_h };
             let p = r.table.clone().place(&m, None);
-            let counts = class == Class::Plain && p.is_some() && r.probed != line && r.noted.len() < NOTED_CAP;
+            let counts = class == Class::Plain && p.is_some() && r.table.fable_only_room() && r.probed != order && r.noted.len() < NOTED_CAP;
             if let Some(p) = p.filter(|_| counts) {
-                r.noted.push(!p.plain_only);
-                r.probed.clone_from(&line);
+                r.noted.push(wrong(class, &p));
+                r.probed.clone_from(&order);
             }
-            let placed = p.as_ref().map_or_else(|| nowhere(&r.table, class), placed_words);
+            let placed = p.as_ref().map_or_else(|| "table=-".into(), placed_words);
             lines.push(format!("kind=probe class={} {placed} counted={}", class_word(class), u8::from(counts)));
         }
         lines

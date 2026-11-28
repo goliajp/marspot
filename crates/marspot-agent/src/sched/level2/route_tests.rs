@@ -212,7 +212,8 @@ fn sched_route_a_short_fleet_places_the_newcomer_where_it_costs_least() {
 
 /// Short, under balanced with Fable short: a plain newcomer goes to the
 /// account with other-model week even where the Fable-only one would
-/// last longer, and gets nothing when only Fable-only accounts are left.
+/// last longer; when only Fable-only accounts are left other models keep
+/// working, and the placement says so.
 #[test]
 fn sched_route_a_short_fleet_keeps_protection() {
     let mut a = [acct(5, 0.5, 0.5, 100.0), acct(6, 0.1, 0.0, 100.0)];
@@ -232,7 +233,30 @@ fn sched_route_a_short_fleet_keeps_protection() {
     // only the Fable-only account left
     let i = Input { accounts: &a[..1], panes: &p[..1], limits: crate::sched::level2::Limits::BALANCED, ..i };
     let mut r = Routing::of(&i, &evaluate(&i, &[Sched::STAY]));
-    assert_eq!(r.place(&helper(Class::Plain), None), None);
     assert!(r.kept_off_all(Class::Plain));
-    assert_eq!(r.place(&helper(Class::Restricted), None).map(|x| (x.to, x.short)), Some((5, true)), "a Fable newcomer may go there");
+    assert_eq!(r.line(), "fable=P5=-22.0 plain=P5=-22.0 others=-");
+    assert_eq!(r.clone().place(&helper(Class::Plain), None).map(|x| (x.to, x.short, x.fable_only)), Some((5, true, true)));
+    assert_eq!(r.place(&helper(Class::Restricted), None).map(|x| (x.to, x.short, x.fable_only)), Some((5, true, false)), "a Fable newcomer may go there");
+}
+
+/// Short: a new pane or helper goes short, today's account or not,
+/// unless today's account is one the table does not hold; a refused pane
+/// goes short only to today's rule's pick, and under
+/// protection one nobody is at waits rather than go short.
+#[test]
+fn sched_route_a_refused_pane_goes_short_only_where_today_s_rule_would() {
+    let a = [acct(1, 0.3, 0.0, 100.0), acct(2, 0.2, 0.0, 100.0), acct(3, 0.1, 0.0, 100.0)];
+    let p = [pane(10, 1, false, 0.0, 0.02), pane(11, 2, false, 0.0, 0.01), pane(12, 3, false, 0.0, 0.006)];
+    let i = input(&a, &p);
+    let r = Routing::of(&i, &evaluate(&i, &[Sched::STAY; 3]));
+    let m = long(Class::Plain, 0.01);
+    let to = |x: RefusedTo| if let RefusedTo::To(p) = x { Some((p.to, p.short)) } else { None };
+    assert_eq!(r.clone().place_refused(&m, 1, 10, None), RefusedTo::Nowhere, "today's rule has nowhere");
+    assert_eq!(to(r.clone().place_refused(&m, 1, 10, Some(3))), Some((3, true)));
+    assert_eq!(r.clone().place_or(&m, None, None).map(|x| (x.to, x.short)), Some((2, true)), "a new pane still goes short");
+    assert_eq!(r.clone().place_or(&m, None, Some(9)), None, "today's account is not in the table: today's rule places it");
+    let mut b = i;
+    b.limits = crate::sched::level2::Limits::BALANCED;
+    let r = Routing::of(&b, &evaluate(&b, &[Sched::STAY; 3]));
+    assert_eq!(r.clone().place_refused(&m, 1, 10, Some(3)), RefusedTo::Wait, "unattended, protected, no entry");
 }

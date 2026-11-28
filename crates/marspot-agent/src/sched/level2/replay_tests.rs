@@ -17,6 +17,10 @@ struct Sum {
     /// could have saved.
     lapsed_reserve: f64,
     phi: f64,
+    /// `Phi` other models took while another open account had other-model room.
+    phi_room: f64,
+    /// Demand no account served.
+    unmet: f64,
     planned: usize,
     /// Planned switches the fleet's daily limit counts (not averting a refusal soon).
     counted: usize,
@@ -54,6 +58,8 @@ fn sum(fx: &Fx, o: &Out) -> Sum {
         lapsed: 100.0 * (o.fable_lapsed + o.fable_stranded),
         lapsed_reserve: 100.0 * o.cycles.iter().map(|c| c.3.min(c.5)).sum::<f64>(),
         phi: 100.0 * o.phi_taken,
+        phi_room: 100.0 * o.phi_taken_room,
+        unmet: 100.0 * o.unmet,
         planned: o.planned.len(),
         counted: o.planned.iter().filter(|x| !x.5).count(),
         moves: o.moves.len(),
@@ -80,10 +86,12 @@ fn days(fx: &Fx) -> f64 {
 fn report(fx: &Fx, name: &str, s: &Sum) {
     let d = days(fx);
     println!(
-        "{name}: fable lapsed {:.1} pts ({:.1} for want of the reserve other models took), phi taken {:.1} pts, planned {} ({:.1}/day, counted {:.1}/day), all switches {} ({:.1}/day), refusals {}, before boundaries planned {} refusals {}, from boundaries a day planned {:.1} counted {:.1} all {:.1}, most planned per pane per day {} (all changes {}), changes of one pane within an hour {}, notices {}, full searches {}",
+        "{name}: fable lapsed {:.1} pts ({:.1} for want of the reserve other models took), phi taken {:.1} pts ({:.1} while another account had other-model room), unmet {:.1} pts, planned {} ({:.1}/day, counted {:.1}/day), all switches {} ({:.1}/day), refusals {}, before boundaries planned {} refusals {}, from boundaries a day planned {:.1} counted {:.1} all {:.1}, most planned per pane per day {} (all changes {}), changes of one pane within an hour {}, notices {}, full searches {}",
         s.lapsed,
         s.lapsed_reserve,
         s.phi,
+        s.phi_room,
+        s.unmet,
         s.planned,
         s.planned as f64 / d,
         s.counted as f64 / d,
@@ -193,7 +201,9 @@ fn sched_replay_full_never_switches_a_pane_twice_in_an_hour() {
 /// term of the money keeps it was not traced).  The rest is 5.8 points
 /// of P4's window no Fable pane used, 2.6 on P1 and 0.9 on P6.  Making
 /// strict protection's waits instead of rehearsing
-/// them changes nothing: some account always had other-model room.
+/// them changes nothing: some account always had other-model room.  The
+/// routing table's placements while the fleet is short change none of
+/// these numbers either.
 #[test]
 #[ignore = "measures total Fable lapsed and Fable lapsed for want of the reserve other models took, both against 10 points: 22.8 and 14.2 on these records, see the comment"]
 fn sched_replay_full_lapses_under_ten() {

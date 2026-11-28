@@ -23,7 +23,8 @@
 //! person (the plan's own simulation of refusals does the same).
 //!
 //! When the fleet is short the plan's panes can take every room; a
-//! newcomer no entry holds then goes where it costs least, marked short.
+//! newcomer no entry holds then goes to today's rule's account first,
+//! else where it costs least, marked short (see `short`).
 //!
 //! The other agents have a line each with what their best account has
 //! left; a request that leaves the agent open goes where the most is
@@ -139,6 +140,9 @@ pub struct Placed {
     pub plain_only: bool,
     /// No entry held it: it went where it costs least (see `short`).
     pub short: bool,
+    /// A plain newcomer on an account whose week is all Fable-usable,
+    /// because under protection only such accounts were left.
+    pub fable_only: bool,
 }
 
 /// Where a refused pane goes.
@@ -236,31 +240,23 @@ impl Routing {
     }
 
     /// As `place`; when no entry holds `m`, `today` (today's rule's
-    /// account) is where it goes short if `m` may go there at all.
+    /// account) is where it goes short if `m` may go there at all, and it
+    /// goes nowhere when the table does not hold `today`.
     pub fn place_or(&mut self, m: &Newcomer, except: Option<u8>, today: Option<u8>) -> Option<Placed> {
-        self.place_where(m, except, |_| true, today)
+        self.place_where(m, except, |_| true, Some(today))
     }
 
-    /// Where refused pane `sid` leaving `from` goes: as `place`, except
-    /// that under protection a pane the plan knows nobody is at skips
-    /// every account an attended pane is on, and waits when that leaves
-    /// nowhere.
-    pub fn place_refused(&mut self, m: &Newcomer, from: u8, sid: u64, today: Option<u8>) -> RefusedTo {
-        if !(self.keep_attended && self.unattended.contains(&sid)) {
-            return self.place_or(m, Some(from), today).map_or(RefusedTo::Nowhere, RefusedTo::To);
-        }
-        let held: Vec<u8> = self.rooms.iter().filter(|r| r.attended).map(|r| r.id).collect();
-        self.place_where(m, Some(from), |id| !held.contains(&id), today).map_or(RefusedTo::Wait, RefusedTo::To)
-    }
-
-    fn place_where(&mut self, m: &Newcomer, except: Option<u8>, ok: impl Fn(u8) -> bool, today: Option<u8>) -> Option<Placed> {
+    /// `short`: whether `m` may go short when no entry holds it, and
+    /// today's rule's account to try first then.
+    pub(super) fn place_where(&mut self, m: &Newcomer, except: Option<u8>, ok: impl Fn(u8) -> bool, short: Option<Option<u8>>) -> Option<Placed> {
         let ok = |id: u8| Some(id) != except && ok(id);
         let held = self.order(m.class).into_iter().filter(|id| ok(*id)).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS));
         let (to, short) = match held {
             Some(to) => (to, false),
-            None => (self.least_bad(m, ok, today)?, true),
+            None => (self.least_bad(m, ok, short?)?, true),
         };
-        self.take(to, m).map(|p| Placed { short, ..p })
+        let fable_only = self.rooms.iter().any(|r| r.id == to && self.kept_off(r, m.class));
+        self.take(to, m).map(|p| Placed { short, fable_only, ..p })
     }
 
     /// `m` placed on `to` (where a placement or someone else put it):
@@ -275,7 +271,7 @@ impl Routing {
             Class::Plain => r.plain -= u,
         }
         r.load += m.rate;
-        Some(Placed { to, before, after: r.room(m.class), plain_only: r.plain_only, short: false })
+        Some(Placed { to, before, after: r.room(m.class), plain_only: r.plain_only, short: false, fable_only: false })
     }
 
     /// The other agent a request that leaves it open goes to, or `None`
