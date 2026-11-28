@@ -8,6 +8,8 @@ pub(crate) mod menus;
 pub(crate) mod menu_pick;
 #[path = "menu_family.rs"]
 mod menu_family;
+#[path = "slot_replace.rs"]
+pub(crate) mod slot_replace;
 
 impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
@@ -160,11 +162,17 @@ impl CoreApp {
     ) -> Vec<marspot::ui::components::MenuItem> {
         let moves = |app: &Self| menus::move_items(app.windows.len(), wi, win!(app, wi).panes.len());
         match region {
-            ContextRegion::Pane(_) => menus::pane_menu(win!(self, wi).selection.is_some(), moves(self)),
+            ContextRegion::Pane(_) => {
+                let mut moves = moves(self);
+                moves.push(self.replace_row());
+                menus::pane_menu(win!(self, wi).selection.is_some(), moves)
+            }
             ContextRegion::SidebarSlot(i) => {
                 let sid = win!(self, wi).panes.get(i).and_then(Pane::shelld_session_id);
                 let kin = sid.map_or_else(Vec::new, |sid| self.kin_of(sid));
-                menus::sidebar_menu(kin, moves(self))
+                let mut moves = moves(self);
+                moves.push(self.replace_row());
+                menus::sidebar_menu(kin, moves)
             }
             ContextRegion::SidebarPane(sid) => {
                 let kin = self.kin_of(sid);

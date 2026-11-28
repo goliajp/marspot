@@ -88,7 +88,7 @@ impl CoreApp {
     /// A row about whose child a pane is, or what a slot shows; false
     /// when `tag` is none of those.
     fn pick_family_tag(&mut self, wi: usize, region: ContextRegion, tag: u32) -> bool {
-        self.pick_kin(wi, region, tag)
+        self.pick_kin(wi, region, tag) || self.pick_replace(wi, region, tag)
     }
 }
 

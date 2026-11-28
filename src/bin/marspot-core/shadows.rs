@@ -40,8 +40,10 @@ pub(super) struct Shadows {
     pub(super) family: super::helper_panel::Family,
     /// Each window's sidebar rows.
     pub(super) trees: super::draw::sidebar_tree::Trees,
-    /// The panes the open menu lists, by their place in it.
+    /// The panes the open menu lists to belong to, and the hidden ones
+    /// it lists to show, by their place in it.
     pub(super) menu_panes: Vec<u64>,
+    pub(super) menu_hidden: Vec<u64>,
     new_windows: spawn_window::NewWindows,
     /// Dev seam only (`MARSPOT_DEV_SHADOWS=n`): how many shadow panes
     /// to open under the first pane, and when.
