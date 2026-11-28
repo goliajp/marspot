@@ -103,6 +103,26 @@ mod tests {
         assert_eq!(value_of(&parse("gemini.allocation = live\n"), "gemini.allocation"), "live");
     }
 
+    /// The kimi allocation is off unless the file says `dryrun` or
+    /// `live`, and a rewrite keeps the word.
+    #[test]
+    fn kimi_allocation_is_off_unless_named() {
+        assert_eq!(Settings::default().kimi_allocation, AgentAllocation::Off);
+        for (word, want) in [
+            ("live", AgentAllocation::Live),
+            ("DryRun", AgentAllocation::DryRun),
+            ("off", AgentAllocation::Off),
+            ("on", AgentAllocation::Off),
+            ("true", AgentAllocation::Off),
+        ] {
+            let body = format!("kimi.allocation = {word}\n");
+            let s = parse(&body);
+            assert_eq!(s.kimi_allocation, want, "{word}");
+            assert_eq!(parse(&render(&s, &body)).kimi_allocation, want, "{word} after a rewrite");
+        }
+        assert_eq!(value_of(&parse("kimi.allocation = dryrun\n"), "kimi.allocation"), "dryrun");
+    }
+
     /// The reset switch is off unless the file says otherwise, and reads
     /// back as written; the retired screen-read switch is no setting.
     #[test]
