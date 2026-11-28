@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.934"  # the lib: a notice when text pasted into a web page is cut
-core    = "0.12.813"  # web pane: copied text only for the copy asked, a link opens only after a Command press and as a page address, nothing of input to a version 2 page, bad input frames end the page, size and shown as latest-value slots
+core    = "0.12.814"  # a dropped copy answer from a web pane is logged once, when it arrives
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)

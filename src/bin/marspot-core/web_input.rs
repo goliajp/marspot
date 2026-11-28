@@ -143,9 +143,12 @@ impl CoreApp {
             let id_of = w.window_id;
             w.panes.iter_mut().filter_map(web).find(|p| p.id() == id).map(|p| {
                 let said = p.take_said();
+                let answered = said.copied.is_some();
                 let copied = said.copied.filter(|(seq, _)| p.copy_answers(*seq)).map(|(_, text)| text);
                 let open = said.open.filter(|_| p.take_open());
-                (wi, id_of, p.hovered, said.cursor, copied, open, p.stray_copies())
+                // logged when a stray arrives, not on every later frame
+                let strays = (answered && copied.is_none()).then(|| p.stray_copies());
+                (wi, id_of, p.hovered, said.cursor, copied, open, strays)
             })
         });
         let Some((wi, window_id, hovered, cursor, copied, open, strays)) = found else { return };
@@ -161,7 +164,7 @@ impl CoreApp {
         if let Some(text) = copied {
             lx_event!("WEB_PANE_COPIED", "a web pane's selection went to the clipboard", session = id, chars = text.chars().count());
             marspot::input::write_clipboard_text(&text);
-        } else if strays > 0 {
+        } else if let Some(strays) = strays {
             lx_info!("web_pane.stray_copied", "copied text no copy asked for was dropped", session = id, dropped = strays);
         }
         if let Some(url) = open {
