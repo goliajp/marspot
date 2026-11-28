@@ -14,13 +14,15 @@ use super::*;
 /// The dev seam opens its pane once per process.
 static DEV_OPENED: AtomicBool = AtomicBool::new(false);
 
-/// Where the page of a pane in cell `rect` goes: below the title strip,
-/// at whole device pixels.
+/// Where the page of pane `i` goes: where a terminal's text would, below
+/// the title strip and inside the padding the pane's outline is drawn
+/// over, at whole device pixels.
 fn page_rect(layout: &Layout, i: usize) -> Option<(f64, f64, f64, f64)> {
     let c = layout.cells.get(i)?;
-    let top = c.y_top + layout.cell_title_h;
-    let (x, y) = (c.x.ceil(), top.ceil());
-    Some((x, y, (c.x + c.w - x).floor(), (c.y_top + c.h - y).floor()))
+    let pad = layout.padding;
+    let (x, y) = ((c.x + pad).ceil(), (c.y_top + layout.cell_title_h + pad).ceil());
+    let (right, bottom) = ((c.x + c.w - pad).floor(), (c.y_top + c.h - pad).floor());
+    Some((x, y, right - x, bottom - y))
 }
 
 impl CoreApp {
@@ -55,6 +57,10 @@ impl CoreApp {
         let w = &mut win!(self, wi);
         w.panes.push(pane);
         w.focused_idx = w.panes.len() - 1;
+        // a column more when the grid is full, so the page has a cell
+        if w.panes.len() > w.grid_cols * w.grid_rows {
+            w.grid_cols += 1;
+        }
         self.rebuild_layout(wi);
         let idx = win!(self, wi).panes.len() - 1;
         let Some((_, _, pw, ph)) = page_rect(&win!(self, wi).layout, idx) else {

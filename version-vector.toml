@@ -29,5 +29,5 @@
 # `git diff` readability.
 
 shell   = "0.7.920"  # in a sandbox the madcawl host runs for the web pane dev seam, with --isolate there only; dev backing scale
-core    = "0.12.806"  # the window backing scale a sandbox may name (MARSPOT_DEV_BACKING_SCALE); the madcawl host socket name shared with the shell
+core    = "0.12.807"  # a web pane page sits inside the pane padding its outline is drawn over; the dev seam widens a full grid
 session = "0.11.499"  # marspot-term: PaneUserInput frame; PaneBadgeClicked coding moves to a file of its own (not used by session)
