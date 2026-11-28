@@ -181,7 +181,9 @@ def checksum(head, rows):
     h = hashlib.sha256()
     for k in ("binary", "version", "file_bytes", "budget", "previous_budget"):
         h.update(f"{k}\t{head.get(k)}\n".encode())
-    for k in sorted(rows):
+    # a module only the previous table had is written as a row of 0 bytes;
+    # it is no part of what the budget rests on
+    for k in sorted(k for k, v in rows.items() if v):
         h.update(f"{k}\t{rows[k]}\n".encode())
     return "sha256:" + h.hexdigest()
 

@@ -1,125 +1,141 @@
 # binary	marspot-core
 # version	0.18.0
-# commit	f3d5667aaec20c77b4cdec2206c13ee0d8f06862
-# file_bytes	2678288
-# budget	2883584
-# previous_budget	none
-# previous	-
-# checksum	sha256:45f7f94552dd56cf0b8e57ac4452650b6fa586066b6d4d6015754af21c2819d8
+# commit	e504969cdc859c2315deddb45f7532e0a8b4cab2
+# file_bytes	2929968
+# budget	3145728
+# previous_budget	2883584
+# previous	0.18 2678288
+# checksum	sha256:d6615a249d327c6ddf17217a15fd8f59fb3963d25531db349edcbcc6449c786f
 module	bytes	previous	delta
-(__LINKEDIT: symbols, strings, signature)	400912	0	+400912
-core	232095	0	+232095
-std	179624	0	+179624
-marspot::ui	156868	0	+156868
-(__TEXT,__eh_frame)	152040	0	+152040
-marspot_core::main	119696	0	+119696
-(__TEXT,__const)	91742	0	+91742
-marspot::frame_build	67172	0	+67172
-(__DATA_CONST,__const)	57728	0	+57728
-marspot_term::terminal	56212	0	+56212
-(__TEXT,__gcc_except_tab)	53556	0	+53556
-marspot_term::grid	46652	0	+46652
-marspot_term::scrollback	43892	0	+43892
-core <- marspot_core	40276	0	+40276
-(unmapped: headers, padding)	38864	0	+38864
-marspot_core::draw	37672	0	+37672
-marspot_core::helper_strip	36459	0	+36459
-marspot::pane	35324	0	+35324
-alloc	34692	0	+34692
-gimli	32904	0	+32904
-(__TEXT,__cstring)	28801	0	+28801
-marspot::render_metal	24020	0	+24020
-(__TEXT,__unwind_info)	23456	0	+23456
-std <- marspot	18660	0	+18660
-marspot_core::context_menu	18432	0	+18432
-core <- marspot	17888	0	+17888
-marspot_term::session_registry	17772	0	+17772
-marspot_core::pointer	17408	0	+17408
-marspot_core::boot_assembly	17312	0	+17312
-marspot::font_cache	17060	0	+17060
-rustc_demangle	16876	0	+16876
-crc32fast	16384	0	+16384
-marspot_core::links	15900	0	+15900
-miniz_oxide	15704	0	+15704
-marspot_term::settings	15308	0	+15308
-marspot_core::keys	14340	0	+14340
-marspot_term::(small)	14223	0	+14223
-marspot_core::tree_panels	13660	0	+13660
-(other small)	13324	0	+13324
-hashbrown <- marspot_core	13020	0	+13020
-core <- marspot_term	12212	0	+12212
-marspot_term::async_writer	12172	0	+12172
-hashbrown	11784	0	+11784
-marspot_core::process_panel	11548	0	+11548
-marspot_core::panels	10760	0	+10760
-marspot_linkify::line	10704	0	+10704
-marspot_core::(small)	10608	0	+10608
-marspot_core::shadows	10344	0	+10344
-addr2line	10200	0	+10200
-std <- marspot_term	9964	0	+9964
-marspot::cc_usage	9356	0	+9356
-marspot::(small)	9208	0	+9208
-marspot_core::pointer_drag	9128	0	+9128
-marspot_core::layout_state	8352	0	+8352
-marspot_core::pump	8292	0	+8292
-std <- marspot_core	8248	0	+8248
-marspot_core::wheel	8004	0	+8004
-marspot_core::l3_reader	7860	0	+7860
-marspot_core::peek	7580	0	+7580
-marspot_core::spawn	7496	0	+7496
-hashbrown <- marspot	7472	0	+7472
-marspot_term::logx	7256	0	+7256
-marspot_term::shell_proto	7220	0	+7220
-marspot_core::windows	6720	0	+6720
-marspot::kimi_usage	6668	0	+6668
-marspot_term::pane_code	6564	0	+6564
-marspot_linkify::scan_visible_links_into	6320	0	+6320
-marspot_term::frame_writer	6160	0	+6160
-marspot_term::segment	5868	0	+5868
-marspot_core::helper_panel	5740	0	+5740
-golia_ui_core::layout	5712	0	+5712
-marspot_core::sessions	5180	0	+5180
-marspot::state	5092	0	+5092
-marspot_core::search	5088	0	+5088
-marspot_term::grid_shm	4816	0	+4816
-marspot_core::pane_move	4784	0	+4784
-marspot_core::reattach	4656	0	+4656
-marspot::font_trait	4624	0	+4624
-marspot_linkify::table	4624	0	+4624
-alloc <- marspot_core	4420	0	+4420
-marspot::glyph_atlas	3968	0	+3968
-marspot::tools	3856	0	+3856
-marspot_term::uds_session_client	3848	0	+3848
-marspot::session_close	3824	0	+3824
-object	3688	0	+3688
-marspot::pidtree	3644	0	+3644
-marspot_core::pane_control	3388	0	+3388
-marspot_core::pane_reports	3372	0	+3372
-golia_ui_core::interact	3332	0	+3332
-alloc <- marspot	3316	0	+3316
-(__TEXT,__text)	3148	0	+3148
-golia_ui_core::paint	3136	0	+3136
-marspot::pane_read	3088	0	+3088
-hashbrown <- marspot_term	3052	0	+3052
-(__TEXT,__stub_helper)	3024	0	+3024
-golia_ui_core::stack	3024	0	+3024
-marspot_linkify::path	3012	0	+3012
-(__TEXT,__stubs)	3000	0	+3000
-marspot_term::osc8	2996	0	+2996
-marspot_core::spawn_said	2980	0	+2980
-alloc <- marspot_term	2904	0	+2904
-core <- golia_ui_core	2840	0	+2840
-marspot_core::pointer_press	2740	0	+2740
-objc2	2616	0	+2616
-golia_ui_core::hit	2584	0	+2584
-marspot::link_probe	2564	0	+2564
-marspot_term::parser	2468	0	+2468
-marspot_linkify::wrap	2424	0	+2424
-marspot_core::card_slots	2372	0	+2372
-marspot_core	2368	0	+2368
-marspot_linkify::(small)	2332	0	+2332
-marspot_core::shadow_place	2328	0	+2328
-marspot::session_signal	2284	0	+2284
-marspot_linkify::addr	2208	0	+2208
-marspot_term::grapheme	2200	0	+2200
-golia_ui_core::(small)	1628	0	+1628
+(__LINKEDIT: symbols, strings, signature)	439600	400912	+38688
+core	252018	232095	+19923
+marspot::ui	178760	156868	+21892
+(__TEXT,__eh_frame)	169000	152040	+16960
+std	163936	179624	-15688
+marspot_core::main	111660	119696	-8036
+(__TEXT,__const)	100857	91742	+9115
+marspot::frame_build	69664	67172	+2492
+(__DATA_CONST,__const)	62464	57728	+4736
+(__TEXT,__gcc_except_tab)	58736	53556	+5180
+marspot_term::terminal	56212	56212	+0
+marspot_term::grid	48308	46652	+1656
+marspot_core::draw	44652	37672	+6980
+marspot_term::scrollback	43976	43892	+84
+core <- marspot_core	39464	40276	-812
+alloc	39316	34692	+4624
+marspot::pane	37692	35324	+2368
+marspot_core::context_menu	35172	18432	+16740
+marspot_core::helper_strip	34855	36459	-1604
+(unmapped: headers, padding)	34641	38864	-4223
+gimli	32904	32904	+0
+(__TEXT,__cstring)	31894	28801	+3093
+(__TEXT,__unwind_info)	26200	23456	+2744
+marspot::render_metal	24044	24020	+24
+marspot_term::shell_proto	21920	7220	+14700
+core <- marspot_term	20296	12212	+8084
+marspot_term::settings	20164	15308	+4856
+marspot_core::panels	19584	10760	+8824
+marspot_term::session_registry	17780	17772	+8
+core <- marspot	17392	17888	-496
+marspot_term::(small)	17203	14223	+2980
+marspot_core::boot_assembly	17144	17312	-168
+marspot::font_cache	17080	17060	+20
+rustc_demangle	16876	16876	+0
+marspot_core::tree_panels	16704	13660	+3044
+crc32fast	16384	16384	+0
+miniz_oxide	15704	15704	+0
+marspot_core::pointer	15024	17408	-2384
+marspot_core::links	14696	15900	-1204
+hashbrown <- marspot_core	13492	13020	+472
+marspot_term::async_writer	12172	12172	+0
+hashbrown	11784	11784	+0
+marspot_core::shadows	11724	10344	+1380
+(other small)	11280	13324	-2044
+marspot_core::windows	11168	6720	+4448
+marspot::agent_resets	11068	0	+11068
+marspot::pane_read	10772	3088	+7684
+marspot_linkify::line	10704	10704	+0
+std <- marspot	10568	18660	-8092
+marspot_core::layout_state	10440	8352	+2088
+marspot_core::process_panel	10380	11548	-1168
+std <- marspot_term	10316	9964	+352
+addr2line	10200	10200	+0
+marspot_core::pointer_drag	9848	9128	+720
+marspot_core::key_to_pane	9676	0	+9676
+marspot_core::(small)	9512	10608	-1096
+marspot_core::helper_panel	9448	5740	+3708
+marspot_core::pump	9384	8292	+1092
+marspot::cc_usage	9328	9356	-28
+marspot_core::spawn	9080	7496	+1584
+marspot_core::peek	8448	7580	+868
+marspot_core::wheel	8004	8004	+0
+marspot::(small)	7588	9208	-1620
+hashbrown <- marspot	7432	7472	-40
+std <- marspot_core	7388	8248	-860
+marspot_term::logx	7256	7256	+0
+core <- marspot_peer	6828	0	+6828
+marspot::kimi_usage	6668	6668	+0
+marspot::pidtree	6536	3644	+2892
+marspot_term::pane_code	6532	6564	-32
+marspot_term::segment	6324	5868	+456
+marspot_linkify::scan_visible_links_into	6320	6320	+0
+marspot_core::pane_control	6280	3388	+2892
+marspot_core::model_guard	5976	0	+5976
+golia_ui_core::layout	5712	5712	+0
+marspot_core::notices	5520	0	+5520
+marspot::font_families	5472	0	+5472
+marspot_core::keys	5464	14340	-8876
+marspot_json	5368	0	+5368
+marspot_core::shadow_place	5360	2328	+3032
+marspot_core::sessions	5192	5180	+12
+alloc <- marspot_term	5188	2904	+2284
+marspot_core::pane_move	5144	4784	+360
+alloc <- marspot_core	5116	4420	+696
+marspot::state	5092	5092	+0
+marspot_core::l3_reader	5024	7860	-2836
+marspot_core::search	5020	5088	-68
+marspot_core::pane_forward	5016	0	+5016
+marspot_term::grid_shm	4816	4816	+0
+marspot::font_trait	4656	4624	+32
+alloc <- marspot	4640	3316	+1324
+marspot_linkify::table	4624	4624	+0
+marspot_core::reattach	4608	4656	-48
+marspot_term::exec_contract	4136	0	+4136
+marspot_term::uds_session_client	4112	3848	+264
+marspot::glyph_atlas	3968	3968	+0
+marspot_core::link_menu	3908	0	+3908
+marspot::tools	3856	3856	+0
+marspot_core::install_ask	3852	0	+3852
+marspot_core::spawn_said	3828	2980	+848
+marspot::session_close	3824	3824	+0
+marspot_core::chrome_input	3756	0	+3756
+object	3688	3688	+0
+marspot_core::pointer_press	3444	2740	+704
+marspot_core::pane_reports	3420	3372	+48
+golia_ui_core::interact	3332	3332	+0
+(__TEXT,__stub_helper)	3192	3024	+168
+(__TEXT,__stubs)	3168	3000	+168
+(__TEXT,__text)	3152	3148	+4
+golia_ui_core::paint	3136	3136	+0
+hashbrown <- marspot_term	3052	3052	+0
+golia_ui_core::stack	3024	3024	+0
+marspot_linkify::path	3012	3012	+0
+marspot_term::osc8	2996	2996	+0
+core <- golia_ui_core	2840	2840	+0
+marspot_core::panes	2704	0	+2704
+marspot::session_signal	2688	2284	+404
+objc2	2616	2616	+0
+golia_ui_core::hit	2584	2584	+0
+marspot::link_probe	2564	2564	+0
+marspot_term::parser	2468	2468	+0
+marspot_linkify::wrap	2424	2424	+0
+marspot_core	2412	2368	+44
+marspot_core::card_slots	2368	2372	-4
+marspot_linkify::(small)	2332	2332	+0
+marspot_linkify::addr	2208	2208	+0
+marspot_term::grapheme	2200	2200	+0
+(__DATA,__la_symbol_ptr)	2112	0	+2112
+marspot::commands	2064	0	+2064
+golia_ui_core::(small)	1628	1628	+0
+marspot_peer::(small)	968	0	+968
+marspot_term::frame_writer	0	6160	-6160
