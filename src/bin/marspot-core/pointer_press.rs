@@ -9,57 +9,21 @@ impl CoreApp {
         // dispatches an item / swallows on frame / closes-on-outside.
         if let Some(hit) = self.menu_press(wi, x_phys, y_phys) {
             use marspot::ui::components::ContextMenuHit;
-            let region = win!(self, wi).context_menu.as_ref().unwrap().region;
+            let items = win!(self, wi).context_menu.as_ref().map(|m| m.items.clone()).unwrap_or_else(|| Vec::new().into());
             match hit {
-                ContextMenuHit::Item(idx) => {
-                    let tag = win!(self, wi).context_menu.as_ref().unwrap()
-                        .items[idx].action_tag;
-                    // Badge menus carry plugin-opaque tags
-                    if let ContextRegion::PaneBadge(sid) = region {
-                        self.pick_badge_row(wi, sid, tag);
-                    } else if tag == MOVE_TO_NEW_WINDOW_TAG
-                        || (MOVE_TO_WINDOW_TAG_BASE..MOVE_TO_NEW_WINDOW_TAG).contains(&tag)
-                    {
-                        if let ContextRegion::SidebarPane(sid) = region {
-                            win!(self, wi).context_menu = None;
-                            win!(self, wi).needs_render = true;
-                            let to = (tag != MOVE_TO_NEW_WINDOW_TAG).then(|| (tag - MOVE_TO_WINDOW_TAG_BASE) as usize);
-                            self.move_other(sid, to);
-                            return true;
-                        }
-                        let idx = match region {
-                            ContextRegion::Pane(i)
-                            | ContextRegion::SidebarSlot(i) => i,
-                            _ => win!(self, wi).focused_idx,
-                        };
-                        win!(self, wi).context_menu = None;
-                        win!(self, wi).needs_render = true;
-                        if tag == MOVE_TO_NEW_WINDOW_TAG {
-                            self.move_pane_to_new_window(wi, idx);
-                        } else {
-                            let to = (tag - MOVE_TO_WINDOW_TAG_BASE) as usize;
-                            self.move_pane_to_window(wi, idx, to);
-                        }
-                    } else if let Some(action) = ContextMenuAction::from_tag(tag) {
-                        self.dispatch_context_action(wi, action, region);
-                    } else {
-                        win!(self, wi).context_menu = None;
-                        win!(self, wi).needs_render = true;
-                    }
-                    return true;
-                }
-                ContextMenuHit::Frame => {
-                    // Click on divider / disabled row / padding —
-                    // swallow, NSMenu-style.
-                    return true;
-                }
+                ContextMenuHit::Item(i) => self.pick_menu_tag(wi, items[i].action_tag),
+                ContextMenuHit::SubItem(i, j) => self.pick_menu_tag(wi, items[i].submenu[j].action_tag),
+                // a divider, a disabled row or the padding swallows the
+                // press, NSMenu-style; a row that opens a menu opens it
+                ContextMenuHit::Frame => win!(self, wi).needs_render = true,
                 ContextMenuHit::Outside => {
                     win!(self, wi).context_menu = None;
                     win!(self, wi).needs_render = true;
-                    // Fall through: click also triggers normal
-                    // focus / selection behaviour.
+                    // the press also focuses and selects as it would
+                    return false;
                 }
             }
+            return true;
         }
         false
     }

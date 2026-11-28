@@ -26,11 +26,16 @@ use crate::ui::strings::{t, Msg};
 use crate::ui::components::context_menu_view::MenuRender;
 use crate::ui::components::{ContextMenu, MenuItem};
 
-#[path = "chrome_ansi_scene.rs"]
+#[cfg(test)]
+#[path = "chrome_ansi_snapshot_tests.rs"]
 mod ansi;
 use ansi::ansi_scene;
+#[cfg(test)]
 #[path = "sidebar_tree_snapshot_tests.rs"]
 mod sidebar_tree;
+#[cfg(test)]
+#[path = "menu_beside_snapshot_tests.rs"]
+mod menu_beside;
 
 thread_local! {
     /// The sidebar rows of the next scene, when they are not one per pane.

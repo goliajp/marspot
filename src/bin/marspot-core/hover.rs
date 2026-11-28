@@ -48,7 +48,7 @@ impl CoreApp {
 
     /// The open menu's surface, laid out as the next frame will show
     /// it.  `None` with no menu open.
-    fn with_menu<T>(&mut self, wi: usize, f: impl FnOnce(&mut MenuSurface) -> T) -> Option<T> {
+    pub(super) fn with_menu<T>(&mut self, wi: usize, f: impl FnOnce(&mut MenuSurface) -> T) -> Option<T> {
         let menu = self.menu_render(wi)?;
         let window = (win!(self, wi).layout.window_w, win!(self, wi).layout.window_h);
         let mut s = menu.surface.borrow_mut();

@@ -4,6 +4,8 @@ use super::*;
 
 #[path = "menus.rs"]
 pub(crate) mod menus;
+#[path = "menu_pick.rs"]
+mod menu_pick;
 
 impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────

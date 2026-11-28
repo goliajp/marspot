@@ -24,6 +24,12 @@ pub struct MenuItem {
     /// row index, and the caller maps `items[idx].action_tag` to an
     /// `Action` enum it owns.
     pub action_tag: u32,
+    /// The rows of the menu this row opens beside it; empty for a row
+    /// that acts.  A row of such a menu opens none.
+    pub submenu: Vec<MenuItem>,
+    /// Said beside a disabled row while the pointer is on it: why it is
+    /// off.  Empty: nothing is said.
+    pub tooltip: String,
 }
 
 impl MenuItem {
@@ -34,6 +40,8 @@ impl MenuItem {
             enabled: true,
             divider: false,
             action_tag,
+            submenu: Vec::new(),
+            tooltip: String::new(),
         }
     }
     pub fn with_shortcut(mut self, hint: &str) -> Self {
@@ -51,7 +59,24 @@ impl MenuItem {
             enabled: false,
             divider: true,
             action_tag: 0,
+            submenu: Vec::new(),
+            tooltip: String::new(),
         }
+    }
+    /// A row that opens `rows` beside it.
+    pub fn with_submenu(mut self, rows: Vec<MenuItem>) -> Self {
+        self.submenu = rows;
+        self
+    }
+    /// A row that is off, saying `why` while the pointer is on it.
+    pub fn disabled_because(mut self, why: &str) -> Self {
+        self.enabled = false;
+        self.tooltip = why.to_string();
+        self
+    }
+    /// Whether the row opens a menu of its own.
+    pub fn opens(&self) -> bool {
+        self.enabled && !self.submenu.is_empty()
     }
 }
 
@@ -85,6 +110,8 @@ pub fn dividers_sound(items: &[MenuItem]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuHit {
     Item(usize),
+    /// A row of the menu opened beside row `.0`.
+    SubItem(usize, usize),
     Frame,
     Outside,
 }
@@ -141,6 +168,12 @@ fn label_ch_w_phys() -> f64 {
         * crate::ui::core::ViewPainter::px_per_pt()
 }
 
+/// How wide `s` is set as a menu row's label, estimated as the menu's
+/// own width is, physical pixels.
+pub(crate) fn label_w(s: &str) -> f64 {
+    crate::ui::core::text_fit::cells(s) as f64 * label_ch_w_phys()
+}
+
 impl ContextMenu {
     /// Layout a menu anchored at `(anchor_x, anchor_y)` in physical
     /// pixels.  The menu prefers to extend down-right; if it would
@@ -161,20 +194,23 @@ impl ContextMenu {
         items: &[MenuItem],
     ) -> Self {
         let frame = frame_of(window_w, window_h, scale, anchor_x, anchor_y, top_obstruction, items);
-        let top_pad = TOP_PAD_LOGICAL * scale;
-        let mut rows_h = 0.0;
-        // Full width: the row's own horizontal padding is inside it,
-        // and the rect is what a hover background is drawn to.
-        let item_rects = items
-            .iter()
-            .map(|it| {
-                let h = if it.divider { DIVIDER_H_LOGICAL * scale } else { ROW_H_LOGICAL * scale };
-                let top = top_pad + rows_h;
-                rows_h += h;
-                Rect { x: frame.x, y_top: frame.y_top + top, w: frame.w, h }
-            })
-            .collect();
+        let mut item_rects = Vec::with_capacity(items.len());
+        rows_into(frame, scale, items, &mut item_rects);
         Self { frame, item_rects }
+    }
+}
+
+/// Each row's rectangle in a menu of `items` standing at `frame`, into
+/// `out`, which is emptied first.  Full width: the row's own horizontal
+/// padding is inside it, and the rect is what a hover band is drawn to.
+pub(crate) fn rows_into(frame: Rect, scale: f64, items: &[MenuItem], out: &mut Vec<Rect>) {
+    out.clear();
+    let top_pad = TOP_PAD_LOGICAL * scale;
+    let mut rows_h = 0.0;
+    for it in items {
+        let h = if it.divider { DIVIDER_H_LOGICAL * scale } else { ROW_H_LOGICAL * scale };
+        out.push(Rect { x: frame.x, y_top: frame.y_top + (top_pad + rows_h), w: frame.w, h });
+        rows_h += h;
     }
 }
 
