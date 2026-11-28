@@ -69,10 +69,25 @@ pub fn make_buffer(w: u32, h: u32) -> io::Result<(OwnedFd, Mapping, Buffer)> {
     Ok((fd, m, Buffer { bytes, width: w, height: h, stride: head.stride }))
 }
 
+/// Whether pixels at `offset` with rows of `stride` bytes meet the
+/// device's linear-texture alignment `align` (16 on Apple GPUs, 256 on
+/// some Intel ones).
+pub fn linear_ok(align: usize, offset: usize, stride: usize) -> bool {
+    align > 0 && offset.is_multiple_of(align) && stride.is_multiple_of(align)
+}
+
 /// The texture over `m`, which `b` describes; the mapping is Metal's
-/// from here on.
-pub fn wrap(device: &ProtocolObject<dyn MTLDevice>, m: Mapping, b: &Buffer) -> Option<Texture> {
-    let ptr = NonNull::new(m.as_ptr() as *mut c_void)?;
+/// from here on.  Refused on a device whose linear-texture alignment
+/// the wire's fixed pixel offset does not meet: there is no copy path.
+pub fn wrap(device: &ProtocolObject<dyn MTLDevice>, m: Mapping, b: &Buffer) -> Result<Texture, String> {
+    let align = device.minimumLinearTextureAlignmentForPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    if !linear_ok(align, HEADER_LEN, b.stride as usize) {
+        return Err(format!(
+            "the GPU wants pixels and rows aligned to {align} bytes; they start at {HEADER_LEN} with rows of {}",
+            b.stride
+        ));
+    }
+    let ptr = NonNull::new(m.as_ptr() as *mut c_void).ok_or("a null mapping")?;
     let len = m.len();
     let hold = std::cell::Cell::new(Some(m));
     // unmapped when Metal releases the block, after the buffer is gone
@@ -86,7 +101,8 @@ pub fn wrap(device: &ProtocolObject<dyn MTLDevice>, m: Mapping, b: &Buffer) -> O
             MTLResourceOptions::StorageModeShared,
             Some(&free),
         )
-    }?;
+    }
+    .ok_or("Metal made no buffer over the mapping")?;
     // SAFETY: plain descriptor constructor
     let desc = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
@@ -98,8 +114,8 @@ pub fn wrap(device: &ProtocolObject<dyn MTLDevice>, m: Mapping, b: &Buffer) -> O
     };
     desc.setUsage(MTLTextureUsage::ShaderRead);
     desc.setStorageMode(MTLStorageMode::Shared);
-    // the pixels start past the 64-byte header and rows are 16-byte
-    // aligned, which a texture over a buffer requires
-    let texture = buffer.newTextureWithDescriptor_offset_bytesPerRow(&desc, HEADER_LEN, b.stride as usize)?;
-    Some(Texture { texture, buffer })
+    let texture = buffer
+        .newTextureWithDescriptor_offset_bytesPerRow(&desc, HEADER_LEN, b.stride as usize)
+        .ok_or("Metal made no texture over the buffer")?;
+    Ok(Texture { texture, buffer })
 }

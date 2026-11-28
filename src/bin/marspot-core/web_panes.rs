@@ -39,7 +39,7 @@ impl CoreApp {
             return;
         }
         DEV_OPENED.store(true, Ordering::Relaxed);
-        self.open_web_pane(0, url);
+        self.open_web_pane(0, url.to_owned());
     }
 
     /// Add a web pane for `url` to window `wi`, focused, and open it at

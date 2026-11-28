@@ -26,8 +26,10 @@ pub const HOST_SOCKET: &str = "madcawl.sock";
 /// Dev seam: open one web pane on this file URL after start.  Honoured
 /// only by a dev build or under a sandbox state dir, as the other
 /// `MARSPOT_DEV_*` seams that point the app at a developer's files.
-pub fn dev_url() -> Option<String> {
-    dev_var("MARSPOT_DEV_WEB_PANE")
+pub fn dev_url() -> Option<&'static str> {
+    // read once: the core asks every main-loop turn
+    static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    URL.get_or_init(|| dev_var("MARSPOT_DEV_WEB_PANE")).as_deref()
 }
 
 /// Dev seam: the host program a sandbox starts, in place of the one

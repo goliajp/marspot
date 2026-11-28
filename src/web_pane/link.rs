@@ -54,14 +54,23 @@ struct Link {
 }
 
 impl Link {
-    fn new(s: UnixStream) -> Link {
-        Link { s, buf: Vec::new(), fds: Vec::new() }
+    /// Writes never block: a side that stops reading would otherwise
+    /// hold this thread in `sendmsg`, deaf to the wake pipe. Reads come
+    /// only after `poll` says there is something.
+    fn new(s: UnixStream) -> Result<Link, End> {
+        s.set_nonblocking(true).map_err(|e| failed("the socket", e))?;
+        Ok(Link { s, buf: Vec::new(), fds: Vec::new() })
     }
 
+    /// A frame that does not fit in the socket's buffer now ends the
+    /// link: the other side has stopped reading.
     fn send(&self, f: &Frame, fds: &[BorrowedFd]) -> Result<(), End> {
         let mut out = Vec::new();
         f.encode(&mut out);
-        os::send(&self.s, &out, fds).map_err(|e| failed("writing", e))
+        os::send(&self.s, &out, fds).map_err(|e| match e.kind() {
+            io::ErrorKind::WouldBlock => failed("writing", "the other side stopped reading"),
+            _ => failed("writing", e),
+        })
     }
 
     /// A whole frame already read, if there is one.
@@ -144,7 +153,7 @@ pub fn run(o: Open, device: Device, shared: Arc<Shared>, wake: OwnedFd) {
 
 fn serve(o: &Open, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), End> {
     let s = UnixStream::connect(&o.socket).map_err(|e| failed("the madcawl host is not reachable", e))?;
-    let mut host_link = Link::new(s);
+    let mut host_link = Link::new(s)?;
     let hello = Hello { range: host::RANGE, role: Some(host::role::DISPLAY), version: None };
     host_link.send(&hello.frame(host::kind::HELLO), &[])?;
     let answer = host_link.next(wake)?;
@@ -162,7 +171,7 @@ fn serve(o: &Open, device: &Device, shared: &Shared, wake: RawFd) -> Result<(), 
     if host_link.fds.len() != 1 {
         return Err(failed("the host's answer", "no display channel came with it"));
     }
-    let mut ch = Link::new(UnixStream::from(host_link.fds.remove(0)));
+    let mut ch = Link::new(UnixStream::from(host_link.fds.remove(0)))?;
     crate::lx_event!("WEB_PANE_OPENED", "the host opened the page", session = o.session, page = opened.page, content_pid = opened.pid);
     let dh = Hello { range: display::RANGE, role: None, version: None };
     ch.send(&dh.frame(display::kind::HELLO), &[])?;
@@ -178,7 +187,7 @@ fn attach(ch: &Link, o: &Open, device: &Device) -> Result<(Vec<Texture>, Commits
     let (mut fds, mut textures, mut buffers) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..display::MAX_BUFFERS {
         let (fd, m, b) = gpu::make_buffer(o.px.0, o.px.1).map_err(|e| failed("no shared memory", e))?;
-        textures.push(gpu::wrap(device, m, &b).ok_or_else(|| failed("no texture", "Metal made none over the buffer"))?);
+        textures.push(gpu::wrap(device, m, &b).map_err(|e| failed("no texture", e))?);
         fds.push(fd);
         buffers.push(b);
     }
@@ -249,5 +258,15 @@ mod tests {
         assert_eq!(b.bytes % gpu::page_size(), 0);
         // the frame round-trips with its one descriptor
         assert_eq!(Surface::from_frame(&s.frame(), 1), Ok(s));
+    }
+
+    #[test]
+    fn web_pane_linear_texture_alignment_checks_offset_and_stride() {
+        let (_, _, b) = gpu::make_buffer(333, 77).expect("shared memory");
+        let header = madcawl_wire::shm::HEADER_LEN;
+        assert!(gpu::linear_ok(16, header, b.stride as usize));
+        assert!(!gpu::linear_ok(256, header, 1024), "the 64-byte pixel offset misses 256");
+        assert!(!gpu::linear_ok(16, 64, 1336), "a stride off the alignment");
+        assert!(!gpu::linear_ok(0, 64, 1344));
     }
 }
