@@ -244,8 +244,10 @@ impl CoreApp {
                     .map(|(wi, _)| wi)
                     .unwrap_or(self.key_window)
                     .min(self.windows.len().saturating_sub(1));
-                win!(self, wi).panes.push(pane);
-                self.rebuild_layout(wi);
+                // in the first slot past the cells, which the grid grows to draw
+                let w = &win!(self, wi);
+                let first_undrawn = w.panes.len().min(w.grid_cols * w.grid_rows);
+                self.insert_drawn(wi, first_undrawn, pane);
                 win!(self, wi).needs_render = true;
             }),
             // the other panes may have gone while the session answered

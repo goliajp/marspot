@@ -128,8 +128,32 @@ fn snapshot_on(
     open: impl FnOnce(&mut MetalRenderer, &mut WindowRender, &ChromeShape<'_>),
 ) {
     let name = &density_kit::scaled_name(&crate::snapshot_kit::themed(name));
-    let (w, h) = density_kit::scaled_size(w, h);
+    let Some((rgba, (w, h), _)) = scene_rgba(renderer, wr, Some(name), (w, h), (cols, rows), panes, focused, open) else { return };
+    let first = [rgba[0], rgba[1], rgba[2], rgba[3]];
+    assert!(rgba.chunks_exact(4).any(|px| px != first), "{name}: the frame is one flat colour");
+
     let dir = std::path::Path::new(UI_SNAPSHOT_DIR);
+    std::fs::create_dir_all(dir).expect("mkdir bench/ui/snapshots");
+    let path = dir.join(format!("{name}.png"));
+    assert_snapshot_ssim(&rgba, &path, w, h, 0.98);
+    write_snapshot_png(&path, &rgba, w, h);
+}
+
+/// One frame of a scene as RGBA, its size in pixels at the display
+/// scale in force and its layout; none when `name` is a scene the
+/// density capture took instead.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn scene_rgba(
+    renderer: &mut MetalRenderer,
+    wr: &mut WindowRender,
+    name: Option<&str>,
+    (w, h): (u32, u32),
+    (cols, rows): (usize, usize),
+    panes: &[PaneSpec],
+    focused: usize,
+    open: impl FnOnce(&mut MetalRenderer, &mut WindowRender, &ChromeShape<'_>),
+) -> Option<(Vec<u8>, (u32, u32), Layout)> {
+    let (w, h) = density_kit::scaled_size(w, h);
     let target = make_readback_texture(renderer.device(), w, h).expect("a readback texture");
     let (cell_w, cell_h) = renderer.cell_dims();
     // The app's own numbers at the display scale in force.
@@ -200,20 +224,14 @@ fn snapshot_on(
     // atlas texture the second one samples.
     renderer.render_layout_to_texture(wr, &target, &layout, &views, &sidebar, focused);
     renderer.render_layout_to_texture(wr, &target, &layout, &views, &sidebar, focused);
-    if density_kit::deliver(name, renderer, wr, &layout, panes.len()) {
-        return;
+    if name.is_some_and(|name| density_kit::deliver(name, renderer, wr, &layout, panes.len())) {
+        return None;
     }
     let mut rgba = renderer.read_target(&target).expect("readback");
     for px in rgba.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    let first = [rgba[0], rgba[1], rgba[2], rgba[3]];
-    assert!(rgba.chunks_exact(4).any(|px| px != first), "{name}: the frame is one flat colour");
-
-    std::fs::create_dir_all(dir).expect("mkdir bench/ui/snapshots");
-    let path = dir.join(format!("{name}.png"));
-    assert_snapshot_ssim(&rgba, &path, w, h, 0.98);
-    write_snapshot_png(&path, &rgba, w, h);
+    Some((rgba, (w, h), layout))
 }
 
 fn four_panes() -> [PaneSpec; 4] {

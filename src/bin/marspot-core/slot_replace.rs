@@ -2,8 +2,9 @@
 //! place of the pane in it.
 //!
 //! The pane that leaves goes on running in no window, hollow in the
-//! sidebar, and whose child either pane is does not change: nothing is
-//! asked of either session.  The keyboard follows the slot to the pane
+//! sidebar, or, when the pane shown was in a slot not drawn, takes that
+//! slot: the two change places.  Whose child either pane is does not
+//! change: nothing is asked of either session.  The keyboard follows the slot to the pane
 //! now in it.  A pane's menu and its sidebar row's menu offer the same
 //! rows and pick through the same command: a row of a slot of the
 //! window replaces that slot, any other row the slot in use.
@@ -31,11 +32,10 @@ pub(crate) enum Replace {
 
 impl CoreApp {
     /// The "Replace with…" row: a new shell first, then, past a
-    /// divider, every hidden pane, a child with its parent's code.
+    /// divider, every pane not shown, a child with its parent's code.
     /// The panes listed are kept for the pick.
     pub(crate) fn replace_row(&mut self) -> MenuItem {
-        let hidden: Vec<u64> =
-            self.shadows.iter().filter_map(Pane::shelld_session_id).filter(|s| !self.on_screen(*s)).take(LISTED_CAP).collect();
+        let hidden = self.not_shown(LISTED_CAP);
         let names = self.pane_names();
         let mut rows = vec![MenuItem::entry(t(Msg::MenuNewShell), NEW_SHELL_TAG)];
         if !hidden.is_empty() {
@@ -78,9 +78,24 @@ impl CoreApp {
     }
 
     /// Slot `idx` of window `wi` shows `with` from now on, and has the
-    /// keyboard; the pane that was in it goes on in no window.
+    /// keyboard; the pane that was in it goes on in no window, or in
+    /// the slot `with` was in.
     pub(crate) fn replace_slot(&mut self, wi: usize, idx: usize, with: Replace) {
         if idx >= win!(self, wi).panes.len() {
+            return;
+        }
+        if let Replace::Hidden(sid) = with
+            && let Some(other) = self.slot_not_shown(sid)
+        {
+            self.unview(wi, idx);
+            self.unview(other.0, other.1);
+            let old_sid = win!(self, wi).panes[idx].shelld_session_id();
+            self.swap_slots((wi, idx), other);
+            win!(self, wi).focused_idx = idx;
+            self.save_session_state();
+            lx_event!("PANE_SLOTS_SWAPPED", "a slot shows a pane that was not shown; the one it showed takes that pane's slot",
+                window_id = win!(self, wi).window_id, slot = idx as u32, shown = sid, other_window = win!(self, other.0).window_id,
+                other_slot = other.1 as u32, hidden = old_sid.unwrap_or(0));
             return;
         }
         // the new shell is started as a pane of the window before it

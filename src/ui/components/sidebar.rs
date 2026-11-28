@@ -90,7 +90,7 @@ fn row_fill(row: Rect) -> Rect {
 }
 
 /// The status dot of a row, indented one step for a child.
-fn status_dot(row: Rect, tree: SidebarTree) -> Rect {
+pub(crate) fn status_dot(row: Rect, tree: SidebarTree) -> Rect {
     let indent = if tree.is_child() { chrome::px(chrome::SIDEBAR_INDENT) } else { 0.0 };
     Rect {
         x: row.x + chrome::px(chrome::SIDEBAR_PAD_X) + indent,
@@ -171,8 +171,8 @@ pub(crate) fn paint_row(p: &mut ViewPainter, rect: Rect, code: Option<u16>, name
     p.text(label_x as f32, baseline, name, fg);
 }
 
-/// The dot in its state's colour: filled for a pane on screen, a ring
-/// for one in no window.
+/// The dot in its state's colour: filled for a pane shown, a wider
+/// ring for one that is not.
 fn paint_dot(p: &mut ViewPainter, dot: Rect, state: SessionState, hollow: bool) {
     let color = match state {
         SessionState::Active => palette::ok(),
@@ -182,7 +182,9 @@ fn paint_dot(p: &mut ViewPainter, dot: Rect, state: SessionState, hollow: bool) 
     let radius = (chrome::px(chrome::SIDEBAR_DOT) * 0.5) as f32;
     if hollow {
         let ring = chrome::px(chrome::SIDEBAR_DOT_RING) as f32;
-        p.fill_rounded_rect(dot, palette::none(), radius, (color, ring));
+        let grow = chrome::px(chrome::SIDEBAR_DOT_HOLLOW - chrome::SIDEBAR_DOT) * 0.5;
+        let r = Rect { x: dot.x - grow, y_top: dot.y_top - grow, w: dot.w + 2.0 * grow, h: dot.h + 2.0 * grow };
+        p.fill_rounded_rect(r, palette::none(), (r.w * 0.5) as f32, (color, ring));
     } else {
         p.fill_rounded_rect(dot, color, radius, (palette::none(), 0.0));
     }

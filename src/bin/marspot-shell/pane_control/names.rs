@@ -93,17 +93,20 @@ pub fn pane_refs_in(obs: &Observation) -> Vec<marspot::pane_name::PaneRef> {
         .collect()
 }
 
-/// `sid → (window, x, y)`, 1-based, from the layout L2 persists.
-pub fn layout_cells() -> std::collections::HashMap<u64, (usize, usize, usize)> {
+/// `sid → (window, its cell (x, y))`, 1-based, from the layout L2
+/// persists; no cell for a pane in a slot past the grid's cells, which
+/// its window holds and draws nowhere.
+pub fn layout_cells() -> std::collections::HashMap<u64, (usize, Option<(usize, usize)>)> {
     let mut out = std::collections::HashMap::new();
     let Some(saved) = marspot::state::read() else {
         return out;
     };
     for (wi, win) in saved.windows.iter().enumerate() {
         let cols = win.grid_cols.max(1) as usize;
+        let cells = cols * win.grid_rows as usize;
         for (i, p) in win.panes.iter().enumerate() {
             if p.sid != 0 {
-                out.insert(p.sid, (wi + 1, i % cols + 1, i / cols + 1));
+                out.insert(p.sid, (wi + 1, (i < cells).then(|| (i % cols + 1, i / cols + 1))));
             }
         }
     }
@@ -205,5 +208,20 @@ mod tests {
         assert!(parse_target("w(0,1,1)").is_err());
         assert!(parse_target("w(1,1)").is_err());
         assert!(parse_target("").is_err());
+    }
+
+    /// A 4×1 window holding seven panes: the last three are in it and
+    /// have no cell, so none is named for them.
+    #[test]
+    fn a_slot_past_the_grid_has_no_cell() {
+        let _sandbox = marspot_term::test_env::sandbox_state_dir();
+        let panes = (1..=7).map(|sid| marspot::state::SavedPane { sid, ..Default::default() }).collect();
+        let win = marspot::state::SavedWindowLayout { grid_cols: 4, grid_rows: 1, focused_idx: 0, panes };
+        marspot::state::write(&marspot::state::SavedState { windows: vec![win], key_window: 0 }).unwrap();
+        let cells = layout_cells();
+        assert_eq!(cells.get(&4), Some(&(1, Some((4, 1)))));
+        for sid in 5..=7 {
+            assert_eq!(cells.get(&sid), Some(&(1, None)), "{sid} is in window 1 and drawn nowhere");
+        }
     }
 }

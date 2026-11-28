@@ -31,13 +31,13 @@ pub(super) fn shadow_of(entry: &SessionEntry) -> u64 {
 /// again only when the file changed.
 pub(super) struct Cells {
     stamp: Option<SystemTime>,
-    cells: HashMap<u64, (usize, usize, usize)>,
+    cells: HashMap<u64, (usize, Option<(usize, usize)>)>,
 }
 
 static CELLS: std::sync::LazyLock<std::sync::Mutex<Cells>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Cells { stamp: None, cells: HashMap::new() }));
 
-pub(super) fn cells() -> HashMap<u64, (usize, usize, usize)> {
+pub(super) fn cells() -> HashMap<u64, (usize, Option<(usize, usize)>)> {
     fresh_cells().cells.clone()
 }
 

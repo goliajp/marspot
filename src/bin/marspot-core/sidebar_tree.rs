@@ -33,7 +33,7 @@ pub(crate) enum RowPane {
 pub(crate) struct Row {
     pub(crate) pane: RowPane,
     pub(crate) tree: SidebarTree,
-    /// In no cell of a window, or only in a minimized one.
+    /// Not shown: in no drawn slot of a window that is not minimized.
     pub(crate) hollow: bool,
 }
 
@@ -104,7 +104,8 @@ impl CoreApp {
         wi.hash(&mut h);
         self.pane_control.shadows.minimized.hash(&mut h);
         for w in &self.windows {
-            (w.window_id, w.layout.cells.len(), w.panes.len()).hash(&mut h);
+            let drawn = (0..w.layout.cells.len()).filter(|i| Self::slot_drawn(w, *i)).count();
+            (w.window_id, drawn, w.panes.len()).hash(&mut h);
             for p in &w.panes {
                 (p.shelld_session_id(), p.peeked()).hash(&mut h);
             }
@@ -121,23 +122,6 @@ impl CoreApp {
         });
         (mixed, parents.len()).hash(&mut h);
         h.finish()
-    }
-
-    /// Whether `sid` is in a cell of some window, or viewed in one.
-    pub(crate) fn on_screen(&self, sid: u64) -> bool {
-        self.windows.iter().any(|w| Self::in_cells(w, sid))
-    }
-
-    /// As [`Self::on_screen`], counting only windows not minimized: what
-    /// the sidebar's solid dot means.
-    pub(crate) fn on_visible_screen(&self, sid: u64) -> bool {
-        let shown = |w: &&WindowState| !self.pane_control.shadows.minimized.contains(&w.window_id);
-        self.windows.iter().filter(shown).any(|w| Self::in_cells(w, sid))
-    }
-
-    fn in_cells(w: &WindowState, sid: u64) -> bool {
-        let cells = w.layout.cells.len();
-        w.panes.iter().take(cells).any(|p| p.shelld_session_id() == Some(sid) || p.peeked() == Some(sid))
     }
 
     /// Window `wi`'s rows, worked out again if what they are made of
@@ -189,6 +173,9 @@ impl CoreApp {
         self.sidebar_rows(wi).get(i).copied()
     }
 }
+
+#[path = "drawn.rs"]
+mod drawn;
 
 #[cfg(test)]
 #[path = "sidebar_tree_tests.rs"]

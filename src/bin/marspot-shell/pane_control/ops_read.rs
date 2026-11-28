@@ -35,8 +35,9 @@ pub(super) fn list(conn: &Conn, ctx: &Ctx) -> Value {
         let r = marspot::pane_name::PaneRef::new(sid, cwd.clone());
         let view = views.get(&sid);
         // a closed window keeps its place in the saved layout, to be reopened
-        let shown = cells.get(&sid).filter(|(w, _, _)| open.contains(&(w - 1)));
-        let cell = shown.map_or(Value::Null, |(w, x, y)| format!("w({w},{x},{y})").into());
+        let shown = cells.get(&sid).filter(|(w, _)| open.contains(&(w - 1)));
+        // a slot past the grid's cells is drawn nowhere: no cell to name
+        let cell = shown.and_then(|(w, xy)| xy.map(|(x, y)| format!("w({w},{x},{y})"))).map_or(Value::Null, Value::from);
         obj([
             ("id", (sid as i64).into()),
             ("name", r.full_name().into()),
