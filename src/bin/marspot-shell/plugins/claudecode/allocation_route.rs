@@ -15,8 +15,13 @@
 //! a pass builds until then.
 //!
 //! Each full pass also places one probe newcomer of each class without
-//! keeping it (`probe`); a plain probe is noted for the ladder like a
-//! real placement when it could have gone wrong on a table not tried yet.
+//! keeping it (`probe`); a plain probe the table placed is noted for the
+//! ladder like a real placement, once per table line.
+//!
+//! While the fleet is short the table still places, on today's rule's
+//! account when protection allows it, else where the newcomer costs
+//! least, and the placement line says `short=1`; a plain newcomer
+//! protection keeps off every account says `fable_only=1`.
 
 use marspot_agent::sched::forecast::Forecast;
 use marspot_agent::sched::level2::route::{Newcomer, OTHERS_CAP, Placed, RefusedTo, Routing};
@@ -92,20 +97,22 @@ pub(super) fn line() -> Option<String> {
 /// the plan's input already, on the account it leaves, and the next
 /// input has it on the one it went to, so its use only comes out of this
 /// table.  A refused pane (`refused`) is placed by the table's rule for
-/// refusals, and may be told to wait (`wait=1`).
-fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, refused: Option<u64>, now: i64) -> (String, Pick) {
+/// refusals, and may be told to wait (`wait=1`).  When the fleet is
+/// short and no entry holds it, it goes to `today`, today's rule's
+/// account, when it may go there, else where it costs least.
+fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, refused: Option<u64>, today: Option<u8>, now: i64) -> (String, Pick) {
     ROUTE.update(|r| {
         if !r.built {
             return ("table=-".into(), Pick::None);
         }
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: life_h.unwrap_or(r.helper_life_h) };
         let placed: Option<Placed> = match (refused, from) {
-            (Some(sid), Some(f)) => match r.table.place_refused(&m, f, sid) {
+            (Some(sid), Some(f)) => match r.table.place_refused(&m, f, sid, today) {
                 RefusedTo::To(p) => Some(p),
                 RefusedTo::Nowhere => None,
                 RefusedTo::Wait => return ("table=- wait=1".into(), Pick::Wait),
             },
-            _ => r.table.place(&m, from),
+            _ => r.table.place_or(&m, from, today),
         };
         match placed {
             Some(p) => {
@@ -118,11 +125,19 @@ fn place(class: Class, rate: f64, life_h: Option<f64>, from: Option<u8>, refused
                 if r.noted.len() < NOTED_CAP {
                     r.noted.push(class == Class::Plain && !p.plain_only);
                 }
-                (format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after), Pick::To(p.to))
+                (placed_words(&p), Pick::To(p.to))
             }
-            None => ("table=-".into(), Pick::None),
+            None => (nowhere(&r.table, class), Pick::None),
         }
     })
+}
+
+fn placed_words(p: &Placed) -> String {
+    format!("table=P{} room={:.2}>{:.2}{}", p.to, 100.0 * p.before, 100.0 * p.after, if p.short { " short=1" } else { "" })
+}
+
+fn nowhere(table: &Routing, class: Class) -> String {
+    if table.kept_off_all(class) { "table=- short=1 fable_only=1".into() } else { "table=-".into() }
 }
 
 /// What the table says of a placement.
@@ -146,10 +161,9 @@ impl Pick {
 /// and its kept placements are left as they were.  Run once per full
 /// plan pass, so the ladder's count does not wait on the person starting
 /// work.  Only a plain probe can go wrong (a Fable newcomer may use any
-/// account), and it is noted only when the table has an account whose
-/// week is all Fable-usable for it to wrongly pick: under protection the
-/// order leaves such accounts out for the plain class, and the probe
-/// checks that it does.  The same table is noted once, so a quiet fleet
+/// account): it is noted whenever the table placed it, short or not, and
+/// it went wrong when it landed on an account whose week is all
+/// Fable-usable.  The same table line is noted once, so a quiet fleet
 /// does not count one decision twenty times.  The lines for
 /// `sched.route.shadow`.
 pub(super) fn probe() -> Vec<String> {
@@ -161,13 +175,13 @@ pub(super) fn probe() -> Vec<String> {
         let mut lines = Vec::new();
         for class in [Class::Plain, Class::Restricted] {
             let m = Newcomer { class, rate: RHO0, high: RHO0 * high_of(class), life_h: r.helper_life_h };
-            let counts = class == Class::Plain && r.table.fable_only_room(class) && r.probed != line;
             let p = r.table.clone().place(&m, None);
-            if counts && r.noted.len() < NOTED_CAP {
-                r.noted.push(p.is_some_and(|p| !p.plain_only));
+            let counts = class == Class::Plain && p.is_some() && r.probed != line && r.noted.len() < NOTED_CAP;
+            if let Some(p) = p.filter(|_| counts) {
+                r.noted.push(!p.plain_only);
                 r.probed.clone_from(&line);
             }
-            let placed = p.map_or("table=-".into(), |p| format!("table=P{} room={:.2}>{:.2}", p.to, 100.0 * p.before, 100.0 * p.after));
+            let placed = p.as_ref().map_or_else(|| nowhere(&r.table, class), placed_words);
             lines.push(format!("kind=probe class={} {placed} counted={}", class_word(class), u8::from(counts)));
         }
         lines
@@ -256,7 +270,7 @@ pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>,
         let m = Newcomer { class, rate, high: rate * high_of(class), life_h: r.helper_life_h };
         r.table.agent_for(&m).unwrap_or("claude")
     });
-    let (placed, picked) = place(class, rate, None, None, None, now);
+    let (placed, picked) = place(class, rate, None, None, None, to, now);
     let others: Vec<String> = others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
     let line = format!("kind=helper class={} today={} {placed} agent={agent} others={}", class_word(class), today(to), if others.is_empty() { "-".into() } else { others.join(",") });
     marspot::lx_info!("sched.route.shadow", &line);
@@ -269,7 +283,7 @@ pub(in crate::plugins) fn shadow_helper(class: Class, rate: f64, to: Option<u8>,
 pub(super) fn shadow_pane(kind: &str, sid: u64, class: Class, rate: f64, from: Option<u8>, to: Option<u8>, now: i64) -> (String, Pick) {
     let rate = if rate > 0.0 { rate } else { RHO0 };
     let refused = (kind == "refused").then_some(sid);
-    let (placed, picked) = place(class, rate, Some(H2), from, refused, now);
+    let (placed, picked) = place(class, rate, Some(H2), from, refused, to, now);
     let line = format!("kind={kind} sid={sid} class={} today={} {placed}", class_word(class), today(to));
     (line, if from.is_some() { live_pick(picked) } else { Pick::None })
 }

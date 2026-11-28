@@ -20,7 +20,7 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     let i = input(&a);
     rebuild(&i, &plan(&i, None), None, None, now);
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=-"));
-    let placed: Vec<String> = (0..6).map(|_| place(Class::Plain, RHO0, None, None, None, now).0).collect();
+    let placed: Vec<String> = (0..6).map(|_| place(Class::Plain, RHO0, None, None, None, None, now).0).collect();
     assert!(placed[0].starts_with("table=P2 ") && placed[4].starts_with("table=P4 "), "{placed:?}");
     // the next pass sees none of them yet: their use stays taken out
     rebuild(&i, &plan(&i, None), None, None, now + 2);
@@ -55,15 +55,14 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     rebuild(&i, &plan(&i, None), None, Some(vec![("codex", 0.16)]), later + 4);
     rebuild(&i, &plan(&i, None), None, None, later + 6);
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=codex=16.0"));
-    // a full pass's probes leave the table as it was; with no account
-    // whose week is all Fable-usable a plain probe cannot go wrong and
-    // is not counted, and a Fable probe never is
+    // a full pass's probes leave the table as it was; a plain probe the
+    // table placed is counted, here right, and a Fable probe never is
     take_noted();
     let probes = probe();
     assert_eq!(probes.len(), 2, "{probes:?}");
-    assert!(probes[0].starts_with("kind=probe class=plain table=P") && probes[0].ends_with(" counted=0"), "{probes:?}");
+    assert!(probes[0].starts_with("kind=probe class=plain table=P") && probes[0].ends_with(" counted=1"), "{probes:?}");
     assert_eq!(probes[1], "kind=probe class=fable table=- counted=0", "no account has Fable-usable room");
-    assert!(take_noted().is_empty());
+    assert_eq!(take_noted(), vec![false]);
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=codex=16.0"));
     // one whose only room is Fable-usable is a wrong placement, counted
     // once for the same table
@@ -84,4 +83,26 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     assert!(probe()[0].starts_with("kind=probe class=plain table=P5 "));
     assert_eq!(take_noted(), vec![false]);
     assert!(live_placed(later + 130).is_empty(), "a probe is never a live placement");
+    take_noted();
+    // short: a day-long pane at a point an hour needs 24 of P6's 5 points;
+    // the table places it anyway, marked, and keeps its use out
+    let s = [acct(6, 0.05, 100.0)];
+    let i = input(&s);
+    rebuild(&i, &plan(&i, None), None, None, later + 200);
+    assert_eq!(place(Class::Plain, 0.01, Some(H2), None, None, None, later + 200).0, "table=P6 room=5.00>-19.00 short=1");
+    assert_eq!(take_noted(), vec![false], "a short placement counts for the ladder");
+    rebuild(&i, &plan(&i, None), None, None, later + 202);
+    assert_eq!(line().as_deref(), Some("fable=- plain=P6=-19.0 others=codex=16.0"), "the kept placement stays out, shown below zero");
+    let probes = probe();
+    assert!(probes[0].starts_with("kind=probe class=plain table=P6 room=-19.00>") && probes[0].ends_with(" short=1 counted=1"), "{probes:?}");
+    assert_eq!(take_noted(), vec![false]);
+    rebuild(&i, &plan(&i, None), None, None, later + 204);
+    assert!(probe()[0].ends_with(" counted=0"), "the same table line again");
+    // protection with only a Fable-only account: the plain newcomer gets none, and the line says why
+    let f = [Account { q: Quant { id: 3, r: 0.4, f: 0.4, t: 100.0, tf: 100.0, open: true, stale: false }, spare: 0.1, price: [1.0, 1.0] }];
+    let i = Input { limits: marspot_agent::sched::level2::Limits::BALANCED, ..input(&f) };
+    rebuild(&i, &plan(&i, None), None, None, later + 206);
+    let probes = probe();
+    assert_eq!(probes[0], "kind=probe class=plain table=- short=1 fable_only=1 counted=0", "{probes:?}");
+    assert!(take_noted().is_empty());
 }

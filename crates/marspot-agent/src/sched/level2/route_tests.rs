@@ -76,7 +76,8 @@ fn sched_route_a_long_newcomer_skips_an_account_that_does_not_last_it_six_hours(
     let mut short = r.clone();
     short.rooms.retain(|x| x.id == 2);
     assert_eq!(short.clone().place(&helper(Class::Plain), None).map(|x| x.to), Some(2));
-    assert_eq!(short.place(&long(Class::Plain, 0.006), None), None);
+    let p = short.place(&long(Class::Plain, 0.006), None).expect("the only account, short");
+    assert!(p.to == 2 && p.short, "{p:?}");
 }
 
 #[test]
@@ -169,15 +170,69 @@ fn sched_route_under_protection_a_refused_unattended_pane_keeps_off_an_attended_
     i.limits = crate::sched::level2::Limits::BALANCED;
     let pl = plan(&i, None);
     let to = |r: RefusedTo| if let RefusedTo::To(x) = r { Some(x.to) } else { None };
-    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 1, 10)), Some(3), "not onto the attended pane's account");
+    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 1, 10, None)), Some(3), "not onto the attended pane's account");
     // the attended pane itself, and an unknown pane, take the best account
-    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 3, 11)), Some(2));
-    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 1, 99)), Some(2));
+    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 3, 11, None)), Some(2));
+    assert_eq!(to(Routing::of(&i, &pl).place_refused(&m, 1, 99, None)), Some(2));
     // with P3 gone, the unattended pane waits rather than take P2
     let b = [a[0].clone(), a[1].clone(), acct(3, 0.0, 0.0, 110.0)];
     let i2 = Input { accounts: &b, ..i };
-    assert_eq!(Routing::of(&i2, &plan(&i2, None)).place_refused(&m, 1, 10), RefusedTo::Wait);
+    assert_eq!(Routing::of(&i2, &plan(&i2, None)).place_refused(&m, 1, 10, None), RefusedTo::Wait);
     // steady prices Fable and keeps nothing back
     let steady = Input { limits: crate::sched::level2::Limits::STEADY, ..i2 };
-    assert_eq!(to(Routing::of(&steady, &plan(&steady, None)).place_refused(&m, 1, 10)), Some(2));
+    assert_eq!(to(Routing::of(&steady, &plan(&steady, None)).place_refused(&m, 1, 10, None)), Some(2));
+}
+
+/// Twenty-four hours of the plan's panes need more than each account
+/// holds: every room is below zero.  A newcomer still goes somewhere:
+/// to today's rule's account when it may go there, else where the most
+/// room is left after its use, and a batch spreads.
+#[test]
+fn sched_route_a_short_fleet_places_the_newcomer_where_it_costs_least() {
+    let a = [acct(1, 0.3, 0.0, 100.0), acct(2, 0.2, 0.0, 100.0), acct(3, 0.1, 0.0, 100.0)];
+    let p = [pane(10, 1, false, 0.0, 0.02), pane(11, 2, false, 0.0, 0.01), pane(12, 3, false, 0.0, 0.006)];
+    let i = input(&a, &p);
+    let mut r = Routing::of(&i, &evaluate(&i, &[Sched::STAY; 3]));
+    assert!(r.order(Class::Plain).is_empty(), "no entry has room");
+    // the most room left first
+    assert_eq!(r.line(), "fable=- plain=P2=-4.0,P3=-4.4,P1=-18.0 others=-");
+    assert_eq!(r.clone().place_or(&helper(Class::Plain), None, Some(1)).map(|x| (x.to, x.short)), Some((1, true)), "today's account");
+    let first = r.place(&helper(Class::Plain), None).expect("short, but placed");
+    assert!(first.to == 2 && first.short && first.before < 0.0 && first.after < first.before, "{first:?}");
+    // a day-long pane at a point an hour takes P2 to -28, below P3's -4.4
+    let pane = long(Class::Plain, 0.01);
+    assert_eq!(r.place(&pane, None).map(|x| (x.to, x.short)), Some((2, true)));
+    assert_eq!(r.place(&pane, None).map(|x| (x.to, x.short)), Some((3, true)), "the batch spreads");
+    // an entry that holds it still wins over the least bad
+    let b = [a[0].clone(), a[1].clone(), acct(4, 0.5, 0.0, 100.0)];
+    let i = input(&b, &p[..2]);
+    let mut r = Routing::of(&i, &evaluate(&i, &[Sched::STAY; 2]));
+    assert_eq!(r.place_or(&helper(Class::Plain), None, Some(1)).map(|x| (x.to, x.short)), Some((4, false)), "today's account only when short");
+}
+
+/// Short, under balanced with Fable short: a plain newcomer goes to the
+/// account with other-model week even where the Fable-only one would
+/// last longer, and gets nothing when only Fable-only accounts are left.
+#[test]
+fn sched_route_a_short_fleet_keeps_protection() {
+    let mut a = [acct(5, 0.5, 0.5, 100.0), acct(6, 0.1, 0.0, 100.0)];
+    // level 1 lends the plain class a little of P5's reserve
+    a[0].spare = 0.1;
+    let p = [pane(10, 5, true, 0.03, 0.0), pane(11, 6, false, 0.0, 0.05)];
+    let mut i = input(&a, &p);
+    i.limits = crate::sched::level2::Limits::BALANCED;
+    let stay = [Sched::STAY; 2];
+    let mut r = Routing::of(&i, &evaluate(&i, &stay));
+    assert_eq!(r.line(), "fable=P5=-22.0 plain=P6=-110.0 others=-");
+    assert_eq!(r.place_or(&helper(Class::Plain), None, Some(5)).map(|x| (x.to, x.short)), Some((6, true)), "not today's Fable-only account");
+    assert!(!r.kept_off_all(Class::Plain));
+    // steady prices Fable: P5's room after the helper, -22.2 points, beats P6's -110.2
+    i.limits = crate::sched::level2::Limits::STEADY;
+    assert_eq!(Routing::of(&i, &evaluate(&i, &stay)).place(&helper(Class::Plain), None).map(|x| x.to), Some(5));
+    // only the Fable-only account left
+    let i = Input { accounts: &a[..1], panes: &p[..1], limits: crate::sched::level2::Limits::BALANCED, ..i };
+    let mut r = Routing::of(&i, &evaluate(&i, &[Sched::STAY]));
+    assert_eq!(r.place(&helper(Class::Plain), None), None);
+    assert!(r.kept_off_all(Class::Plain));
+    assert_eq!(r.place(&helper(Class::Restricted), None).map(|x| (x.to, x.short)), Some((5, true)), "a Fable newcomer may go there");
 }

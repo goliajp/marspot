@@ -63,6 +63,7 @@ fn sched_gap_strict_keeps_other_models_off_what_only_fable_can_use() {
     let mut r = Routing::of(&i, &plan(&i, None));
     let m = Newcomer { class: crate::quota::Class::Plain, rate: 0.004, high: 0.006, life_h: H2 };
     assert_eq!(r.place(&m, None), None, "no other-model newcomer on what only Fable can use");
+    assert!(r.kept_off_all(m.class), "protection, not want of room, leaves it nowhere");
     i.pi = 0.0;
     assert!(guard::waits(&i).is_empty(), "Fable cannot use it all: other models may");
     i.limits = Limits::BALANCED;

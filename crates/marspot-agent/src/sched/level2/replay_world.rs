@@ -226,7 +226,7 @@ impl W<'_> {
                 }
             },
             Ev::New(sid, to, class) => {
-                let to = if planner { self.place_new(class).unwrap_or(to) } else { to };
+                let to = if planner { self.place_new(class, to).unwrap_or(to) } else { to };
                 self.add(at, sid, to, class);
             }
             Ev::Gone(sid) => {

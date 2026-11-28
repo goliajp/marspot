@@ -22,6 +22,9 @@
 //! account an attended pane is on: it waits, and the quota stays for the
 //! person (the plan's own simulation of refusals does the same).
 //!
+//! When the fleet is short the plan's panes can take every room; a
+//! newcomer no entry holds then goes where it costs least, marked short.
+//!
 //! The other agents have a line each with what their best account has
 //! left; a request that leaves the agent open goes where the most is
 //! left for its use.
@@ -54,6 +57,8 @@ struct Room {
     tf: f64,
     /// The plan's load on it at the level, weeks an hour.
     load: f64,
+    /// What each class could use before the plan: restricted, plain.
+    cap: [f64; 2],
 }
 
 impl Room {
@@ -123,7 +128,8 @@ pub struct Routing {
     unattended: Vec<u64>,
 }
 
-/// Where a placement went, and its entry's room before and after, weeks.
+/// Where a placement went, and its entry's room before and after, weeks
+/// (below zero on a short placement).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placed {
     pub to: u8,
@@ -131,6 +137,8 @@ pub struct Placed {
     pub after: f64,
     /// The account had week beyond its Fable-usable quota.
     pub plain_only: bool,
+    /// No entry held it: it went where it costs least (see `short`).
+    pub short: bool,
 }
 
 /// Where a refused pane goes.
@@ -186,6 +194,7 @@ impl Routing {
                     t: a.q.t,
                     tf: a.q.tf,
                     load: load[j],
+                    cap: [a.q.phi(), a.spare.min(a.q.r).max(0.0)],
                 }
             })
             .collect();
@@ -203,7 +212,7 @@ impl Routing {
 
     /// The accounts in the order a newcomer of `class` tries them.
     pub fn order(&self, class: Class) -> Vec<u8> {
-        let mut v: Vec<&Room> = self.rooms.iter().filter(|r| r.left(class) > EPS && !(self.protect && class == Class::Plain && !r.plain_only)).collect();
+        let mut v: Vec<&Room> = self.rooms.iter().filter(|r| r.left(class) > EPS && !self.kept_off(r, class)).collect();
         let lapses = |r: &Room| r.renews(class) < H2;
         let tier = |r: &Room| match class {
             Class::Plain => u8::from(!r.plain_only),
@@ -219,41 +228,46 @@ impl Routing {
         v.iter().map(|r| r.id).collect()
     }
 
-    /// An account with room for `class` whose week is all Fable-usable:
-    /// one a plain newcomer could wrongly be placed on.
-    pub fn fable_only_room(&self, class: Class) -> bool {
-        self.rooms.iter().any(|r| !r.plain_only && r.left(class) > EPS)
+    /// Where `m` goes, `None` only when no account has anything for it;
+    /// the room it takes is taken out of the table.  A pane that moves
+    /// names the account it leaves in `except`.
+    pub fn place(&mut self, m: &Newcomer, except: Option<u8>) -> Option<Placed> {
+        self.place_or(m, except, None)
     }
 
-    /// Where `m` goes, `None` when no entry holds it; the room it takes
-    /// is taken out of the table.  A pane that moves names the account
-    /// it leaves in `except`.
-    pub fn place(&mut self, m: &Newcomer, except: Option<u8>) -> Option<Placed> {
-        self.place_where(m, except, |_| true)
+    /// As `place`; when no entry holds `m`, `today` (today's rule's
+    /// account) is where it goes short if `m` may go there at all.
+    pub fn place_or(&mut self, m: &Newcomer, except: Option<u8>, today: Option<u8>) -> Option<Placed> {
+        self.place_where(m, except, |_| true, today)
     }
 
     /// Where refused pane `sid` leaving `from` goes: as `place`, except
     /// that under protection a pane the plan knows nobody is at skips
     /// every account an attended pane is on, and waits when that leaves
     /// nowhere.
-    pub fn place_refused(&mut self, m: &Newcomer, from: u8, sid: u64) -> RefusedTo {
+    pub fn place_refused(&mut self, m: &Newcomer, from: u8, sid: u64, today: Option<u8>) -> RefusedTo {
         if !(self.keep_attended && self.unattended.contains(&sid)) {
-            return self.place(m, Some(from)).map_or(RefusedTo::Nowhere, RefusedTo::To);
+            return self.place_or(m, Some(from), today).map_or(RefusedTo::Nowhere, RefusedTo::To);
         }
         let held: Vec<u8> = self.rooms.iter().filter(|r| r.attended).map(|r| r.id).collect();
-        self.place_where(m, Some(from), |id| !held.contains(&id)).map_or(RefusedTo::Wait, RefusedTo::To)
+        self.place_where(m, Some(from), |id| !held.contains(&id), today).map_or(RefusedTo::Wait, RefusedTo::To)
     }
 
-    fn place_where(&mut self, m: &Newcomer, except: Option<u8>, ok: impl Fn(u8) -> bool) -> Option<Placed> {
-        let to = self.order(m.class).into_iter().filter(|id| Some(*id) != except && ok(*id)).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS))?;
-        self.take(to, m)
+    fn place_where(&mut self, m: &Newcomer, except: Option<u8>, ok: impl Fn(u8) -> bool, today: Option<u8>) -> Option<Placed> {
+        let ok = |id: u8| Some(id) != except && ok(id);
+        let held = self.order(m.class).into_iter().filter(|id| ok(*id)).find(|id| self.rooms.iter().any(|r| r.id == *id && r.left(m.class) >= m.needs(r.renews(m.class), self.lasts_h) - EPS));
+        let (to, short) = match held {
+            Some(to) => (to, false),
+            None => (self.least_bad(m, ok, today)?, true),
+        };
+        self.take(to, m).map(|p| Placed { short, ..p })
     }
 
     /// `m` placed on `to` (where a placement or someone else put it):
     /// its expected use comes out of that entry.
     pub fn take(&mut self, to: u8, m: &Newcomer) -> Option<Placed> {
         let r = self.rooms.iter_mut().find(|r| r.id == to)?;
-        let before = r.left(m.class);
+        let before = r.room(m.class);
         let u = m.usage(r.renews(m.class));
         r.week -= u;
         match m.class {
@@ -261,7 +275,7 @@ impl Routing {
             Class::Plain => r.plain -= u,
         }
         r.load += m.rate;
-        Some(Placed { to, before, after: r.left(m.class), plain_only: r.plain_only })
+        Some(Placed { to, before, after: r.room(m.class), plain_only: r.plain_only, short: false })
     }
 
     /// The other agent a request that leaves it open goes to, or `None`
@@ -276,20 +290,10 @@ impl Routing {
         let need = m.needs(f64::INFINITY, self.lasts_h);
         self.others.iter().filter(|o| o.1 >= need - EPS && o.1 > own + EPS).max_by(|a, b| a.1.total_cmp(&b.1)).map(|o| o.0)
     }
-
-    /// One line, in points: each class's entries in order with their room,
-    /// then the other agents.
-    pub fn line(&self) -> String {
-        let mut s = String::new();
-        for (word, class) in [("fable", Class::Restricted), ("plain", Class::Plain)] {
-            let entries: Vec<String> = self.order(class).iter().filter_map(|id| self.rooms.iter().find(|r| r.id == *id)).map(|r| format!("P{}={:.1}", r.id, 100.0 * r.left(class))).collect();
-            s.push_str(&format!("{word}={} ", if entries.is_empty() { "-".into() } else { entries.join(",") }));
-        }
-        let others: Vec<String> = self.others.iter().map(|(a, l)| format!("{a}={:.1}", 100.0 * l)).collect();
-        s.push_str(&format!("others={}", if others.is_empty() { "-".into() } else { others.join(",") }));
-        s
-    }
 }
+
+#[path = "route_short.rs"]
+mod short;
 
 #[cfg(test)]
 #[path = "route_tests.rs"]
