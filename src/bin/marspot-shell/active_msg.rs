@@ -88,7 +88,7 @@ impl ShellApp {
                     c.send(MsgType::StripKeys, &marspot::shell_proto::encode_strip_keys(&m));
                 }
             }
-            ShellInbox::PointerShape(shape) => crate::platform::pointer_shape::set(shape),
+            ShellInbox::PointerShape(shape) => marspot::app_pointer::set_shape(shape),
             ShellInbox::CaretRect(rect, window_id) => {
                 // NOT `ctx` — the control socket is drained in
                 // `user_event`, which is an event about the process and

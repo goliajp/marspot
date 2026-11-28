@@ -2,7 +2,6 @@
 //! of them knows who uses it.
 
 pub(crate) mod exec_hooks;
-pub(crate) mod pointer_shape;
 // fact logs and state directories: their first callers are the agent
 // services that move onto them; until then only the tests use them, so
 // no writer of today runs through the off-main check

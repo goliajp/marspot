@@ -1,4 +1,4 @@
-//! Hearing that the pointer left a window.
+//! The pointer over a window: hearing that it left, and its shape.
 //!
 //! `mouseMoved:` is delivered while the pointer is over the key
 //! window and stops at its edge, so the last move the app heard is
@@ -9,8 +9,10 @@
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSTrackingArea, NSTrackingAreaOptions, NSView};
+use objc2_app_kit::{NSCursor, NSTrackingArea, NSTrackingAreaOptions, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+use crate::shell_proto::PointerShape;
 
 /// A point in no window: where the pointer is said to be once it has
 /// left one.  Physical pixels, like every other pointer position.
@@ -34,4 +36,15 @@ pub(crate) fn track(view: &NSView, mtm: MainThreadMarker) {
         )
     };
     view.addTrackingArea(&area);
+}
+
+/// Shows `shape`, as the core asks, until something else sets the
+/// pointer.  On the main thread, where AppKit's cursor lives.
+pub fn set_shape(shape: PointerShape) {
+    let cursor = match shape {
+        PointerShape::Arrow => NSCursor::arrowCursor(),
+        PointerShape::Hand => NSCursor::pointingHandCursor(),
+        PointerShape::IBeam => NSCursor::IBeamCursor(),
+    };
+    cursor.set();
 }
