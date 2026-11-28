@@ -96,30 +96,31 @@ fn sched_route_an_open_agent_goes_where_the_most_is_left() {
     let i = input(&a, &[]);
     let r = Routing::of(&i, &plan(&i, None));
     let m = helper(Class::Plain);
-    assert_eq!(r.clone().with_others(&[("codex", 0.16), ("kimi", 0.02)]).agent_for(&m), "codex");
-    assert_eq!(r.clone().with_others(&[("codex", 0.0)]).agent_for(&m), "claude");
-    assert_eq!(r.with_others(&[]).agent_for(&m), "claude");
+    assert_eq!(r.clone().with_others(&[("b", 0.16), ("c", 0.02)]).agent_for(&m), Some("b"));
+    assert_eq!(r.clone().with_others(&[("b", 0.0)]).agent_for(&m), None);
+    assert_eq!(r.with_others(&[]).agent_for(&m), None);
 }
 
 #[test]
 fn sched_route_another_agent_must_hold_the_newcomer_for_its_lifetime() {
-    // Claude has nothing left; codex has 2 points: a quarter-hour helper
-    // fits, a pane at 0.6 points an hour that lives the day does not
+    // the planned agent has nothing left; agent b has 2 points: a
+    // quarter-hour helper fits, a pane at 0.6 points an hour that lives
+    // the day does not
     let a = [acct(1, 0.0, 0.0, 100.0)];
     let i = input(&a, &[]);
-    let r = Routing::of(&i, &plan(&i, None)).with_others(&[("codex", 0.02)]);
-    assert_eq!(r.agent_for(&helper(Class::Plain)), "codex");
-    assert_eq!(r.agent_for(&long(Class::Plain, 0.006)), "claude", "two points do not hold a pane that uses 14.4 over the day");
-    let big = r.with_others(&[("codex", 0.02), ("kimi", 0.2)]);
-    assert_eq!(big.agent_for(&long(Class::Plain, 0.006)), "kimi");
+    let r = Routing::of(&i, &plan(&i, None)).with_others(&[("b", 0.02)]);
+    assert_eq!(r.agent_for(&helper(Class::Plain)), Some("b"));
+    assert_eq!(r.agent_for(&long(Class::Plain, 0.006)), None, "two points do not hold a pane that uses 14.4 over the day");
+    let big = r.with_others(&[("b", 0.02), ("c", 0.2)]);
+    assert_eq!(big.agent_for(&long(Class::Plain, 0.006)), Some("c"));
 }
 
 #[test]
 fn sched_route_line_lists_each_class_in_order_with_its_room() {
     let a = [acct(2, 0.2, 0.0, 10.0), acct(4, 0.6, 0.1, 120.0)];
     let i = input(&a, &[]);
-    let r = Routing::of(&i, &plan(&i, None)).with_others(&[("codex", 0.16)]);
-    assert_eq!(r.line(), "fable=P4=10.0 plain=P2=20.0,P4=50.0 others=codex=16.0");
+    let r = Routing::of(&i, &plan(&i, None)).with_others(&[("b", 0.16)]);
+    assert_eq!(r.line(), "fable=P4=10.0 plain=P2=20.0,P4=50.0 others=b=16.0");
 }
 
 #[test]
