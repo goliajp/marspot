@@ -58,11 +58,14 @@ cat >"$SB/home/.kimi-code/mcp.json" <<EOF
 {"mcpServers": {"marspot": {"command": "$PY", "args": ["$HERE/probe.py", "mcp", "$SB/probes/mcp.log"]}}}
 EOF
 
-export HOME="$SB/home"
-export KIMI_MODEL_NAME=mock-model KIMI_MODEL_API_KEY=e2e
-export KIMI_MODEL_BASE_URL="http://127.0.0.1:$(cat "$SB/port")/v1"
-export KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_DISABLE_TELEMETRY=1 KIMI_CODE_TRUST_WORKSPACE=1
-/usr/bin/timeout 120 python3 -I "$HERE/record.py" "$KIMI" "$HOME/.kimi-code" "$SB/proj" "$SB/probes" "$SB/raw.json" \
+# a clean environment: nothing of this shell (tokens, keys, the user's
+# paths) reaches kimi, its hooks or its MCP server, so none of it can
+# end up in the recording
+/usr/bin/timeout 120 /usr/bin/env -i PATH="$PATH" HOME="$SB/home" TERM=xterm-256color \
+  KIMI_CODE_HOME="$SB/home/.kimi-code" KIMI_MODEL_NAME=mock-model KIMI_MODEL_API_KEY=e2e \
+  KIMI_MODEL_BASE_URL="http://127.0.0.1:$(cat "$SB/port")/v1" \
+  KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_DISABLE_TELEMETRY=1 KIMI_CODE_TRUST_WORKSPACE=1 \
+  "$PY" -I "$HERE/record.py" "$KIMI" "$SB/home/.kimi-code" "$SB/proj" "$SB/probes" "$SB/raw.json" \
   || { echo "the recording did not finish"; exit 1; }
 python3 -I "$HERE/sanitize.py" "$SB/raw.json" "$SB" "$OUT" || exit 1
 echo "wrote $OUT (raw recording: $SB/raw.json)"

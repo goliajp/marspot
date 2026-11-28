@@ -145,12 +145,17 @@ class App:
         except SystemExit:
             return 0
         finally:
-            if self.session:
-                self.session.unlock()
-            self.out(sc.goodbye(getattr(self.live, "below", 0), self.session.id if self.session else None))
-            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            # the pty may be gone (EIO) when the pane closed: release what
+            # outlives this process first, the terminal last
             for s in self.servers:
                 s.close()
+            if self.session:
+                self.session.unlock()
+            try:
+                self.out(sc.goodbye(getattr(self.live, "below", 0), self.session.id if self.session else None))
+                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+            except OSError:
+                pass
 
 
 class Keys:

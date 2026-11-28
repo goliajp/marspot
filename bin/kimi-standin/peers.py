@@ -6,6 +6,7 @@ with the recorded stdin shapes."""
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import threading
@@ -140,10 +141,22 @@ def run_hooks(home, event, payload, cwd):
     for h in hooks(home):
         if h["event"] != event:
             continue
-        try:
-            r = subprocess.run(["/bin/sh", "-c", h["command"]], input=json.dumps(payload, separators=(",", ":")),
-                               capture_output=True, text=True, cwd=cwd, timeout=h.get("timeout", 60))
-            got.append((r.returncode, r.stdout, r.stderr))
-        except subprocess.TimeoutExpired:
-            got.append((None, "", ""))
+        got.append(run_hook(h, payload, cwd))
     return got
+
+
+def run_hook(h, payload, cwd):
+    # its own group: on timeout the command the shell started goes too,
+    # not only /bin/sh
+    p = subprocess.Popen(["/bin/sh", "-c", h["command"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, cwd=cwd, start_new_session=True)
+    try:
+        out, err = p.communicate(json.dumps(payload, separators=(",", ":")), timeout=h.get("timeout", 60))
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.communicate()
+        return None, "", ""

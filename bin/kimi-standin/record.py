@@ -18,6 +18,7 @@ import json
 import os
 import pty
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -106,17 +107,33 @@ def mark(name, typed):
     os.write(m, b"\r")
 
 
-pump(3, 40)
-for name, prompt in PROMPTS:
-    before = ended()
-    mark(name, prompt)
-    pump(2, 60, lambda: ended() > before)
-mark("exit", "/exit")
-pump(3, 20)
-segments.append(current)
-if p.poll() is None:
-    p.terminate()
-    p.wait(timeout=5)
+def end_group():
+    """kimi runs in its own session, so its MCP servers and hooks are
+    in its group: ended together, or they stay behind on this machine"""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+# a `timeout` above this script sends SIGTERM: leave through the finally
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(124))
+try:
+    pump(3, 40)
+    for name, prompt in PROMPTS:
+        before = ended()
+        mark(name, prompt)
+        pump(2, 60, lambda: ended() > before)
+    mark("exit", "/exit")
+    pump(3, 20)
+    segments.append(current)
+finally:
+    end_group()
 
 
 def read(path):

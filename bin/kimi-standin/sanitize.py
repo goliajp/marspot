@@ -7,7 +7,8 @@ workspace directory, the model stand-in's port, the host name and the
 pid in the lock, and the time zone in the date reminder.  Records over 2 KB (the tool lists kimi snapshots)
 are left out, and the system prompt of `profile.bind` is cut to `…`.
 Refuses when a path of the recording machine, the user's name or the
-host name is left.
+host name is left, or the value of a secret-looking variable of this
+environment (a name with KEY, TOKEN or SECRET, longer than 8 chars).
 
 Usage: sanitize.py <raw.json> <scratch-dir> <out.json>
 """
@@ -65,5 +66,10 @@ for leak in ("/Users/", "/private/", "/var/folders/", "/tmp/", os.path.basename(
     if m:
         at = m.start()
         sys.exit("the recording still holds %r: ...%s..." % (leak, out[max(0, at - 60):at + 60]))
+# the recording ran in a clean environment; this shell's secrets must
+# still not be in it
+for name, value in os.environ.items():
+    if re.search(r"KEY|TOKEN|SECRET", name) and len(value) > 8 and value in out:
+        sys.exit("the recording holds the value of $%s" % name)
 with open(OUT, "w") as f:
     f.write(out + "\n")
