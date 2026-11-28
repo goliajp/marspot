@@ -10,7 +10,8 @@
 //! rollouts adds the earliest reading there that shows a balance, once,
 //! and only from a scan that settled the account: a scan stopped by its
 //! deadline may not have read the earliest days yet.  Where a settled
-//! scan found nothing, `credit_scan_progress` keeps the day it reached.
+//! scan found nothing, `credit_scan_progress` keeps the day it reached,
+//! by profile and never with the account id.
 //! Two logins with one account id (workspaces of one team) cannot be
 //! told apart in the rollouts, and neither is scanned.
 //!
@@ -197,7 +198,7 @@ impl LotLog {
                 log.push(("codex.wallet.lot_scan", format!("ambiguous P{profile} shares its account id with {twins:?}; not scanned")));
                 continue;
             }
-            let from = self.progress.from(account).unwrap_or(i64::MIN);
+            let from = self.progress.from(profile, account).unwrap_or(i64::MIN);
             wants.push((home(&self.homes, profile).join("sessions"), Want { profile, account: account.clone(), from }));
         }
         if wants.is_empty() {
@@ -226,7 +227,7 @@ impl LotLog {
                     self.write(LotLine { first_seen: at, profile: w.profile, amount: balance, seen_by: ROLLOUT.into(), recorded_at: now }, log);
                 }
                 Some(_) => {}
-                None => moved |= opened.is_some_and(|day| self.progress.advance(&w.account, day)),
+                None => moved |= opened.is_some_and(|day| self.progress.advance(w.profile, &w.account, day)),
             }
         }
         if moved && let Err(e) = self.progress.save() {

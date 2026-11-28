@@ -109,7 +109,10 @@ fn a_finished_scan_that_found_nothing_is_not_read_again_from_the_start() {
     lots.scan([1], 10, &mut log);
     wait(&lots);
     lots.scan([1], 20, &mut log);
-    assert_eq!(fs::read_to_string(t.join("credit_scan.tsv")).unwrap(), "acct-test-1\t20261001\t1\n");
+    let digest = marspot_peer::control::sha256::hex_prefix(b"acct-test-1", 16);
+    let progress = fs::read_to_string(t.join("credit_scan.tsv")).unwrap();
+    assert_eq!(progress, format!("P\t1\t{digest}\t20261001\t1\n"));
+    assert!(!progress.contains("acct-test-1"), "the id is never written");
     assert!(log.iter().any(|(_, l)| l.contains("complete=true files=1 ") && l.contains("background=true")), "{log:?}");
     // a restart reads that day again and the newer ones, not the older
     let old = homes.join(".codex-profile-1/sessions/2026/09/20");
