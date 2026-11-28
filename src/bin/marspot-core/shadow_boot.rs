@@ -2,29 +2,15 @@
 //! (`shadow_of != 0`), and a core starting up puts the live ones back
 //! into `shadows` instead of into the first window.
 //!
-//! A session that a saved window layout also names is that window's:
-//! the window wins, and the core tells the session it is a shadow no
-//! longer.
+//! A session that a saved window layout also names is shown in that
+//! window and stays the child of its parent.
 
-use super::shadow_place::{L2_REQ_UNTRACKED, session_shadow_frame};
 use super::*;
 use std::collections::HashSet;
 
 /// Session ids of registry entries that say they are shadow panes.
 pub(super) fn shadow_ids(entries: &[marspot_term::session_registry::SessionEntry]) -> HashSet<u64> {
     entries.iter().filter(|e| e.shadow_of != 0).map(|e| e.id).collect()
-}
-
-/// A session reattached into a window while its entry calls it a
-/// shadow: it is told it is one no longer.  Its answer goes nowhere.
-pub(super) fn unshadow_in_window(pane: &Pane, sid: u64) {
-    if pane.session().send_pane_control(session_shadow_frame(L2_REQ_UNTRACKED, 0)) {
-        lx_event!(
-            "SHADOW_WINDOW_WINS",
-            "a saved window holds a session that said it was a shadow; told it is not",
-            session = sid
-        );
-    }
 }
 
 /// Reattach every live shadow session not in `taken` (the panes the

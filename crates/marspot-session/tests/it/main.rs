@@ -21,6 +21,7 @@ mod pane_link;
 mod paste_markers;
 mod prompt_jump;
 mod self_execv;
+mod shadow_levels;
 mod shadow_session;
 mod signals_in_the_pane;
 mod stray_pointer;

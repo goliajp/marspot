@@ -14,14 +14,14 @@ use crate::pane_link::{Link, Reply, bin, screen_shows, wait};
 use crate::self_execv::{Sandbox, count_in_log, stage};
 use crate::support::{COLS, ROWS, Session};
 
-fn sid(n: u64) -> u64 {
+pub(crate) fn sid(n: u64) -> u64 {
     crate::support::id_base() + 4300 + n
 }
 
 /// Session `sid(n)` running `body` (a `/bin/sh` script that prints
 /// READY), the shadow of `shadow.0` with timeout `shadow.1` if given,
 /// with its registry entry written.
-fn pane(sandbox: &mut Sandbox, n: u64, body: &str, shadow: Option<(u64, u32)>) -> (Session, SessionRegions) {
+pub(crate) fn pane(sandbox: &mut Sandbox, n: u64, body: &str, shadow: Option<(u64, u32)>) -> (Session, SessionRegions) {
     use std::os::unix::fs::PermissionsExt;
     let script = sandbox.path().join(format!("pane{n}.sh"));
     std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -46,23 +46,23 @@ fn pane(sandbox: &mut Sandbox, n: u64, body: &str, shadow: Option<(u64, u32)>) -
     (s, regions)
 }
 
-fn parent(sandbox: &mut Sandbox, n: u64) -> (Session, SessionRegions) {
+pub(crate) fn parent(sandbox: &mut Sandbox, n: u64) -> (Session, SessionRegions) {
     pane(sandbox, n, "printf READY; exec sleep 600", None)
 }
 
-fn shadow_of(n: u64) -> u64 {
+pub(crate) fn shadow_of(n: u64) -> u64 {
     read_session_entry(sid(n)).expect("the entry").shadow_of
 }
 
 /// Kill without collecting, as a parent whose own parent has not
 /// collected it yet: the shadow must not take the zombie for alive.
-fn kill(s: &Session) {
+pub(crate) fn kill(s: &Session) {
     // SAFETY: a process this test started
     unsafe { libc::kill(s.pid() as i32, libc::SIGKILL) };
 }
 
 /// How long `s` took to exit, if it did within `secs`.
-fn exits_within(s: &mut Session, secs: f64) -> Option<Duration> {
+pub(crate) fn exits_within(s: &mut Session, secs: f64) -> Option<Duration> {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs_f64(secs) {
         if s.child.try_wait().unwrap().is_some() {
@@ -73,15 +73,19 @@ fn exits_within(s: &mut Session, secs: f64) -> Option<Duration> {
     None
 }
 
-fn assert_gone(n: u64, regions: &SessionRegions) {
+pub(crate) fn assert_gone(n: u64, regions: &SessionRegions) {
     assert!(!session_dir(sid(n)).exists(), "session {n}'s directory is gone");
     assert!(open_region(regions.grid_name()).is_err(), "session {n}'s grid region name is gone");
     assert!(ClusterTableReader::open(regions).is_err(), "session {n}'s cluster region name is gone");
 }
 
 fn set_shadow(s: &Session, req_id: u32, parent_sid: u64) -> (DoneCode, String) {
+    set_shadow_idle(s, req_id, parent_sid, marspot_term::shell_proto::SHADOW_IDLE_DEFAULT_S)
+}
+
+pub(crate) fn set_shadow_idle(s: &Session, req_id: u32, parent_sid: u64, idle_s: u32) -> (DoneCode, String) {
     let mut link = Link::new(s);
-    s.send_frame(MsgType::SessionShadow, encode_session_shadow(&SessionShadow { req_id, parent_sid, idle_s: 0 }));
+    s.send_frame(MsgType::SessionShadow, encode_session_shadow(&SessionShadow { req_id, parent_sid, idle_s }));
     link.take(5.0, &format!("PaneDone {req_id}"), |r| match r {
         Reply::Done(d) if d.req_id == req_id => Some((d.code, d.text.clone())),
         _ => None,
@@ -89,7 +93,7 @@ fn set_shadow(s: &Session, req_id: u32, parent_sid: u64) -> (DoneCode, String) {
 }
 
 /// Ask for an image swap and reattach to the image that took over.
-fn swap(s: &Session, state: &Path, n: u64) -> Link {
+pub(crate) fn swap(s: &Session, state: &Path, n: u64) -> Link {
     stage(state, true);
     let before = count_in_log(state, "L3_EXECV_RESUMED");
     s.send_frame(MsgType::SessionUpdate, Vec::new());
@@ -131,17 +135,20 @@ fn shadow_session_whose_parent_is_not_there_ends_at_once() {
     assert!(count_in_log(sandbox.path(), "L3_SHADOW_ENDED") >= 1);
 }
 
+/// A session started under a child pane goes under that child's parent:
+/// panes nest two levels at most.
 #[test]
-fn shadow_session_nested_two_levels_ends_layer_by_layer() {
+fn shadow_session_started_under_a_child_goes_under_its_parent() {
     let mut sandbox = Sandbox::new();
     let (mut a, ra) = parent(&mut sandbox, 1);
     let (mut b, rb) = pane(&mut sandbox, 2, "printf READY; exec sleep 600", Some((sid(1), 0)));
     let (mut c, rc) = pane(&mut sandbox, 3, "printf READY; exec sleep 600", Some((sid(2), 0)));
-    assert_eq!(shadow_of(3), sid(2), "each names its direct parent");
-    assert!(exits_within(&mut c, 0.5).is_none(), "the inner shadow lives while its parent does");
+    assert_eq!(shadow_of(3), sid(1), "under the pane at the top, not the child it named");
+    assert!(count_in_log(sandbox.path(), "L3_SHADOW_FLATTENED") >= 1, "said in the log");
+    assert!(exits_within(&mut c, 0.5).is_none(), "it lives while its parent does");
     kill(&a);
-    exits_within(&mut b, 2.0).expect("the first level ends with the top");
-    exits_within(&mut c, 2.0).expect("the second level ends with the first");
+    exits_within(&mut b, 2.0).expect("one child ends with the top");
+    exits_within(&mut c, 2.0).expect("the other too");
     assert_gone(2, &rb);
     assert_gone(3, &rc);
     let _ = a.child.wait();

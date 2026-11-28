@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.875"  # a handoff whose first frame comes late fails before its ledger is committed
-core    = "0.12.762"  # a menu puts a divider only between two groups that both have rows
-session = "0.11.489"  # quiescing for an execv moves to a file of its own
+shell   = "0.7.876"  # the wire carries a change of parent and the idle timeout constants
+core    = "0.12.763"  # a pane shown in a window keeps its parent, and changes it where it is shown
+session = "0.11.490"  # a child the user made has no idle timeout, and panes nest two levels at most

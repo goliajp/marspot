@@ -66,7 +66,7 @@ pub use helper_strip::*;
 wire_enum!(WatchKind { Cancel = 0, Text = 1, Quiet = 2, Prompt = 3, Exit = 4, Change = 5, CommandEnd = 6 });
 wire_enum!(WatchReason { Met = 1, SessionEnded = 2, Restarting = 3 });
 wire_enum!(RetireMode { Delete = 0, Recycle = 1 });
-wire_enum!(PlaceWhere { Shadow = 0, Window = 1, Peek = 2, Unpeek = 3 });
+wire_enum!(PlaceWhere { Shadow = 0, Window = 1, Peek = 2, Unpeek = 3, Parent = 4 });
 wire_enum!(TypedResult { Written = 0, PtyQueueFull = 1, QueueFull = 2, NotReading = 3, NotAtShell = 4 });
 wire_enum!(DoneCode { Ok = 0, NotAttached = 1, NoSuchSession = 2, WatchTableFull = 3, OldSession = 4, Other = 5 });
 wire_enum!(PanelAct { CloseHelper = 1, CloseAllOfParent = 2, ToggleCwdControl = 3 });
@@ -159,8 +159,9 @@ pub fn decode_pane_spawned(p: &[u8]) -> io::Result<PaneSpawned> {
     Ok(PaneSpawned { req_id, ok, sid, err, window_id })
 }
 
-/// L1 → L2: move a pane between a window and the shadows, or show it
-/// inside `host_sid`'s pane; answered by `PaneDone`.
+/// L1 → L2: move a pane between a window and the shadows, show it
+/// inside `host_sid`'s pane, or (`Parent`) make it the child of
+/// `host_sid` (0: of none) where it is; answered by `PaneDone`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PanePlace {
     pub req_id: u32,
@@ -196,8 +197,14 @@ pub fn decode_pane_place(p: &[u8]) -> io::Result<PanePlace> {
     })
 }
 
-/// L2 → L3: the session's shadow parent (0: no longer a shadow);
-/// answered by `PaneDone`.
+/// A child pane's idle timeout that is none: one the user made a child.
+pub const SHADOW_IDLE_NEVER: u32 = 0;
+/// The idle timeout of a shadow pane an agent opened or moved there.
+pub const SHADOW_IDLE_DEFAULT_S: u32 = 6 * 3600;
+
+/// L2 → L3: the session's shadow parent (0: no longer a shadow) and how
+/// long it may sit idle (`SHADOW_IDLE_NEVER`: no limit); answered by
+/// `PaneDone`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionShadow {
     pub req_id: u32,

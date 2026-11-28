@@ -268,6 +268,7 @@ fn pane_control_each_frame_round_trips() {
         PlaceWhere::Window,
         PlaceWhere::Peek,
         PlaceWhere::Unpeek,
+        PlaceWhere::Parent,
     ] {
         let m = PanePlace {
             req_id: 1,

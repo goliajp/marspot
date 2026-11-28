@@ -11,18 +11,18 @@ fn place(req_id: u32, sid: u64, to: PlaceWhere, host_sid: u64) -> Frame {
     frame(MsgType::PanePlace, encode_pane_place(&PanePlace { req_id, sid, to, host_sid, force: false }))
 }
 
+/// Shown in a window, a child pane is still its parent's child.
 #[test]
 fn shadow_place_moves_after_the_answer_and_without_one_puts_the_pane_back() {
     let sb = sandbox();
     let (mut app, rx, psid) = app_with_parent(&sb);
     let sid = open_shadow(&mut app, &rx, 7, psid);
 
-    assert_eq!(app.route_pane_control(place(20, sid, PlaceWhere::Window, psid)), Route::Forwarded);
-    assert!(app.shadow_index(sid).is_some(), "nothing moves before the session answers");
-    assert_eq!(wait_done(&mut app, &rx, 20).code, DoneCode::Ok);
+    assert_eq!(app.route_pane_control(place(20, sid, PlaceWhere::Window, psid)), Route::Answered(DoneCode::Ok));
+    assert_eq!(done_for(&app, 20).expect("answered at once").code, DoneCode::Ok);
     assert_eq!(app.find_window_pane_by_sid(sid), Some((0, 1)), "into the parent's window");
     assert!(app.shadows.is_empty() && !unwatched::is(sid));
-    assert_eq!(reg::read_session_entry(sid).unwrap().shadow_of, 0);
+    assert_eq!(reg::read_session_entry(sid).unwrap().shadow_of, psid, "still the parent's child");
 
     assert_eq!(app.route_pane_control(place(21, sid, PlaceWhere::Shadow, psid)), Route::Forwarded);
     assert_eq!(wait_done(&mut app, &rx, 21).code, DoneCode::Ok);
@@ -33,12 +33,11 @@ fn shadow_place_moves_after_the_answer_and_without_one_puts_the_pane_back() {
     // a session that cannot answer
     let pid = reg::read_session_entry(sid).unwrap().pid;
     assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
-    assert_eq!(app.route_pane_control(place(22, sid, PlaceWhere::Window, psid)), Route::Forwarded);
+    assert_eq!(app.route_pane_control(place(22, sid, PlaceWhere::Parent, 0)), Route::Forwarded);
     app.expire_places(Instant::now() + Duration::from_secs(4));
     let d = done_for(&app, 22).expect("answered at the deadline");
     assert_eq!((d.code, d.text.as_str()), (DoneCode::Other, UNANSWERED));
     assert_eq!(app.shadow_index(sid), Some(0), "the pane stayed in the shadows");
-    assert_eq!(app.windows[0].panes.len(), 2, "the window holds the parent and the placeholder only");
 
     // its late answer is undone
     assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
@@ -92,10 +91,35 @@ fn shadow_place_under_an_unknown_parent_is_refused() {
     let sb = sandbox();
     let (mut app, rx, psid) = app_with_parent(&sb);
     let sid = open_shadow(&mut app, &rx, 7, psid);
-    assert_eq!(app.route_pane_control(place(40, sid, PlaceWhere::Window, psid)), Route::Forwarded);
-    assert_eq!(wait_done(&mut app, &rx, 40).code, DoneCode::Ok);
+    assert_eq!(app.route_pane_control(place(40, sid, PlaceWhere::Window, psid)), Route::Answered(DoneCode::Ok));
     app.route_pane_control(place(41, sid, PlaceWhere::Shadow, 0x7777_0001));
     let d = done_for(&app, 41).expect("answered at once");
     assert_eq!((d.code, d.text.as_str()), (DoneCode::Other, "no such parent pane"));
     assert!(app.find_window_pane_by_sid(sid).is_some());
+}
+
+/// `Parent` changes whose child a pane is and nothing else: a hidden
+/// pane stays hidden, a shown one stays shown.
+#[test]
+fn shadow_place_parent_changes_the_parent_where_the_pane_is() {
+    let sb = sandbox();
+    let (mut app, rx, psid) = app_with_parent(&sb);
+    let sid = open_shadow(&mut app, &rx, 7, psid);
+
+    assert_eq!(app.route_pane_control(place(50, sid, PlaceWhere::Parent, 0)), Route::Forwarded);
+    assert_eq!(wait_done(&mut app, &rx, 50).code, DoneCode::Ok);
+    assert_eq!(reg::read_session_entry(sid).unwrap().shadow_of, 0, "a top pane now");
+    assert_eq!(app.shadow_index(sid), Some(0), "and still hidden");
+
+    assert_eq!(app.route_pane_control(place(51, sid, PlaceWhere::Window, 0)), Route::Answered(DoneCode::Ok));
+    assert_eq!(app.route_pane_control(place(52, sid, PlaceWhere::Parent, psid)), Route::Forwarded);
+    assert_eq!(wait_done(&mut app, &rx, 52).code, DoneCode::Ok);
+    assert_eq!(reg::read_session_entry(sid).unwrap().shadow_of, psid, "a child again");
+    assert!(app.find_window_pane_by_sid(sid).is_some(), "still shown");
+
+    app.route_pane_control(place(53, sid, PlaceWhere::Parent, sid));
+    let d = done_for(&app, 53).expect("answered at once");
+    assert_eq!((d.code, d.text.as_str()), (DoneCode::Other, "a pane cannot be its own parent"));
+    app.route_pane_control(place(54, sid, PlaceWhere::Parent, 0x7777_0001));
+    assert_eq!(done_for(&app, 54).expect("answered at once").text, "no such parent pane");
 }

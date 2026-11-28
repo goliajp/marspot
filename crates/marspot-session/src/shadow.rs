@@ -13,21 +13,31 @@
 //! parent's process exits, whose pid is one more thing the session's
 //! file watcher waits on, and when it has neither printed nor been typed
 //! into for its idle timeout, a deadline the main loop sleeps toward.
+//! A child the user made has no idle timeout (`SHADOW_IDLE_NEVER`).
+//!
+//! Panes nest two levels at most: a parent is never itself a child, and
+//! a pane with children never becomes one.  L1 holds every change to
+//! that; a session refuses one that breaks it all the same, and one that
+//! starts under a child (an image from before the rule, or a spawn that
+//! raced a move) is put under that child's parent instead.
 //! Either way it ends as when its shell exits: the shell is hung up, its
 //! regions and its directory go.
 
 use std::time::{Duration, Instant};
 
 use marspot_term::fs_watch::Watcher;
-use marspot_term::shell_proto::{DoneCode, Frame, MsgType, PaneDone, SessionShadow, encode_pane_done};
+use marspot_term::shell_proto::{
+    DoneCode, Frame, MsgType, PaneDone, SHADOW_IDLE_DEFAULT_S, SHADOW_IDLE_NEVER, SessionShadow, encode_pane_done,
+};
 use marspot_term::{lx_event, lx_warn, platform, session_registry};
 
 use crate::control_writer::ControlWriter;
 
 pub(crate) const ENV_SHADOW_OF: &str = "MARSPOT_SHADOW_OF";
 pub(crate) const ENV_SHADOW_IDLE_S: &str = "MARSPOT_SHADOW_IDLE_S";
-/// Six hours: the timeout of a shadow whose starter named none.
-const DEFAULT_IDLE_S: u32 = 6 * 3600;
+/// How many parents up a chain is followed: the registry is written by
+/// the sessions, so a broken one can loop.
+const WALK_MAX: usize = 16;
 
 /// Whose shadow this session is (`parent` 0: nobody's) and how long it
 /// may sit idle.
@@ -38,21 +48,23 @@ pub(crate) struct ShadowCfg {
 }
 
 impl ShadowCfg {
-    /// A timeout of 0 is the default one; a pane that is no shadow has none.
+    /// A timeout of `SHADOW_IDLE_NEVER` is none; a pane that is no
+    /// shadow has none either.
     pub(crate) fn new(parent: u64, idle_s: u32) -> Self {
-        match (parent, idle_s) {
-            (0, _) => Self::default(),
-            (parent, 0) => Self { parent, idle_s: DEFAULT_IDLE_S },
-            (parent, idle_s) => Self { parent, idle_s },
+        match parent {
+            0 => Self::default(),
+            parent => Self { parent, idle_s },
         }
     }
 }
 
 /// What the core asked for in the environment, which leaves it here:
-/// neither the shell nor a later image may see it.
+/// neither the shell nor a later image may see it.  A parent named with
+/// no timeout gets the default one.
 pub(crate) fn take_env() -> ShadowCfg {
-    let read = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
-    let cfg = ShadowCfg::new(read(ENV_SHADOW_OF), u32::try_from(read(ENV_SHADOW_IDLE_S)).unwrap_or(u32::MAX));
+    let read = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok());
+    let idle = read(ENV_SHADOW_IDLE_S).map_or(SHADOW_IDLE_DEFAULT_S, |v| u32::try_from(v).unwrap_or(u32::MAX));
+    let cfg = ShadowCfg::new(read(ENV_SHADOW_OF).unwrap_or(0), idle);
     // SAFETY: first thing in main, before any other thread or the shell starts
     unsafe {
         std::env::remove_var(ENV_SHADOW_OF);
@@ -112,7 +124,11 @@ impl Shadow {
 
     /// When the idle timeout runs out, for the main loop's sleep.
     pub(crate) fn due_in(&self) -> Option<Duration> {
-        (self.cfg.parent != 0).then(|| (self.active_at + self.idle()).saturating_duration_since(Instant::now()))
+        self.times_out().then(|| (self.active_at + self.idle()).saturating_duration_since(Instant::now()))
+    }
+
+    fn times_out(&self) -> bool {
+        self.cfg.parent != 0 && self.cfg.idle_s != SHADOW_IDLE_NEVER
     }
 
     fn idle(&self) -> Duration {
@@ -144,7 +160,7 @@ impl Shadow {
         }
         if self.parent_gone {
             Some("the parent session is gone")
-        } else if self.active_at.elapsed() >= self.idle() {
+        } else if self.times_out() && self.active_at.elapsed() >= self.idle() {
             Some("idle for the shadow timeout")
         } else {
             None
@@ -157,6 +173,9 @@ impl Shadow {
         let cfg = ShadowCfg::new(m.parent_sid, m.idle_s);
         let answer = if cfg.parent == self.sid || (cfg.parent != 0 && confirm(cfg.parent).is_none()) {
             (DoneCode::NoSuchSession, "no such session".to_string())
+        } else if let Some(why) = (cfg.parent != 0).then(|| third_level(self.sid, cfg.parent)).flatten() {
+            lx_warn!("l3.shadow.third_level_refused", why, session_id = self.sid, parent = cfg.parent);
+            (DoneCode::Other, why.to_string())
         } else {
             match write_entry(self.sid, cfg.parent) {
                 Ok(()) => {
@@ -178,6 +197,42 @@ impl Shadow {
             let _ = w.send(Frame::new(MsgType::PaneDone, p));
         }
     }
+}
+
+/// Why making `sid` a child of `parent` would nest panes three levels
+/// deep, if it would.
+fn third_level(sid: u64, parent: u64) -> Option<&'static str> {
+    if session_registry::read_session_entry(parent).is_ok_and(|e| e.shadow_of != 0) {
+        return Some(THIRD_LEVEL_PARENT);
+    }
+    session_registry::list_session_entries()
+        .iter()
+        .any(|e| e.shadow_of == sid && e.id != sid && session_registry::entry_is_live(e))
+        .then_some(THIRD_LEVEL_CHILDREN)
+}
+
+pub(crate) const THIRD_LEVEL_PARENT: &str = "the parent is itself a child pane";
+pub(crate) const THIRD_LEVEL_CHILDREN: &str = "a pane with child panes cannot become a child pane";
+
+/// `cfg` with its parent moved up to the top of the parent's chain
+/// when the parent is itself a child, said in the log.  The registry
+/// entry is not written here: this runs before the session writes it.
+pub(crate) fn flattened(sid: u64, cfg: ShadowCfg) -> ShadowCfg {
+    let parent_of = |s: u64| session_registry::read_session_entry(s).map_or(0, |e| e.shadow_of);
+    let mut top = cfg.parent;
+    for _ in 0..WALK_MAX {
+        match parent_of(top) {
+            0 => break,
+            p if p == sid => break,
+            p => top = p,
+        }
+    }
+    if top == cfg.parent {
+        return cfg;
+    }
+    lx_event!("L3_SHADOW_FLATTENED", "the parent was itself a child pane; now under the pane at the top",
+        session_id = sid, was = cfg.parent, parent = top);
+    ShadowCfg { parent: top, ..cfg }
 }
 
 fn write_entry(sid: u64, parent: u64) -> std::io::Result<()> {
@@ -214,13 +269,16 @@ mod tests {
         let mut env = EnvGuard::new();
         env.set(ENV_SHADOW_OF, "42");
         env.remove(ENV_SHADOW_IDLE_S);
-        assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: DEFAULT_IDLE_S });
+        assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: SHADOW_IDLE_DEFAULT_S });
         assert!(std::env::var_os(ENV_SHADOW_OF).is_none());
         assert_eq!(take_env(), ShadowCfg::default(), "gone after the first read");
         env.set(ENV_SHADOW_OF, "42");
         env.set(ENV_SHADOW_IDLE_S, "2");
         assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: 2 });
         assert!(std::env::var_os(ENV_SHADOW_IDLE_S).is_none());
+        env.set(ENV_SHADOW_OF, "42");
+        env.set(ENV_SHADOW_IDLE_S, "0");
+        assert_eq!(take_env(), ShadowCfg { parent: 42, idle_s: SHADOW_IDLE_NEVER }, "no timeout");
         env.set(ENV_SHADOW_OF, "0");
         env.set(ENV_SHADOW_IDLE_S, "2");
         assert_eq!(take_env(), ShadowCfg::default());

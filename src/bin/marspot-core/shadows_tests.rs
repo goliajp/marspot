@@ -181,12 +181,9 @@ fn shadow_sessions_go_back_to_the_shadows_at_boot_and_a_saved_window_wins() {
 
     let mut app = app_in(sb.dir(), vec![win(1, panes)]);
     app.shadows = shadows;
-    wait_for("the session in the window is a shadow no longer", || {
-        drive(&mut app, &rx);
-        reg::read_session_entry(bsid).is_ok_and(|e| e.shadow_of == 0)
-    });
     std::thread::sleep(Duration::from_millis(200));
     drive(&mut app, &rx);
+    assert_eq!(reg::read_session_entry(bsid).unwrap().shadow_of, psid, "shown in the window, still the parent's child");
     assert!(
         app.pane_control.reports.frames().all(|f| f.msg_type != MsgType::PaneDone),
         "the session's answer to the core's own request did not go on to L1"
