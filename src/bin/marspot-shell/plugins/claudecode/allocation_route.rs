@@ -192,7 +192,7 @@ pub(super) fn probe() -> Vec<String> {
                 r.probed.clone_from(&order);
             }
             let placed = p.as_ref().map_or_else(|| "table=-".into(), placed_words);
-            lines.push(format!("kind=probe class={} {placed} counted={}", class_word(class), u8::from(counts)));
+            lines.push(format!("kind=probe class={} {placed} fable_only_room={} counted={}", class_word(class), u8::from(r.table.fable_only_room()), u8::from(counts)));
         }
         lines
     })

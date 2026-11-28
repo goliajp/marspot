@@ -62,7 +62,7 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     let probes = probe();
     assert_eq!(probes.len(), 2, "{probes:?}");
     assert!(probes[0].starts_with("kind=probe class=plain table=P") && probes[0].ends_with(" counted=0"), "{probes:?}");
-    assert_eq!(probes[1], "kind=probe class=fable table=- counted=0", "no account has Fable-usable room");
+    assert_eq!(probes[1], "kind=probe class=fable table=- fable_only_room=0 counted=0", "no account has Fable-usable room");
     assert!(take_noted().is_empty());
     assert_eq!(line().as_deref(), Some("fable=- plain=P2=0.5,P4=60.0 others=codex=16.0"));
     // one whose only room is Fable-usable is a wrong placement, counted
@@ -95,7 +95,7 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     rebuild(&i, &plan(&i, None), None, None, later + 202);
     assert_eq!(line().as_deref(), Some("fable=- plain=P6=-19.0 others=codex=16.0"), "the kept placement stays out, shown below zero");
     let probes = probe();
-    assert!(probes[0].starts_with("kind=probe class=plain table=P6 room=-19.00>") && probes[0].ends_with(" short=1 counted=0"), "{probes:?}");
+    assert!(probes[0].starts_with("kind=probe class=plain table=P6 room=-19.00>") && probes[0].ends_with(" short=1 fable_only_room=0 counted=0"), "{probes:?}");
     assert!(take_noted().is_empty(), "no Fable-only account to pick wrongly");
     // live, short on two accounts: a refused pane short on today's account
     // is today's pick, not the table's; with no pick from today's rule it
@@ -119,6 +119,6 @@ fn sched_route_shadow_places_a_batch_across_passes_and_logs_the_table() {
     let i = Input { limits: marspot_agent::sched::level2::Limits::BALANCED, ..input(&f) };
     rebuild(&i, &plan(&i, None), None, None, later + 306);
     let probes = probe();
-    assert!(probes[0].starts_with("kind=probe class=plain table=P3 room=10.00>") && probes[0].ends_with(" short=1 fable_only=1 counted=1"), "{probes:?}");
+    assert!(probes[0].starts_with("kind=probe class=plain table=P3 room=10.00>") && probes[0].ends_with(" short=1 fable_only=1 fable_only_room=1 counted=1"), "{probes:?}");
     assert_eq!(take_noted(), vec![false]);
 }

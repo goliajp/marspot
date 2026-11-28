@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.948"  # short placements: refused panes only to today's pick, fable_only placements, probes keyed on account order
+shell   = "0.7.949"  # a probe line says whether the table had an account a plain probe could wrongly pick
 core    = "0.12.816"  # the switching row's snapshot test imports in order
 session = "0.11.500"  # marspot-term: PointerShape frame; the caret frame moves to a file of its own (not used by session)
