@@ -93,3 +93,26 @@ fn panes_mut_reaches_a_shadow_pane() {
     );
     assert_eq!(app.windows[0].panes.len(), 1, "the drawn pane is untouched");
 }
+
+/// What drawing asks about a pane's code reads memory only: a pane whose
+/// code was never looked up is drawn without one and the code file is
+/// not touched; once its directory is looked up, the code is there.
+#[test]
+fn panes_mut_drawing_a_pane_of_unknown_code_touches_no_file() {
+    let sb = crate::shadows::tests::sandbox();
+    let (tx, _rx) = marspot_term::mailbox::channel();
+    let sid = reg::allocate_next_session_id().unwrap();
+    let pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx).expect("real L3 spawn (is marspot-session built?)");
+    let mut app = app_in(sb.dir(), vec![win(1, vec![pane])]);
+    let codes = marspot_term::paths::state_root().join("pane-codes");
+    assert!(codes.starts_with(sb.dir()));
+    for _ in 0..3 {
+        assert_eq!(app.pane_code(0, 0), None);
+        assert!(app.pane_names().get(&sid).is_some_and(|n| !n.contains('#')));
+    }
+    assert!(!codes.exists() && !codes.with_extension("lock").exists(), "drawing touched the code file");
+    app.resolve_pane_cwd(sid);
+    let code = app.pane_code(0, 0).expect("known once its directory was looked up");
+    assert!(codes.exists());
+    assert_eq!(marspot_term::pane_code::code_for(sid).unwrap(), code);
+}

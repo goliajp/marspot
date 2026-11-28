@@ -28,6 +28,6 @@
 # NOT keep appending to this line — it grew to ~25 KB once and ate
 # `git diff` readability.
 
-shell   = "0.7.878"  # an agent's pane gets the shared default idle timeout constant
-core    = "0.12.767"  # the +N counts a child shown in a window as the strip lists it
+shell   = "0.7.879"  # the code table answers what it knows without touching the file
+core    = "0.12.768"  # drawing reads pane codes from memory; they are learnt off the draw
 session = "0.11.491"  # an idle timeout of 0 is the default again; no timeout is u32::MAX

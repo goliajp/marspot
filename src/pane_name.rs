@@ -34,6 +34,11 @@ impl PaneRef {
         Self { sid, cwd: cwd.into(), code: marspot_term::pane_code::code_for(sid).ok(), shadow: false }
     }
 
+    /// As `new`, with the code only if already known: touches no file.
+    pub fn known(sid: u64, cwd: impl Into<String>) -> Self {
+        Self { sid, cwd: cwd.into(), code: marspot_term::pane_code::known(sid), shadow: false }
+    }
+
     pub fn with_shadow(self, shadow: bool) -> Self {
         Self { shadow, ..self }
     }

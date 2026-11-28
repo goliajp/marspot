@@ -149,10 +149,10 @@ impl CoreApp {
         self.renderer.set_layout_modal(layout_modal);
     }
 
-    /// The code of pane `i` of window `wi`, known after its first ask.
-    fn pane_code(&self, wi: usize, i: usize) -> Option<u16> {
-        let sid = win!(self, wi).panes.get(i)?.shelld_session_id()?;
-        marspot_term::pane_code::code_for(sid).ok()
+    /// The code of pane `i` of window `wi`, from memory only: drawing
+    /// never waits on the code file (`note_pane_code` fills it).
+    pub(super) fn pane_code(&self, wi: usize, i: usize) -> Option<u16> {
+        marspot_term::pane_code::known(win!(self, wi).panes.get(i)?.shelld_session_id()?)
     }
 
     /// Render the full UI into `target_tex` and return the focused-

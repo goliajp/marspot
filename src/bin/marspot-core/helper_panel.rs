@@ -75,6 +75,9 @@ impl CoreApp {
     pub(super) fn shadows_changed(&mut self) {
         let hidden: Vec<u64> = self.shadows.iter().filter_map(Pane::shelld_session_id).collect();
         let shown: Vec<u64> = self.windows.iter().flat_map(|w| w.panes.iter()).filter_map(Pane::shelld_session_id).collect();
+        for sid in &hidden {
+            Self::note_pane_code(*sid);
+        }
         self.pane_control.shadows.family.recount(&hidden, &shown);
         for w in &mut self.windows {
             w.needs_render = true;
