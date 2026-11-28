@@ -10,13 +10,18 @@ fn hours(at: i64, now: i64) -> f64 {
     (at - now) as f64 / 3600.0
 }
 
+/// The week's usage a grant takes off, as the allocation reads it.
+fn week_cut(b: &marspot::agent_resets::Brings) -> WeekCut {
+    b.week_share.map_or(WeekCut::Nothing, WeekCut::ShareOfUsed)
+}
+
 /// What one grant brings back; none for one with nothing left or one
 /// that brings back neither the week nor the restricted window.
 fn of_grant(g: &Grant, usable_below_left: Option<f64>, now: i64) -> Option<Supply> {
     let left = g.left.unwrap_or(1);
     let b = brings_back(g);
     let (week, window, gives_back_week) = (b.week, b.window, b.gives_back_week);
-    let week_cut = b.week_share.map_or(WeekCut::Nothing, WeekCut::ShareOfUsed);
+    let week_cut = week_cut(&b);
     if left == 0 || !(week || window) {
         return None;
     }
@@ -77,6 +82,13 @@ mod tests {
         assert_eq!(got[1], Supply { week: false, window: true, gives_back_week: true, week_cut: WeekCut::Nothing, moves_week: false, requires_limit: true, starts_h: 1.0, ends_h: None, left: 1, usable_below_left: None });
         assert!(of_account(&all, "a", 2, None, NOW).is_empty());
         assert!(of_account(&all, "b", 1, None, NOW).is_empty());
+    }
+
+    #[test]
+    fn a_share_of_the_week_taken_off_becomes_the_supplys_week_cut() {
+        let b = marspot::agent_resets::Brings { week: false, window: true, gives_back_week: false, week_share: Some(0.5) };
+        assert_eq!(week_cut(&b), WeekCut::ShareOfUsed(0.5));
+        assert_eq!(week_cut(&marspot::agent_resets::Brings { week_share: None, ..b }), WeekCut::Nothing);
     }
 
     #[test]
