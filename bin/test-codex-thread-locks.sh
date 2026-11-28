@@ -10,20 +10,25 @@
 # on the real homes).  No login and no credentials: a thread is made
 # with `thread/start` and `thread/inject_items`, which need no model.
 #
-# Runs the real codex CLI, so it runs on the machine that has one and
-# never on a runner.  Every codex command is under a hard timeout, every
-# process it starts is recorded by pid and ended by that pid.
+# The codex is the stand-in in bin/codex-standin, as real agent CLIs
+# never run on a runner: its app-server holds a writer lock per loaded
+# thread in the home's `thread-writer-locks` and refuses a thread whose
+# lock another process holds, in the words the real one uses.  Every
+# codex command is under a hard timeout, every process it starts is
+# recorded by pid and ended by that pid.
 #
 #   MARSPOT_SHELL_BIN=<marspot-shell> bin/test-codex-thread-locks.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SHELL_BIN="${MARSPOT_SHELL_BIN:-$ROOT/target/debug/marspot-shell}"
+source "$ROOT/bin/_codex-standin.sh"
+SHELL_BIN="${MARSPOT_SHELL_BIN:-$ROOT/target/release/marspot-shell}"
 PROFILES="$ROOT/assets/skills/marspot-profiles/profiles.sh"
-CODEX="$(command -v codex)" || { echo "no codex on PATH"; exit 2; }
 [[ -x "$SHELL_BIN" ]] || { echo "no $SHELL_BIN: build marspot-shell or set MARSPOT_SHELL_BIN"; exit 2; }
 
 SB="$(cd "$(mktemp -d "${E2E_TMP:-/tmp/marspot-cxlocks.}XXXXXX")" && pwd -P)"
+CODEX="$SB/codex/bin/codex"
+codex_standin_build "$CODEX" || exit 2
 PIDS="$SB/pids"
 REAL_HOME="$HOME"
 export HOME="$SB/home"
@@ -73,7 +78,10 @@ cat >"$SB/ws.py" <<'PY'
 import base64, json, os, socket, struct, sys, time
 class Ws:
     def __init__(self, path):
-        self.s = socket.socket(socket.AF_UNIX); self.s.connect(os.path.realpath(path)); self.s.settimeout(30)
+        # from inside the directory: under the e2e runner's scratch prefix
+        # the full path is past the 104 bytes sun_path holds
+        real = os.path.realpath(path); os.chdir(os.path.dirname(real))
+        self.s = socket.socket(socket.AF_UNIX); self.s.connect(os.path.basename(real)); self.s.settimeout(30)
         self.s.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                        b"Sec-WebSocket-Key: " + base64.b64encode(os.urandom(16)) + b"\r\nSec-WebSocket-Version: 13\r\n\r\n")
         self.buf = b""

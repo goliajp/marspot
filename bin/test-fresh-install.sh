@@ -26,7 +26,8 @@
 # command that answers --version where each vendor's would go.  The
 # checks of what an installed CLI accepts are then checks of the
 # stand-ins; FRESH_VENDOR=1 runs the vendors' installers instead, which
-# reaches the network.  A release build honours that directory only
+# reaches the network, and is refused for a runner host
+# (bin/_real-agent-guard.sh).  A release build honours that directory only
 # under a sandbox state dir, so with the stand-ins the app is also given
 # MARSPOT_STATE_DIR, naming the state root it would use anyway; its log
 # then sits in that root.  It takes a few minutes.  Everything it starts carries the scratch HOME in its
@@ -41,6 +42,15 @@ DMG="${1:?usage: $0 <Marspot.dmg>}"
 # shellcheck source=/dev/null
 source "$(cd "$(dirname "$0")/.." && pwd)/bin/_lib.sh"
 HOST="${HOST:-$(marspot_host gui)}"
+# the vendors' installers put real agent CLIs on the host and run them
+if [[ ${FRESH_VENDOR:-0} == 1 ]]; then
+  # shellcheck source=bin/_real-agent-guard.sh
+  source "$(dirname "$0")/_real-agent-guard.sh"
+  if is_runner_host "$HOST"; then
+    echo "refusing FRESH_VENDOR=1 on $HOST, a runner: real agent CLIs run only on the interactive machine" >&2
+    exit 2
+  fi
+fi
 WAIT="${FRESH_WAIT:-420}"
 RUN_ID="fresh-$$-$(date +%s)"
 REMOTE_DMG="/tmp/marspot-$RUN_ID.dmg"

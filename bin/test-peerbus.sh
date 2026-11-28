@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 #
 # Messages between a Claude Code session and Codex panes, end to end:
-# a sandbox marspot with two panes, a real Codex TUI in each, the real
-# Codex app-server, the real registry, and replies that Codex itself
-# sends with the marspot MCP tools (`marspot-peer mcp`).
+# a sandbox marspot with two panes, a Codex TUI in each, the Codex
+# app-server, the real registry, and replies that Codex itself sends
+# with the marspot MCP tools (`marspot-peer mcp`).  The Codex is the
+# stand-in in bin/codex-standin, since real agent CLIs never run on a
+# runner: it draws the screen recorded from Codex 0.171.0, speaks the
+# app-server protocol as far as marspot uses it, and runs its turns
+# against the model stand-in with the MCP servers its config names.
 #
 # What it proves:
 #   - the binding: an inbox reaches the pane it was made for and the
@@ -39,13 +43,9 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
+source "$ROOT/bin/_codex-standin.sh"
 
-CODEX_VERSION=0.171.0
-# The packaged layout, not the bare binary: a bare `codex` refuses to
-# start its app-server ("this CLI has no complete local package").
-CODEX_SHA256=58c88032ec446e72922d911d8f03773102da20c16a6059cf21f6744bce57f210
-CODEX_URL="https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-package-aarch64-apple-darwin.tar.gz"
-CODEX_CACHE="$HOME/.cache/marspot-e2e/codex-$CODEX_VERSION"
+export CODEX_STANDIN_VERSION=0.171.0
 
 # Short on purpose: Codex puts unix sockets under $HOME/.codex, and a
 # socket path has to fit in 104 bytes.
@@ -118,26 +118,10 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" || ! -x "$SESSION_BIN" || ! -x "$PEE
     && cargo build --release -p marspot-peer 2>&1 | tail -3 )
 fi
 
-# ── Codex, pinned ─────────────────────────────────────────────────
-codex_entry() { # the package's entrypoint, from its manifest
-  local m
-  m="$(find "$CODEX_CACHE" -maxdepth 3 -name codex-package.json | head -1)"
-  [[ -n "$m" ]] && echo "$(dirname "$m")/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["entrypoint"])' "$m")"
-}
-if [[ ! -x "$(codex_entry)" ]]; then
-  echo "==> fetching Codex $CODEX_VERSION"
-  rm -rf "$CODEX_CACHE"; mkdir -p "$CODEX_CACHE"
-  curl -fsSL -o "$CODEX_CACHE/codex.tar.gz" "$CODEX_URL" || { echo "download failed"; exit 1; }
-  got="$(shasum -a 256 "$CODEX_CACHE/codex.tar.gz" | cut -d' ' -f1)"
-  [[ "$got" == "$CODEX_SHA256" ]] || { echo "Codex archive digest $got, expected $CODEX_SHA256"; exit 1; }
-  tar -xzf "$CODEX_CACHE/codex.tar.gz" -C "$CODEX_CACHE"
-  rm "$CODEX_CACHE/codex.tar.gz"
-  [[ -x "$(codex_entry)" ]] || { echo "no Codex entrypoint in the package"; find "$CODEX_CACHE" -maxdepth 3 | head; exit 1; }
-fi
-
 # ── this test's own HOME ──────────────────────────────────────────
 rm -rf "$SB"; mkdir -p "$SB/bin" "$SB/proj" "$REGISTRY" "$SB/home/.codex"
 cp "$PEER_BIN" "$SB/bin/marspot-peer"
+codex_standin_build "$SB/codex/bin/codex" || exit 1
 
 python3 "$ROOT/bin/_peerbus_mock_model.py" "$SB/port" "$SB/model-requests.log" > "$SB/mock.log" 2>&1 &
 echo $! > "$SB/mock.pid"
@@ -169,9 +153,7 @@ env = { MARSPOT_STATE_DIR = "$MARSPOT_STATE_DIR" }
 screen_reader_detection_done = true
 terminal_title = ["activity", "thread-name", "project-name", "thread-id"]
 EOF
-# the package's own bin/ on PATH, not a link to it: Codex finds the
-# rest of its package next to the path it was started from
-export PATH="$(dirname "$(codex_entry)"):$SB/bin:$PATH"
+export PATH="$SB/codex/bin:$SB/bin:$PATH"
 # stand-ins for madcawl-mcp and the host it needs where marspot looks
 # for them: the claude MCP config marspot writes must register it with a
 # socket in the state root, and does so only while both are installed
@@ -298,6 +280,12 @@ send_once "$P1" "cd $SB/proj && codex"
 R1="$(wait_record "$P1" "" 60)" || fail "pane $P1's Codex never got an inbox"
 T1="$(cut -f3 <<<"$R1")"
 ok "pane $P1 bound: $(cut -f1 <<<"$R1") thread $T1"
+# before its first user message the thread cannot be resumed, so the
+# class comes from config/read: approval never + full access is bypass
+BIND1="$(grep -a 'peerbus\.bind' "$APPLOG" | grep -aF "$T1" | head -1)"
+[[ "$BIND1" == *"subscribed=false"* && "$BIND1" == *bypass* ]] \
+  && ok "pane $P1 was classified from config/read before its first turn" \
+  || fail "pane $P1's first bind did not take the config/read path: ${BIND1:-no peerbus.bind line for $T1}"
 [[ "$(cut -f1 <<<"$R1")" == proj ]] || fail "pane $P1's session is not named after its pane: $(cut -f1 <<<"$R1")"
 ok "the session is named after its pane: proj"
 round_trip "$P1" "$R1" PEERBUS-TAG-ONE notify

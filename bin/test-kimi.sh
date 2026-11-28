@@ -34,12 +34,15 @@
 # ~/.cache/marspot-e2e and copied from there; later runs need no network.
 #
 # Sandbox-only: MARSPOT_STATE_DIR *and* HOME are redirected, so the
-# kimi home, the registry and the profiles are this test's own.  Opens
-# windows: run it through bin/test-e2e-remote.sh, never on the machine
-# someone is working at.
+# kimi home, the registry and the profiles are this test's own.  It
+# runs the real kimi, so it runs on the interactive machine only (it
+# refuses on a runner) until a kimi stand-in exists; it opens sandbox
+# windows there.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_real-agent-guard.sh"
+refuse_real_agent_on_runner "the real Kimi CLI"
 source "$ROOT/bin/_dev-sandbox.sh"
 
 KIMI_INSTALLER=https://code.kimi.com/kimi-code/install.sh
